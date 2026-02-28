@@ -149,15 +149,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "camel-management"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "camel-api",
- "camel-core",
-]
-
-[[package]]
 name = "camel-mock"
 version = "0.1.0"
 dependencies = [

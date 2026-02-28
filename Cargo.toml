@@ -6,7 +6,6 @@ members = [
     "crates/camel-util",
     "crates/camel-support",
     "crates/camel-processor",
-    "crates/camel-management",
     "crates/camel-health",
     "crates/camel-dsl",
     "crates/camel-builder",
@@ -37,7 +36,6 @@ camel-core = { path = "crates/camel-core" }
 camel-util = { path = "crates/camel-util" }
 camel-support = { path = "crates/camel-support" }
 camel-processor = { path = "crates/camel-processor" }
-camel-management = { path = "crates/camel-management" }
 camel-health = { path = "crates/camel-health" }
 camel-dsl = { path = "crates/camel-dsl" }
 camel-builder = { path = "crates/camel-builder" }
