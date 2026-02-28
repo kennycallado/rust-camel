@@ -252,6 +252,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "error-handling"
+version = "0.1.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-core",
+ "camel-direct",
+ "camel-log",
+ "camel-timer",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"

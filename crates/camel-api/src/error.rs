@@ -26,6 +26,9 @@ pub enum CamelError {
 
     #[error("IO error: {0}")]
     Io(String),
+
+    #[error("Dead letter channel failed: {0}")]
+    DeadLetterChannelFailed(String),
 }
 
 impl From<std::io::Error> for CamelError {

@@ -46,6 +46,38 @@ impl Service<Exchange> for IdentityProcessor {
 /// single boxed type.
 pub type BoxProcessor = tower::util::BoxCloneService<Exchange, Exchange, CamelError>;
 
+/// Extension trait for [`BoxProcessor`] providing ergonomic constructors.
+///
+/// Since `BoxProcessor` is a type alias for Tower's `BoxCloneService`, we cannot
+/// add inherent methods to it. This trait fills that gap.
+///
+/// # Example
+///
+/// ```ignore
+/// use camel_api::{BoxProcessor, BoxProcessorExt};
+///
+/// let processor = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
+/// ```
+pub trait BoxProcessorExt {
+    /// Create a [`BoxProcessor`] from an async closure.
+    ///
+    /// This is a convenience shorthand for `BoxProcessor::new(ProcessorFn::new(f))`.
+    fn from_fn<F, Fut>(f: F) -> BoxProcessor
+    where
+        F: Fn(Exchange) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Exchange, CamelError>> + Send + 'static;
+}
+
+impl BoxProcessorExt for BoxProcessor {
+    fn from_fn<F, Fut>(f: F) -> BoxProcessor
+    where
+        F: Fn(Exchange) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Exchange, CamelError>> + Send + 'static,
+    {
+        BoxProcessor::new(ProcessorFn::new(f))
+    }
+}
+
 /// Adapts an `Fn(Exchange) -> Future<Result<Exchange>>` closure into a Tower Service.
 /// This allows user-provided async closures (via `.process()`) to participate
 /// in the Tower pipeline.
@@ -183,5 +215,17 @@ mod tests {
         let exchange = Exchange::new(Message::new("original"));
         let result = processor.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("via_box"));
+    }
+
+    #[tokio::test]
+    async fn test_box_processor_ext_from_fn() {
+        let processor = BoxProcessor::from_fn(|mut ex: Exchange| async move {
+            ex.input.body = crate::body::Body::Text("via_from_fn".into());
+            Ok(ex)
+        });
+
+        let exchange = Exchange::new(Message::new("original"));
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(result.input.body.as_text(), Some("via_from_fn"));
     }
 }

@@ -22,6 +22,7 @@ members = [
     "examples/multi-route-direct",
     "examples/transform-pipeline",
     "examples/showcase",
+    "examples/error-handling",
 ]
 
 [workspace.package]

@@ -19,7 +19,7 @@ use camel_endpoint::parse_uri;
 // and receive the (possibly transformed) exchange back.
 // ---------------------------------------------------------------------------
 
-type DirectSender = mpsc::Sender<(Exchange, oneshot::Sender<Exchange>)>;
+type DirectSender = mpsc::Sender<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>;
 type DirectRegistry = Arc<Mutex<HashMap<String, DirectSender>>>;
 
 // ---------------------------------------------------------------------------
@@ -118,7 +118,8 @@ struct DirectConsumer {
 impl Consumer for DirectConsumer {
     async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
         // Create a channel for producers to send exchanges to this consumer.
-        let (tx, mut rx) = mpsc::channel::<(Exchange, oneshot::Sender<Exchange>)>(32);
+        let (tx, mut rx) =
+            mpsc::channel::<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>(32);
 
         // Register ourselves so producers can find us.
         {
@@ -128,20 +129,10 @@ impl Consumer for DirectConsumer {
 
         // Process incoming exchanges.
         while let Some((exchange, reply_tx)) = rx.recv().await {
-            // Forward the exchange into the route pipeline.
-            // The ConsumerContext sends it through the route's processor chain.
-            // For now, direct consumer forwards the exchange and replies with it.
-            //
-            // In a full implementation the route would process and return the
-            // exchange. Here, we send it to the route and reply with the
-            // original exchange (the route processes asynchronously via context).
-            let exchange_clone = exchange.clone();
-            if context.send(exchange).await.is_err() {
-                // Route channel closed — stop the consumer.
-                break;
-            }
-            // Reply to the producer with the exchange.
-            let _ = reply_tx.send(exchange_clone);
+            // Send the exchange into the route pipeline and wait for the result.
+            // This gives us the pipeline result (Ok or Err) to relay back to the producer.
+            let result = context.send_and_wait(exchange).await;
+            let _ = reply_tx.send(result);
         }
 
         Ok(())
@@ -197,7 +188,8 @@ impl Service<Exchange> for DirectProducer {
             // Drop the lock before awaiting the reply to avoid deadlocks.
             drop(reg);
 
-            reply_rx.await.map_err(|_| CamelError::ChannelClosed)
+            // Propagate Ok or Err from the subroute pipeline.
+            reply_rx.await.map_err(|_| CamelError::ChannelClosed)?
         })
     }
 }
@@ -210,6 +202,7 @@ impl Service<Exchange> for DirectProducer {
 mod tests {
     use super::*;
     use camel_api::Message;
+    use camel_component::ExchangeEnvelope;
     use tower::ServiceExt;
 
     #[test]
@@ -265,8 +258,8 @@ mod tests {
         let consumer_endpoint = component.create_endpoint("direct:test").unwrap();
         let mut consumer = consumer_endpoint.create_consumer().unwrap();
 
-        // The route channel collects exchanges sent by the consumer
-        let (route_tx, mut route_rx) = mpsc::channel(16);
+        // The route channel now carries ExchangeEnvelope (request-reply support).
+        let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(route_tx);
 
         // Start the consumer in a background task
@@ -276,6 +269,16 @@ mod tests {
 
         // Give the consumer a moment to register
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Spawn a pipeline simulator that reads envelopes and replies Ok.
+        tokio::spawn(async move {
+            while let Some(envelope) = route_rx.recv().await {
+                let ExchangeEnvelope { exchange, reply_tx } = envelope;
+                if let Some(tx) = reply_tx {
+                    let _ = tx.send(Ok(exchange));
+                }
+            }
+        });
 
         // Now send an exchange via the producer
         let producer_endpoint = component.create_endpoint("direct:test").unwrap();
@@ -287,11 +290,40 @@ mod tests {
         assert!(result.is_ok());
         let reply = result.unwrap();
         assert_eq!(reply.input.body.as_text(), Some("hello direct"));
+    }
 
-        // The exchange should also have been forwarded to the route
-        let routed = route_rx.try_recv();
-        assert!(routed.is_ok());
-        assert_eq!(routed.unwrap().input.body.as_text(), Some("hello direct"));
+    #[tokio::test]
+    async fn test_direct_propagates_error_when_no_handler() {
+        let component = DirectComponent::new();
+
+        let consumer_endpoint = component.create_endpoint("direct:err-test").unwrap();
+        let mut consumer = consumer_endpoint.create_consumer().unwrap();
+
+        let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(route_tx);
+
+        tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Pipeline simulator that replies with Err (simulates no error handler).
+        tokio::spawn(async move {
+            while let Some(envelope) = route_rx.recv().await {
+                if let Some(tx) = envelope.reply_tx {
+                    let _ = tx.send(Err(CamelError::ProcessorError("subroute failed".into())));
+                }
+            }
+        });
+
+        let producer_endpoint = component.create_endpoint("direct:err-test").unwrap();
+        let producer = producer_endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::new("test"));
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CamelError::ProcessorError(_)));
     }
 
     #[tokio::test]
@@ -302,7 +334,7 @@ mod tests {
         // We need a consumer to register
         let mut consumer = endpoint.create_consumer().unwrap();
 
-        let (route_tx, _route_rx) = mpsc::channel(16);
+        let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
         let ctx = ConsumerContext::new(route_tx);
 
         // Start consumer in background

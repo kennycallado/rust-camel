@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 use tower::Service;
 use tower::ServiceExt;
 
+use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor};
 
 /// A Route defines a message flow: from a source endpoint, through a composed
@@ -48,6 +49,8 @@ pub enum BuilderStep {
 pub struct RouteDefinition {
     pub(crate) from_uri: String,
     pub(crate) steps: Vec<BuilderStep>,
+    /// Optional per-route error handler config. Takes precedence over the global one.
+    pub(crate) error_handler: Option<ErrorHandlerConfig>,
 }
 
 impl RouteDefinition {
@@ -56,6 +59,7 @@ impl RouteDefinition {
         Self {
             from_uri: from_uri.into(),
             steps,
+            error_handler: None,
         }
     }
 
@@ -67,6 +71,12 @@ impl RouteDefinition {
     /// The steps in this route definition.
     pub fn steps(&self) -> &[BuilderStep] {
         &self.steps
+    }
+
+    /// Set a per-route error handler, overriding the global one.
+    pub fn with_error_handler(mut self, config: ErrorHandlerConfig) -> Self {
+        self.error_handler = Some(config);
+        self
     }
 }
 

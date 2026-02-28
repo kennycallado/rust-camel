@@ -12,6 +12,7 @@ camel-support.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true
 

@@ -255,8 +255,8 @@ mod tests {
 
         // Collect exchanges
         let mut received = Vec::new();
-        while let Some(ex) = rx.recv().await {
-            received.push(ex);
+        while let Some(envelope) = rx.recv().await {
+            received.push(envelope.exchange);
             if received.len() == 3 {
                 break;
             }

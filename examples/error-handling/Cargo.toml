@@ -1,0 +1,17 @@
+[package]
+name = "error-handling"
+description = "Error handling patterns tour for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-timer.workspace = true
+camel-log.workspace = true
+camel-direct.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

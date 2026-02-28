@@ -1,4 +1,5 @@
 use camel_api::body::Body;
+use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, ProcessorFn, Value};
 use camel_core::route::{BuilderStep, RouteDefinition};
 use camel_processor::{Filter, MapBody, SetHeader};
@@ -17,6 +18,7 @@ use camel_processor::{Filter, MapBody, SetHeader};
 pub struct RouteBuilder {
     from_uri: String,
     steps: Vec<BuilderStep>,
+    error_handler: Option<ErrorHandlerConfig>,
 }
 
 impl RouteBuilder {
@@ -25,6 +27,7 @@ impl RouteBuilder {
         Self {
             from_uri: endpoint.to_string(),
             steps: Vec::new(),
+            error_handler: None,
         }
     }
 
@@ -49,6 +52,12 @@ impl RouteBuilder {
         let svc = ProcessorFn::new(f);
         self.steps
             .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Add a pre-built `BoxProcessor` step.
+    pub fn process_fn(mut self, processor: BoxProcessor) -> Self {
+        self.steps.push(BuilderStep::Processor(processor));
         self
     }
 
@@ -79,6 +88,12 @@ impl RouteBuilder {
         self
     }
 
+    /// Set a per-route error handler. Overrides the global error handler on `CamelContext`.
+    pub fn error_handler(mut self, config: ErrorHandlerConfig) -> Self {
+        self.error_handler = Some(config);
+        self
+    }
+
     /// Consume the builder and produce a [`RouteDefinition`].
     pub fn build(self) -> Result<RouteDefinition, CamelError> {
         if self.from_uri.is_empty() {
@@ -86,7 +101,13 @@ impl RouteBuilder {
                 "route must have a 'from' URI".to_string(),
             ));
         }
-        Ok(RouteDefinition::new(self.from_uri, self.steps))
+        let definition = RouteDefinition::new(self.from_uri, self.steps);
+        let definition = if let Some(eh) = self.error_handler {
+            definition.with_error_handler(eh)
+        } else {
+            definition
+        };
+        Ok(definition)
     }
 }
 

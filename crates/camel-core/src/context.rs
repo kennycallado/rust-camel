@@ -1,11 +1,13 @@
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tower::{Service, ServiceExt};
+use tower::{Layer, Service, ServiceExt};
 use tracing::{error, info};
 
-use camel_api::{BoxProcessor, CamelError, Exchange};
-use camel_component::{Component, ConsumerContext};
+use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::{BoxProcessor, CamelError};
+use camel_component::{Component, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_endpoint::parse_uri;
+use camel_processor::error_handler::ErrorHandlerLayer;
 
 use crate::registry::Registry;
 use crate::route::Route;
@@ -17,6 +19,8 @@ pub struct CamelContext {
     routes: Vec<Route>,
     tasks: Vec<JoinHandle<()>>,
     shutdown_tx: Option<mpsc::Sender<()>>,
+    /// Optional global error handler applied to all routes that don't have a per-route handler.
+    global_error_handler: Option<ErrorHandlerConfig>,
 }
 
 impl CamelContext {
@@ -27,7 +31,13 @@ impl CamelContext {
             routes: Vec::new(),
             tasks: Vec::new(),
             shutdown_tx: None,
+            global_error_handler: None,
         }
+    }
+
+    /// Set a global error handler applied to all routes without a per-route handler.
+    pub fn set_error_handler(&mut self, config: ErrorHandlerConfig) {
+        self.global_error_handler = Some(config);
     }
 
     /// Register a component with this context.
@@ -40,6 +50,39 @@ impl CamelContext {
     pub fn add_route(&mut self, route: Route) {
         info!(from = route.from_uri(), "Adding route");
         self.routes.push(route);
+    }
+
+    /// Resolve an `ErrorHandlerConfig` into an `ErrorHandlerLayer` by looking up
+    /// DLC and per-policy `handled_by` URIs in the component registry.
+    fn resolve_error_handler(
+        &self,
+        config: ErrorHandlerConfig,
+    ) -> Result<ErrorHandlerLayer, CamelError> {
+        // Resolve DLC URI → producer.
+        let dlc_producer = if let Some(ref uri) = config.dlc_uri {
+            let parsed = parse_uri(uri)?;
+            let component = self.registry.get_or_err(&parsed.scheme)?;
+            let endpoint = component.create_endpoint(uri)?;
+            Some(endpoint.create_producer()?)
+        } else {
+            None
+        };
+
+        // Resolve per-policy `handled_by` URIs.
+        let mut resolved_policies = Vec::new();
+        for policy in config.policies {
+            let handler_producer = if let Some(ref uri) = policy.handled_by {
+                let parsed = parse_uri(uri)?;
+                let component = self.registry.get_or_err(&parsed.scheme)?;
+                let endpoint = component.create_endpoint(uri)?;
+                Some(endpoint.create_producer()?)
+            } else {
+                None
+            };
+            resolved_policies.push((policy, handler_producer));
+        }
+
+        Ok(ErrorHandlerLayer::new(dlc_producer, resolved_policies))
     }
 
     /// Add a route definition. The definition's "to" URIs are resolved immediately
@@ -67,6 +110,19 @@ impl CamelContext {
         }
 
         let pipeline = compose_pipeline(processors);
+
+        // Determine which error handler config to use (per-route takes precedence).
+        let eh_config = definition
+            .error_handler
+            .or_else(|| self.global_error_handler.clone());
+
+        let pipeline: BoxProcessor = if let Some(config) = eh_config {
+            let layer = self.resolve_error_handler(config)?;
+            BoxProcessor::new(layer.layer(pipeline))
+        } else {
+            pipeline
+        };
+
         let route = Route::new(definition.from_uri, pipeline);
         self.add_route(route);
         Ok(())
@@ -94,7 +150,7 @@ impl CamelContext {
             let endpoint = component.create_endpoint(&from_uri)?;
 
             // Create a channel for the consumer to send exchanges into
-            let (tx, mut rx) = mpsc::channel::<Exchange>(256);
+            let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(256);
             let consumer_ctx = ConsumerContext::new(tx);
 
             // Start the consumer in a background task
@@ -114,16 +170,24 @@ impl CamelContext {
             let pipeline_handle = tokio::spawn(async move {
                 let _shutdown = shutdown_tx_clone;
 
-                while let Some(exchange) = rx.recv().await {
+                while let Some(envelope) = rx.recv().await {
+                    let ExchangeEnvelope { exchange, reply_tx } = envelope;
                     // Ensure the service is ready before calling
                     match pipeline.ready().await {
                         Ok(svc) => {
-                            if let Err(e) = svc.call(exchange).await {
+                            let result = svc.call(exchange).await;
+                            if let Some(tx) = reply_tx {
+                                // Request-reply: send result back to consumer (e.g. direct:).
+                                let _ = tx.send(result);
+                            } else if let Err(e) = result {
                                 error!("Pipeline error: {e}");
                             }
                         }
                         Err(e) => {
                             error!("Pipeline not ready: {e}");
+                            if let Some(tx) = reply_tx {
+                                let _ = tx.send(Err(e));
+                            }
                             break;
                         }
                     }

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use camel_api::body::Body;
+use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{CamelError, Value};
 use camel_builder::RouteBuilder;
 use camel_core::context::CamelContext;
@@ -19,6 +21,11 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(direct);
+
+    // Global error handler: catch-all for any route without its own handler.
+    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel(
+        "log:global-dlc?showHeaders=true&showBody=true",
+    ));
 
     // Route 1: Timer -> process (alternate body) -> set header -> dispatch
     let counter = Arc::new(AtomicU64::new(0));
@@ -42,6 +49,7 @@ async fn main() -> Result<(), CamelError> {
         .build()?;
 
     // Route 2: Receive -> filter typeA only -> uppercase -> mark processed -> log
+    // With error handling: retry processing errors up to 2 times before logging.
     let route2 = RouteBuilder::from("direct:dispatcher")
         .filter(|ex| ex.input.body.as_text() == Some("typeA"))
         .map_body(|body| {
@@ -53,6 +61,15 @@ async fn main() -> Result<(), CamelError> {
         })
         .set_header("processed", Value::Bool(true))
         .to("log:output?showHeaders=true&showBody=true")
+        .error_handler(
+            ErrorHandlerConfig::dead_letter_channel(
+                "log:route2-dlc?showHeaders=true&showBody=true",
+            )
+            .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
+            .retry(2)
+            .with_backoff(Duration::from_millis(100), 2.0, Duration::from_secs(1))
+            .build(),
+        )
         .build()?;
 
     ctx.add_route_definition(route1)?;

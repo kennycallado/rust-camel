@@ -1,5 +1,6 @@
 pub mod body;
 pub mod error;
+pub mod error_handler;
 pub mod exchange;
 pub mod message;
 pub mod processor;
@@ -8,7 +9,10 @@ pub mod value;
 // Re-export core types at crate root for convenience.
 pub use body::Body;
 pub use error::CamelError;
+pub use error_handler::{
+    ErrorHandlerConfig, ExceptionPolicy, ExceptionPolicyBuilder, ExponentialBackoff,
+};
 pub use exchange::{Exchange, ExchangePattern};
 pub use message::Message;
-pub use processor::{BoxProcessor, IdentityProcessor, Processor, ProcessorFn};
+pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn};
 pub use value::{Headers, Value};
