@@ -1,0 +1,10 @@
+[package]
+name = "camel-util"
+description = "Utility functions and helpers for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true

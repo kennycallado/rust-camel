@@ -1,0 +1,11 @@
+[package]
+name = "camel-management"
+description = "Management API for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+async-trait.workspace = true

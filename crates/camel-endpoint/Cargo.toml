@@ -1,0 +1,12 @@
+[package]
+name = "camel-endpoint"
+description = "Endpoint abstractions for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-util.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true

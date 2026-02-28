@@ -1,6 +1,53 @@
-[package]
-name = "rust-camel"
+[workspace]
+resolver = "2"
+members = [
+    "crates/camel-api",
+    "crates/camel-core",
+    "crates/camel-util",
+    "crates/camel-support",
+    "crates/camel-processor",
+    "crates/camel-management",
+    "crates/camel-health",
+    "crates/camel-dsl",
+    "crates/camel-builder",
+    "crates/camel-component",
+    "crates/camel-endpoint",
+    "crates/camel-test",
+    "crates/components/camel-timer",
+    "crates/components/camel-log",
+    "crates/components/camel-file",
+    "crates/components/camel-direct",
+    "examples/hello-world",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/user/rust-camel"
 
-[dependencies]
+[workspace.dependencies]
+camel-api = { path = "crates/camel-api" }
+camel-core = { path = "crates/camel-core" }
+camel-util = { path = "crates/camel-util" }
+camel-support = { path = "crates/camel-support" }
+camel-processor = { path = "crates/camel-processor" }
+camel-management = { path = "crates/camel-management" }
+camel-health = { path = "crates/camel-health" }
+camel-dsl = { path = "crates/camel-dsl" }
+camel-builder = { path = "crates/camel-builder" }
+camel-component = { path = "crates/camel-component" }
+camel-endpoint = { path = "crates/camel-endpoint" }
+camel-test = { path = "crates/camel-test" }
+camel-timer = { path = "crates/components/camel-timer" }
+camel-log = { path = "crates/components/camel-log" }
+camel-file = { path = "crates/components/camel-file" }
+camel-direct = { path = "crates/components/camel-direct" }
+
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

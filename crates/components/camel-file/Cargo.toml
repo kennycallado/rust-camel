@@ -1,0 +1,15 @@
+[package]
+name = "camel-file"
+description = "File component for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-component.workspace = true
+camel-endpoint.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

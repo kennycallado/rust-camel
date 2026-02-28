@@ -1,0 +1,18 @@
+[package]
+name = "camel-core"
+description = "Core engine for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-util.workspace = true
+camel-support.workspace = true
+camel-processor.workspace = true
+camel-component.workspace = true
+camel-endpoint.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true

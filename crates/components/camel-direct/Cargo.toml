@@ -1,0 +1,13 @@
+[package]
+name = "camel-direct"
+description = "Direct component for rust-camel (in-memory routing)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-component.workspace = true
+camel-endpoint.workspace = true
+async-trait.workspace = true
+tokio.workspace = true

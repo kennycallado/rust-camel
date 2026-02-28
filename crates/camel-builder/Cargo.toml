@@ -1,0 +1,12 @@
+[package]
+name = "camel-builder"
+description = "Fluent route builder API for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-processor.workspace = true
+camel-component.workspace = true
