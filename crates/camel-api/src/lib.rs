@@ -5,6 +5,7 @@ pub mod error_handler;
 pub mod exchange;
 pub mod message;
 pub mod processor;
+pub mod splitter;
 pub mod value;
 
 // Re-export core types at crate root for convenience.
@@ -17,4 +18,8 @@ pub use error_handler::{
 pub use exchange::{Exchange, ExchangePattern};
 pub use message::Message;
 pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn};
+pub use splitter::{
+    split_body, split_body_json_array, split_body_lines, AggregationStrategy, SplitExpression,
+    SplitterConfig,
+};
 pub use value::{Headers, Value};

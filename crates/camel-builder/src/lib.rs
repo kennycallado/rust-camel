@@ -1,6 +1,7 @@
 use camel_api::body::Body;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::splitter::SplitterConfig;
 use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, ProcessorFn, Value};
 use camel_core::route::{BuilderStep, RouteDefinition};
 use camel_processor::{Filter, MapBody, SetHeader};
@@ -103,6 +104,19 @@ impl RouteBuilder {
         self
     }
 
+    /// Begin a Splitter sub-pipeline. Steps added after this call (until
+    /// `.end_split()`) will be executed per-fragment.
+    ///
+    /// Returns a `SplitBuilder` — you cannot call `.build()` until
+    /// `.end_split()` closes the split scope (enforced by the type system).
+    pub fn split(self, config: SplitterConfig) -> SplitBuilder {
+        SplitBuilder {
+            parent: self,
+            config,
+            steps: Vec::new(),
+        }
+    }
+
     /// Consume the builder and produce a [`RouteDefinition`].
     pub fn build(self) -> Result<RouteDefinition, CamelError> {
         if self.from_uri.is_empty() {
@@ -122,6 +136,87 @@ impl RouteBuilder {
             definition
         };
         Ok(definition)
+    }
+}
+
+/// Builder for the sub-pipeline within a `.split()` ... `.end_split()` block.
+///
+/// Exposes the same step methods as `RouteBuilder` (to, process, filter, etc.)
+/// but NOT `.build()` and NOT `.split()` (no nested splits).
+///
+/// Calling `.end_split()` packages the sub-steps into a `BuilderStep::Split`
+/// and returns the parent `RouteBuilder`.
+pub struct SplitBuilder {
+    parent: RouteBuilder,
+    config: SplitterConfig,
+    steps: Vec<BuilderStep>,
+}
+
+// TODO: Extract StepAccumulator trait to DRY step methods shared with RouteBuilder.
+impl SplitBuilder {
+    /// Add a destination step within the split sub-pipeline.
+    pub fn to(mut self, endpoint: &str) -> Self {
+        self.steps.push(BuilderStep::To(endpoint.to_string()));
+        self
+    }
+
+    /// Add an async processor step within the split sub-pipeline.
+    pub fn process<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(Exchange) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Exchange, CamelError>> + Send + 'static,
+    {
+        let svc = ProcessorFn::new(f);
+        self.steps
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Add a pre-built `BoxProcessor` step within the split sub-pipeline.
+    pub fn process_fn(mut self, processor: BoxProcessor) -> Self {
+        self.steps.push(BuilderStep::Processor(processor));
+        self
+    }
+
+    /// Add a filter step within the split sub-pipeline.
+    pub fn filter<F>(mut self, predicate: F) -> Self
+    where
+        F: Fn(&Exchange) -> bool + Clone + Send + Sync + 'static,
+    {
+        let svc = Filter::new(IdentityProcessor, predicate);
+        self.steps
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Add a set-header step within the split sub-pipeline.
+    pub fn set_header(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        let svc = SetHeader::new(IdentityProcessor, key, value);
+        self.steps
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Add a body transformation step within the split sub-pipeline.
+    pub fn map_body<F>(mut self, f: F) -> Self
+    where
+        F: Fn(Body) -> Body + Clone + Send + Sync + 'static,
+    {
+        let svc = MapBody::new(IdentityProcessor, f);
+        self.steps
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Close the split scope. Packages the accumulated sub-steps into a
+    /// `BuilderStep::Split` and returns the parent `RouteBuilder`.
+    pub fn end_split(mut self) -> RouteBuilder {
+        let split_step = BuilderStep::Split {
+            config: self.config,
+            steps: self.steps,
+        };
+        self.parent.steps.push(split_step);
+        self.parent
     }
 }
 
@@ -360,5 +455,72 @@ mod tests {
             "circuit breaker config should be set"
         );
         // Route definition was built successfully with both configs.
+    }
+
+    // --- Splitter builder tests ---
+
+    #[test]
+    fn test_split_builder_typestate() {
+        use camel_api::splitter::{split_body_lines, SplitterConfig};
+
+        // .split() returns SplitBuilder, .end_split() returns RouteBuilder
+        let definition = RouteBuilder::from("timer:test?period=1000")
+            .split(SplitterConfig::new(split_body_lines()))
+                .to("mock:per-fragment")
+            .end_split()
+            .to("mock:final")
+            .build()
+            .unwrap();
+
+        // Should have 2 top-level steps: Split + To("mock:final")
+        assert_eq!(definition.steps().len(), 2);
+    }
+
+    #[test]
+    fn test_split_builder_steps_collected() {
+        use camel_api::splitter::{split_body_lines, SplitterConfig};
+
+        let definition = RouteBuilder::from("timer:test?period=1000")
+            .split(SplitterConfig::new(split_body_lines()))
+                .set_header("fragment", Value::String("yes".into()))
+                .to("mock:per-fragment")
+            .end_split()
+            .build()
+            .unwrap();
+
+        // Should have 1 top-level step: Split (containing 2 sub-steps)
+        assert_eq!(definition.steps().len(), 1);
+        match &definition.steps()[0] {
+            BuilderStep::Split { steps, .. } => {
+                assert_eq!(steps.len(), 2); // SetHeader + To
+            }
+            other => panic!("Expected Split, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_split_builder_config_propagated() {
+        use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
+
+        let definition = RouteBuilder::from("timer:test?period=1000")
+            .split(
+                SplitterConfig::new(split_body_lines())
+                    .parallel(true)
+                    .parallel_limit(4)
+                    .aggregation(AggregationStrategy::CollectAll)
+            )
+                .to("mock:per-fragment")
+            .end_split()
+            .build()
+            .unwrap();
+
+        match &definition.steps()[0] {
+            BuilderStep::Split { config, .. } => {
+                assert!(config.parallel);
+                assert_eq!(config.parallel_limit, Some(4));
+                assert!(matches!(config.aggregation, AggregationStrategy::CollectAll));
+            }
+            other => panic!("Expected Split, got {:?}", other),
+        }
     }
 }

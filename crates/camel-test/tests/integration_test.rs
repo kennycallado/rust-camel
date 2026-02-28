@@ -7,6 +7,7 @@
 //! capture closures.
 
 use camel_api::Value;
+use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
 use camel_builder::RouteBuilder;
 use camel_core::CamelContext;
 use camel_log::LogComponent;
@@ -596,4 +597,104 @@ async fn test_circuit_breaker_with_error_handler() {
             "mock:sink should receive zero exchanges"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Splitter EIP integration tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Test 15: Split with timer and mock (end-to-end)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_split_with_timer_and_mock() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    // Timer fires once, body = "line1\nline2\nline3"
+    // Split by lines, each fragment goes to mock:per-line
+    // After split, aggregated result goes to mock:final
+    let route = RouteBuilder::from("timer:split-test?period=100&repeatCount=1")
+        .process(|mut ex: camel_api::Exchange| async move {
+            ex.input.body = camel_api::body::Body::Text("line1\nline2\nline3".to_string());
+            Ok(ex)
+        })
+        .split(
+            SplitterConfig::new(split_body_lines())
+                .aggregation(AggregationStrategy::CollectAll),
+        )
+            .to("mock:per-line")
+        .end_split()
+        .to("mock:final")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    // Each line should have been sent to mock:per-line
+    let per_line = mock.get_endpoint("per-line").unwrap();
+    let per_line_count = per_line.get_received_exchanges().await.len();
+    assert_eq!(per_line_count, 3, "Expected 3 per-line exchanges, got {per_line_count}");
+
+    // The aggregated result should have been sent to mock:final
+    let final_ep = mock.get_endpoint("final").unwrap();
+    let final_exchanges = final_ep.get_received_exchanges().await;
+    assert_eq!(final_exchanges.len(), 1, "Expected 1 final exchange, got {}", final_exchanges.len());
+
+    // CollectAll produces a JSON array of the fragment bodies
+    let expected = serde_json::json!(["line1", "line2", "line3"]);
+    match &final_exchanges[0].input.body {
+        camel_api::body::Body::Json(v) => assert_eq!(*v, expected, "CollectAll should produce JSON array of fragment bodies"),
+        other => panic!("Expected JSON body from CollectAll, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 16: Split with error handler (stop_on_exception + DLC)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_split_with_error_handler() {
+    use camel_api::error_handler::ErrorHandlerConfig;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:split-err?period=100&repeatCount=1")
+        .process(|mut ex: camel_api::Exchange| async move {
+            ex.input.body = camel_api::body::Body::Text("a\nb".to_string());
+            Ok(ex)
+        })
+        .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:dlc"))
+        .split(SplitterConfig::new(split_body_lines()).stop_on_exception(true))
+            .process_fn(failing_step("fragment boom"))
+        .end_split()
+        .to("mock:sink")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    // The split error should propagate up to the route's error handler (DLC)
+    let dlc = mock.get_endpoint("dlc").unwrap();
+    let dlc_count = dlc.get_received_exchanges().await.len();
+    assert_eq!(dlc_count, 1, "Expected exactly 1 DLC exchange (stop_on_exception), got {dlc_count}");
+
+    // The sink should NOT have received anything (error stops pipeline)
+    let sink = mock.get_endpoint("sink").unwrap();
+    let sink_count = sink.get_received_exchanges().await.len();
+    assert_eq!(sink_count, 0, "Expected 0 sink exchanges, got {sink_count}");
 }

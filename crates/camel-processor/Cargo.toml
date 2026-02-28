@@ -10,6 +10,7 @@ camel-api.workspace = true
 camel-util.workspace = true
 camel-support.workspace = true
 async-trait.workspace = true
+futures = "0.3"
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

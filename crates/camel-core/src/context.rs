@@ -10,10 +10,10 @@ use camel_component::{Component, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_endpoint::parse_uri;
 use camel_processor::error_handler::ErrorHandlerLayer;
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
+use camel_processor::splitter::SplitterService;
 
 use crate::registry::Registry;
-use crate::route::Route;
-use crate::route::RouteDefinition;
+use crate::route::{BuilderStep, Route, RouteDefinition, compose_pipeline};
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
 ///
@@ -93,16 +93,11 @@ impl CamelContext {
         Ok(ErrorHandlerLayer::new(dlc_producer, resolved_policies))
     }
 
-    /// Add a route definition. The definition's "to" URIs are resolved immediately
-    /// using the registered components.
-    pub fn add_route_definition(&mut self, definition: RouteDefinition) -> Result<(), CamelError> {
-        use crate::route::{BuilderStep, compose_pipeline};
-
-        info!(from = definition.from_uri(), "Adding route definition");
-
+    /// Resolve BuilderSteps into BoxProcessors, handling To(uri) resolution
+    /// and recursive Split sub-pipeline resolution.
+    fn resolve_steps(&self, steps: Vec<BuilderStep>) -> Result<Vec<BoxProcessor>, CamelError> {
         let mut processors: Vec<BoxProcessor> = Vec::new();
-
-        for step in definition.steps {
+        for step in steps {
             match step {
                 BuilderStep::Processor(svc) => {
                     processors.push(svc);
@@ -114,9 +109,23 @@ impl CamelContext {
                     let producer = endpoint.create_producer()?;
                     processors.push(producer);
                 }
+                BuilderStep::Split { config, steps } => {
+                    let sub_processors = self.resolve_steps(steps)?;
+                    let sub_pipeline = compose_pipeline(sub_processors);
+                    let splitter = SplitterService::new(config, sub_pipeline);
+                    processors.push(BoxProcessor::new(splitter));
+                }
             }
         }
+        Ok(processors)
+    }
 
+    /// Add a route definition. The definition's "to" URIs are resolved immediately
+    /// using the registered components.
+    pub fn add_route_definition(&mut self, definition: RouteDefinition) -> Result<(), CamelError> {
+        info!(from = definition.from_uri(), "Adding route definition");
+
+        let processors = self.resolve_steps(definition.steps)?;
         let pipeline = compose_pipeline(processors);
 
         // Apply circuit breaker if configured (wraps the step pipeline).

@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor};
+use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, SplitterConfig};
 
 /// A Route defines a message flow: from a source endpoint, through a composed
 /// Tower Service pipeline.
@@ -44,6 +44,23 @@ pub enum BuilderStep {
     Processor(BoxProcessor),
     /// A destination URI — resolved at start time by CamelContext.
     To(String),
+    /// A Splitter sub-pipeline: config + nested steps to execute per fragment.
+    Split {
+        config: SplitterConfig,
+        steps: Vec<BuilderStep>,
+    },
+}
+
+impl std::fmt::Debug for BuilderStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuilderStep::Processor(_) => write!(f, "BuilderStep::Processor(...)"),
+            BuilderStep::To(uri) => write!(f, "BuilderStep::To({uri:?})"),
+            BuilderStep::Split { steps, .. } => {
+                write!(f, "BuilderStep::Split {{ steps: {steps:?}, .. }}")
+            }
+        }
+    }
 }
 
 /// An unresolved route definition. "to" URIs have not been resolved to producers yet.

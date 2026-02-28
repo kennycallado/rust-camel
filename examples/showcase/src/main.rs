@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::splitter::{split_body_json_array, AggregationStrategy, SplitterConfig};
 use camel_api::{CamelError, Value};
 use camel_builder::RouteBuilder;
 use camel_core::context::CamelContext;
@@ -72,8 +73,41 @@ async fn main() -> Result<(), CamelError> {
         )
         .build()?;
 
+    // Route 3: Timer -> set JSON array body -> parallel split -> enrich each -> log aggregated
+    let route3 = RouteBuilder::from("timer:orders?period=3000&repeatCount=3")
+        .process(|mut exchange| {
+            Box::pin(async move {
+                exchange.input.body = Body::Json(serde_json::json!([
+                    {"id": 1, "item": "widget", "qty": 5},
+                    {"id": 2, "item": "gadget", "qty": 2},
+                    {"id": 3, "item": "gizmo",  "qty": 10},
+                ]));
+                Ok(exchange)
+            })
+        })
+        .split(
+            SplitterConfig::new(split_body_json_array())
+                .aggregation(AggregationStrategy::CollectAll)
+                .parallel(true)
+                .parallel_limit(2),
+        )
+            // Enrich each order fragment with a "processed" flag
+            .map_body(|body| {
+                if let Body::Json(mut v) = body {
+                    v["processed"] = serde_json::json!(true);
+                    Body::Json(v)
+                } else {
+                    body
+                }
+            })
+            .to("log:order-fragment?showBody=true")
+        .end_split()
+        .to("log:orders-aggregated?showBody=true")
+        .build()?;
+
     ctx.add_route_definition(route1)?;
     ctx.add_route_definition(route2)?;
+    ctx.add_route_definition(route3)?;
     ctx.start().await?;
 
     tokio::signal::ctrl_c()

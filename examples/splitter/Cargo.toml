@@ -1,6 +1,6 @@
 [package]
-name = "showcase"
-description = "All-in-one showcase example for rust-camel"
+name = "splitter"
+description = "Splitter EIP example — split, process per-fragment, aggregate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,6 @@ camel-core.workspace = true
 camel-builder.workspace = true
 camel-timer.workspace = true
 camel-log.workspace = true
-camel-direct.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true

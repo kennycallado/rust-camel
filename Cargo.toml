@@ -23,6 +23,7 @@ members = [
     "examples/transform-pipeline",
     "examples/showcase",
     "examples/error-handling",
+    "examples/splitter",
 ]
 
 [workspace.package]
