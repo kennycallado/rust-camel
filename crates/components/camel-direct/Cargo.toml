@@ -10,4 +10,5 @@ camel-api.workspace = true
 camel-component.workspace = true
 camel-endpoint.workspace = true
 async-trait.workspace = true
+tower.workspace = true
 tokio.workspace = true

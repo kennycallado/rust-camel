@@ -9,5 +9,14 @@ license.workspace = true
 camel-api.workspace = true
 camel-core.workspace = true
 camel-builder.workspace = true
+camel-component.workspace = true
+camel-processor.workspace = true
+camel-mock.workspace = true
+camel-timer.workspace = true
+camel-log.workspace = true
+camel-direct.workspace = true
 tokio.workspace = true
-anyhow.workspace = true
+tower.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

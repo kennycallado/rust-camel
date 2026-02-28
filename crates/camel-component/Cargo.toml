@@ -11,3 +11,4 @@ camel-util.workspace = true
 camel-endpoint.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
+tokio.workspace = true

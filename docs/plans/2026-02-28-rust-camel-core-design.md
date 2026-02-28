@@ -550,3 +550,39 @@ async fn test_route_with_timer_and_mock() {
 4. Implement `camel-core` with basic route execution
 5. Implement MVP components
 6. Add integration tests
+
+---
+
+## Implementation Notes (Post-MVP)
+
+1. **CamelError Clone**: `CamelError` derives `Clone` to allow `Exchange` to be `Clone`. The `Io` variant stores a `String` instead of `std::io::Error` (which isn't `Clone`), trading direct IO error wrapping for cloneability.
+
+2. **Producer trait simplified**: Rather than the complex boxed Tower Service type shown in the design, `Producer` is an `async_trait` with a simple `async fn process(&self, exchange: Exchange) -> Result<Exchange, CamelError>` method. This proved far more ergonomic without sacrificing functionality.
+
+3. **Integration test location**: Because the workspace root has no `[package]`, integration tests live in `crates/camel-core/tests/integration_test.rs` rather than a root-level `tests/` directory.
+
+4. **camel-mock crate**: The mock component crate was not in the original workspace scaffold and had to be created during implementation.
+
+5. **Additional workspace dependencies**: `tower`, `bytes`, and `tracing-subscriber` were missing from `[workspace.dependencies]` and were added during implementation.
+
+6. **Filter behavior**: `RouteBuilder::filter()` sets a `CamelFilterMatched=false` property on non-matching exchanges rather than dropping them. The route engine passes all exchanges through regardless of filter result.
+
+7. **register_component is synchronous**: Changed from `async fn` to `fn` since it only performs a synchronous `HashMap::insert`.
+
+8. **camel-processor files**: The processor crate contains `map_body.rs`, `set_header.rs`, and `filter.rs` instead of the designed `map.rs`, `log.rs`, and `to.rs`. Logging lives in the `camel-log` component, and endpoint sends are handled by `RouteStep::To` in the route engine.
+
+### Tower Reconnection (Post-MVP Refactor)
+
+The following deviations were resolved by the Tower reconnection refactor:
+
+- **#2 resolved**: `Producer` trait removed entirely. Component producers now implement `Service<Exchange>` directly (Tower-native). `Endpoint::create_producer()` returns `BoxProcessor` (`BoxCloneService<Exchange, Exchange, CamelError>`).
+- **#3 resolved**: Integration tests moved from `crates/camel-core/tests/` to a dedicated `crates/camel-test/` crate with proper component dependencies.
+- **#6 resolved**: `Filter` is now a real Tower Service with gate semantics — non-matching exchanges are returned as-is without forwarding to the inner service. The `CamelFilterMatched` property is no longer used.
+- **#8 resolved**: Each processor has both a `Service` impl and a `Layer` type (`FilterLayer`, `SetHeaderLayer`, `MapBodyLayer`).
+
+Additional architectural changes:
+- Flat `RouteStep` dispatcher replaced with Tower `Service<Exchange>` composition (`ProcessorFn` retained as a closure-to-Service adapter)
+- `BoxProcessor` type alias is the runtime unit for all processors
+- `RouteBuilder` produces `RouteDefinition` resolved by `CamelContext::add_route_definition()`
+- `MockComponent` has shared endpoint registry (`Arc<Mutex<HashMap>>`) for test verification
+- `camel-processor` is a live runtime dependency (processors are real Tower Services in the pipeline, not compile-time-only)

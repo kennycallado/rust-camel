@@ -17,7 +17,12 @@ members = [
     "crates/components/camel-log",
     "crates/components/camel-file",
     "crates/components/camel-direct",
+    "crates/components/camel-mock",
     "examples/hello-world",
+    "examples/content-based-routing",
+    "examples/multi-route-direct",
+    "examples/transform-pipeline",
+    "examples/showcase",
 ]
 
 [workspace.package]
@@ -43,11 +48,15 @@ camel-timer = { path = "crates/components/camel-timer" }
 camel-log = { path = "crates/components/camel-log" }
 camel-file = { path = "crates/components/camel-file" }
 camel-direct = { path = "crates/components/camel-direct" }
+camel-mock = { path = "crates/components/camel-mock" }
 
 tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
 async-trait = "0.1"
 thiserror = "2"
 anyhow = "1"
+bytes = "1"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -10,7 +10,7 @@
 
 ---
 
-## Task 1: Setup Workspace Structure
+## Task 1: Setup Workspace Structure [DONE]
 
 **Files:**
 - Modify: `Cargo.toml` (workspace root)
@@ -42,7 +42,7 @@ Run: `git add -A && git commit -m "chore: setup workspace structure"`
 
 ---
 
-## Task 2: Implement camel-api Core Types
+## Task 2: Implement camel-api Core Types [DONE]
 
 **Files:**
 - `crates/camel-api/src/body.rs` - Body enum
@@ -81,7 +81,7 @@ pub struct Exchange {
 
 ---
 
-## Task 3: Implement Processor Trait
+## Task 3: Implement Processor Trait [DONE]
 
 **Files:**
 - `crates/camel-api/src/processor.rs`
@@ -100,7 +100,7 @@ pub trait Processor: Service<Exchange, Response = Exchange, Error = CamelError> 
 
 ---
 
-## Task 4: Implement camel-component Traits
+## Task 4: Implement camel-component Traits [DONE]
 
 **Files:**
 - `crates/camel-component/src/component.rs`
@@ -131,7 +131,7 @@ pub trait Consumer: Send + Sync {
 
 ---
 
-## Task 5: Implement camel-processor EIPs
+## Task 5: Implement camel-processor EIPs [DONE]
 
 **Files:**
 - `crates/camel-processor/src/filter.rs`
@@ -169,7 +169,7 @@ pub struct SetHeader<P> {
 
 ---
 
-## Task 6: Implement CamelContext
+## Task 6: Implement CamelContext [DONE]
 
 **Files:**
 - `crates/camel-core/src/context.rs`
@@ -197,7 +197,7 @@ impl CamelContext {
 
 ---
 
-## Task 7: Implement Timer Component
+## Task 7: Implement Timer Component [DONE]
 
 **Files:**
 - `crates/components/camel-timer/Cargo.toml`
@@ -221,7 +221,7 @@ pub struct TimerConfig {
 
 ---
 
-## Task 8: Implement Log Component
+## Task 8: Implement Log Component [DONE]
 
 **Files:**
 - `crates/components/camel-log/Cargo.toml`
@@ -243,7 +243,7 @@ pub struct LogConfig {
 
 ---
 
-## Task 9: Implement Direct Component
+## Task 9: Implement Direct Component [DONE]
 
 **Files:**
 - `crates/components/camel-direct/Cargo.toml`
@@ -257,7 +257,7 @@ pub struct LogConfig {
 
 ---
 
-## Task 10: Implement Mock Component
+## Task 10: Implement Mock Component [DONE]
 
 **Files:**
 - `crates/components/camel-mock/Cargo.toml`
@@ -281,7 +281,7 @@ impl MockEndpoint {
 
 ---
 
-## Task 11: Implement RouteBuilder
+## Task 11: Implement RouteBuilder [DONE]
 
 **Files:**
 - `crates/camel-builder/src/lib.rs`
@@ -308,7 +308,7 @@ impl RouteBuilder {
 
 ---
 
-## Task 12: Create Hello World Example
+## Task 12: Create Hello World Example [DONE]
 
 **Files:**
 - `examples/hello-world/Cargo.toml`
@@ -344,7 +344,7 @@ async fn main() -> Result<(), CamelError> {
 
 ---
 
-## Task 13: Integration Tests
+## Task 13: Integration Tests [DONE]
 
 **Files:**
 - `tests/integration_test.rs`
@@ -376,3 +376,42 @@ cargo fmt --check
 - Commit after each task
 - Run `cargo test` frequently
 - The design document is at `docs/plans/2026-02-28-rust-camel-core-design.md`
+
+---
+
+## Summary
+
+- **Total tests:** 79 (16 api + 11 builder + 7 endpoint + 9 processor + 7 timer + 7 log + 8 direct + 9 mock + 5 integration)
+- **All 13 tasks completed**
+- **Date completed:** 2026-02-28
+
+---
+
+## Implementation Deviations
+
+1. **CamelError Clone**: `CamelError` needed `Clone` for `Exchange` to be `Clone`. Solved by storing IO errors as `String` (i.e., `Io(String)`) instead of `#[from] std::io::Error`.
+
+2. **Producer trait simplified**: The design specified `Producer` as a complex boxed Tower Service type. Implementation simplified it to an `async_trait` with `async fn process(&self, exchange: Exchange) -> Result<Exchange, CamelError>` for ergonomics.
+
+3. **Integration test location**: Virtual workspace (no `[package]` at root) means integration tests can't live in root `tests/` directory. Placed them in `crates/camel-core/tests/integration_test.rs` instead.
+
+4. **camel-mock crate**: Was missing from the original scaffold - had to create it.
+
+5. **Additional workspace dependencies**: `tower`, `bytes`, `tracing-subscriber` were missing from workspace `[workspace.dependencies]` and had to be added.
+
+6. **Filter behavior**: `RouteBuilder::filter()` does NOT drop filtered exchanges. Instead it sets a `CamelFilterMatched=false` property. The route engine still passes them through.
+
+7. **register_component is synchronous**: The design showed `async fn register_component`, but the implementation is synchronous `fn register_component` since it's just a HashMap insert.
+
+8. **camel-processor files**: Design listed `map.rs`, `log.rs`, `to.rs` but implementation uses `map_body.rs`, `set_header.rs`, `filter.rs` (no log.rs or to.rs in processor crate - logging is in camel-log component, and "to" is handled by RouteStep::To in the route engine).
+
+### Deviations Resolved by Tower Reconnection
+
+The following deviations from the original design were resolved in the Tower reconnection refactor (see `2026-02-28-tower-reconnection-design.md` and `2026-02-28-tower-reconnection-implementation.md`):
+
+- **#2**: Producer trait removed. Producers are Tower-native `Service<Exchange>` implementations.
+- **#3**: Integration tests moved to `crates/camel-test/` crate.
+- **#6**: Filter has real Tower gate semantics (no more `CamelFilterMatched` property).
+- **#8**: Processor crate now has Layer types (`FilterLayer`, `SetHeaderLayer`, `MapBodyLayer`).
+
+Additional changes: `MockComponent` has shared endpoint registry for test verification. `camel-processor` is a live runtime dependency (processors are real Tower Services in the pipeline).

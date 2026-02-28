@@ -1,0 +1,16 @@
+[package]
+name = "camel-mock"
+description = "Mock component for rust-camel testing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-component.workspace = true
+camel-endpoint.workspace = true
+tower.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

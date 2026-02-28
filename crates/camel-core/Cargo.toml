@@ -15,4 +15,6 @@ camel-endpoint.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tower.workspace = true
 tracing.workspace = true
+
