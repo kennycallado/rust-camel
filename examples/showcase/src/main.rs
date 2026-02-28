@@ -80,7 +80,9 @@ async fn main() -> Result<(), CamelError> {
         .await
         .map_err(|e| CamelError::Io(e.to_string()))?;
 
+    println!("Shutting down gracefully (30s timeout)...");
     ctx.stop().await?;
+    println!("Shutdown complete.");
 
     Ok(())
 }

@@ -102,8 +102,8 @@ where
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
@@ -308,6 +308,54 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().has_error());
         assert_eq!(*received.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_poll_ready_delegates_to_inner() {
+        use std::sync::atomic::AtomicBool;
+
+        /// A service that returns `Pending` on the first `poll_ready`, then `Ready`.
+        #[derive(Clone)]
+        struct DelayedReadyService {
+            ready: Arc<AtomicBool>,
+        }
+
+        impl Service<Exchange> for DelayedReadyService {
+            type Response = Exchange;
+            type Error = CamelError;
+            type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+            fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                if self.ready.fetch_or(true, Ordering::SeqCst) {
+                    // Already marked ready (second+ call) → Ready
+                    Poll::Ready(Ok(()))
+                } else {
+                    // First call → Pending, schedule a wake
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+
+            fn call(&mut self, ex: Exchange) -> Self::Future {
+                Box::pin(async move { Ok(ex) })
+            }
+        }
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let inner = DelayedReadyService {
+            ready: Arc::new(AtomicBool::new(false)),
+        };
+        let mut svc = ErrorHandlerService::new(inner, None, vec![]);
+
+        // First poll_ready: inner returns Pending, so ErrorHandlerService must too.
+        let first = Pin::new(&mut svc).poll_ready(&mut cx);
+        assert!(first.is_pending(), "expected Pending on first poll_ready");
+
+        // Second poll_ready: inner returns Ready, so ErrorHandlerService must too.
+        let second = Pin::new(&mut svc).poll_ready(&mut cx);
+        assert!(second.is_ready(), "expected Ready on second poll_ready");
     }
 
     #[tokio::test]

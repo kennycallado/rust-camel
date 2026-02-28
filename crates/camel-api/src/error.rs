@@ -2,6 +2,7 @@ use thiserror::Error;
 
 /// Core error type for the Camel framework.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum CamelError {
     #[error("Component not found: {0}")]
     ComponentNotFound(String),
@@ -29,6 +30,9 @@ pub enum CamelError {
 
     #[error("Dead letter channel failed: {0}")]
     DeadLetterChannelFailed(String),
+
+    #[error("Circuit breaker open: {0}")]
+    CircuitOpen(String),
 }
 
 impl From<std::io::Error> for CamelError {

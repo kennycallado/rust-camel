@@ -224,7 +224,7 @@ async fn test_multiple_routes() {
 // Error-handling integration tests (Tasks 4 + 5)
 // ---------------------------------------------------------------------------
 
-use camel_api::{BoxProcessor, BoxProcessorExt, CamelError};
+use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, CircuitBreakerConfig};
 use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
@@ -525,4 +525,75 @@ async fn test_no_error_handler_logs_and_continues() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
     // No panic — test passes if we get here.
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: Circuit breaker with error handler (end-to-end)
+// ---------------------------------------------------------------------------
+
+/// Verifies circuit breaker + error handler interaction:
+///
+/// - The pipeline is composed as `ErrorHandler(CircuitBreaker(Steps))`.
+/// - The first `failure_threshold` errors pass through the circuit breaker
+///   (Closed state), hit the error handler, and are routed to the DLC.
+/// - After the threshold, the circuit opens. `poll_ready()` returns
+///   `CamelError::CircuitOpen`, and the pipeline task backs off (1s sleep)
+///   then retries. Since `open_duration` is 60s (much longer than the test),
+///   the circuit stays open for the rest of the test.
+/// - Meanwhile, the timer consumer keeps producing exchanges into the channel,
+///   but the pipeline is stuck in the backoff loop and never processes them.
+/// - Result: DLC receives exactly `failure_threshold` exchanges; `mock:sink`
+///   receives zero.
+#[tokio::test]
+async fn test_circuit_breaker_with_error_handler() {
+    use camel_api::error_handler::ErrorHandlerConfig;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=5")
+        .process_fn(failing_step("cb test failure"))
+        .circuit_breaker(
+            CircuitBreakerConfig::new()
+                .failure_threshold(2)
+                .open_duration(Duration::from_secs(60)),
+        )
+        .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:dlc"))
+        .to("mock:sink")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    // Give enough time for all 5 timer ticks to fire (5 × 50ms = 250ms).
+    // The circuit opens after 2 failures. The pipeline backs off in a
+    // retry loop (1s sleep) rather than breaking, but since open_duration
+    // is 60s, no further exchanges are processed during this window.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    // DLC received exactly the 2 exchanges that passed through the CB
+    // before it opened — each marked with an error.
+    let dlc = mock.get_endpoint("dlc").unwrap();
+    let dlc_exchanges = dlc.get_received_exchanges().await;
+    assert_eq!(
+        dlc_exchanges.len(),
+        2,
+        "DLC should receive exactly failure_threshold (2) exchanges"
+    );
+    for ex in &dlc_exchanges {
+        assert!(ex.has_error(), "Each DLC exchange should carry an error");
+    }
+
+    // mock:sink received nothing — every exchange failed before reaching it.
+    if let Some(sink) = mock.get_endpoint("sink") {
+        assert_eq!(
+            sink.get_received_exchanges().await.len(),
+            0,
+            "mock:sink should receive zero exchanges"
+        );
+    }
 }

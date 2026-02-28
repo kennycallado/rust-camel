@@ -1,4 +1,5 @@
 use camel_api::body::Body;
+use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, ProcessorFn, Value};
 use camel_core::route::{BuilderStep, RouteDefinition};
@@ -19,6 +20,7 @@ pub struct RouteBuilder {
     from_uri: String,
     steps: Vec<BuilderStep>,
     error_handler: Option<ErrorHandlerConfig>,
+    circuit_breaker_config: Option<CircuitBreakerConfig>,
 }
 
 impl RouteBuilder {
@@ -28,6 +30,7 @@ impl RouteBuilder {
             from_uri: endpoint.to_string(),
             steps: Vec::new(),
             error_handler: None,
+            circuit_breaker_config: None,
         }
     }
 
@@ -94,6 +97,12 @@ impl RouteBuilder {
         self
     }
 
+    /// Set a circuit breaker for this route.
+    pub fn circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker_config = Some(config);
+        self
+    }
+
     /// Consume the builder and produce a [`RouteDefinition`].
     pub fn build(self) -> Result<RouteDefinition, CamelError> {
         if self.from_uri.is_empty() {
@@ -104,6 +113,11 @@ impl RouteBuilder {
         let definition = RouteDefinition::new(self.from_uri, self.steps);
         let definition = if let Some(eh) = self.error_handler {
             definition.with_error_handler(eh)
+        } else {
+            definition
+        };
+        let definition = if let Some(cb) = self.circuit_breaker_config {
+            definition.with_circuit_breaker(cb)
         } else {
             definition
         };
@@ -306,5 +320,45 @@ mod tests {
         let exchange = Exchange::new(Message::new("unchanged"));
         let result = pipeline.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("unchanged"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Circuit breaker builder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_builder_circuit_breaker_sets_config() {
+        use camel_api::circuit_breaker::CircuitBreakerConfig;
+
+        let config = CircuitBreakerConfig::new().failure_threshold(5);
+        let definition = RouteBuilder::from("timer:tick")
+            .circuit_breaker(config)
+            .build()
+            .unwrap();
+
+        let cb = definition.circuit_breaker_config().expect("circuit breaker should be set");
+        assert_eq!(cb.failure_threshold, 5);
+    }
+
+    #[test]
+    fn test_builder_circuit_breaker_with_error_handler() {
+        use camel_api::circuit_breaker::CircuitBreakerConfig;
+        use camel_api::error_handler::ErrorHandlerConfig;
+
+        let cb_config = CircuitBreakerConfig::new().failure_threshold(3);
+        let eh_config = ErrorHandlerConfig::log_only();
+
+        let definition = RouteBuilder::from("timer:tick")
+            .to("log:info")
+            .circuit_breaker(cb_config)
+            .error_handler(eh_config)
+            .build()
+            .unwrap();
+
+        assert!(
+            definition.circuit_breaker_config().is_some(),
+            "circuit breaker config should be set"
+        );
+        // Route definition was built successfully with both configs.
     }
 }

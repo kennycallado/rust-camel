@@ -137,41 +137,54 @@ impl Consumer for TimerConsumer {
     async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
         let config = self.config.clone();
 
-        // Initial delay
+        // Initial delay (cancellable so shutdown isn't blocked by long delays)
         if !config.delay.is_zero() {
-            time::sleep(config.delay).await;
+            tokio::select! {
+                _ = time::sleep(config.delay) => {}
+                _ = context.cancelled() => {
+                    debug!(timer = config.name, "Timer cancelled during initial delay");
+                    return Ok(());
+                }
+            }
         }
 
         let mut interval = time::interval(config.period);
         let mut count: u32 = 0;
 
         loop {
-            interval.tick().await;
-            count += 1;
+            tokio::select! {
+                _ = context.cancelled() => {
+                    debug!(timer = config.name, "Timer received cancellation, stopping");
+                    break;
+                }
+                _ = interval.tick() => {
+                    count += 1;
 
-            debug!(timer = config.name, count, "Timer tick");
+                    debug!(timer = config.name, count, "Timer tick");
 
-            let mut exchange = Exchange::new(Message::new(format!(
-                "timer://{} tick #{}",
-                config.name, count
-            )));
-            exchange.input.set_header(
-                "CamelTimerName",
-                serde_json::Value::String(config.name.clone()),
-            );
-            exchange
-                .input
-                .set_header("CamelTimerCounter", serde_json::Value::Number(count.into()));
+                    let mut exchange = Exchange::new(Message::new(format!(
+                        "timer://{} tick #{}",
+                        config.name, count
+                    )));
+                    exchange.input.set_header(
+                        "CamelTimerName",
+                        serde_json::Value::String(config.name.clone()),
+                    );
+                    exchange
+                        .input
+                        .set_header("CamelTimerCounter", serde_json::Value::Number(count.into()));
 
-            if context.send(exchange).await.is_err() {
-                // Channel closed, route was stopped
-                break;
-            }
+                    if context.send(exchange).await.is_err() {
+                        // Channel closed, route was stopped
+                        break;
+                    }
 
-            if let Some(max) = config.repeat_count
-                && count >= max
-            {
-                break;
+                    if let Some(max) = config.repeat_count
+                        && count >= max
+                    {
+                        break;
+                    }
+                }
             }
         }
 
@@ -246,7 +259,7 @@ mod tests {
         let mut consumer = endpoint.create_consumer().unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let ctx = ConsumerContext::new(tx);
+        let ctx = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
 
         // Run consumer in background
         tokio::spawn(async move {
@@ -273,6 +286,47 @@ mod tests {
         assert_eq!(
             first.input.header("CamelTimerCounter"),
             Some(&serde_json::Value::Number(1.into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_timer_consumer_respects_cancellation() {
+        use tokio_util::sync::CancellationToken;
+
+        let token = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        let mut consumer = TimerConsumer {
+            config: TimerConfig {
+                name: "cancel-test".to_string(),
+                period: Duration::from_millis(50),
+                delay: Duration::from_millis(0),
+                repeat_count: None,
+            },
+        };
+
+        let handle = tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        // Let it fire a few times
+        tokio::time::sleep(Duration::from_millis(180)).await;
+        token.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(
+            result.is_ok(),
+            "Consumer should have stopped after cancellation"
+        );
+
+        let mut count = 0;
+        while rx.try_recv().is_ok() {
+            count += 1;
+        }
+        assert!(
+            count >= 2,
+            "Expected at least 2 exchanges before cancellation, got {count}"
         );
     }
 }

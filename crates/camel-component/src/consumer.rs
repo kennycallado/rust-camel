@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use camel_api::{CamelError, Exchange};
 
@@ -17,12 +18,27 @@ pub struct ExchangeEnvelope {
 #[derive(Clone)]
 pub struct ConsumerContext {
     sender: mpsc::Sender<ExchangeEnvelope>,
+    cancel_token: CancellationToken,
 }
 
 impl ConsumerContext {
     /// Create a new consumer context wrapping the given channel sender.
-    pub fn new(sender: mpsc::Sender<ExchangeEnvelope>) -> Self {
-        Self { sender }
+    pub fn new(sender: mpsc::Sender<ExchangeEnvelope>, cancel_token: CancellationToken) -> Self {
+        Self {
+            sender,
+            cancel_token,
+        }
+    }
+
+    /// Returns a future that resolves when shutdown is requested.
+    /// Use in `tokio::select!` inside consumer loops.
+    pub async fn cancelled(&self) {
+        self.cancel_token.cancelled().await
+    }
+
+    /// Returns true if shutdown has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token.is_cancelled()
     }
 
     /// Send an exchange into the route pipeline (fire-and-forget).
@@ -61,4 +77,21 @@ pub trait Consumer: Send + Sync {
 
     /// Stop consuming messages.
     async fn stop(&mut self) -> Result<(), CamelError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_consumer_context_cancelled() {
+        let (tx, _rx) = mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        assert!(!ctx.is_cancelled());
+        token.cancel();
+        ctx.cancelled().await;
+        assert!(ctx.is_cancelled());
+    }
 }

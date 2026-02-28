@@ -127,12 +127,29 @@ impl Consumer for DirectConsumer {
             reg.insert(self.name.clone(), tx);
         }
 
-        // Process incoming exchanges.
-        while let Some((exchange, reply_tx)) = rx.recv().await {
-            // Send the exchange into the route pipeline and wait for the result.
-            // This gives us the pipeline result (Ok or Err) to relay back to the producer.
-            let result = context.send_and_wait(exchange).await;
-            let _ = reply_tx.send(result);
+        // Process incoming exchanges with cooperative cancellation.
+        loop {
+            tokio::select! {
+                _ = context.cancelled() => {
+                    tracing::debug!("Direct '{}' received cancellation, stopping", self.name);
+                    break;
+                }
+                msg = rx.recv() => {
+                    match msg {
+                        Some((exchange, reply_tx)) => {
+                            let result = context.send_and_wait(exchange).await;
+                            let _ = reply_tx.send(result);
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // Cleanup: remove from registry on exit
+        {
+            let mut reg = self.registry.lock().await;
+            reg.remove(&self.name);
         }
 
         Ok(())
@@ -260,7 +277,7 @@ mod tests {
 
         // The route channel now carries ExchangeEnvelope (request-reply support).
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx);
+        let ctx = ConsumerContext::new(route_tx, tokio_util::sync::CancellationToken::new());
 
         // Start the consumer in a background task
         tokio::spawn(async move {
@@ -300,7 +317,7 @@ mod tests {
         let mut consumer = consumer_endpoint.create_consumer().unwrap();
 
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx);
+        let ctx = ConsumerContext::new(route_tx, tokio_util::sync::CancellationToken::new());
 
         tokio::spawn(async move {
             consumer.start(ctx).await.unwrap();
@@ -335,7 +352,7 @@ mod tests {
         let mut consumer = endpoint.create_consumer().unwrap();
 
         let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
-        let ctx = ConsumerContext::new(route_tx);
+        let ctx = ConsumerContext::new(route_tx, tokio_util::sync::CancellationToken::new());
 
         // Start consumer in background
         let handle = tokio::spawn(async move {
@@ -364,5 +381,37 @@ mod tests {
         }
 
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_direct_consumer_respects_cancellation() {
+        use tokio_util::sync::CancellationToken;
+
+        let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let token = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        let mut consumer = DirectConsumer {
+            name: "cancel-test".to_string(),
+            registry: registry.clone(),
+        };
+
+        let handle = tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(registry.lock().await.contains_key("cancel-test"));
+
+        token.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        assert!(
+            result.is_ok(),
+            "Consumer should have stopped after cancellation"
+        );
+
+        // After cancellation, the consumer should have cleaned up the registry
+        assert!(!registry.lock().await.contains_key("cancel-test"));
     }
 }

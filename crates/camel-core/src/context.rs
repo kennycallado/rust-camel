@@ -1,5 +1,6 @@
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service, ServiceExt};
 use tracing::{error, info};
 
@@ -8,17 +9,24 @@ use camel_api::{BoxProcessor, CamelError};
 use camel_component::{Component, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_endpoint::parse_uri;
 use camel_processor::error_handler::ErrorHandlerLayer;
+use camel_processor::circuit_breaker::CircuitBreakerLayer;
 
 use crate::registry::Registry;
 use crate::route::Route;
 use crate::route::RouteDefinition;
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
+///
+/// # Lifecycle
+///
+/// A `CamelContext` is single-use: call [`start()`](Self::start) once to launch routes,
+/// then [`stop()`](Self::stop) or [`abort()`](Self::abort) to shut down. Restarting a
+/// stopped context is not supported — create a new instance instead.
 pub struct CamelContext {
     registry: Registry,
     routes: Vec<Route>,
     tasks: Vec<JoinHandle<()>>,
-    shutdown_tx: Option<mpsc::Sender<()>>,
+    cancel_token: CancellationToken,
     /// Optional global error handler applied to all routes that don't have a per-route handler.
     global_error_handler: Option<ErrorHandlerConfig>,
 }
@@ -30,7 +38,7 @@ impl CamelContext {
             registry: Registry::new(),
             routes: Vec::new(),
             tasks: Vec::new(),
-            shutdown_tx: None,
+            cancel_token: CancellationToken::new(),
             global_error_handler: None,
         }
     }
@@ -111,6 +119,14 @@ impl CamelContext {
 
         let pipeline = compose_pipeline(processors);
 
+        // Apply circuit breaker if configured (wraps the step pipeline).
+        let pipeline = if let Some(cb_config) = definition.circuit_breaker {
+            let cb_layer = CircuitBreakerLayer::new(cb_config);
+            BoxProcessor::new(cb_layer.layer(pipeline))
+        } else {
+            pipeline
+        };
+
         // Determine which error handler config to use (per-route takes precedence).
         let eh_config = definition
             .error_handler
@@ -137,9 +153,6 @@ impl CamelContext {
     pub async fn start(&mut self) -> Result<(), CamelError> {
         info!("Starting CamelContext with {} routes", self.routes.len());
 
-        let (shutdown_tx, _shutdown_rx) = mpsc::channel::<()>(1);
-        self.shutdown_tx = Some(shutdown_tx.clone());
-
         // Take routes to iterate
         let routes = std::mem::take(&mut self.routes);
 
@@ -151,7 +164,8 @@ impl CamelContext {
 
             // Create a channel for the consumer to send exchanges into
             let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(256);
-            let consumer_ctx = ConsumerContext::new(tx);
+            let child_token = self.cancel_token.child_token();
+            let consumer_ctx = ConsumerContext::new(tx, child_token);
 
             // Start the consumer in a background task
             let mut consumer = endpoint.create_consumer()?;
@@ -164,32 +178,62 @@ impl CamelContext {
 
             // Get the pipeline from the route
             let mut pipeline = route.into_pipeline();
-            let shutdown_tx_clone = shutdown_tx.clone();
 
-            // Spawn a task that reads exchanges and runs them through the Tower pipeline
+            // Spawn a task that reads exchanges and runs them through the Tower pipeline.
+            // This task exits when the channel is fully drained (all senders dropped).
+            // During graceful shutdown, the consumer stops first (via CancellationToken),
+            // which drops its sender, causing the channel to close after in-flight
+            // exchanges are processed — achieving drain-then-exit semantics.
+            let pipeline_cancel = self.cancel_token.child_token();
             let pipeline_handle = tokio::spawn(async move {
-                let _shutdown = shutdown_tx_clone;
-
                 while let Some(envelope) = rx.recv().await {
                     let ExchangeEnvelope { exchange, reply_tx } = envelope;
-                    // Ensure the service is ready before calling
-                    match pipeline.ready().await {
-                        Ok(svc) => {
-                            let result = svc.call(exchange).await;
-                            if let Some(tx) = reply_tx {
-                                // Request-reply: send result back to consumer (e.g. direct:).
-                                let _ = tx.send(result);
-                            } else if let Err(e) = result {
-                                error!("Pipeline error: {e}");
+
+                    // Wait for the service to be ready. If the circuit breaker is
+                    // open, poll_ready returns CircuitOpen — back off and retry
+                    // instead of killing the route permanently.
+                    //
+                    // Note: while backing off, the current exchange is held here in
+                    // the loop. The channel continues to buffer incoming exchanges
+                    // (up to its capacity). On shutdown:
+                    // - The held exchange gets a CircuitOpen reply (via the cancel branch).
+                    // - Exchanges buffered in the channel are dropped silently (fire-and-forget)
+                    //   or their callers receive RecvError mapped to ChannelClosed (request-reply
+                    //   via direct:).
+                    let svc = loop {
+                        match pipeline.ready().await {
+                            Ok(svc) => break svc,
+                            Err(CamelError::CircuitOpen(ref msg)) => {
+                                tracing::warn!("Circuit open, backing off: {msg}");
+                                tokio::select! {
+                                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                                        continue;
+                                    }
+                                    _ = pipeline_cancel.cancelled() => {
+                                        // Shutting down — don't retry.
+                                        if let Some(tx) = reply_tx {
+                                            let _ = tx.send(Err(CamelError::CircuitOpen(msg.clone())));
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Pipeline not ready: {e}");
+                                if let Some(tx) = reply_tx {
+                                    let _ = tx.send(Err(e));
+                                }
+                                return;
                             }
                         }
-                        Err(e) => {
-                            error!("Pipeline not ready: {e}");
-                            if let Some(tx) = reply_tx {
-                                let _ = tx.send(Err(e));
-                            }
-                            break;
-                        }
+                    };
+
+                    let result = svc.call(exchange).await;
+                    if let Some(tx) = reply_tx {
+                        // Request-reply: send result back to consumer (e.g. direct:).
+                        let _ = tx.send(result);
+                    } else if let Err(e) = result {
+                        error!("Pipeline error: {e}");
                     }
                 }
             });
@@ -200,20 +244,49 @@ impl CamelContext {
         Ok(())
     }
 
-    /// Stop the context, shutting down all routes.
+    /// Graceful shutdown with default 30-second timeout.
     pub async fn stop(&mut self) -> Result<(), CamelError> {
+        self.stop_timeout(std::time::Duration::from_secs(30)).await
+    }
+
+    /// Graceful shutdown with custom timeout.
+    pub async fn stop_timeout(&mut self, timeout: std::time::Duration) -> Result<(), CamelError> {
         info!("Stopping CamelContext");
 
-        // Drop shutdown sender to signal tasks
-        self.shutdown_tx.take();
+        // 1. Signal all consumers to stop
+        self.cancel_token.cancel();
 
-        // Abort all tasks
-        for task in self.tasks.drain(..) {
-            task.abort();
+        // 2. Wait for all tasks to complete within timeout
+        let mut tasks = std::mem::take(&mut self.tasks);
+        let result = tokio::time::timeout(timeout, async {
+            for task in &mut tasks {
+                let _ = task.await;
+            }
+        })
+        .await;
+
+        // 3. If timeout expired, abort remaining tasks
+        if result.is_err() {
+            tracing::warn!(
+                "Graceful shutdown timed out after {:?}, aborting remaining tasks",
+                timeout
+            );
+            for task in &tasks {
+                task.abort();
+            }
         }
 
         info!("CamelContext stopped");
         Ok(())
+    }
+
+    /// Immediate abort — kills all tasks without draining.
+    pub async fn abort(&mut self) {
+        self.cancel_token.cancel();
+        let tasks = std::mem::take(&mut self.tasks);
+        for task in &tasks {
+            task.abort();
+        }
     }
 }
 
