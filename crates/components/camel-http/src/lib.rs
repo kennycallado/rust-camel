@@ -179,6 +179,7 @@ pub struct RequestEnvelope {
 }
 
 /// The HTTP response that `HttpConsumer` sends back to the Axum handler.
+#[derive(Debug, Clone)]
 pub struct HttpReply {
     pub status:  u16,
     pub headers: Vec<(String, String)>,
