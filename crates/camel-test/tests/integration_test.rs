@@ -11,6 +11,7 @@ use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig}
 use camel_builder::RouteBuilder;
 use camel_core::CamelContext;
 use camel_file::FileComponent;
+use camel_http::HttpComponent;
 use camel_log::LogComponent;
 use camel_mock::MockComponent;
 use camel_timer::TimerComponent;
@@ -807,4 +808,50 @@ async fn test_file_to_file_pipeline() {
     );
     let content = std::fs::read_to_string(output_dir.path().join("source.txt")).unwrap();
     assert_eq!(content, "hello world");
+}
+
+// ---------------------------------------------------------------------------
+// HTTP component integration tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Test 20: HTTP component registration and endpoint creation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_component_registration_and_endpoint_creation() {
+    use camel_http::HttpComponent;
+    use camel_component::Component;
+
+    let component = HttpComponent::new();
+    
+    // Verify component scheme
+    assert_eq!(component.scheme(), "http");
+
+    // Verify endpoint can be created with config
+    let endpoint = component.create_endpoint("http://example.com/api?httpMethod=POST&connectTimeout=5000").unwrap();
+    assert!(endpoint.uri().contains("httpMethod=POST"));
+}
+
+// ---------------------------------------------------------------------------
+// Test 21: HTTP query params are forwarded (Bug #3 verification)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_query_params_forwarding_config() {
+    use camel_http::{HttpComponent, HttpConfig};
+
+    // Verify config parsing forwards non-Camel query params
+    let config = HttpConfig::from_uri(
+        "http://api.example.com/v1/users?apiKey=secret123&httpMethod=GET&token=abc456"
+    ).unwrap();
+
+    // apiKey and token should be preserved for forwarding
+    assert!(config.query_params.contains_key("apiKey"), "apiKey should be preserved");
+    assert!(config.query_params.contains_key("token"), "token should be preserved");
+    assert_eq!(config.query_params.get("apiKey").unwrap(), "secret123");
+    assert_eq!(config.query_params.get("token").unwrap(), "abc456");
+
+    // httpMethod should NOT be in query_params (it's a Camel option)
+    assert!(!config.query_params.contains_key("httpMethod"), "httpMethod should not be forwarded");
 }
