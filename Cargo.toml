@@ -29,6 +29,7 @@ members = [
     "examples/file-pipeline",
     "examples/http-client",
     "examples/aggregator",
+    "examples/wiretap",
 ]
 
 [workspace.package]

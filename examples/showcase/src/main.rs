@@ -135,11 +135,29 @@ async fn main() -> Result<(), CamelError> {
         .to("log:http-response?showHeaders=true&showBody=true")
         .build()?;
 
+    // Route 6 (WireTap): Timer -> wire_tap (monitoring) -> log (main)
+    // Demonstrates fire-and-forget: tap receives a copy while original continues
+    let route6 = RouteBuilder::from("timer:monitor?period=4000&repeatCount=3")
+        .process(|mut exchange| {
+            Box::pin(async move {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                exchange.input.body = Body::Text(format!("[{timestamp}] Monitoring event"));
+                Ok(exchange)
+            })
+        })
+        .wire_tap("log:tap-monitor?showBody=true")
+        .to("log:tap-main?showBody=true")
+        .build()?;
+
     ctx.add_route_definition(route1)?;
     ctx.add_route_definition(route2)?;
     ctx.add_route_definition(route3)?;
     ctx.add_route_definition(route4)?;
     ctx.add_route_definition(route5)?;
+    ctx.add_route_definition(route6)?;
     ctx.start().await?;
 
     println!("Showcase running. Routes:");
@@ -147,6 +165,7 @@ async fn main() -> Result<(), CamelError> {
     println!("  - timer:orders (3s) -> split -> log");
     println!("  - timer:file-writer (2s) -> file:{file_path}/events.log");
     println!("  - timer:http-poll (5s) -> https:httpbin.org/get -> log");
+    println!("  - timer:monitor (4s) -> wire_tap -> log");
     println!();
     println!("Press Ctrl+C to stop...");
 

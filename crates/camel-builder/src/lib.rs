@@ -129,6 +129,16 @@ impl RouteBuilder {
 
 
 
+    /// Add a WireTap step that sends a clone of the exchange to the given
+    /// endpoint URI (fire-and-forget). The original exchange continues
+    /// downstream unchanged.
+    pub fn wire_tap(mut self, endpoint: &str) -> Self {
+        self.steps.push(BuilderStep::WireTap {
+            uri: endpoint.to_string(),
+        });
+        self
+    }
+
     /// Set a per-route error handler. Overrides the global error handler on `CamelContext`.
     pub fn error_handler(mut self, config: ErrorHandlerConfig) -> Self {
         self.error_handler = Some(config);
@@ -952,5 +962,18 @@ mod tests {
 
         assert_eq!(definition.steps().len(), 1);
         assert!(matches!(&definition.steps()[0], BuilderStep::Filter { .. }));
+    }
+
+    #[test]
+    fn test_wire_tap_builder_adds_step() {
+        let definition = RouteBuilder::from("timer:tick")
+            .wire_tap("mock:tap")
+            .to("mock:result")
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 2);
+        assert!(matches!(&definition.steps()[0], BuilderStep::WireTap { uri } if uri == "mock:tap"));
+        assert!(matches!(&definition.steps()[1], BuilderStep::To(uri) if uri == "mock:result"));
     }
 }

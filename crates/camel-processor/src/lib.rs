@@ -7,6 +7,7 @@ pub mod filter;
 pub mod map_body;
 pub mod set_header;
 pub mod splitter;
+pub mod wire_tap;
 
 pub use aggregator::AggregatorService;
 pub use circuit_breaker::{CircuitBreakerLayer, CircuitBreakerService};
@@ -17,3 +18,4 @@ pub use dynamic_set_header::{DynamicSetHeader, DynamicSetHeaderLayer};
 pub use set_body::{SetBody, SetBodyLayer};
 pub use set_header::{SetHeader, SetHeaderLayer};
 pub use splitter::SplitterService;
+pub use wire_tap::{WireTapLayer, WireTapService};

@@ -13,6 +13,7 @@ use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::splitter::SplitterService;
 use camel_processor::AggregatorService;
 use camel_processor::FilterService;
+use camel_processor::WireTapService;
 
 use crate::registry::Registry;
 use crate::route::{BuilderStep, Route, RouteDefinition, compose_pipeline};
@@ -125,6 +126,14 @@ impl CamelContext {
                     let sub_processors = self.resolve_steps(steps)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc = FilterService::from_predicate(predicate, sub_pipeline);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::WireTap { uri } => {
+                    let parsed = parse_uri(&uri)?;
+                    let component = self.registry.get_or_err(&parsed.scheme)?;
+                    let endpoint = component.create_endpoint(&uri)?;
+                    let producer = endpoint.create_producer()?;
+                    let svc = WireTapService::new(producer);
                     processors.push(BoxProcessor::new(svc));
                 }
             }

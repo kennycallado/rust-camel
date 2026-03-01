@@ -10,17 +10,19 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | Splitter EIP                                                         | Core design + Tower reconnection       | Media — primer EIP con sub-pipeline                                            | DONE   |
 | File component (consumer + producer)                                 | Core design Future Extensions          | Media — primer componente I/O real                                             | DONE   |
 | HTTP component (producer)                                            | Core design Future Extensions          | Media — integración con APIs externas                                          | DONE   |
-| WireTap EIP                                                          | Splitter design Future EIPs            | Media-baja — Exchange clone + fire-and-forget, casi trivial                    |        |
+| WireTap EIP                                                          | Splitter design Future EIPs            | Media-baja — Exchange clone + fire-and-forget, casi trivial                    | DONE   |
 | Aggregator EIP                                                       | Splitter design Future EIPs            | Media —                                                                        | DONE   |
 | Filter real stopping behavior                                        | Aggregator postmortem                  | Media — Filter devuelve exchange as-is cuando predicate=false;                 |        |
 |                                                                      |                                        | pipeline no se detiene;                                                        |        |
-|                                                                      |                                        | afecta WireTap, Multicast, cualquier EIP que quiera filtrar downstream         |        |
+|                                                                      |                                        | afecta Multicast, cualquier EIP que quiera filtrar downstream                  |        |
 | Aggregator v2: completion by timeout                                 | Aggregator design Deferred             | Media-baja — requiere `tokio::spawn` interno por bucket + `CancellationToken`  |        |
 | Aggregator v2: correlation key por función                           | Aggregator design Deferred             | Baja — cambiar `header_name: String` a `CorrelationKeyFn`;                     |        |
 |                                                                      |                                        | exponer `correlate_by_header` y `correlate_by_fn` en el builder                |        |
 | Aggregator v2: estado compartido cross-route                         | Aggregator design Deferred             | Baja — requiere registry de agregadores nombrados en `CamelContext`            |        |
 | Aggregator v2: estado persistente                                    | Aggregator design Deferred             | Baja — buckets son in-memory, se pierden en restart                            |        |
 | Aggregator v2: `forceCompletionOnStop`/`discardOnAggregationFailure` | Aggregator design Deferred             | Baja — opciones Java Camel diferidas                                           |        |
+| WireTap v2: prepare/processor function                                | WireTap postmortem                     | Baja — transformar copia antes de enviar; Apache Camel tiene esto              |        |
+| WireTap v2: synchronous tap with timeout                               | WireTap design Non-Goals               | Baja — viola fire-and-forget, añade complejidad                                |        |
 | Multicast EIP                                                        | Splitter design Future EIPs            | Media — mismo patrón que Splitter (clone N, aggregate)                         |        |
 | Routing Slip EIP                                                     | Core design                            | Media-baja                                                                     |        |
 | HTTP consumer (server/webhook endpoint)                              | File-HTTP plan implícito               | Media-baja — HttpConsumer no implementado, solo producer                       |        |

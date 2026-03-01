@@ -58,6 +58,10 @@ pub enum BuilderStep {
         predicate: FilterPredicate,
         steps: Vec<BuilderStep>,
     },
+    /// A WireTap step: sends a clone of the exchange to a tap endpoint (fire-and-forget).
+    WireTap {
+        uri: String,
+    },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -72,6 +76,7 @@ impl std::fmt::Debug for BuilderStep {
             BuilderStep::Filter { steps, .. } => {
                 write!(f, "BuilderStep::Filter {{ steps: {steps:?}, .. }}")
             }
+            BuilderStep::WireTap { uri } => write!(f, "BuilderStep::WireTap {{ uri: {uri:?} }}"),
         }
     }
 }
