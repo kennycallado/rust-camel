@@ -511,10 +511,12 @@ impl Component for HttpComponent {
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
         let config = HttpConfig::from_uri(uri)?;
+        let server_config = HttpServerConfig::from_uri(uri)?;
         let client = build_client(&config)?;
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,
+            server_config,
             client,
         }))
     }
@@ -541,10 +543,12 @@ impl Component for HttpsComponent {
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
         let config = HttpConfig::from_uri(uri)?;
+        let server_config = HttpServerConfig::from_uri(uri)?;
         let client = build_client(&config)?;
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,
+            server_config,
             client,
         }))
     }
@@ -569,6 +573,7 @@ fn build_client(config: &HttpConfig) -> Result<reqwest::Client, CamelError> {
 struct HttpEndpoint {
     uri: String,
     config: HttpConfig,
+    server_config: HttpServerConfig,
     client: reqwest::Client,
 }
 
@@ -578,9 +583,7 @@ impl Endpoint for HttpEndpoint {
     }
 
     fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Err(CamelError::EndpointCreationFailed(
-            "HTTP endpoint does not support consumers (producer-only)".to_string(),
-        ))
+        Ok(Box::new(HttpConsumer::new(self.server_config.clone())))
     }
 
     fn create_producer(&self) -> Result<BoxProcessor, CamelError> {
@@ -851,10 +854,17 @@ mod tests {
     }
 
     #[test]
-    fn test_http_endpoint_no_consumer() {
+    fn test_http_endpoint_creates_consumer() {
         let component = HttpComponent::new();
-        let endpoint = component.create_endpoint("http://localhost/api").unwrap();
-        assert!(endpoint.create_consumer().is_err());
+        let endpoint = component.create_endpoint("http://0.0.0.0:19100/test").unwrap();
+        assert!(endpoint.create_consumer().is_ok());
+    }
+
+    #[test]
+    fn test_http_endpoint_still_creates_producer() {
+        let component = HttpComponent::new();
+        let endpoint = component.create_endpoint("http://localhost:8080/api").unwrap();
+        assert!(endpoint.create_producer().is_ok());
     }
 
     #[test]
