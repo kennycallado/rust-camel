@@ -10,7 +10,7 @@ use camel_builder::RouteBuilder;
 use camel_core::context::CamelContext;
 use camel_direct::DirectComponent;
 use camel_file::FileComponent;
-use camel_http::HttpComponent;
+use camel_http::{HttpComponent, HttpsComponent};
 use camel_log::LogComponent;
 use camel_timer::TimerComponent;
 
@@ -26,6 +26,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(direct);
     ctx.register_component(FileComponent::new());
     ctx.register_component(HttpComponent::new());
+    ctx.register_component(HttpsComponent::new());
 
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel(
         "log:global-dlc?showHeaders=true&showBody=true",
