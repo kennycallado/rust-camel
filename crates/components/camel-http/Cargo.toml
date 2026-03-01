@@ -17,3 +17,5 @@ tracing.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 bytes.workspace = true
+axum.workspace = true
+http.workspace = true
