@@ -209,30 +209,6 @@ pub struct SplitBuilder {
 
 // TODO: Extract StepAccumulator trait to DRY step methods shared with RouteBuilder.
 impl SplitBuilder {
-    /// Add a destination step within the split sub-pipeline.
-    pub fn to(mut self, endpoint: &str) -> Self {
-        self.steps.push(BuilderStep::To(endpoint.to_string()));
-        self
-    }
-
-    /// Add an async processor step within the split sub-pipeline.
-    pub fn process<F, Fut>(mut self, f: F) -> Self
-    where
-        F: Fn(Exchange) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<Exchange, CamelError>> + Send + 'static,
-    {
-        let svc = ProcessorFn::new(f);
-        self.steps
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Add a pre-built `BoxProcessor` step within the split sub-pipeline.
-    pub fn process_fn(mut self, processor: BoxProcessor) -> Self {
-        self.steps.push(BuilderStep::Processor(processor));
-        self
-    }
-
     /// Open a filter scope within the split sub-pipeline.
     pub fn filter<F>(self, predicate: F) -> FilterInSplitBuilder
     where
@@ -245,62 +221,6 @@ impl SplitBuilder {
         }
     }
 
-    /// Add a set-header step within the split sub-pipeline.
-    pub fn set_header(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
-        let svc = SetHeader::new(IdentityProcessor, key, value);
-        self.steps
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Add a body transformation step within the split sub-pipeline.
-    pub fn map_body<F>(mut self, f: F) -> Self
-    where
-        F: Fn(Body) -> Body + Clone + Send + Sync + 'static,
-    {
-        let svc = MapBody::new(IdentityProcessor, f);
-        self.steps
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set body to a static value within the split sub-pipeline.
-    pub fn set_body<B>(mut self, body: B) -> Self
-    where
-        B: Into<Body> + Clone + Send + Sync + 'static,
-    {
-        let body: Body = body.into();
-        let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set body using a closure within the split sub-pipeline.
-    pub fn set_body_fn<F>(mut self, expr: F) -> Self
-    where
-        F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
-    {
-        let svc = SetBody::new(IdentityProcessor, expr);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set a header dynamically using a closure within the split sub-pipeline.
-    pub fn set_header_fn<F>(mut self, key: impl Into<String>, expr: F) -> Self
-    where
-        F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
-    {
-        let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Add an Aggregator step within the split sub-pipeline.
-    pub fn aggregate(mut self, config: AggregatorConfig) -> Self {
-        self.steps.push(BuilderStep::Aggregate { config });
-        self
-    }
-
     /// Close the split scope. Packages the accumulated sub-steps into a
     /// `BuilderStep::Split` and returns the parent `RouteBuilder`.
     pub fn end_split(mut self) -> RouteBuilder {
@@ -310,6 +230,12 @@ impl SplitBuilder {
         };
         self.parent.steps.push(split_step);
         self.parent
+    }
+}
+
+impl StepAccumulator for SplitBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
     }
 }
 
