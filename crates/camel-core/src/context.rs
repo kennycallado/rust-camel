@@ -299,7 +299,9 @@ impl CamelContext {
                             // - Exchanges buffered in the channel are dropped silently (fire-and-forget)
                             //   or their callers receive RecvError mapped to ChannelClosed (request-reply
                             //   via direct:).
-                            if let Err(e) = ready_with_backoff(&mut pipeline, &pipeline_cancel).await {
+                            if let Err(e) =
+                                ready_with_backoff(&mut pipeline, &pipeline_cancel).await
+                            {
                                 if let Some(tx) = reply_tx {
                                     let _ = tx.send(Err(e));
                                 }
@@ -320,8 +322,7 @@ impl CamelContext {
                     })
                 }
                 ConcurrencyModel::Concurrent { max } => {
-                    let sem = max
-                        .map(|n| std::sync::Arc::new(tokio::sync::Semaphore::new(n)));
+                    let sem = max.map(|n| std::sync::Arc::new(tokio::sync::Semaphore::new(n)));
                     tokio::spawn(async move {
                         while let Some(envelope) = rx.recv().await {
                             let ExchangeEnvelope { exchange, reply_tx } = envelope;
@@ -331,9 +332,7 @@ impl CamelContext {
                             tokio::spawn(async move {
                                 // Acquire semaphore permit if bounded
                                 let _permit = match &sem {
-                                    Some(s) => {
-                                        Some(s.acquire().await.expect("semaphore closed"))
-                                    }
+                                    Some(s) => Some(s.acquire().await.expect("semaphore closed")),
                                     None => None,
                                 };
 

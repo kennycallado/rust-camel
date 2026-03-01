@@ -3,8 +3,8 @@
 //! Verifies that log statements work correctly within routes and that
 //! exchanges flow through the pipeline correctly.
 
-use camel_api::body::Body;
 use camel_api::Value;
+use camel_api::body::Body;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::CamelContext;
 use camel_direct::DirectComponent;
@@ -177,9 +177,7 @@ async fn test_log_eip_in_split_scope() {
             Ok(ex)
         })
         .log("Before split", LogLevel::Info)
-        .split(
-            SplitterConfig::new(split_body_lines()).aggregation(AggregationStrategy::CollectAll),
-        )
+        .split(SplitterConfig::new(split_body_lines()).aggregation(AggregationStrategy::CollectAll))
         .log("Processing fragment", LogLevel::Info)
         .to("mock:per-line")
         .end_split()

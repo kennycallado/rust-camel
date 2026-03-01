@@ -234,8 +234,7 @@ async fn main() -> Result<(), CamelError> {
             async move {
                 let mut n = counter.lock().unwrap();
                 *n += 1;
-                exchange.input.body =
-                    Body::Json(serde_json::json!({ "count": *n }));
+                exchange.input.body = Body::Json(serde_json::json!({ "count": *n }));
                 Ok(exchange)
             }
         })

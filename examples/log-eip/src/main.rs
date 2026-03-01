@@ -17,7 +17,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(MockComponent::new());
 
     let route = RouteBuilder::from("timer:demo?period=3000&repeatCount=5")
-        .log("=== Starting processing cycle ===", LogLevel::Info)
+        .log("=== Starting processing cycle ===", LogLevel::Warn)
         .process(|mut ex| async move {
             ex.input.body = Body::Json(serde_json::json!({
                 "order_id": 12345,
@@ -31,7 +31,7 @@ async fn main() -> Result<(), CamelError> {
             Ok(ex)
         })
         .log("Order data prepared", LogLevel::Info)
-        .log("Checking order priority", LogLevel::Debug)
+        .log("Checking order priority", LogLevel::Error)
         .to("log:exchange-full?showBody=true&showHeaders=true&multiline=true")
         .process(|mut ex| async move {
             if let Some(priority) = ex.input.header("priority").and_then(|v| v.as_str()) {

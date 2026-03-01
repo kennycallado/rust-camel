@@ -1955,8 +1955,8 @@ async fn test_http_sequential_override() {
 
 #[tokio::test]
 async fn test_http_concurrent_with_semaphore_limit() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let mock = MockComponent::new();
     let mut ctx = CamelContext::new();
@@ -2236,9 +2236,17 @@ async fn test_http_concurrent_error_propagation() {
     for handle in handles {
         let (i, should_fail, resp) = handle.await.unwrap();
         if should_fail {
-            assert_eq!(resp.status(), 500, "Request {i} with fail=true should return 500");
+            assert_eq!(
+                resp.status(),
+                500,
+                "Request {i} with fail=true should return 500"
+            );
         } else {
-            assert_eq!(resp.status(), 200, "Request {i} with fail=false should return 200");
+            assert_eq!(
+                resp.status(),
+                200,
+                "Request {i} with fail=false should return 200"
+            );
         }
     }
 

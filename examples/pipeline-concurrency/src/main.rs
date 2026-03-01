@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use camel_api::body::Body;
 use camel_api::CamelError;
+use camel_api::body::Body;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_http::HttpComponent;

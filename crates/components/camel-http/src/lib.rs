@@ -443,11 +443,11 @@ impl Consumer for HttpConsumer {
                     let cancel = cancel_token.clone();
 
                     // Spawn a task to handle this request concurrently
-                    // 
+                    //
                     // NOTE: This spawns a separate tokio task for each incoming HTTP request to enable
                     // true concurrent request processing. This change was introduced as part of the
                     // pipeline concurrency feature and was NOT part of the original HttpConsumer design.
-                    // 
+                    //
                     // Rationale:
                     // 1. Without spawning per-request tasks, the send_and_wait() operation would block
                     //    the consumer's main loop until the pipeline processing completes
@@ -457,7 +457,7 @@ impl Consumer for HttpConsumer {
                     //    defeating the purpose of pipeline-side concurrency
                     // 4. By spawning a task per request, we allow the consumer loop to continue
                     //    accepting new requests while existing ones are processed in the pipeline
-                    // 
+                    //
                     // This approach effectively decouples request acceptance from pipeline processing,
                     // allowing the channel to buffer multiple exchanges that can be processed concurrently
                     // by the pipeline when ConcurrencyModel::Concurrent is active.
