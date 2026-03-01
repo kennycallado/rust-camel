@@ -106,6 +106,59 @@ impl HttpConfig {
 }
 
 // ---------------------------------------------------------------------------
+// HttpServerConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for an HTTP server (consumer) endpoint.
+#[derive(Debug, Clone)]
+pub struct HttpServerConfig {
+    /// Bind address, e.g. "0.0.0.0" or "127.0.0.1".
+    pub host: String,
+    /// TCP port to listen on.
+    pub port: u16,
+    /// URL path this consumer handles, e.g. "/orders".
+    pub path: String,
+}
+
+impl HttpServerConfig {
+    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
+        let parts = parse_uri(uri)?;
+        if parts.scheme != "http" && parts.scheme != "https" {
+            return Err(CamelError::InvalidUri(format!(
+                "expected scheme 'http' or 'https', got '{}'",
+                parts.scheme
+            )));
+        }
+
+        // parts.path is everything after the scheme colon, e.g. "//0.0.0.0:8080/orders"
+        // Strip leading "//"
+        let authority_and_path = parts.path.trim_start_matches('/');
+
+        // Split on the first "/" to separate "host:port" from "/path"
+        let (authority, path_suffix) = if let Some(idx) = authority_and_path.find('/') {
+            (&authority_and_path[..idx], &authority_and_path[idx..])
+        } else {
+            (authority_and_path, "/")
+        };
+
+        let path = if path_suffix.is_empty() { "/" } else { path_suffix }.to_string();
+
+        // Parse host:port
+        let (host, port) = if let Some(colon) = authority.rfind(':') {
+            let port_str = &authority[colon + 1..];
+            match port_str.parse::<u16>() {
+                Ok(p) => (authority[..colon].to_string(), p),
+                Err(_) => (authority.to_string(), 80),
+            }
+        } else {
+            (authority.to_string(), 80)
+        };
+
+        Ok(Self { host, port, path })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HttpComponent / HttpsComponent
 // ---------------------------------------------------------------------------
 
@@ -892,5 +945,28 @@ mod tests {
             !config.query_params.contains_key("httpMethod"),
             "httpMethod should not be forwarded"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // HttpServerConfig tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_http_server_config_parse() {
+        let cfg = HttpServerConfig::from_uri("http://0.0.0.0:8080/orders").unwrap();
+        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.port, 8080);
+        assert_eq!(cfg.path, "/orders");
+    }
+
+    #[test]
+    fn test_http_server_config_default_path() {
+        let cfg = HttpServerConfig::from_uri("http://0.0.0.0:3000").unwrap();
+        assert_eq!(cfg.path, "/");
+    }
+
+    #[test]
+    fn test_http_server_config_wrong_scheme() {
+        assert!(HttpServerConfig::from_uri("file:/tmp").is_err());
     }
 }
