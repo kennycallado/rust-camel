@@ -92,10 +92,11 @@ pub trait StepAccumulator: Sized {
         self
     }
 
-    /// Stop processing this exchange. No further steps in the pipeline will run.
+    /// Stop processing this exchange immediately. No further steps in the
+    /// current pipeline will run.
     ///
-    /// When used inside a `.filter()` block, matching exchanges are halted and
-    /// will not reach steps defined after `.end_filter()`.
+    /// Can be used at any point in the route: directly on RouteBuilder,
+    /// inside `.filter()`, inside `.split()`, etc.
     fn stop(mut self) -> Self {
         self.steps_mut()
             .push(BuilderStep::Processor(BoxProcessor::new(StopService)));
