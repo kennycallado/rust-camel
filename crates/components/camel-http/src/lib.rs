@@ -248,9 +248,9 @@ impl ServerRegistry {
             CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
         })?;
         // If another task already registered this port while we were binding,
-        // our server will fail at accept-time (address in use) — that's fine.
-        // Use the winner's dispatch table.
+        // abort our task (it has no routes) and use the winner's dispatch table.
         if let Some(existing) = guard.get(&port) {
+            task.abort();
             return Ok(Arc::clone(&existing.dispatch));
         }
         guard.insert(port, ServerHandle { dispatch: Arc::clone(&dispatch), _task: task });
