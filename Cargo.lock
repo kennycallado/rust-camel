@@ -1234,6 +1234,8 @@ dependencies = [
  "camel-builder",
  "camel-core",
  "camel-direct",
+ "camel-file",
+ "camel-http",
  "camel-log",
  "camel-timer",
  "serde_json",
