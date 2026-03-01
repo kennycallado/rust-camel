@@ -40,6 +40,9 @@ pub enum CamelError {
         status_text: String,
         response_body: Option<String>,
     },
+
+    #[error("Exchange stopped by Stop EIP")]
+    Stopped,
 }
 
 impl From<std::io::Error> for CamelError {
@@ -72,6 +75,20 @@ mod tests {
             response_body: None,
         };
         let cloned = err.clone();
-        assert!(matches!(cloned, CamelError::HttpOperationFailed { status_code: 500, .. }));
+        assert!(matches!(
+            cloned,
+            CamelError::HttpOperationFailed {
+                status_code: 500,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_stopped_variant_exists_and_is_clone() {
+        let err = CamelError::Stopped;
+        let cloned = err.clone();
+        assert!(matches!(cloned, CamelError::Stopped));
+        assert_eq!(format!("{err}"), "Exchange stopped by Stop EIP");
     }
 }

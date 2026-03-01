@@ -174,6 +174,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use camel_api::BoxProcessorExt;
 
     /// A service that returns `Pending` on the first `poll_ready`, then `Ready`.
     #[derive(Clone)]
@@ -236,5 +237,37 @@ mod tests {
         // Empty pipeline should be immediately ready.
         let result = pipeline.poll_ready(&mut cx);
         assert!(result.is_ready(), "expected Ready for empty pipeline");
+    }
+
+    // When a step in the pipeline returns Err(CamelError::Stopped), the pipeline
+    // should halt further steps and propagate Err(Stopped). The context loop is
+    // responsible for silencing Stopped (treating it as a graceful halt, not an error).
+    #[tokio::test]
+    async fn test_pipeline_stops_gracefully_on_stopped_error() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+        // A flag to detect if a step AFTER stop() was called.
+        let after_called = Arc::new(AtomicBool::new(false));
+        let after_called_clone = after_called.clone();
+
+        let stop_step = BoxProcessor::from_fn(|_ex| {
+            Box::pin(async { Err(CamelError::Stopped) })
+        });
+        let after_step = BoxProcessor::from_fn(move |ex| {
+            after_called_clone.store(true, Ordering::SeqCst);
+            Box::pin(async move { Ok(ex) })
+        });
+
+        let mut pipeline = SequentialPipeline {
+            steps: vec![stop_step, after_step],
+        };
+
+        let ex = Exchange::new(camel_api::Message::new("hello"));
+        let result = pipeline.call(ex).await;
+
+        // Pipeline propagates Stopped — callers (context loop) are responsible for silencing it.
+        assert!(matches!(result, Err(CamelError::Stopped)), "expected Err(Stopped), got: {:?}", result);
+        // The step after stop must NOT have been called.
+        assert!(!after_called.load(Ordering::SeqCst), "step after stop should not be called");
     }
 }

@@ -262,8 +262,11 @@ impl CamelContext {
                     if let Some(tx) = reply_tx {
                         // Request-reply: send result back to consumer (e.g. direct:).
                         let _ = tx.send(result);
-                    } else if let Err(e) = result {
-                        error!("Pipeline error: {e}");
+                    } else if let Err(ref e) = result {
+                        // Stopped is a control-flow sentinel, not a real error — silence it.
+                        if !matches!(e, CamelError::Stopped) {
+                            error!("Pipeline error: {e}");
+                        }
                     }
                 }
             });

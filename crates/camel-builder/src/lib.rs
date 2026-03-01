@@ -5,7 +5,7 @@ use camel_api::splitter::SplitterConfig;
 use camel_api::{BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProcessorFn, Value};
 use camel_api::aggregator::AggregatorConfig;
 use camel_core::route::{BuilderStep, RouteDefinition};
-use camel_processor::{DynamicSetHeader, MapBody, SetBody, SetHeader};
+use camel_processor::{DynamicSetHeader, MapBody, SetBody, SetHeader, StopService};
 
 /// Shared step-accumulation methods for all builder types.
 ///
@@ -80,6 +80,15 @@ pub trait StepAccumulator: Sized {
 
     fn aggregate(mut self, config: AggregatorConfig) -> Self {
         self.steps_mut().push(BuilderStep::Aggregate { config });
+        self
+    }
+
+    /// Stop processing this exchange. No further steps in the pipeline will run.
+    ///
+    /// When used inside a `.filter()` block, matching exchanges are halted and
+    /// will not reach steps defined after `.end_filter()`.
+    fn stop(mut self) -> Self {
+        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(StopService)));
         self
     }
 }

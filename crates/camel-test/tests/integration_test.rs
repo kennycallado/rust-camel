@@ -1548,3 +1548,59 @@ async fn test_http_query_params_forwarded_e2e() {
         other => panic!("expected Body::Bytes, got {:?}", other),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stop EIP: .stop() inside filter halts outer pipeline for matching exchanges
+// ---------------------------------------------------------------------------
+
+/// Apache Camel semantics: exchanges matching the filter predicate hit .stop()
+/// and do NOT continue to the outer pipeline. Non-matching exchanges skip the
+/// filter block entirely and DO continue to the outer pipeline.
+///
+/// Route:
+///   timer (4 exchanges, n=0..3, even=active=true)
+///     .filter(active=true)
+///       .to("mock:inner")   ← only active=true exchanges
+///       .stop()             ← active=true exchanges stop here
+///     .end_filter()
+///     .to("mock:outer")     ← only active=false exchanges reach here
+#[tokio::test]
+async fn test_stop_inside_filter_prevents_outer_pipeline() {
+    use std::time::Duration;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter_clone = std::sync::Arc::clone(&counter);
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .process(move |mut ex: camel_api::Exchange| {
+            let c = std::sync::Arc::clone(&counter_clone);
+            async move {
+                let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ex.input.set_header("active", Value::Bool(n.is_multiple_of(2)));
+                Ok(ex)
+            }
+        })
+        .filter(|ex| ex.input.header("active") == Some(&Value::Bool(true)))
+            .to("mock:inner")
+            .stop()           // active=true exchanges stop here
+        .end_filter()
+        .to("mock:outer")     // only active=false exchanges should reach here
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    ctx.stop().await.unwrap();
+
+    let inner = mock.get_endpoint("inner").unwrap();
+    let outer = mock.get_endpoint("outer").unwrap();
+
+    inner.assert_exchange_count(2).await; // active=true: exchanges 0 and 2
+    outer.assert_exchange_count(2).await; // active=false: exchanges 1 and 3 (stopped exchanges never reach outer)
+}
