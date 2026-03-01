@@ -424,15 +424,8 @@ mod tests {
             sub,
         );
         let exchange = Exchange::new(Message::new("reject"));
-        let result = svc.ready().await.unwrap().call(exchange).await;
-        
-        // Should return FilteredOut error with the original exchange
-        match result {
-            Err(CamelError::FilteredOut(boxed)) => {
-                assert_eq!(boxed.input.body.as_text(), Some("reject"));
-            }
-            _ => panic!("Expected FilteredOut error, got {:?}", result),
-        }
+        let result = svc.ready().await.unwrap().call(exchange).await.unwrap();
+        assert_eq!(result.input.body.as_text(), Some("reject"));
     }
 
     #[tokio::test]
