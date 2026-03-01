@@ -444,7 +444,26 @@ impl Consumer for HttpConsumer {
                                 .input
                                 .headers
                                 .iter()
+                                // Filter Camel internal headers
                                 .filter(|(k, _)| !k.starts_with("Camel"))
+                                // Filter hop-by-hop and request-only headers
+                                .filter(|(k, _)| {
+                                    !matches!(
+                                        k.to_lowercase().as_str(),
+                                        "content-length" |      // Auto-calculated by framework
+                                        "transfer-encoding" |  // Hop-by-hop
+                                        "connection" |         // Hop-by-hop
+                                        "keep-alive" |         // Hop-by-hop
+                                        "upgrade" |            // Hop-by-hop
+                                        "host" |               // Request-only
+                                        "user-agent" |         // Request-only
+                                        "accept" |             // Request-only
+                                        "accept-encoding" |    // Request-only
+                                        "accept-language" |    // Request-only
+                                        "authorization" |      // Request-only (security)
+                                        "proxy-authorization"  // Request-only (security)
+                                    )
+                                })
                                 .filter_map(|(k, v)| {
                                     v.as_str().map(|s| (k.clone(), s.to_string()))
                                 })

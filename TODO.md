@@ -24,7 +24,7 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | WireTap v2: prepare/processor function                               | WireTap postmortem                     | Baja — transformar copia antes de enviar; Apache Camel tiene esto              |        |
 | WireTap v2: synchronous tap with timeout                             | WireTap design Non-Goals               | Baja — viola fire-and-forget, añade complejidad                                |        |
 | Routing Slip EIP                                                     | Core design                            | Media-baja                                                                     |        |
-| HTTP consumer (server/webhook endpoint)                              | File-HTTP plan implícito               | Media-baja — HttpConsumer no implementado, solo producer                       |        |
+| HTTP consumer (server/webhook endpoint)                              | File-HTTP plan implícito               | Media-baja — HttpConsumer no implementado, solo producer                       | DONE   |
 | Idempotent file consumer (seen-file tracking)                        | File-HTTP postmortem \#6               | Media-baja — noop=true re-envía duplicados cada poll, necesita idempotent repo |        |
 | Pipeline concurrency (Option E typestate)                            | Pipeline concurrency analysis          | Media-baja — struct-based consumers con concurrency compile-time               |        |
 | HttpOperationFailed: añadir URL y método                             | File-HTTP postmortem \#7               | Baja — mejora de debugging en logs                                             |        |
