@@ -861,10 +861,12 @@ mod tests {
     }
 
     #[test]
-    fn test_http_endpoint_still_creates_producer() {
-        let component = HttpComponent::new();
-        let endpoint = component.create_endpoint("http://localhost:8080/api").unwrap();
-        assert!(endpoint.create_producer().is_ok());
+    fn test_https_endpoint_creates_consumer() {
+        let component = HttpsComponent::new();
+        let endpoint = component
+            .create_endpoint("https://0.0.0.0:8443/test")
+            .unwrap();
+        assert!(endpoint.create_consumer().is_ok());
     }
 
     #[test]
