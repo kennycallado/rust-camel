@@ -148,7 +148,7 @@ async fn test_filter_matching_exchanges_reach_inner_mock() {
 }
 
 // ---------------------------------------------------------------------------
-// Test N+1: Filter EIP — non-matching exchanges skip inner, reach outer mock
+// Test N+1: Filter EIP — filtered-out exchanges stop pipeline, only matching continue
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -173,7 +173,7 @@ async fn test_filter_non_matching_continue_outer_pipeline() {
         .filter(|ex| ex.input.header("active") == Some(&Value::Bool(true)))
             .to("mock:inner")
         .end_filter()
-        .to("mock:outer") // always reached by all 4 exchanges
+        .to("mock:outer") // only reached by exchanges that passed filter
         .build()
         .unwrap();
 
@@ -187,7 +187,7 @@ async fn test_filter_non_matching_continue_outer_pipeline() {
     let outer = mock.get_endpoint("outer").unwrap();
 
     inner.assert_exchange_count(2).await; // only active=true exchanges
-    outer.assert_exchange_count(4).await; // ALL exchanges continue past filter
+    outer.assert_exchange_count(2).await; // only filtered exchanges continue past filter
 }
 
 // ---------------------------------------------------------------------------
