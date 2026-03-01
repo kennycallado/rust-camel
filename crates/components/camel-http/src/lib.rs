@@ -3,22 +3,12 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use tower::Service;
 use tracing::debug;
 
-use camel_api::{BoxProcessor, CamelError, Exchange, Message, body::Body};
+use camel_api::{BoxProcessor, CamelError, Exchange, body::Body};
 use camel_component::{Component, Consumer, Endpoint};
 use camel_endpoint::parse_uri;
-
-const CAMEL_OPTIONS: &[&str] = &[
-    "httpMethod",
-    "throwExceptionOnFailure",
-    "okStatusCodeRange",
-    "followRedirects",
-    "connectTimeout",
-    "responseTimeout",
-];
 
 // ---------------------------------------------------------------------------
 // HttpConfig
@@ -297,16 +287,14 @@ impl Service<Exchange> for HttpProducer {
             }
 
             for (key, value) in &exchange.input.headers {
-                if !key.starts_with("Camel") {
-                    if let Some(val_str) = value.as_str() {
-                        if let (Ok(name), Ok(val)) = (
+                if !key.starts_with("Camel")
+                    && let Some(val_str) = value.as_str()
+                        && let (Ok(name), Ok(val)) = (
                             reqwest::header::HeaderName::from_bytes(key.as_bytes()),
                             reqwest::header::HeaderValue::from_str(val_str),
                         ) {
                             request = request.header(name, val);
                         }
-                    }
-                }
             }
 
             if let Some(body_bytes) = HttpProducer::body_to_bytes(&exchange.input.body) {
@@ -369,6 +357,7 @@ impl Service<Exchange> for HttpProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::Message;
     use std::time::Duration;
 
     #[test]

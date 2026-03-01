@@ -285,29 +285,25 @@ async fn poll_directory(
             .unwrap_or_default()
             .to_string();
 
-        if let Some(ref target_name) = config.file_name {
-            if file_name != *target_name {
+        if let Some(ref target_name) = config.file_name
+            && file_name != *target_name {
                 continue;
             }
-        }
 
-        if let Some(re) = include_re {
-            if !re.is_match(&file_name) {
+        if let Some(re) = include_re
+            && !re.is_match(&file_name) {
                 continue;
             }
-        }
 
-        if let Some(re) = exclude_re {
-            if re.is_match(&file_name) {
+        if let Some(re) = exclude_re
+            && re.is_match(&file_name) {
                 continue;
             }
-        }
 
-        if let Some(ref move_dir) = config.move_to {
-            if file_path.starts_with(base_path.join(move_dir)) {
+        if let Some(ref move_dir) = config.move_to
+            && file_path.starts_with(base_path.join(move_dir)) {
                 continue;
             }
-        }
 
         let content = match fs::read(&file_path).await {
             Ok(c) => c,
@@ -450,11 +446,10 @@ impl Service<Exchange> for FileProducer {
             let dir_path = std::path::Path::new(&config.directory);
             let target_path = dir_path.join(&file_name);
 
-            if config.auto_create {
-                if let Some(parent) = target_path.parent() {
+            if config.auto_create
+                && let Some(parent) = target_path.parent() {
                     fs::create_dir_all(parent).await.map_err(CamelError::from)?;
                 }
-            }
 
             if target_path.exists() {
                 match config.file_exist {
