@@ -5,7 +5,7 @@ use camel_api::splitter::SplitterConfig;
 use camel_api::{BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProcessorFn, Value};
 use camel_api::aggregator::AggregatorConfig;
 use camel_core::route::{BuilderStep, RouteDefinition};
-use camel_processor::{MapBody, SetHeader};
+use camel_processor::{DynamicSetHeader, MapBody, SetBody, SetHeader};
 
 /// A fluent builder for constructing routes.
 ///
@@ -84,6 +84,37 @@ impl RouteBuilder {
         let svc = MapBody::new(IdentityProcessor, mapper);
         self.steps
             .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Set body to a static value (any type implementing `Into<Body>`).
+    pub fn set_body<B>(mut self, body: B) -> Self
+    where
+        B: Into<Body> + Clone + Send + Sync + 'static,
+    {
+        let body: Body = body.into();
+        let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Set body using a closure that receives the full exchange.
+    pub fn set_body_fn<F>(mut self, expr: F) -> Self
+    where
+        F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
+    {
+        let svc = SetBody::new(IdentityProcessor, expr);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Set a header dynamically using a closure that receives the full exchange.
+    pub fn set_header_fn<F>(mut self, key: impl Into<String>, expr: F) -> Self
+    where
+        F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
+    {
+        let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
     }
 
@@ -222,6 +253,37 @@ impl SplitBuilder {
         self
     }
 
+    /// Set body to a static value within the split sub-pipeline.
+    pub fn set_body<B>(mut self, body: B) -> Self
+    where
+        B: Into<Body> + Clone + Send + Sync + 'static,
+    {
+        let body: Body = body.into();
+        let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Set body using a closure within the split sub-pipeline.
+    pub fn set_body_fn<F>(mut self, expr: F) -> Self
+    where
+        F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
+    {
+        let svc = SetBody::new(IdentityProcessor, expr);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Set a header dynamically using a closure within the split sub-pipeline.
+    pub fn set_header_fn<F>(mut self, key: impl Into<String>, expr: F) -> Self
+    where
+        F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
+    {
+        let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
     /// Add an Aggregator step within the split sub-pipeline.
     pub fn aggregate(mut self, config: AggregatorConfig) -> Self {
         self.steps.push(BuilderStep::Aggregate { config });
@@ -283,6 +345,37 @@ impl FilterBuilder {
         self
     }
 
+    /// Set body to a static value within the filter sub-pipeline.
+    pub fn set_body<B>(mut self, body: B) -> Self
+    where
+        B: Into<Body> + Clone + Send + Sync + 'static,
+    {
+        let body: Body = body.into();
+        let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Set body using a closure within the filter sub-pipeline.
+    pub fn set_body_fn<F>(mut self, expr: F) -> Self
+    where
+        F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
+    {
+        let svc = SetBody::new(IdentityProcessor, expr);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Set a header dynamically using a closure within the filter sub-pipeline.
+    pub fn set_header_fn<F>(mut self, key: impl Into<String>, expr: F) -> Self
+    where
+        F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
+    {
+        let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
     pub fn aggregate(mut self, config: AggregatorConfig) -> Self {
         self.steps.push(BuilderStep::Aggregate { config });
         self
@@ -339,6 +432,37 @@ impl FilterInSplitBuilder {
         F: Fn(Body) -> Body + Clone + Send + Sync + 'static,
     {
         let svc = MapBody::new(IdentityProcessor, mapper);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Set body to a static value within the filter-in-split sub-pipeline.
+    pub fn set_body<B>(mut self, body: B) -> Self
+    where
+        B: Into<Body> + Clone + Send + Sync + 'static,
+    {
+        let body: Body = body.into();
+        let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Set body using a closure within the filter-in-split sub-pipeline.
+    pub fn set_body_fn<F>(mut self, expr: F) -> Self
+    where
+        F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
+    {
+        let svc = SetBody::new(IdentityProcessor, expr);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Set a header dynamically using a closure within the filter-in-split sub-pipeline.
+    pub fn set_header_fn<F>(mut self, key: impl Into<String>, expr: F) -> Self
+    where
+        F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
+    {
+        let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
         self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
     }
@@ -715,6 +839,92 @@ mod tests {
         } else {
             panic!("expected Split step");
         }
+    }
+
+    // ── set_body / set_body_fn / set_header_fn builder tests ────────────────────
+
+    #[test]
+    fn test_builder_set_body_static_adds_processor() {
+        let definition = RouteBuilder::from("timer:tick")
+            .set_body("fixed")
+            .build()
+            .unwrap();
+        assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn test_builder_set_body_fn_adds_processor() {
+        let definition = RouteBuilder::from("timer:tick")
+            .set_body_fn(|_ex: &Exchange| Body::Text("dynamic".into()))
+            .build()
+            .unwrap();
+        assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn test_builder_set_header_fn_adds_processor() {
+        let definition = RouteBuilder::from("timer:tick")
+            .set_header_fn("k", |_ex: &Exchange| Value::String("v".into()))
+            .build()
+            .unwrap();
+        assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[tokio::test]
+    async fn test_set_body_static_processor_works() {
+        use camel_core::route::compose_pipeline;
+        let def = RouteBuilder::from("t:t")
+            .set_body("replaced")
+            .build()
+            .unwrap();
+        let pipeline = compose_pipeline(
+            def.steps().iter().filter_map(|s| {
+                if let BuilderStep::Processor(p) = s { Some(p.clone()) } else { None }
+            }).collect()
+        );
+        let exchange = Exchange::new(Message::new("original"));
+        let result = pipeline.oneshot(exchange).await.unwrap();
+        assert_eq!(result.input.body.as_text(), Some("replaced"));
+    }
+
+    #[tokio::test]
+    async fn test_set_body_fn_processor_works() {
+        use camel_core::route::compose_pipeline;
+        let def = RouteBuilder::from("t:t")
+            .set_body_fn(|ex: &Exchange| {
+                Body::Text(ex.input.body.as_text().unwrap_or("").to_uppercase())
+            })
+            .build()
+            .unwrap();
+        let pipeline = compose_pipeline(
+            def.steps().iter().filter_map(|s| {
+                if let BuilderStep::Processor(p) = s { Some(p.clone()) } else { None }
+            }).collect()
+        );
+        let exchange = Exchange::new(Message::new("hello"));
+        let result = pipeline.oneshot(exchange).await.unwrap();
+        assert_eq!(result.input.body.as_text(), Some("HELLO"));
+    }
+
+    #[tokio::test]
+    async fn test_set_header_fn_processor_works() {
+        use camel_core::route::compose_pipeline;
+        let def = RouteBuilder::from("t:t")
+            .set_header_fn("echo", |ex: &Exchange| {
+                ex.input.body.as_text()
+                    .map(|t| Value::String(t.into()))
+                    .unwrap_or(Value::Null)
+            })
+            .build()
+            .unwrap();
+        let pipeline = compose_pipeline(
+            def.steps().iter().filter_map(|s| {
+                if let BuilderStep::Processor(p) = s { Some(p.clone()) } else { None }
+            }).collect()
+        );
+        let exchange = Exchange::new(Message::new("ping"));
+        let result = pipeline.oneshot(exchange).await.unwrap();
+        assert_eq!(result.input.header("echo"), Some(&Value::String("ping".into())));
     }
 
     // ── FilterBuilder typestate tests ─────────────────────────────────────
