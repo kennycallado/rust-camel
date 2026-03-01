@@ -17,7 +17,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(MockComponent::new());
 
     let route = RouteBuilder::from("timer:demo?period=3000&repeatCount=5")
-        .log("=== Starting processing cycle ===")
+        .log("=== Starting processing cycle ===", LogLevel::Info)
         .process(|mut ex| async move {
             ex.input.body = Body::Json(serde_json::json!({
                 "order_id": 12345,
@@ -30,8 +30,8 @@ async fn main() -> Result<(), CamelError> {
                 .set_header("priority", camel_api::Value::String("high".into()));
             Ok(ex)
         })
-        .log("Order data prepared")
-        .log_level(LogLevel::Debug, "Checking order priority")
+        .log("Order data prepared", LogLevel::Info)
+        .log("Checking order priority", LogLevel::Debug)
         .to("log:exchange-full?showBody=true&showHeaders=true&multiline=true")
         .process(|mut ex| async move {
             if let Some(priority) = ex.input.header("priority").and_then(|v| v.as_str()) {
@@ -42,10 +42,10 @@ async fn main() -> Result<(), CamelError> {
             }
             Ok(ex)
         })
-        .log_level(LogLevel::Info, "Processing high priority order")
+        .log("Processing high priority order", LogLevel::Info)
         .to("log:after-processing?showBody=true")
-        .log_level(LogLevel::Trace, "Route execution complete")
-        .log("=== Processing cycle complete ===")
+        .log("Route execution complete", LogLevel::Trace)
+        .log("=== Processing cycle complete ===", LogLevel::Info)
         .to("mock:result")
         .build()?;
 

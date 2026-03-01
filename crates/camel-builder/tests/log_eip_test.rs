@@ -24,13 +24,13 @@ async fn test_log_eip_with_timer() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:log-test?period=50&repeatCount=1")
-        .log("Starting processing")
-        .log_level(LogLevel::Debug, "Debug message")
+        .log("Starting processing", LogLevel::Info)
+        .log("Debug message", LogLevel::Debug)
         .process(|mut ex: camel_api::Exchange| async move {
             ex.input.body = Body::Text("processed".into());
             Ok(ex)
         })
-        .log("Finished processing")
+        .log("Finished processing", LogLevel::Info)
         .to("mock:result")
         .build()
         .unwrap();
@@ -70,13 +70,13 @@ async fn test_log_eip_with_direct() {
 
     // Route 2: Direct endpoint processes with logging
     let process_route = RouteBuilder::from("direct:process")
-        .log("Starting processing in direct route")
-        .log_level(LogLevel::Debug, "Processing exchange")
+        .log("Starting processing in direct route", LogLevel::Info)
+        .log("Processing exchange", LogLevel::Debug)
         .process(|mut ex: camel_api::Exchange| async move {
             ex.input.body = Body::Text("processed".into());
             Ok(ex)
         })
-        .log("Finished processing in direct route")
+        .log("Finished processing in direct route", LogLevel::Info)
         .to("mock:result")
         .build()
         .unwrap();
@@ -123,7 +123,7 @@ async fn test_log_eip_in_filter_scope() {
                 Ok(ex)
             }
         })
-        .log("Before filter")
+        .log("Before filter", LogLevel::Info)
         .filter(|ex| {
             ex.input
                 .header("count")
@@ -131,10 +131,10 @@ async fn test_log_eip_in_filter_scope() {
                 .map(|n| n % 2 == 0)
                 .unwrap_or(false)
         })
-        .log("Inside filter - only even counts")
+        .log("Inside filter - only even counts", LogLevel::Info)
         .set_header("filtered", Value::Bool(true))
         .end_filter()
-        .log("After filter")
+        .log("After filter", LogLevel::Info)
         .to("mock:result")
         .build()
         .unwrap();
@@ -176,14 +176,14 @@ async fn test_log_eip_in_split_scope() {
             ex.input.body = Body::Text("line1\nline2\nline3".to_string());
             Ok(ex)
         })
-        .log("Before split")
+        .log("Before split", LogLevel::Info)
         .split(
             SplitterConfig::new(split_body_lines()).aggregation(AggregationStrategy::CollectAll),
         )
-        .log("Processing fragment")
+        .log("Processing fragment", LogLevel::Info)
         .to("mock:per-line")
         .end_split()
-        .log("After split")
+        .log("After split", LogLevel::Info)
         .to("mock:final")
         .build()
         .unwrap();
@@ -217,11 +217,11 @@ async fn test_log_eip_multiple_levels() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:levels?period=50&repeatCount=1")
-        .log_level(LogLevel::Trace, "Trace level message")
-        .log_level(LogLevel::Debug, "Debug level message")
-        .log("Info level message (default)")
-        .log_level(LogLevel::Warn, "Warn level message")
-        .log_level(LogLevel::Error, "Error level message")
+        .log("Trace level message", LogLevel::Trace)
+        .log("Debug level message", LogLevel::Debug)
+        .log("Info level message", LogLevel::Info)
+        .log("Warn level message", LogLevel::Warn)
+        .log("Error level message", LogLevel::Error)
         .to("mock:result")
         .build()
         .unwrap();

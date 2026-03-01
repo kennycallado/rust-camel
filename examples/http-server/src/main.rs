@@ -8,6 +8,7 @@ use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_core::route::RouteDefinition;
 use camel_http::HttpComponent;
+use camel_processor::LogLevel;
 use errors::ApiError;
 use models::{CreateUserRequest, UpdateUserRequest};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -117,7 +118,7 @@ fn create_user_route(
     request_count: Arc<AtomicU64>,
 ) -> Result<RouteDefinition, CamelError> {
     RouteBuilder::from("http://0.0.0.0:8080/api/users/create")
-        .log("Received create user request")
+        .log("Received create user request", LogLevel::Info)
         .process(move |mut exchange| {
             let storage = Arc::clone(&storage);
             let rc = Arc::clone(&request_count);
@@ -165,7 +166,7 @@ fn create_user_route(
                 Ok(exchange)
             }
         })
-        .log("Create user request completed")
+        .log("Create user request completed", LogLevel::Info)
         .build()
 }
 

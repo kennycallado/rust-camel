@@ -4,34 +4,34 @@ This example demonstrates the difference between the **Log EIP** and the **Log C
 
 ## Two Ways to Log
 
-| Feature | Log EIP `.log("msg")` | Log Component `.to("log:...")` |
-|---------|----------------------|-------------------------------|
+| Feature | Log EIP `.log("msg", LogLevel)` | Log Component `.to("log:...")` |
+|---------|--------------------------------|-------------------------------|
 | **Purpose** | Human-readable messages | Exchange inspection |
 | **Output** | Just the string | Body, headers, properties |
 | **Use case** | Status, progress, milestones | Debugging, tracing |
 | **Performance** | Minimal overhead | Slightly more overhead |
-| **Configuration** | Simple (just message) | Rich options |
+| **Configuration** | Simple (message + level) | Rich options |
 
 ## Log EIP
 
-Simple logging for human-readable messages:
+Simple logging for human-readable messages with explicit log levels:
 
 ```rust
 RouteBuilder::from("timer:demo")
-    .log("Starting processing")           // INFO level (default)
-    .log("Processing order")              // Simple status message
-    .log("Done")                          // Milestone marker
+    .log("Starting processing", LogLevel::Info)
+    .log("Processing order", LogLevel::Info)
+    .log("Done", LogLevel::Info)
 ```
 
-**With explicit log levels:**
+**All log levels available:**
 
 ```rust
 RouteBuilder::from("timer:demo")
-    .log_level(LogLevel::Trace, "Entering method")    // Most verbose
-    .log_level(LogLevel::Debug, "Variable x = 42")    // Debugging info
-    .log_level(LogLevel::Info, "Order received")      // Business events
-    .log_level(LogLevel::Warn, "Rate limit approaching") // Warnings
-    .log_level(LogLevel::Error, "Payment failed")     // Errors
+    .log("Entering method", LogLevel::Trace)        // Most verbose
+    .log("Variable x = 42", LogLevel::Debug)        // Debugging info
+    .log("Order received", LogLevel::Info)          // Business events
+    .log("Rate limit approaching", LogLevel::Warn)  // Warnings
+    .log("Payment failed", LogLevel::Error)         // Errors
 ```
 
 **Output:**

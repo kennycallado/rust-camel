@@ -104,17 +104,10 @@ pub trait StepAccumulator: Sized {
         self
     }
 
-    /// Log a message at INFO level.
-    ///
-    /// The message will be logged when an exchange passes through this step.
-    fn log(self, message: impl Into<String>) -> Self {
-        self.log_level(LogLevel::Info, message)
-    }
-
     /// Log a message at the specified level.
     ///
     /// The message will be logged when an exchange passes through this step.
-    fn log_level(mut self, level: LogLevel, message: impl Into<String>) -> Self {
+    fn log(mut self, message: impl Into<String>, level: LogLevel) -> Self {
         use camel_processor::LogProcessor;
         let svc = LogProcessor::new(level, message.into());
         self.steps_mut()

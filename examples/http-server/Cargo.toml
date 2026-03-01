@@ -8,6 +8,7 @@ camel-api = { path = "../../crates/camel-api" }
 camel-builder = { path = "../../crates/camel-builder" }
 camel-core = { path = "../../crates/camel-core" }
 camel-http = { path = "../../crates/components/camel-http" }
+camel-processor = { path = "../../crates/camel-processor" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"

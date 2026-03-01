@@ -748,6 +748,7 @@ dependencies = [
  "camel-builder",
  "camel-core",
  "camel-http",
+ "camel-processor",
  "dashmap",
  "serde",
  "serde_json",
@@ -1015,6 +1016,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "log-eip"
+version = "0.1.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-core",
+ "camel-log",
+ "camel-mock",
+ "camel-processor",
+ "camel-timer",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1141,6 +1159,19 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+
+[[package]]
+name = "pipeline-concurrency"
+version = "0.1.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-core",
+ "camel-http",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "potential_utf"
