@@ -216,7 +216,7 @@ mod tests {
     use super::*;
     use camel_api::{BoxProcessorExt, Message};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use tower::ServiceExt;
 
     // ── Test helpers ───────────────────────────────────────────────────
@@ -239,21 +239,6 @@ mod tests {
     fn failing_processor() -> BoxProcessor {
         BoxProcessor::from_fn(|_ex| {
             Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
-        })
-    }
-
-    fn fail_on_nth(n: usize) -> BoxProcessor {
-        let count = Arc::new(AtomicUsize::new(0));
-        BoxProcessor::from_fn(move |ex: Exchange| {
-            let count = Arc::clone(&count);
-            Box::pin(async move {
-                let c = count.fetch_add(1, Ordering::SeqCst);
-                if c == n {
-                    Err(CamelError::ProcessorError(format!("fail on {c}")))
-                } else {
-                    Ok(ex)
-                }
-            })
         })
     }
 
@@ -416,7 +401,105 @@ mod tests {
         assert_eq!(result.unwrap().input.body.as_text(), Some("HELLO"));
     }
 
-    // ── 7. Empty endpoints ─────────────────────────────────────────────
+    // ── 7. Stop on exception with fail_on_nth ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_multicast_stop_on_exception_halts_early() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        
+        // Track which endpoints actually execute
+        let executed = Arc::new(AtomicUsize::new(0));
+        
+        let exec_clone1 = Arc::clone(&executed);
+        let endpoint0 = BoxProcessor::from_fn(move |ex: Exchange| {
+            let e = Arc::clone(&exec_clone1);
+            Box::pin(async move {
+                e.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(ex)
+            })
+        });
+        
+        let exec_clone2 = Arc::clone(&executed);
+        let endpoint1 = BoxProcessor::from_fn(move |_ex: Exchange| {
+            let e = Arc::clone(&exec_clone2);
+            Box::pin(async move {
+                e.fetch_add(1, AtomicOrdering::SeqCst);
+                Err(CamelError::ProcessorError("fail on 1".into()))
+            })
+        });
+        
+        let exec_clone3 = Arc::clone(&executed);
+        let endpoint2 = BoxProcessor::from_fn(move |ex: Exchange| {
+            let e = Arc::clone(&exec_clone3);
+            Box::pin(async move {
+                e.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(ex)
+            })
+        });
+        
+        let endpoints = vec![endpoint0, endpoint1, endpoint2];
+        let config = MulticastConfig::new().stop_on_exception(true);
+        let mut svc = MulticastService::new(endpoints, config);
+        
+        let result = svc.ready().await.unwrap().call(make_exchange("x")).await;
+        assert!(result.is_err(), "should fail at endpoint 1");
+        
+        // Only endpoints 0 and 1 should have executed (2 should be skipped)
+        let count = executed.load(AtomicOrdering::SeqCst);
+        assert_eq!(count, 2, "endpoint 2 should not have executed due to stop_on_exception");
+    }
+
+    // ── 8. Continue on exception with fail_on_nth ─────────────────────────
+
+    #[tokio::test]
+    async fn test_multicast_continue_on_exception_executes_all() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        
+        // Track which endpoints actually execute
+        let executed = Arc::new(AtomicUsize::new(0));
+        
+        let exec_clone1 = Arc::clone(&executed);
+        let endpoint0 = BoxProcessor::from_fn(move |ex: Exchange| {
+            let e = Arc::clone(&exec_clone1);
+            Box::pin(async move {
+                e.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(ex)
+            })
+        });
+        
+        let exec_clone2 = Arc::clone(&executed);
+        let endpoint1 = BoxProcessor::from_fn(move |_ex: Exchange| {
+            let e = Arc::clone(&exec_clone2);
+            Box::pin(async move {
+                e.fetch_add(1, AtomicOrdering::SeqCst);
+                Err(CamelError::ProcessorError("fail on 1".into()))
+            })
+        });
+        
+        let exec_clone3 = Arc::clone(&executed);
+        let endpoint2 = BoxProcessor::from_fn(move |ex: Exchange| {
+            let e = Arc::clone(&exec_clone3);
+            Box::pin(async move {
+                e.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(ex)
+            })
+        });
+        
+        let endpoints = vec![endpoint0, endpoint1, endpoint2];
+        let config = MulticastConfig::new()
+            .stop_on_exception(false)
+            .aggregation(MulticastStrategy::LastWins);
+        let mut svc = MulticastService::new(endpoints, config);
+        
+        let result = svc.ready().await.unwrap().call(make_exchange("x")).await;
+        assert!(result.is_ok(), "last endpoint should succeed");
+        
+        // All 3 endpoints should have executed
+        let count = executed.load(AtomicOrdering::SeqCst);
+        assert_eq!(count, 3, "all endpoints should have executed despite error in endpoint 1");
+    }
+
+    // ── 9. Empty endpoints ─────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_multicast_empty_endpoints() {
@@ -433,7 +516,7 @@ mod tests {
         assert_eq!(result.property("marker"), Some(&Value::Bool(true)));
     }
 
-    // ── 8. Metadata properties ─────────────────────────────────────────
+    // ── 10. Metadata properties ─────────────────────────────────────────
 
     #[tokio::test]
     async fn test_multicast_metadata_properties() {
@@ -476,7 +559,7 @@ mod tests {
         }
     }
 
-    // ── 9. poll_ready delegates to endpoints ────────────────────────────
+    // ── 11. poll_ready delegates to endpoints ────────────────────────────
 
     #[tokio::test]
     async fn test_poll_ready_delegates_to_endpoints() {
@@ -535,7 +618,7 @@ mod tests {
         );
     }
 
-    // ── 10. CollectAll with error propagates ────────────────────────────
+    // ── 12. CollectAll with error propagates ────────────────────────────
 
     #[tokio::test]
     async fn test_multicast_collect_all_error_propagates() {
@@ -560,7 +643,7 @@ mod tests {
         assert!(result.is_err(), "CollectAll should propagate first error");
     }
 
-    // ── 11. LastWins with error last returns error ──────────────────────
+    // ── 13. LastWins with error last returns error ──────────────────────
 
     #[tokio::test]
     async fn test_multicast_last_wins_error_last() {
@@ -585,7 +668,7 @@ mod tests {
         assert!(result.is_err(), "LastWins should return last error");
     }
 
-    // ── 12. Custom aggregation with error propagates ────────────────────
+    // ── 14. Custom aggregation with error propagates ────────────────────
 
     #[tokio::test]
     async fn test_multicast_custom_error_propagates() {
@@ -616,7 +699,7 @@ mod tests {
         );
     }
 
-    // ── 13. Parallel + CollectAll basic ─────────────────────────────────
+    // ── 15. Parallel + CollectAll basic ─────────────────────────────────
 
     #[tokio::test]
     async fn test_multicast_parallel_basic() {
@@ -647,7 +730,7 @@ mod tests {
         }
     }
 
-    // ── 14. Parallel with concurrency limit ─────────────────────────────
+    // ── 16. Parallel with concurrency limit ─────────────────────────────
 
     #[tokio::test]
     async fn test_multicast_parallel_with_limit() {
