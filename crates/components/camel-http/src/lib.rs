@@ -1541,4 +1541,37 @@ mod tests {
         token_a.cancel();
         token_b.cancel();
     }
+
+    #[tokio::test]
+    async fn test_integration_unregistered_path_returns_404() {
+        use camel_component::{ConsumerContext, ExchangeEnvelope};
+
+        // Get an OS-assigned free port (ephemeral)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("http://127.0.0.1:{port}/registered"))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/not-there"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+
+        token.cancel();
+    }
 }
