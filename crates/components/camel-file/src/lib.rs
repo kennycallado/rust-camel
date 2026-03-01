@@ -398,12 +398,37 @@ async fn list_files(
 }
 
 // ---------------------------------------------------------------------------
-// FileProducer (stub)
+// FileProducer
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct FileProducer {
     config: FileConfig,
+}
+
+impl FileProducer {
+    fn body_to_bytes(body: &Body) -> Result<Vec<u8>, CamelError> {
+        match body {
+            Body::Empty => Err(CamelError::ProcessorError(
+                "Cannot write empty body to file".to_string(),
+            )),
+            Body::Bytes(b) => Ok(b.to_vec()),
+            Body::Text(s) => Ok(s.as_bytes().to_vec()),
+            Body::Json(v) => Ok(v.to_string().into_bytes()),
+        }
+    }
+
+    fn resolve_filename(exchange: &Exchange, config: &FileConfig) -> Result<String, CamelError> {
+        if let Some(name) = exchange.input.header("CamelFileName").and_then(|v| v.as_str()) {
+            return Ok(name.to_string());
+        }
+        if let Some(ref name) = config.file_name {
+            return Ok(name.clone());
+        }
+        Err(CamelError::ProcessorError(
+            "No filename specified: set CamelFileName header or fileName option".to_string(),
+        ))
+    }
 }
 
 impl Service<Exchange> for FileProducer {
@@ -415,9 +440,77 @@ impl Service<Exchange> for FileProducer {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, _exchange: Exchange) -> Self::Future {
+    fn call(&mut self, mut exchange: Exchange) -> Self::Future {
+        let config = self.config.clone();
+
         Box::pin(async move {
-            todo!("File producer not yet implemented")
+            let file_name = FileProducer::resolve_filename(&exchange, &config)?;
+            let data = FileProducer::body_to_bytes(&exchange.input.body)?;
+
+            let dir_path = std::path::Path::new(&config.directory);
+            let target_path = dir_path.join(&file_name);
+
+            if config.auto_create {
+                if let Some(parent) = target_path.parent() {
+                    fs::create_dir_all(parent).await.map_err(CamelError::from)?;
+                }
+            }
+
+            if target_path.exists() {
+                match config.file_exist {
+                    FileExistStrategy::Fail => {
+                        return Err(CamelError::ProcessorError(format!(
+                            "File already exists: {}",
+                            target_path.display()
+                        )));
+                    }
+                    FileExistStrategy::Append => {
+                        use tokio::io::AsyncWriteExt;
+                        let mut file = fs::OpenOptions::new()
+                            .append(true)
+                            .open(&target_path)
+                            .await
+                            .map_err(CamelError::from)?;
+                        file.write_all(&data).await.map_err(CamelError::from)?;
+                        file.flush().await.map_err(CamelError::from)?;
+
+                        let abs_path = target_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| target_path.clone())
+                            .to_string_lossy()
+                            .to_string();
+                        exchange.input.set_header(
+                            "CamelFileNameProduced",
+                            serde_json::Value::String(abs_path),
+                        );
+                        return Ok(exchange);
+                    }
+                    FileExistStrategy::Override => {}
+                }
+            }
+
+            if let Some(ref prefix) = config.temp_prefix {
+                let temp_name = format!("{prefix}{file_name}");
+                let temp_path = dir_path.join(&temp_name);
+
+                fs::write(&temp_path, &data).await.map_err(CamelError::from)?;
+                fs::rename(&temp_path, &target_path).await.map_err(CamelError::from)?;
+            } else {
+                fs::write(&target_path, &data).await.map_err(CamelError::from)?;
+            }
+
+            let abs_path = target_path
+                .canonicalize()
+                .unwrap_or_else(|_| target_path.clone())
+                .to_string_lossy()
+                .to_string();
+            exchange.input.set_header(
+                "CamelFileNameProduced",
+                serde_json::Value::String(abs_path),
+            );
+
+            debug!(file = %target_path.display(), "File written");
+            Ok(exchange)
         })
     }
 }
@@ -679,5 +772,162 @@ mod tests {
 
         let result = tokio::time::timeout(Duration::from_secs(1), handle).await;
         assert!(result.is_ok(), "Consumer should have stopped after cancellation");
+    }
+
+    // -----------------------------------------------------------------------
+    // Producer tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_file_producer_writes_file() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let mut exchange = Exchange::new(Message::new("file content"));
+        exchange.input.set_header("CamelFileName", serde_json::Value::String("output.txt".to_string()));
+
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("output.txt")).unwrap();
+        assert_eq!(content, "file content");
+
+        assert!(result.input.header("CamelFileNameProduced").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_auto_create_dirs() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}/sub/dir"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let mut exchange = Exchange::new(Message::new("nested"));
+        exchange.input.set_header("CamelFileName", serde_json::Value::String("file.txt".to_string()));
+
+        producer.oneshot(exchange).await.unwrap();
+
+        assert!(dir.path().join("sub/dir/file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_file_exist_fail() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        std::fs::write(dir.path().join("existing.txt"), "old").unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?fileExist=Fail"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let mut exchange = Exchange::new(Message::new("new"));
+        exchange.input.set_header("CamelFileName", serde_json::Value::String("existing.txt".to_string()));
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "Should fail when file exists with Fail strategy");
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_file_exist_append() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        std::fs::write(dir.path().join("append.txt"), "old").unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?fileExist=Append"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let mut exchange = Exchange::new(Message::new("new"));
+        exchange.input.set_header("CamelFileName", serde_json::Value::String("append.txt".to_string()));
+
+        producer.oneshot(exchange).await.unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("append.txt")).unwrap();
+        assert_eq!(content, "oldnew");
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_temp_prefix() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?tempPrefix=.tmp"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let mut exchange = Exchange::new(Message::new("atomic write"));
+        exchange.input.set_header("CamelFileName", serde_json::Value::String("final.txt".to_string()));
+
+        producer.oneshot(exchange).await.unwrap();
+
+        assert!(dir.path().join("final.txt").exists());
+        assert!(!dir.path().join(".tmpfinal.txt").exists());
+        let content = std::fs::read_to_string(dir.path().join("final.txt")).unwrap();
+        assert_eq!(content, "atomic write");
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_uses_filename_option() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?fileName=fixed.txt"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::new("content"));
+
+        producer.oneshot(exchange).await.unwrap();
+        assert!(dir.path().join("fixed.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_no_filename_errors() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::new("content"));
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "Should error when no filename is provided");
     }
 }
