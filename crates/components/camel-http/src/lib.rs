@@ -284,12 +284,14 @@ async fn dispatch_handler(
     State(dispatch): State<DispatchTable>,
     req: Request,
 ) -> impl IntoResponse {
+    const MAX_REQUEST_BODY: usize = 2 * 1024 * 1024; // 2 MB
+    
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
     let headers = req.headers().clone();
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+    let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_REQUEST_BODY).await {
         Ok(b) => b,
         Err(_) => {
             return Response::builder()
@@ -337,7 +339,12 @@ async fn dispatch_handler(
             for (k, v) in &reply.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
-            builder.body(AxumBody::from(reply.body)).unwrap()
+            builder.body(AxumBody::from(reply.body)).unwrap_or_else(|_| {
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(AxumBody::from("Invalid response headers from consumer"))
+        .unwrap()
+})
         }
         Err(_) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
