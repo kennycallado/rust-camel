@@ -1,3 +1,4 @@
+pub mod aggregator;
 pub mod body;
 pub mod circuit_breaker;
 pub mod error;
@@ -9,6 +10,7 @@ pub mod splitter;
 pub mod value;
 
 // Re-export core types at crate root for convenience.
+pub use aggregator::{AggregationFn, AggregatorConfig, CompletionCondition};
 pub use body::Body;
 pub use circuit_breaker::CircuitBreakerConfig;
 pub use error::CamelError;

@@ -3,6 +3,7 @@ use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::splitter::SplitterConfig;
 use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, ProcessorFn, Value};
+use camel_api::aggregator::AggregatorConfig;
 use camel_core::route::{BuilderStep, RouteDefinition};
 use camel_processor::{Filter, MapBody, SetHeader};
 
@@ -101,6 +102,16 @@ impl RouteBuilder {
     /// Set a circuit breaker for this route.
     pub fn circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
         self.circuit_breaker_config = Some(config);
+        self
+    }
+
+    /// Add an Aggregator step. Collects exchanges by correlation key header,
+    /// emitting an aggregated exchange downstream when the completion condition is met.
+    ///
+    /// Exchanges that do not complete the bucket return with `Body::Empty` and
+    /// the `CamelAggregatorPending = true` property.
+    pub fn aggregate(mut self, config: AggregatorConfig) -> Self {
+        self.steps.push(BuilderStep::Aggregate { config });
         self
     }
 
@@ -205,6 +216,12 @@ impl SplitBuilder {
         let svc = MapBody::new(IdentityProcessor, f);
         self.steps
             .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Add an Aggregator step within the split sub-pipeline.
+    pub fn aggregate(mut self, config: AggregatorConfig) -> Self {
+        self.steps.push(BuilderStep::Aggregate { config });
         self
     }
 
@@ -521,6 +538,49 @@ mod tests {
                 assert!(matches!(config.aggregation, AggregationStrategy::CollectAll));
             }
             other => panic!("Expected Split, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_builder_adds_step() {
+        use camel_api::aggregator::AggregatorConfig;
+        use camel_core::route::BuilderStep;
+
+        let definition = RouteBuilder::from("timer:tick")
+            .aggregate(
+                AggregatorConfig::correlate_by("key")
+                    .complete_when_size(2)
+                    .build(),
+            )
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 1);
+        assert!(matches!(definition.steps()[0], BuilderStep::Aggregate { .. }));
+    }
+
+    #[test]
+    fn test_aggregate_in_split_builder() {
+        use camel_api::aggregator::AggregatorConfig;
+        use camel_api::splitter::{split_body_lines, SplitterConfig};
+        use camel_core::route::BuilderStep;
+
+        let definition = RouteBuilder::from("timer:tick")
+            .split(SplitterConfig::new(split_body_lines()))
+                .aggregate(
+                    AggregatorConfig::correlate_by("key")
+                        .complete_when_size(1)
+                        .build(),
+                )
+            .end_split()
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 1);
+        if let BuilderStep::Split { steps, .. } = &definition.steps()[0] {
+            assert!(matches!(steps[0], BuilderStep::Aggregate { .. }));
+        } else {
+            panic!("expected Split step");
         }
     }
 }

@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, SplitterConfig};
+use camel_api::{AggregatorConfig, BoxProcessor, CamelError, Exchange, IdentityProcessor, SplitterConfig};
 
 /// A Route defines a message flow: from a source endpoint, through a composed
 /// Tower Service pipeline.
@@ -49,6 +49,10 @@ pub enum BuilderStep {
         config: SplitterConfig,
         steps: Vec<BuilderStep>,
     },
+    /// An Aggregator step: collects exchanges by correlation key, emits when complete.
+    Aggregate {
+        config: AggregatorConfig,
+    },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -59,6 +63,7 @@ impl std::fmt::Debug for BuilderStep {
             BuilderStep::Split { steps, .. } => {
                 write!(f, "BuilderStep::Split {{ steps: {steps:?}, .. }}")
             }
+            BuilderStep::Aggregate { .. } => write!(f, "BuilderStep::Aggregate {{ .. }}"),
         }
     }
 }

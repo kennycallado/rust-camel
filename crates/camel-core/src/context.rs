@@ -11,6 +11,7 @@ use camel_endpoint::parse_uri;
 use camel_processor::error_handler::ErrorHandlerLayer;
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::splitter::SplitterService;
+use camel_processor::AggregatorService;
 
 use crate::registry::Registry;
 use crate::route::{BuilderStep, Route, RouteDefinition, compose_pipeline};
@@ -114,6 +115,10 @@ impl CamelContext {
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let splitter = SplitterService::new(config, sub_pipeline);
                     processors.push(BoxProcessor::new(splitter));
+                }
+                BuilderStep::Aggregate { config } => {
+                    let svc = AggregatorService::new(config);
+                    processors.push(BoxProcessor::new(svc));
                 }
             }
         }

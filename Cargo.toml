@@ -28,6 +28,7 @@ members = [
     "examples/file-polling",
     "examples/file-pipeline",
     "examples/http-client",
+    "examples/aggregator",
 ]
 
 [workspace.package]

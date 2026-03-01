@@ -7,6 +7,7 @@
 //! capture closures.
 
 use camel_api::Value;
+use camel_api::aggregator::AggregatorConfig;
 use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
 use camel_builder::RouteBuilder;
 use camel_core::CamelContext;
@@ -1122,6 +1123,173 @@ async fn test_http_error_handling_e2e() {
             "mock:result should not receive the failed exchange"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Aggregator EIP integration tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Test 26 (Aggregator): collect_all — 9 timer fires, orderId cycles A/B/C,
+//          completionSize=3, expect 3 batches each with Body::Json([...])
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_aggregator_collect_all() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter_clone = std::sync::Arc::clone(&counter);
+
+    let route = RouteBuilder::from("timer:agg-test?period=1&repeatCount=9")
+        .process(move |mut ex: camel_api::Exchange| {
+            let c = std::sync::Arc::clone(&counter_clone);
+            async move {
+                let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let key = ["A", "B", "C"][(n % 3) as usize];
+                ex.input.headers.insert("orderId".to_string(), serde_json::json!(key));
+                ex.input.body = camel_api::body::Body::Text(format!("item-{n}"));
+                Ok(ex)
+            }
+        })
+        .aggregate(
+            AggregatorConfig::correlate_by("orderId")
+                .complete_when_size(3)
+                .build(),
+        )
+        .to("mock:aggregated")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    ctx.stop().await.unwrap();
+
+    // 9 exchanges total: 6 pending (Body::Empty) + 3 completed (Body::Json).
+    // The aggregator emits all exchanges; pending ones have Body::Empty.
+    let endpoint = mock.get_endpoint("aggregated").unwrap();
+    let exchanges = endpoint.get_received_exchanges().await;
+
+    let completed: Vec<_> = exchanges
+        .iter()
+        .filter(|e| e.property("CamelAggregatorPending").is_none())
+        .collect();
+    assert_eq!(completed.len(), 3, "expected 3 completed batches, got {}", completed.len());
+
+    for ex in &completed {
+        let camel_api::body::Body::Json(v) = &ex.input.body else {
+            panic!("expected Body::Json, got {:?}", ex.input.body);
+        };
+        let arr = v.as_array().expect("expected JSON array");
+        assert_eq!(arr.len(), 3, "each batch should have 3 items");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 27 (Aggregator): custom_strategy — 4 timer fires with key "X",
+//          custom fold concatenates bodies with "+", completionSize=4,
+//          expect 1 exchange with body "0+1+2+3"
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_aggregator_custom_strategy() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter_clone = std::sync::Arc::clone(&counter);
+
+    let fold_fn: camel_api::aggregator::AggregationFn =
+        std::sync::Arc::new(|mut acc: camel_api::Exchange, next: camel_api::Exchange| {
+            let a = acc.input.body.as_text().unwrap_or("").to_string();
+            let b = next.input.body.as_text().unwrap_or("").to_string();
+            acc.input.body = camel_api::body::Body::Text(format!("{a}+{b}"));
+            acc
+        });
+
+    let route = RouteBuilder::from("timer:agg-custom?period=1&repeatCount=4")
+        .process(move |mut ex: camel_api::Exchange| {
+            let c = std::sync::Arc::clone(&counter_clone);
+            async move {
+                let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ex.input.headers.insert("key".to_string(), serde_json::json!("X"));
+                ex.input.body = camel_api::body::Body::Text(n.to_string());
+                Ok(ex)
+            }
+        })
+        .aggregate(
+            AggregatorConfig::correlate_by("key")
+                .complete_when_size(4)
+                .strategy(camel_api::aggregator::AggregationStrategy::Custom(fold_fn))
+                .build(),
+        )
+        .to("mock:custom-agg")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    ctx.stop().await.unwrap();
+
+    let endpoint = mock.get_endpoint("custom-agg").unwrap();
+    let exchanges = endpoint.get_received_exchanges().await;
+
+    // 4 exchanges total: 3 pending (Body::Empty) + 1 completed (Body::Text "0+1+2+3").
+    let completed: Vec<_> = exchanges
+        .iter()
+        .filter(|e| e.property("CamelAggregatorPending").is_none())
+        .collect();
+    assert_eq!(completed.len(), 1, "expected 1 completed aggregate, got {}", completed.len());
+    assert_eq!(completed[0].input.body.as_text(), Some("0+1+2+3"));
+}
+
+// ---------------------------------------------------------------------------
+// Test 28 (Aggregator): scatter-gather — timer fires 3 times, each fire
+//          is aggregated by timer name, completionSize=3,
+//          expect 1 exchange at mock:scatter-gather
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_aggregator_scatter_gather() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    // Timer fires 3 times with the same timer name "scatter".
+    // The aggregator groups by CamelTimerName (all 3 share key "scatter")
+    // and emits when completionSize=3 is reached.
+    let route = RouteBuilder::from("timer:scatter?period=10&repeatCount=3")
+        .aggregate(
+            AggregatorConfig::correlate_by("CamelTimerName")
+                .complete_when_size(3)
+                .build(),
+        )
+        .to("mock:scatter-gather")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    // 3 exchanges: 2 pending + 1 completed (Body::Json array of 3).
+    let endpoint = mock.get_endpoint("scatter-gather").unwrap();
+    let exchanges = endpoint.get_received_exchanges().await;
+
+    let completed: Vec<_> = exchanges
+        .iter()
+        .filter(|e| e.property("CamelAggregatorPending").is_none())
+        .collect();
+    assert_eq!(completed.len(), 1, "expected 1 completed aggregate, got {}", completed.len());
 }
 
 // ---------------------------------------------------------------------------
