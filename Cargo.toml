@@ -25,6 +25,9 @@ members = [
     "examples/showcase",
     "examples/error-handling",
     "examples/splitter",
+    "examples/file-polling",
+    "examples/file-pipeline",
+    "examples/http-client",
 ]
 
 [workspace.package]

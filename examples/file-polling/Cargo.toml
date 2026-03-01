@@ -1,0 +1,15 @@
+[package]
+name = "file-polling"
+description = "File consumer example - poll directory for new files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-file.workspace = true
+camel-log.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
