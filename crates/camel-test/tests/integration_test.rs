@@ -10,6 +10,7 @@ use camel_api::Value;
 use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
 use camel_builder::RouteBuilder;
 use camel_core::CamelContext;
+use camel_file::FileComponent;
 use camel_log::LogComponent;
 use camel_mock::MockComponent;
 use camel_timer::TimerComponent;
@@ -697,4 +698,113 @@ async fn test_split_with_error_handler() {
     let sink = mock.get_endpoint("sink").unwrap();
     let sink_count = sink.get_received_exchanges().await.len();
     assert_eq!(sink_count, 0, "Expected 0 sink exchanges, got {sink_count}");
+}
+
+// ---------------------------------------------------------------------------
+// File component integration tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Test 17: File consumer → Mock (read files from directory)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_file_consumer_to_mock() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_str().unwrap();
+
+    std::fs::write(dir.path().join("a.txt"), "alpha").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "beta").unwrap();
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(FileComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from(&format!(
+        "file:{dir_path}?noop=true&initialDelay=0&delay=100"
+    ))
+    .to("mock:result")
+    .build()
+    .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    let endpoint = mock.get_endpoint("result").unwrap();
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert!(exchanges.len() >= 2, "Should have read at least 2 files, got {}", exchanges.len());
+
+    for ex in &exchanges {
+        assert!(ex.input.header("CamelFileName").is_some());
+        assert!(ex.input.header("CamelFileNameOnly").is_some());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 18: Timer → File producer (write files)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_timer_to_file_producer() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_str().unwrap();
+
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(FileComponent::new());
+
+    let route = RouteBuilder::from("timer:write-test?period=50&repeatCount=2")
+        .set_header("CamelFileName", Value::String("output.txt".into()))
+        .to(&format!("file:{dir_path}?fileExist=Append"))
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ctx.stop().await.unwrap();
+
+    assert!(dir.path().join("output.txt").exists(), "File should have been written");
+}
+
+// ---------------------------------------------------------------------------
+// Test 19: File consumer → Transform → File producer (file-to-file pipeline)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_file_to_file_pipeline() {
+    let input_dir = tempfile::tempdir().unwrap();
+    let output_dir = tempfile::tempdir().unwrap();
+    let input_path = input_dir.path().to_str().unwrap();
+    let output_path = output_dir.path().to_str().unwrap();
+
+    std::fs::write(input_dir.path().join("source.txt"), "hello world").unwrap();
+
+    let mut ctx = CamelContext::new();
+    ctx.register_component(FileComponent::new());
+
+    let route = RouteBuilder::from(&format!(
+        "file:{input_path}?noop=true&initialDelay=0&delay=100"
+    ))
+    .to(&format!("file:{output_path}"))
+    .build()
+    .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    assert!(
+        output_dir.path().join("source.txt").exists(),
+        "File should have been copied to output directory"
+    );
+    let content = std::fs::read_to_string(output_dir.path().join("source.txt")).unwrap();
+    assert_eq!(content, "hello world");
 }

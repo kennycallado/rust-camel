@@ -15,8 +15,11 @@ camel-mock.workspace = true
 camel-timer.workspace = true
 camel-log.workspace = true
 camel-direct.workspace = true
+camel-file.workspace = true
+camel-http.workspace = true
 tokio.workspace = true
 tower.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile = "3"
