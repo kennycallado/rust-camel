@@ -143,7 +143,12 @@ impl HttpServerConfig {
             (authority_and_path, "/")
         };
 
-        let path = if path_suffix.is_empty() { "/" } else { path_suffix }.to_string();
+        let path = if path_suffix.is_empty() {
+            "/"
+        } else {
+            path_suffix
+        }
+        .to_string();
 
         // Parse host:port
         let (host, port) = if let Some(colon) = authority.rfind(':') {
@@ -172,20 +177,20 @@ impl HttpServerConfig {
 /// An inbound HTTP request sent from the Axum dispatch handler to an
 /// `HttpConsumer` receive loop.
 pub struct RequestEnvelope {
-    pub method:   String,
-    pub path:     String,
-    pub query:    String,
-    pub headers:  http::HeaderMap,
-    pub body:     bytes::Bytes,
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: http::HeaderMap,
+    pub body: bytes::Bytes,
     pub reply_tx: tokio::sync::oneshot::Sender<HttpReply>,
 }
 
 /// The HTTP response that `HttpConsumer` sends back to the Axum handler.
 #[derive(Debug, Clone)]
 pub struct HttpReply {
-    pub status:  u16,
+    pub status: u16,
     pub headers: Vec<(String, String)>,
-    pub body:    bytes::Bytes,
+    pub body: bytes::Bytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +258,13 @@ impl ServerRegistry {
             task.abort();
             return Ok(Arc::clone(&existing.dispatch));
         }
-        guard.insert(port, ServerHandle { dispatch: Arc::clone(&dispatch), _task: task });
+        guard.insert(
+            port,
+            ServerHandle {
+                dispatch: Arc::clone(&dispatch),
+                _task: task,
+            },
+        );
         Ok(dispatch)
     }
 }
@@ -285,7 +296,7 @@ async fn dispatch_handler(
     req: Request,
 ) -> impl IntoResponse {
     const MAX_REQUEST_BODY: usize = 2 * 1024 * 1024; // 2 MB
-    
+
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
@@ -333,18 +344,20 @@ async fn dispatch_handler(
 
     match reply_rx.await {
         Ok(reply) => {
-            let status = StatusCode::from_u16(reply.status)
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status =
+                StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut builder = Response::builder().status(status);
             for (k, v) in &reply.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
-            builder.body(AxumBody::from(reply.body)).unwrap_or_else(|_| {
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(AxumBody::from("Invalid response headers from consumer"))
-        .unwrap()
-})
+            builder
+                .body(AxumBody::from(reply.body))
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(AxumBody::from("Invalid response headers from consumer"))
+                        .unwrap()
+                })
         }
         Err(_) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -414,9 +427,12 @@ impl Consumer for HttpConsumer {
                         }
                     }
 
-                    // Body
+                    // Body: Try to convert to text if UTF-8, otherwise keep as bytes
                     if !envelope.body.is_empty() {
-                        msg.body = Body::Bytes(envelope.body.clone());
+                        match std::str::from_utf8(&envelope.body) {
+                            Ok(text) => msg.body = Body::Text(text.to_string()),
+                            Err(_) => msg.body = Body::Bytes(envelope.body.clone()),
+                        }
                     }
 
                     let exchange = Exchange::new(msg);
@@ -898,7 +914,9 @@ mod tests {
     #[test]
     fn test_http_endpoint_creates_consumer() {
         let component = HttpComponent::new();
-        let endpoint = component.create_endpoint("http://0.0.0.0:19100/test").unwrap();
+        let endpoint = component
+            .create_endpoint("http://0.0.0.0:19100/test")
+            .unwrap();
         assert!(endpoint.create_consumer().is_ok());
     }
 
@@ -1547,9 +1565,7 @@ mod tests {
         let client = reqwest::Client::new();
 
         // Request to /hello
-        let fut_hello = client
-            .get(format!("http://127.0.0.1:{port}/hello"))
-            .send();
+        let fut_hello = client.get(format!("http://127.0.0.1:{port}/hello")).send();
         let (resp_hello, _) = tokio::join!(fut_hello, async {
             if let Some(mut envelope) = rx_a.recv().await {
                 envelope.exchange.input.body =
@@ -1561,9 +1577,7 @@ mod tests {
         });
 
         // Request to /world
-        let fut_world = client
-            .get(format!("http://127.0.0.1:{port}/world"))
-            .send();
+        let fut_world = client.get(format!("http://127.0.0.1:{port}/world")).send();
         let (resp_world, _) = tokio::join!(fut_world, async {
             if let Some(mut envelope) = rx_b.recv().await {
                 envelope.exchange.input.body =

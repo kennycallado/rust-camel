@@ -406,10 +406,10 @@ mod tests {
     #[tokio::test]
     async fn test_multicast_stop_on_exception_halts_early() {
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-        
+
         // Track which endpoints actually execute
         let executed = Arc::new(AtomicUsize::new(0));
-        
+
         let exec_clone1 = Arc::clone(&executed);
         let endpoint0 = BoxProcessor::from_fn(move |ex: Exchange| {
             let e = Arc::clone(&exec_clone1);
@@ -418,7 +418,7 @@ mod tests {
                 Ok(ex)
             })
         });
-        
+
         let exec_clone2 = Arc::clone(&executed);
         let endpoint1 = BoxProcessor::from_fn(move |_ex: Exchange| {
             let e = Arc::clone(&exec_clone2);
@@ -427,7 +427,7 @@ mod tests {
                 Err(CamelError::ProcessorError("fail on 1".into()))
             })
         });
-        
+
         let exec_clone3 = Arc::clone(&executed);
         let endpoint2 = BoxProcessor::from_fn(move |ex: Exchange| {
             let e = Arc::clone(&exec_clone3);
@@ -436,17 +436,20 @@ mod tests {
                 Ok(ex)
             })
         });
-        
+
         let endpoints = vec![endpoint0, endpoint1, endpoint2];
         let config = MulticastConfig::new().stop_on_exception(true);
         let mut svc = MulticastService::new(endpoints, config);
-        
+
         let result = svc.ready().await.unwrap().call(make_exchange("x")).await;
         assert!(result.is_err(), "should fail at endpoint 1");
-        
+
         // Only endpoints 0 and 1 should have executed (2 should be skipped)
         let count = executed.load(AtomicOrdering::SeqCst);
-        assert_eq!(count, 2, "endpoint 2 should not have executed due to stop_on_exception");
+        assert_eq!(
+            count, 2,
+            "endpoint 2 should not have executed due to stop_on_exception"
+        );
     }
 
     // ── 8. Continue on exception with fail_on_nth ─────────────────────────
@@ -454,10 +457,10 @@ mod tests {
     #[tokio::test]
     async fn test_multicast_continue_on_exception_executes_all() {
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-        
+
         // Track which endpoints actually execute
         let executed = Arc::new(AtomicUsize::new(0));
-        
+
         let exec_clone1 = Arc::clone(&executed);
         let endpoint0 = BoxProcessor::from_fn(move |ex: Exchange| {
             let e = Arc::clone(&exec_clone1);
@@ -466,7 +469,7 @@ mod tests {
                 Ok(ex)
             })
         });
-        
+
         let exec_clone2 = Arc::clone(&executed);
         let endpoint1 = BoxProcessor::from_fn(move |_ex: Exchange| {
             let e = Arc::clone(&exec_clone2);
@@ -475,7 +478,7 @@ mod tests {
                 Err(CamelError::ProcessorError("fail on 1".into()))
             })
         });
-        
+
         let exec_clone3 = Arc::clone(&executed);
         let endpoint2 = BoxProcessor::from_fn(move |ex: Exchange| {
             let e = Arc::clone(&exec_clone3);
@@ -484,19 +487,22 @@ mod tests {
                 Ok(ex)
             })
         });
-        
+
         let endpoints = vec![endpoint0, endpoint1, endpoint2];
         let config = MulticastConfig::new()
             .stop_on_exception(false)
             .aggregation(MulticastStrategy::LastWins);
         let mut svc = MulticastService::new(endpoints, config);
-        
+
         let result = svc.ready().await.unwrap().call(make_exchange("x")).await;
         assert!(result.is_ok(), "last endpoint should succeed");
-        
+
         // All 3 endpoints should have executed
         let count = executed.load(AtomicOrdering::SeqCst);
-        assert_eq!(count, 3, "all endpoints should have executed despite error in endpoint 1");
+        assert_eq!(
+            count, 3,
+            "all endpoints should have executed despite error in endpoint 1"
+        );
     }
 
     // ── 9. Empty endpoints ─────────────────────────────────────────────

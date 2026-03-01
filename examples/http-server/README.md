@@ -1,13 +1,15 @@
-# HTTP Server Example - REST API
+# HTTP Server Example - Realistic REST API
 
-A realistic REST API example demonstrating rust-camel's HTTP server capabilities.
+A production-ready REST API example demonstrating rust-camel's HTTP server capabilities with proper validation, error handling, and in-memory database.
 
 ## Features
 
-- **Health & Metrics**: Service health check with uptime and request metrics
-- **User Management**: Full CRUD-style user endpoints
-- **Text Processing**: Text transformation with detailed statistics
-- **Utilities**: Server time in multiple formats
+- **Full CRUD Operations** - Create, Read, Update, Delete users
+- **Validation** - Comprehensive input validation with meaningful error messages
+- **Error Handling** - Proper HTTP status codes (400, 404, 409, 500)
+- **In-Memory Database** - Thread-safe storage using DashMap
+- **Pagination** - List endpoints support page and per_page parameters
+- **Metrics** - Health endpoint with request count and user count
 
 ## Running
 
@@ -17,20 +19,20 @@ cargo run -p http-server
 
 ## API Endpoints
 
-### Health & Metrics
+### Health Check
 
 ```bash
 GET /health
 ```
 
-Returns service health, version, uptime, and request count.
+Returns service health with metrics.
 
 **Example:**
 ```bash
 curl http://localhost:8080/health | jq
 ```
 
-**Response:**
+**Response:** `200 OK`
 ```json
 {
   "status": "UP",
@@ -38,36 +40,45 @@ curl http://localhost:8080/health | jq
   "version": "1.0.0",
   "uptime_seconds": 12345,
   "requests_processed": 42,
+  "users_count": 5,
   "timestamp": 1709251200
 }
 ```
 
 ---
 
-### User Management
-
-#### List All Users
+### List Users
 
 ```bash
-GET /api/users
+GET /api/users?page={page}&per_page={per_page}
 ```
 
-Returns paginated list of users (mock data).
+Returns paginated list of users.
+
+**Parameters:**
+- `page` (optional, default: 1) - Page number (min: 1)
+- `per_page` (optional, default: 10, max: 100) - Users per page
 
 **Example:**
 ```bash
-curl http://localhost:8080/api/users | jq
+curl 'http://localhost:8080/api/users?page=1&per_page=10' | jq
 ```
 
-**Response:**
+**Response:** `200 OK`
 ```json
 {
   "users": [
-    {"id": 1, "name": "Alice", "email": "alice@example.com", "role": "admin"},
-    {"id": 2, "name": "Bob", "email": "bob@example.com", "role": "user"},
-    {"id": 3, "name": "Charlie", "email": "charlie@example.com", "role": "user"}
+    {
+      "id": 1,
+      "name": "Alice",
+      "email": "alice@example.com",
+      "age": 30,
+      "role": "admin",
+      "created_at": 1709251200,
+      "updated_at": null
+    }
   ],
-  "total": 3,
+  "total": 1,
   "page": 1,
   "per_page": 10
 }
@@ -75,47 +86,71 @@ curl http://localhost:8080/api/users | jq
 
 ---
 
-#### Create User
+### Create User
 
 ```bash
 POST /api/users/create
 Content-Type: application/json
 
 {
-  "name": "John",
-  "email": "john@example.com"
+  "name": "Alice",
+  "email": "alice@example.com",
+  "age": 30,
+  "role": "admin"
 }
 ```
 
-Creates a new user with auto-generated ID and timestamp.
+Creates a new user with validation.
+
+**Fields:**
+- `name` (required, max: 100 chars) - User's name
+- `email` (required, valid email format) - Must be unique
+- `age` (optional, max: 150) - User's age
+- `role` (optional, default: "user") - One of: "user", "admin", "moderator"
 
 **Example:**
 ```bash
 curl -X POST http://localhost:8080/api/users/create \
-     -d '{"name":"John","email":"john@example.com"}' | jq
+     -H 'Content-Type: application/json' \
+     -d '{"name":"Alice","email":"alice@example.com","age":30,"role":"admin"}' | jq
 ```
 
 **Response:** `201 Created`
 ```json
 {
-  "id": 1709251234567890123,
-  "name": "John",
-  "email": "john@example.com",
-  "role": "user",
+  "id": 1,
+  "name": "Alice",
+  "email": "alice@example.com",
+  "age": 30,
+  "role": "admin",
   "created_at": 1709251200,
-  "status": "created"
+  "updated_at": null
+}
+```
+
+**Errors:**
+- `400 Bad Request` - Invalid input (validation error)
+- `409 Conflict` - Email already exists
+
+```json
+{
+  "error": "Email already exists",
+  "code": 409
 }
 ```
 
 ---
 
-#### Get User by ID
+### Get User
 
 ```bash
 GET /api/users/id?id={id}
 ```
 
-Returns user details by ID (try id=1, 2, or 3 for existing users).
+Returns user details by ID.
+
+**Parameters:**
+- `id` (required) - User ID
 
 **Example:**
 ```bash
@@ -127,85 +162,109 @@ curl 'http://localhost:8080/api/users/id?id=1' | jq
 {
   "id": 1,
   "name": "Alice",
-  "email": "user1@example.com",
-  "role": "admin"
+  "email": "alice@example.com",
+  "age": 30,
+  "role": "admin",
+  "created_at": 1709251200,
+  "updated_at": null
 }
 ```
 
-**Not Found:** `404 Not Found`
+**Errors:**
+- `404 Not Found` - User doesn't exist
+
 ```json
 {
-  "error": "User not found",
-  "id": 999
+  "error": "User 999 not found",
+  "code": 404
 }
 ```
 
 ---
 
-### Text Processing
-
-#### Transform Text
+### Update User
 
 ```bash
-POST /api/transform
+PUT /api/users/update?id={id}
+Content-Type: application/json
 
-Any text content
+{
+  "name": "New Name",
+  "age": 35
+}
 ```
 
-Transforms text with detailed statistics (character count, words, case analysis, etc).
+Updates user with partial data. Only provided fields are updated.
+
+**Parameters:**
+- `id` (required) - User ID
+
+**Fields:** (all optional)
+- `name` (max: 100 chars) - User's name
+- `email` (valid email format, must be unique)
+- `age` (max: 150) - User's age
+- `role` - One of: "user", "admin", "moderator"
 
 **Example:**
 ```bash
-curl -X POST http://localhost:8080/api/transform \
-     -d 'Hello World 2024!' | jq
+curl -X PUT 'http://localhost:8080/api/users/update?id=1' \
+     -H 'Content-Type: application/json' \
+     -d '{"age":35,"role":"moderator"}' | jq
 ```
 
-**Response:**
+**Response:** `200 OK`
 ```json
 {
-  "original": "Hello World 2024!",
-  "transformed": "HELLO WORLD 2024!",
-  "reversed": "!4202 dlroW olleH",
-  "statistics": {
-    "characters": 17,
-    "words": 3,
-    "uppercase": 2,
-    "lowercase": 8,
-    "digits": 4,
-    "spaces": 2
-  },
-  "metadata": {
-    "processed_at": 1709251200,
-    "version": "1.0"
+  "id": 1,
+  "name": "Alice",
+  "email": "alice@example.com",
+  "age": 35,
+  "role": "moderator",
+  "created_at": 1709251200,
+  "updated_at": 1709251300
+}
+```
+
+**Errors:**
+- `400 Bad Request` - Invalid input or no fields to update
+- `404 Not Found` - User doesn't exist
+
+---
+
+### Delete User
+
+```bash
+DELETE /api/users/delete?id={id}
+```
+
+Deletes user by ID.
+
+**Parameters:**
+- `id` (required) - User ID
+
+**Example:**
+```bash
+curl -X DELETE 'http://localhost:8080/api/users/delete?id=1' | jq
+```
+
+**Response:** `200 OK`
+```json
+{
+  "message": "User deleted successfully",
+  "user": {
+    "id": 1,
+    "name": "Alice",
+    "email": "alice@example.com",
+    "age": 35,
+    "role": "moderator",
+    "created_at": 1709251200,
+    "updated_at": 1709251300
   }
 }
 ```
 
----
-
-### Utilities
-
-#### Server Time
-
-```bash
-GET /api/time
-```
-
-Returns current server time in multiple formats.
-
-**Example:**
-```bash
-curl http://localhost:8080/api/time | jq
-```
-
-**Response:**
-```json
-{
-  "unix_timestamp": 1709251200,
-  "iso8601": "2024-03-01T12:00:00Z",
-  "timezone": "UTC"
-}
-```
+**Errors:**
+- `404 Not Found` - User doesn't exist
 
 ---
 
@@ -213,25 +272,73 @@ curl http://localhost:8080/api/time | jq
 
 This example demonstrates:
 
-- **Multiple HTTP endpoints** on the same port (via ServerRegistry)
-- **Request processing** with body parsing and transformation
-- **Response customization** with headers and status codes
-- **Shared state** across routes (request counter)
-- **Error handling** (404 for missing users)
-- **Header filtering** (automatic removal of hop-by-hop headers)
+- **In-memory storage** - Thread-safe DashMap for concurrent access
+- **Validation** - Comprehensive input validation before processing
+- **Error handling** - Proper HTTP status codes and error messages
+- **Partial updates** - Only update provided fields
+- **Auto-generated IDs** - Atomic counter for unique IDs
+- **Timestamps** - Auto-managed created_at and updated_at fields
 
 ## Testing
 
-Run the server and try the example commands shown in each endpoint section above.
-
-All endpoints return JSON and work with `jq` for pretty printing:
+### Unit Tests
 
 ```bash
-# Quick test all endpoints
-curl http://localhost:8080/health | jq
-curl http://localhost:8080/api/users | jq
-curl -X POST http://localhost:8080/api/users/create -d '{"name":"Test","email":"test@example.com"}' | jq
+cargo test -p http-server
+```
+
+### Integration Tests
+
+Run the server and try the example commands shown in each endpoint section above.
+
+**Quick test script:**
+```bash
+# Create
+curl -X POST http://localhost:8080/api/users/create \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"Alice","email":"alice@example.com","age":30}' | jq
+
+# List
+curl 'http://localhost:8080/api/users' | jq
+
+# Get
 curl 'http://localhost:8080/api/users/id?id=1' | jq
-curl -X POST http://localhost:8080/api/transform -d 'Sample text 123' | jq
-curl http://localhost:8080/api/time | jq
+
+# Update
+curl -X PUT 'http://localhost:8080/api/users/update?id=1' \
+     -H 'Content-Type: application/json' \
+     -d '{"age":35}' | jq
+
+# Delete
+curl -X DELETE 'http://localhost:8080/api/users/delete?id=1' | jq
+```
+
+## Implementation Notes
+
+### Body Handling
+
+HTTP request bodies are automatically converted to UTF-8 text when valid, allowing easy parsing with `as_text()`. Binary data is kept as bytes.
+
+### Concurrency
+
+The in-memory database uses `DashMap` for thread-safe concurrent access without locking the entire map.
+
+### Validation
+
+All input is validated before processing:
+- Required fields are checked
+- String lengths are limited
+- Email format is validated (basic check)
+- Enum values are validated
+- Age range is checked
+
+### Error Responses
+
+All errors follow a consistent format:
+```json
+{
+  "error": "Human-readable error message",
+  "code": 400,
+  "details": ["Optional", "array", "of", "details"]
+}
 ```
