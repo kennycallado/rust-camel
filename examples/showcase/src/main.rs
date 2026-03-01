@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use camel_api::body::Body;
@@ -19,11 +19,11 @@ async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt::init();
 
     let mut ctx = CamelContext::new();
-
     let direct = DirectComponent::new();
+
+    ctx.register_component(direct);
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
-    ctx.register_component(direct);
     ctx.register_component(FileComponent::new());
     ctx.register_component(HttpComponent::new());
     ctx.register_component(HttpsComponent::new());
@@ -156,15 +156,53 @@ async fn main() -> Result<(), CamelError> {
     let route7 = RouteBuilder::from("timer:filter-demo?period=2000&repeatCount=6")
         .process(move |mut exchange| {
             let n = filter_counter_clone.fetch_add(1, Ordering::SeqCst);
-            let msg_type = if n.is_multiple_of(2) { "important" } else { "normal" };
+            let msg_type = if n.is_multiple_of(2) {
+                "important"
+            } else {
+                "normal"
+            };
             exchange.input.body = Body::Text(format!("[{msg_type}] message"));
-            exchange.input.set_header("type", Value::String(msg_type.to_string()));
+            exchange
+                .input
+                .set_header("type", Value::String(msg_type.to_string()));
             async move { Ok(exchange) }
         })
         .filter(|ex| ex.input.header("type") == Some(&Value::String("important".into())))
         .to("log:filter-inside?showBody=true&showHeaders=true")
         .end_filter()
         .to("log:filter-after?showBody=true&showHeaders=true") // all messages
+        .build()?;
+
+    // Route 8 (Stop EIP): Timer -> process (alternate vip/regular) -> filter(vip) -> log + stop
+    // Demonstrates Apache Camel Stop EIP semantics:
+    //   - VIP messages enter the filter, hit log:stop-vip, then STOP — never reach log:stop-all
+    //   - regular messages skip the filter block entirely and reach log:stop-all
+    // Contrast with Route 7: there, ALL messages reach the outer log. Here, only regular ones do.
+    static STOP_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    let route8 = RouteBuilder::from("timer:stop-demo?period=2000&repeatCount=6")
+        .process(|mut exchange| async move {
+            let n = STOP_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let msg_type = if n % 2 == 0 { "vip" } else { "regular" };
+            exchange.input.body = Body::Text(format!(
+                "{}: {} message #{}",
+                msg_type.to_uppercase(),
+                msg_type,
+                n
+            ));
+            Ok(exchange)
+        })
+        .filter(|ex| {
+            ex.input
+                .body
+                .as_text()
+                .map(|t| t.starts_with("VIP"))
+                .unwrap_or(false)
+        })
+        .to("log:stop-vip?showBody=true") // vip messages logged here ...
+        .stop() // ... then stopped: never reach log:stop-all
+        .end_filter()
+        .to("log:stop-all?showBody=true") // only regular messages arrive here
         .build()?;
 
     ctx.add_route_definition(route1)?;
@@ -174,6 +212,8 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(route5)?;
     ctx.add_route_definition(route6)?;
     ctx.add_route_definition(route7)?;
+    ctx.add_route_definition(route8)?;
+
     ctx.start().await?;
 
     println!("Showcase running. Routes:");
@@ -183,6 +223,7 @@ async fn main() -> Result<(), CamelError> {
     println!("  - timer:http-poll (5s)    -> https:httpbin.org/get -> log");
     println!("  - timer:monitor (4s)      -> wire_tap -> log");
     println!("  - timer:filter-demo (2s)  -> filter(important) -> log inside + log after(all)");
+    println!("  - timer:stop-demo (2s)    -> filter(vip) -> log:stop-vip + stop | log:stop-all");
     println!();
     println!("Press Ctrl+C to stop...");
 
