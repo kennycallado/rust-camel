@@ -56,15 +56,16 @@ async fn main() -> Result<(), CamelError> {
     // Route 2: Receive -> filter typeA only -> uppercase -> mark processed -> log
     let route2 = RouteBuilder::from("direct:dispatcher")
         .filter(|ex| ex.input.body.as_text() == Some("typeA"))
-        .map_body(|body| {
-            if let Some(text) = body.as_text() {
-                Body::Text(text.to_uppercase())
-            } else {
-                body
-            }
-        })
-        .set_header("processed", Value::Bool(true))
-        .to("log:output?showHeaders=true&showBody=true")
+            .map_body(|body| {
+                if let Some(text) = body.as_text() {
+                    Body::Text(text.to_uppercase())
+                } else {
+                    body
+                }
+            })
+            .set_header("processed", Value::Bool(true))
+            .to("log:output?showHeaders=true&showBody=true")
+        .end_filter()
         .error_handler(
             ErrorHandlerConfig::dead_letter_channel(
                 "log:route2-dlc?showHeaders=true&showBody=true",

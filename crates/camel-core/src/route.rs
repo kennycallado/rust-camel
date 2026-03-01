@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{AggregatorConfig, BoxProcessor, CamelError, Exchange, IdentityProcessor, SplitterConfig};
+use camel_api::{AggregatorConfig, BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, SplitterConfig};
 
 /// A Route defines a message flow: from a source endpoint, through a composed
 /// Tower Service pipeline.
@@ -53,6 +53,11 @@ pub enum BuilderStep {
     Aggregate {
         config: AggregatorConfig,
     },
+    /// A Filter sub-pipeline: predicate + nested steps executed only when predicate is true.
+    Filter {
+        predicate: FilterPredicate,
+        steps: Vec<BuilderStep>,
+    },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -64,6 +69,9 @@ impl std::fmt::Debug for BuilderStep {
                 write!(f, "BuilderStep::Split {{ steps: {steps:?}, .. }}")
             }
             BuilderStep::Aggregate { .. } => write!(f, "BuilderStep::Aggregate {{ .. }}"),
+            BuilderStep::Filter { steps, .. } => {
+                write!(f, "BuilderStep::Filter {{ steps: {steps:?}, .. }}")
+            }
         }
     }
 }

@@ -9,7 +9,7 @@ pub mod splitter;
 pub use aggregator::AggregatorService;
 pub use circuit_breaker::{CircuitBreakerLayer, CircuitBreakerService};
 pub use error_handler::{ErrorHandlerLayer, ErrorHandlerService};
-pub use filter::{Filter, FilterLayer};
+pub use filter::FilterService;
 pub use map_body::{MapBody, MapBodyLayer};
 pub use set_header::{SetHeader, SetHeaderLayer};
 pub use splitter::SplitterService;

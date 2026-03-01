@@ -20,6 +20,7 @@ pub enum CompletionCondition {
     /// Emit when bucket reaches exactly N exchanges.
     Size(usize),
     /// Emit when predicate returns true for current bucket.
+    #[allow(clippy::type_complexity)]
     Predicate(Arc<dyn Fn(&[Exchange]) -> bool + Send + Sync>),
 }
 

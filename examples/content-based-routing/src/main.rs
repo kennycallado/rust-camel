@@ -34,7 +34,8 @@ async fn main() -> Result<(), CamelError> {
             })
         })
         .filter(|ex| ex.input.body.as_text() == Some("important"))
-        .to("log:filtered?showBody=true")
+            .to("log:filtered?showBody=true")
+        .end_filter()
         .build()?;
 
     ctx.add_route_definition(route)?;

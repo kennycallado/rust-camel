@@ -12,6 +12,7 @@ use camel_processor::error_handler::ErrorHandlerLayer;
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::splitter::SplitterService;
 use camel_processor::AggregatorService;
+use camel_processor::FilterService;
 
 use crate::registry::Registry;
 use crate::route::{BuilderStep, Route, RouteDefinition, compose_pipeline};
@@ -118,6 +119,12 @@ impl CamelContext {
                 }
                 BuilderStep::Aggregate { config } => {
                     let svc = AggregatorService::new(config);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::Filter { predicate, steps } => {
+                    let sub_processors = self.resolve_steps(steps)?;
+                    let sub_pipeline = compose_pipeline(sub_processors);
+                    let svc = FilterService::from_predicate(predicate, sub_pipeline);
                     processors.push(BoxProcessor::new(svc));
                 }
             }

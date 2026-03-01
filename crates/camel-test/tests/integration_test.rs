@@ -55,7 +55,7 @@ async fn test_timer_to_mock() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: Timer → Filter → Mock (verify filtering behavior in flat pipeline)
+// Test 2: Timer → Filter → Mock (verify filtering behavior)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -65,12 +65,11 @@ async fn test_timer_filter_mock() {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(mock.clone());
 
-    // Filter: only allow even-numbered ticks through.
-    // In the flat SequentialPipeline, Filter wraps IdentityProcessor as its
-    // inner service. When the predicate matches, the exchange goes through
-    // Identity (no-op); when it doesn't match, Filter returns the exchange
-    // as-is. Either way, the pipeline continues to the next step, so ALL 4
-    // exchanges reach mock.
+    // Filter: only allow even-numbered ticks through to mock:result.
+    // With the typestate FilterBuilder, the filter scope only executes
+    // for matching exchanges. Non-matching exchanges skip the scope entirely.
+    // Timer fires 4 times (counters 1, 2, 3, 4), but only even counters
+    // (2, 4) pass the filter, so only 2 exchanges reach mock:result.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
         .filter(|ex| {
             ex.input
@@ -79,7 +78,8 @@ async fn test_timer_filter_mock() {
                 .map(|n| n % 2 == 0)
                 .unwrap_or(false)
         })
-        .to("mock:result")
+            .to("mock:result")
+        .end_filter()
         .build()
         .unwrap();
 
@@ -90,18 +90,104 @@ async fn test_timer_filter_mock() {
     ctx.stop().await.unwrap();
 
     let endpoint = mock.get_endpoint("result").unwrap();
-    endpoint.assert_exchange_count(4).await;
+    endpoint.assert_exchange_count(2).await;
 
-    // Verify that all timer headers are intact.
+    // Verify that only even-numbered exchanges passed through.
     let exchanges = endpoint.get_received_exchanges().await;
-    for (i, ex) in exchanges.iter().enumerate() {
-        let counter = ex
-            .input
-            .header("CamelTimerCounter")
-            .and_then(|v| v.as_u64())
-            .expect("CamelTimerCounter header missing");
-        assert_eq!(counter, (i + 1) as u64, "Exchanges should arrive in order");
-    }
+    let counters: Vec<u64> = exchanges
+        .iter()
+        .map(|ex| {
+            ex.input
+                .header("CamelTimerCounter")
+                .and_then(|v| v.as_u64())
+                .expect("CamelTimerCounter header missing")
+        })
+        .collect();
+    assert_eq!(counters, vec![2, 4], "only even counters should pass filter");
+}
+
+// ---------------------------------------------------------------------------
+// Test N: Filter EIP — matching exchanges reach inner mock
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_filter_matching_exchanges_reach_inner_mock() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    // 4 exchanges, alternate active=true/false (n=0,1,2,3 → even=true).
+    // Only active=true exchanges should reach mock:matched.
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter_clone = std::sync::Arc::clone(&counter);
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .process(move |mut ex: camel_api::Exchange| {
+            let c = std::sync::Arc::clone(&counter_clone);
+            async move {
+                let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ex.input.set_header("active", Value::Bool(n % 2 == 0));
+                Ok(ex)
+            }
+        })
+        .filter(|ex| ex.input.header("active") == Some(&Value::Bool(true)))
+            .to("mock:matched")
+        .end_filter()
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    ctx.stop().await.unwrap();
+
+    let endpoint = mock.get_endpoint("matched").unwrap();
+    endpoint.assert_exchange_count(2).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test N+1: Filter EIP — non-matching exchanges skip inner, reach outer mock
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_filter_non_matching_continue_outer_pipeline() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter_clone = std::sync::Arc::clone(&counter);
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .process(move |mut ex: camel_api::Exchange| {
+            let c = std::sync::Arc::clone(&counter_clone);
+            async move {
+                let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ex.input.set_header("active", Value::Bool(n % 2 == 0));
+                Ok(ex)
+            }
+        })
+        .filter(|ex| ex.input.header("active") == Some(&Value::Bool(true)))
+            .to("mock:inner")
+        .end_filter()
+        .to("mock:outer") // always reached by all 4 exchanges
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    ctx.stop().await.unwrap();
+
+    let inner = mock.get_endpoint("inner").unwrap();
+    let outer = mock.get_endpoint("outer").unwrap();
+
+    inner.assert_exchange_count(2).await; // only active=true exchanges
+    outer.assert_exchange_count(4).await; // ALL exchanges continue past filter
 }
 
 // ---------------------------------------------------------------------------

@@ -2,10 +2,10 @@ use camel_api::body::Body;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::splitter::SplitterConfig;
-use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, ProcessorFn, Value};
+use camel_api::{BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProcessorFn, Value};
 use camel_api::aggregator::AggregatorConfig;
 use camel_core::route::{BuilderStep, RouteDefinition};
-use camel_processor::{Filter, MapBody, SetHeader};
+use camel_processor::{MapBody, SetHeader};
 
 /// A fluent builder for constructing routes.
 ///
@@ -36,16 +36,18 @@ impl RouteBuilder {
         }
     }
 
-    /// Add a filter step. Exchanges that do **not** match the predicate are
-    /// passed through unchanged (not forwarded to the inner processor).
-    pub fn filter<F>(mut self, predicate: F) -> Self
+    /// Open a filter scope. Only exchanges matching `predicate` will be processed
+    /// by the steps inside the scope. Non-matching exchanges skip the scope entirely
+    /// and continue to steps after `.end_filter()`.
+    pub fn filter<F>(self, predicate: F) -> FilterBuilder
     where
-        F: Fn(&Exchange) -> bool + Clone + Send + Sync + 'static,
+        F: Fn(&Exchange) -> bool + Send + Sync + 'static,
     {
-        let svc = Filter::new(IdentityProcessor, predicate);
-        self.steps
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
+        FilterBuilder {
+            parent: self,
+            predicate: std::sync::Arc::new(predicate),
+            steps: vec![],
+        }
     }
 
     /// Add a processor step defined by an arbitrary async closure.
@@ -189,15 +191,16 @@ impl SplitBuilder {
         self
     }
 
-    /// Add a filter step within the split sub-pipeline.
-    pub fn filter<F>(mut self, predicate: F) -> Self
+    /// Open a filter scope within the split sub-pipeline.
+    pub fn filter<F>(self, predicate: F) -> FilterInSplitBuilder
     where
-        F: Fn(&Exchange) -> bool + Clone + Send + Sync + 'static,
+        F: Fn(&Exchange) -> bool + Send + Sync + 'static,
     {
-        let svc = Filter::new(IdentityProcessor, predicate);
-        self.steps
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
+        FilterInSplitBuilder {
+            parent: self,
+            predicate: std::sync::Arc::new(predicate),
+            steps: vec![],
+        }
     }
 
     /// Add a set-header step within the split sub-pipeline.
@@ -233,6 +236,125 @@ impl SplitBuilder {
             steps: self.steps,
         };
         self.parent.steps.push(split_step);
+        self.parent
+    }
+}
+
+/// Builder for the sub-pipeline within a `.filter()` ... `.end_filter()` block.
+pub struct FilterBuilder {
+    parent: RouteBuilder,
+    predicate: FilterPredicate,
+    steps: Vec<BuilderStep>,
+}
+
+impl FilterBuilder {
+    pub fn to(mut self, uri: impl Into<String>) -> Self {
+        self.steps.push(BuilderStep::To(uri.into()));
+        self
+    }
+
+    pub fn process<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(Exchange) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Exchange, CamelError>> + Send + 'static,
+    {
+        let svc = ProcessorFn::new(f);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    pub fn process_fn(mut self, processor: BoxProcessor) -> Self {
+        self.steps.push(BuilderStep::Processor(processor));
+        self
+    }
+
+    pub fn set_header(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        let svc = SetHeader::new(IdentityProcessor, key, value);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    pub fn map_body<F>(mut self, mapper: F) -> Self
+    where
+        F: Fn(Body) -> Body + Clone + Send + Sync + 'static,
+    {
+        let svc = MapBody::new(IdentityProcessor, mapper);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    pub fn aggregate(mut self, config: AggregatorConfig) -> Self {
+        self.steps.push(BuilderStep::Aggregate { config });
+        self
+    }
+
+    /// Close the filter scope. Packages the accumulated sub-steps into a
+    /// `BuilderStep::Filter` and returns the parent `RouteBuilder`.
+    pub fn end_filter(mut self) -> RouteBuilder {
+        let step = BuilderStep::Filter {
+            predicate: self.predicate,
+            steps: self.steps,
+        };
+        self.parent.steps.push(step);
+        self.parent
+    }
+}
+
+/// Builder for a filter scope nested inside a `.split()` block.
+pub struct FilterInSplitBuilder {
+    parent: SplitBuilder,
+    predicate: FilterPredicate,
+    steps: Vec<BuilderStep>,
+}
+
+impl FilterInSplitBuilder {
+    pub fn to(mut self, uri: impl Into<String>) -> Self {
+        self.steps.push(BuilderStep::To(uri.into()));
+        self
+    }
+
+    pub fn process<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(Exchange) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Exchange, CamelError>> + Send + 'static,
+    {
+        let svc = ProcessorFn::new(f);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    pub fn process_fn(mut self, processor: BoxProcessor) -> Self {
+        self.steps.push(BuilderStep::Processor(processor));
+        self
+    }
+
+    pub fn set_header(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        let svc = SetHeader::new(IdentityProcessor, key, value);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    pub fn map_body<F>(mut self, mapper: F) -> Self
+    where
+        F: Fn(Body) -> Body + Clone + Send + Sync + 'static,
+    {
+        let svc = MapBody::new(IdentityProcessor, mapper);
+        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    pub fn aggregate(mut self, config: AggregatorConfig) -> Self {
+        self.steps.push(BuilderStep::Aggregate { config });
+        self
+    }
+
+    /// Close the filter scope and return the parent `SplitBuilder`.
+    pub fn end_filter(mut self) -> SplitBuilder {
+        let step = BuilderStep::Filter {
+            predicate: self.predicate,
+            steps: self.steps,
+        };
+        self.parent.steps.push(step);
         self.parent
     }
 }
@@ -273,13 +395,15 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_filter_adds_processor_step() {
+    fn test_builder_filter_adds_filter_step() {
         let definition = RouteBuilder::from("timer:tick")
             .filter(|_ex| true)
+                .to("mock:result")
+            .end_filter()
             .build()
             .unwrap();
 
-        assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+        assert!(matches!(&definition.steps()[0], BuilderStep::Filter { .. }));
     }
 
     #[test]
@@ -317,16 +441,16 @@ mod tests {
         let definition = RouteBuilder::from("timer:tick")
             .set_header("source", Value::String("timer".into()))
             .filter(|ex| ex.input.header("source").is_some())
-            .to("log:info")
+                .to("log:info")
+            .end_filter()
             .to("mock:result")
             .build()
             .unwrap();
 
-        assert_eq!(definition.steps().len(), 4);
+        assert_eq!(definition.steps().len(), 3); // set_header + Filter + To("mock:result")
         assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_))); // set_header
-        assert!(matches!(&definition.steps()[1], BuilderStep::Processor(_))); // filter
-        assert!(matches!(&definition.steps()[2], BuilderStep::To(uri) if uri == "log:info"));
-        assert!(matches!(&definition.steps()[3], BuilderStep::To(uri) if uri == "mock:result"));
+        assert!(matches!(&definition.steps()[1], BuilderStep::Filter { .. })); // filter
+        assert!(matches!(&definition.steps()[2], BuilderStep::To(uri) if uri == "mock:result"));
     }
 
     // -----------------------------------------------------------------------
@@ -346,22 +470,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_filter_processor_passes() {
-        let filter = Filter::new(IdentityProcessor, |ex: &Exchange| {
-            ex.input.body.as_text() == Some("pass")
-        });
+        use camel_api::BoxProcessorExt;
+        use camel_processor::FilterService;
+
+        let sub = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
+        let mut svc = FilterService::new(
+            |ex: &Exchange| ex.input.body.as_text() == Some("pass"),
+            sub,
+        );
         let exchange = Exchange::new(Message::new("pass"));
-        let result = filter.oneshot(exchange).await.unwrap();
+        let result = svc.ready().await.unwrap().call(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("pass"));
     }
 
     #[tokio::test]
     async fn test_filter_processor_blocks() {
-        let filter = Filter::new(IdentityProcessor, |ex: &Exchange| {
-            ex.input.body.as_text() == Some("pass")
-        });
+        use camel_api::BoxProcessorExt;
+        use camel_processor::FilterService;
+
+        let sub = BoxProcessor::from_fn(|_ex| Box::pin(async move { Err(CamelError::ProcessorError("should not reach".into())) }));
+        let mut svc = FilterService::new(
+            |ex: &Exchange| ex.input.body.as_text() == Some("pass"),
+            sub,
+        );
         let exchange = Exchange::new(Message::new("reject"));
-        let result = filter.oneshot(exchange).await.unwrap();
-        // Exchange is returned as-is (filter does not forward to inner)
+        let result = svc.ready().await.unwrap().call(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("reject"));
     }
 
@@ -582,5 +715,31 @@ mod tests {
         } else {
             panic!("expected Split step");
         }
+    }
+
+    // ── FilterBuilder typestate tests ─────────────────────────────────────
+
+    #[test]
+    fn test_filter_builder_typestate() {
+        let result = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+            .filter(|_ex| true)
+                .to("mock:inner")
+            .end_filter()
+            .to("mock:outer")
+            .build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_filter_builder_steps_collected() {
+        let definition = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+            .filter(|_ex| true)
+                .to("mock:inner")
+            .end_filter()
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 1);
+        assert!(matches!(&definition.steps()[0], BuilderStep::Filter { .. }));
     }
 }

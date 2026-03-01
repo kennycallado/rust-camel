@@ -4,6 +4,7 @@ pub mod circuit_breaker;
 pub mod error;
 pub mod error_handler;
 pub mod exchange;
+pub mod filter;
 pub mod message;
 pub mod processor;
 pub mod splitter;
@@ -18,6 +19,7 @@ pub use error_handler::{
     ErrorHandlerConfig, ExceptionPolicy, ExceptionPolicyBuilder, ExponentialBackoff,
 };
 pub use exchange::{Exchange, ExchangePattern};
+pub use filter::FilterPredicate;
 pub use message::Message;
 pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn};
 pub use splitter::{
