@@ -216,6 +216,31 @@ async fn main() -> Result<(), CamelError> {
         .to("log:mc-summary?showBody=true") // receives JSON array of all three responses
         .build()?;
 
+    // Route 10 (Concurrency): HTTP counter with .sequential() override.
+    //
+    // HttpConsumer is Concurrent by default — without .sequential(), concurrent
+    // requests would race on the shared counter. .sequential() tells the runtime
+    // to process one exchange at a time, eliminating any data-race risk.
+    //
+    // Use .sequential() whenever a route mutates shared state that is too
+    // complex to make lock-free, or when strict ordering is a correctness
+    // requirement.
+    let seq_counter = std::sync::Arc::new(std::sync::Mutex::new(0u64));
+    let seq_counter_clone = std::sync::Arc::clone(&seq_counter);
+    let route10 = RouteBuilder::from("http://0.0.0.0:8081/counter")
+        .sequential()
+        .process(move |mut exchange| {
+            let counter = std::sync::Arc::clone(&seq_counter_clone);
+            async move {
+                let mut n = counter.lock().unwrap();
+                *n += 1;
+                exchange.input.body =
+                    Body::Json(serde_json::json!({ "count": *n }));
+                Ok(exchange)
+            }
+        })
+        .build()?;
+
     ctx.add_route_definition(route1)?;
     ctx.add_route_definition(route2)?;
     ctx.add_route_definition(route3)?;
@@ -225,6 +250,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(route7)?;
     ctx.add_route_definition(route8)?;
     ctx.add_route_definition(route9)?;
+    ctx.add_route_definition(route10)?;
     ctx.start().await?;
 
     println!("Showcase running. Routes:");
@@ -236,6 +262,7 @@ async fn main() -> Result<(), CamelError> {
     println!("  - timer:filter-demo (2s)    -> filter(important) -> log inside + log after(all)");
     println!("  - timer:stop-demo (3s)      -> filter -> stop(halt-me) -> log(pass-me only)");
     println!("  - timer:multicast-demo (4s) -> multicast(parallel, CollectAll) -> log summary");
+    println!("  - http://0.0.0.0:8081/counter   -> sequential counter (.sequential() override)");
     println!();
     println!("Press Ctrl+C to stop...");
 

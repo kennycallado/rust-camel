@@ -32,6 +32,7 @@ members = [
     "examples/wiretap",
     "examples/multicast",
     "examples/http-server",
+    "examples/pipeline-concurrency",
 ]
 
 [workspace.package]

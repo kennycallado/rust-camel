@@ -397,6 +397,7 @@ impl Consumer for HttpConsumer {
         }
 
         let path = self.config.path.clone();
+        let cancel_token = ctx.cancel_token();
 
         loop {
             tokio::select! {
@@ -436,96 +437,147 @@ impl Consumer for HttpConsumer {
                     }
 
                     let exchange = Exchange::new(msg);
+                    let reply_tx = envelope.reply_tx;
+                    let sender = ctx.sender().clone();
+                    let path_clone = path.clone();
+                    let cancel = cancel_token.clone();
 
-                    // Send through pipeline and await result
-                    let result = ctx.send_and_wait(exchange).await;
-
-                    let reply = match result {
-                        Ok(out) => {
-                            let status = out
-                                .input
-                                .header("CamelHttpResponseCode")
-                                .and_then(|v| v.as_u64())
-                                .map(|s| s as u16)
-                                .unwrap_or(200);
-
-                            let body_bytes = match &out.input.body {
-                                Body::Empty => bytes::Bytes::new(),
-                                Body::Bytes(b) => b.clone(),
-                                Body::Text(s) => bytes::Bytes::from(s.clone().into_bytes()),
-                                Body::Json(v) => bytes::Bytes::from(v.to_string().into_bytes()),
-                            };
-
-                            let resp_headers: Vec<(String, String)> = out
-                                .input
-                                .headers
-                                .iter()
-                                // Filter Camel internal headers
-                                .filter(|(k, _)| !k.starts_with("Camel"))
-                                // Filter hop-by-hop and request-only headers
-                                // Based on Apache Camel's HttpUtil.addCommonFilters()
-                                .filter(|(k, _)| {
-                                    !matches!(
-                                        k.to_lowercase().as_str(),
-                                        // RFC 2616 Section 4.5 - General headers
-                                        "content-length" |      // Auto-calculated by framework
-                                        "content-type" |        // Auto-calculated from body
-                                        "transfer-encoding" |   // Hop-by-hop
-                                        "connection" |          // Hop-by-hop
-                                        "cache-control" |       // Hop-by-hop
-                                        "date" |                // Auto-generated
-                                        "pragma" |              // Hop-by-hop
-                                        "trailer" |             // Hop-by-hop
-                                        "upgrade" |             // Hop-by-hop
-                                        "via" |                 // Hop-by-hop
-                                        "warning" |             // Hop-by-hop
-                                        // Request-only headers
-                                        "host" |                // Request-only
-                                        "user-agent" |          // Request-only
-                                        "accept" |              // Request-only
-                                        "accept-encoding" |     // Request-only
-                                        "accept-language" |     // Request-only
-                                        "accept-charset" |      // Request-only
-                                        "authorization" |       // Request-only (security)
-                                        "proxy-authorization" | // Request-only (security)
-                                        "cookie" |              // Request-only
-                                        "expect" |              // Request-only
-                                        "from" |                // Request-only
-                                        "if-match" |            // Request-only
-                                        "if-modified-since" |   // Request-only
-                                        "if-none-match" |       // Request-only
-                                        "if-range" |            // Request-only
-                                        "if-unmodified-since" | // Request-only
-                                        "max-forwards" |        // Request-only
-                                        "proxy-connection" |    // Request-only
-                                        "range" |               // Request-only
-                                        "referer" |             // Request-only
-                                        "te"                    // Request-only
-                                    )
-                                })
-                                .filter_map(|(k, v)| {
-                                    v.as_str().map(|s| (k.clone(), s.to_string()))
-                                })
-                                .collect();
-
-                            HttpReply {
-                                status,
-                                headers: resp_headers,
-                                body: body_bytes,
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, path = %path, "Pipeline error processing HTTP request");
-                            HttpReply {
-                                status: 500,
+                    // Spawn a task to handle this request concurrently
+                    // 
+                    // NOTE: This spawns a separate tokio task for each incoming HTTP request to enable
+                    // true concurrent request processing. This change was introduced as part of the
+                    // pipeline concurrency feature and was NOT part of the original HttpConsumer design.
+                    // 
+                    // Rationale:
+                    // 1. Without spawning per-request tasks, the send_and_wait() operation would block
+                    //    the consumer's main loop until the pipeline processing completes
+                    // 2. This blocking would prevent multiple HTTP requests from being processed
+                    //    concurrently, even when ConcurrencyModel::Concurrent is enabled on the pipeline
+                    // 3. The channel would never have multiple exchanges buffered simultaneously,
+                    //    defeating the purpose of pipeline-side concurrency
+                    // 4. By spawning a task per request, we allow the consumer loop to continue
+                    //    accepting new requests while existing ones are processed in the pipeline
+                    // 
+                    // This approach effectively decouples request acceptance from pipeline processing,
+                    // allowing the channel to buffer multiple exchanges that can be processed concurrently
+                    // by the pipeline when ConcurrencyModel::Concurrent is active.
+                    tokio::spawn(async move {
+                        // Check for cancellation before sending to pipeline.
+                        // Returns 503 (Service Unavailable) instead of letting the request
+                        // enter a shutting-down pipeline. This is a behavioral change from
+                        // the pre-concurrency implementation where cancellation during
+                        // processing would result in a 500 (Internal Server Error).
+                        // 503 is more semantically correct: the server is temporarily
+                        // unable to handle the request due to shutdown.
+                        if cancel.is_cancelled() {
+                            let _ = reply_tx.send(HttpReply {
+                                status: 503,
                                 headers: vec![],
-                                body: bytes::Bytes::from("Internal Server Error"),
-                            }
+                                body: bytes::Bytes::from("Service Unavailable"),
+                            });
+                            return;
                         }
-                    };
 
-                    // Reply to Axum handler (ignore error if client disconnected)
-                    let _ = envelope.reply_tx.send(reply);
+                        // Send through pipeline and await result
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let envelope = camel_component::consumer::ExchangeEnvelope {
+                            exchange,
+                            reply_tx: Some(tx),
+                        };
+
+                        let result = match sender.send(envelope).await {
+                            Ok(()) => rx.await.map_err(|_| camel_api::CamelError::ChannelClosed),
+                            Err(_) => Err(camel_api::CamelError::ChannelClosed),
+                        }
+                        .and_then(|r| r);
+
+                        let reply = match result {
+                            Ok(out) => {
+                                let status = out
+                                    .input
+                                    .header("CamelHttpResponseCode")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|s| s as u16)
+                                    .unwrap_or(200);
+
+                                let body_bytes = match &out.input.body {
+                                    Body::Empty => bytes::Bytes::new(),
+                                    Body::Bytes(b) => b.clone(),
+                                    Body::Text(s) => bytes::Bytes::from(s.clone().into_bytes()),
+                                    Body::Json(v) => bytes::Bytes::from(v.to_string().into_bytes()),
+                                };
+
+                                let resp_headers: Vec<(String, String)> = out
+                                    .input
+                                    .headers
+                                    .iter()
+                                    // Filter Camel internal headers
+                                    .filter(|(k, _)| !k.starts_with("Camel"))
+                                    // Filter hop-by-hop and request-only headers
+                                    // Based on Apache Camel's HttpUtil.addCommonFilters()
+                                    .filter(|(k, _)| {
+                                        !matches!(
+                                            k.to_lowercase().as_str(),
+                                            // RFC 2616 Section 4.5 - General headers
+                                            "content-length" |      // Auto-calculated by framework
+                                            "content-type" |        // Auto-calculated from body
+                                            "transfer-encoding" |   // Hop-by-hop
+                                            "connection" |          // Hop-by-hop
+                                            "cache-control" |       // Hop-by-hop
+                                            "date" |                // Auto-generated
+                                            "pragma" |              // Hop-by-hop
+                                            "trailer" |             // Hop-by-hop
+                                            "upgrade" |             // Hop-by-hop
+                                            "via" |                 // Hop-by-hop
+                                            "warning" |             // Hop-by-hop
+                                            // Request-only headers
+                                            "host" |                // Request-only
+                                            "user-agent" |          // Request-only
+                                            "accept" |              // Request-only
+                                            "accept-encoding" |     // Request-only
+                                            "accept-language" |     // Request-only
+                                            "accept-charset" |      // Request-only
+                                            "authorization" |       // Request-only (security)
+                                            "proxy-authorization" | // Request-only (security)
+                                            "cookie" |              // Request-only
+                                            "expect" |              // Request-only
+                                            "from" |                // Request-only
+                                            "if-match" |            // Request-only
+                                            "if-modified-since" |   // Request-only
+                                            "if-none-match" |       // Request-only
+                                            "if-range" |            // Request-only
+                                            "if-unmodified-since" | // Request-only
+                                            "max-forwards" |        // Request-only
+                                            "proxy-connection" |    // Request-only
+                                            "range" |               // Request-only
+                                            "referer" |             // Request-only
+                                            "te"                    // Request-only
+                                        )
+                                    })
+                                    .filter_map(|(k, v)| {
+                                        v.as_str().map(|s| (k.clone(), s.to_string()))
+                                    })
+                                    .collect();
+
+                                HttpReply {
+                                    status,
+                                    headers: resp_headers,
+                                    body: body_bytes,
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, path = %path_clone, "Pipeline error processing HTTP request");
+                                HttpReply {
+                                    status: 500,
+                                    headers: vec![],
+                                    body: bytes::Bytes::from("Internal Server Error"),
+                                }
+                            }
+                        };
+
+                        // Reply to Axum handler (ignore error if client disconnected)
+                        let _ = reply_tx.send(reply);
+                    });
                 }
             }
         }
@@ -541,6 +593,10 @@ impl Consumer for HttpConsumer {
 
     async fn stop(&mut self) -> Result<(), CamelError> {
         Ok(())
+    }
+
+    fn concurrency_model(&self) -> camel_component::ConcurrencyModel {
+        camel_component::ConcurrencyModel::Concurrent { max: None }
     }
 }
 
@@ -1629,5 +1685,21 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 404);
 
         token.cancel();
+    }
+
+    #[test]
+    fn test_http_consumer_declares_concurrent() {
+        use camel_component::ConcurrencyModel;
+
+        let config = HttpServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 19999,
+            path: "/test".to_string(),
+        };
+        let consumer = HttpConsumer::new(config);
+        assert_eq!(
+            consumer.concurrency_model(),
+            ConcurrencyModel::Concurrent { max: None }
+        );
     }
 }

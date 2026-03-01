@@ -7,6 +7,7 @@ use camel_api::splitter::SplitterConfig;
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProcessorFn, Value,
 };
+use camel_component::ConcurrencyModel;
 use camel_core::route::{BuilderStep, RouteDefinition};
 use camel_processor::{DynamicSetHeader, LogLevel, MapBody, SetBody, SetHeader, StopService};
 
@@ -138,6 +139,7 @@ pub struct RouteBuilder {
     steps: Vec<BuilderStep>,
     error_handler: Option<ErrorHandlerConfig>,
     circuit_breaker_config: Option<CircuitBreakerConfig>,
+    concurrency: Option<ConcurrencyModel>,
 }
 
 impl RouteBuilder {
@@ -148,6 +150,7 @@ impl RouteBuilder {
             steps: Vec::new(),
             error_handler: None,
             circuit_breaker_config: None,
+            concurrency: None,
         }
     }
 
@@ -184,6 +187,34 @@ impl RouteBuilder {
     /// Set a circuit breaker for this route.
     pub fn circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
         self.circuit_breaker_config = Some(config);
+        self
+    }
+
+    /// Override the consumer's default concurrency model.
+    ///
+    /// When set, the pipeline spawns a task per exchange, processing them
+    /// concurrently. `max` limits the number of simultaneously active
+    /// pipeline executions (0 = unbounded, channel buffer is backpressure).
+    ///
+    /// # Example
+    /// ```ignore
+    /// RouteBuilder::from("http://0.0.0.0:8080/api")
+    ///     .concurrent(16)  // max 16 in-flight pipeline executions
+    ///     .process(handle_request)
+    ///     .build()
+    /// ```
+    pub fn concurrent(mut self, max: usize) -> Self {
+        let max = if max == 0 { None } else { Some(max) };
+        self.concurrency = Some(ConcurrencyModel::Concurrent { max });
+        self
+    }
+
+    /// Force sequential processing, overriding a concurrent-capable consumer.
+    ///
+    /// Useful for HTTP routes that mutate shared state and need ordering
+    /// guarantees.
+    pub fn sequential(mut self) -> Self {
+        self.concurrency = Some(ConcurrencyModel::Sequential);
         self
     }
 
@@ -228,6 +259,11 @@ impl RouteBuilder {
         };
         let definition = if let Some(cb) = self.circuit_breaker_config {
             definition.with_circuit_breaker(cb)
+        } else {
+            definition
+        };
+        let definition = if let Some(concurrency) = self.concurrency {
+            definition.with_concurrency(concurrency)
         } else {
             definition
         };
@@ -940,5 +976,65 @@ mod tests {
             }
             other => panic!("Expected Multicast, got {:?}", other),
         }
+    }
+
+    // ── Concurrency builder tests ─────────────────────────────────────
+
+    #[test]
+    fn test_builder_concurrent_sets_concurrency() {
+        use camel_component::ConcurrencyModel;
+
+        let definition = RouteBuilder::from("http://0.0.0.0:8080/test")
+            .concurrent(16)
+            .to("log:info")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            definition.concurrency_override(),
+            Some(&ConcurrencyModel::Concurrent { max: Some(16) })
+        );
+    }
+
+    #[test]
+    fn test_builder_concurrent_zero_means_unbounded() {
+        use camel_component::ConcurrencyModel;
+
+        let definition = RouteBuilder::from("http://0.0.0.0:8080/test")
+            .concurrent(0)
+            .to("log:info")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            definition.concurrency_override(),
+            Some(&ConcurrencyModel::Concurrent { max: None })
+        );
+    }
+
+    #[test]
+    fn test_builder_sequential_sets_concurrency() {
+        use camel_component::ConcurrencyModel;
+
+        let definition = RouteBuilder::from("http://0.0.0.0:8080/test")
+            .sequential()
+            .to("log:info")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            definition.concurrency_override(),
+            Some(&ConcurrencyModel::Sequential)
+        );
+    }
+
+    #[test]
+    fn test_builder_default_concurrency_is_none() {
+        let definition = RouteBuilder::from("timer:tick")
+            .to("log:info")
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.concurrency_override(), None);
     }
 }

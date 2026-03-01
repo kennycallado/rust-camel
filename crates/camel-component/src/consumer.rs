@@ -41,6 +41,23 @@ impl ConsumerContext {
         self.cancel_token.is_cancelled()
     }
 
+    /// Returns a clone of the `CancellationToken`.
+    ///
+    /// Useful for consumers that spawn per-request tasks and need to propagate
+    /// shutdown to each task. See `HttpConsumer` for an example.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
+    }
+
+    /// Returns a clone of the channel sender for manual exchange submission.
+    ///
+    /// Useful for consumers that spawn per-request tasks (e.g., `HttpConsumer`)
+    /// where each task independently sends exchanges into the pipeline.
+    /// For simple consumers, prefer `send()` or `send_and_wait()` instead.
+    pub fn sender(&self) -> mpsc::Sender<ExchangeEnvelope> {
+        self.sender.clone()
+    }
+
     /// Send an exchange into the route pipeline (fire-and-forget).
     pub async fn send(&self, exchange: Exchange) -> Result<(), CamelError> {
         self.sender
@@ -69,6 +86,18 @@ impl ConsumerContext {
     }
 }
 
+/// How a consumer's exchanges should be processed by the pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConcurrencyModel {
+    /// Exchanges are processed one at a time, in order. Default for polling
+    /// consumers (timer, file) and synchronous consumers (direct).
+    Sequential,
+    /// Exchanges are processed concurrently via `tokio::spawn`. Optional
+    /// semaphore limit (`max`). `None` means unbounded (channel buffer is
+    /// the only backpressure).
+    Concurrent { max: Option<usize> },
+}
+
 /// A Consumer receives messages from an external source and feeds them into the route.
 #[async_trait]
 pub trait Consumer: Send + Sync {
@@ -77,6 +106,18 @@ pub trait Consumer: Send + Sync {
 
     /// Stop consuming messages.
     async fn stop(&mut self) -> Result<(), CamelError>;
+
+    /// Declares this consumer's natural concurrency model.
+    ///
+    /// The runtime uses this to decide whether to process exchanges
+    /// sequentially or spawn per-exchange. Consumers that accept inbound
+    /// connections (HTTP, WebSocket, Kafka) should override this to return
+    /// `ConcurrencyModel::Concurrent`.
+    ///
+    /// Default: `Sequential`.
+    fn concurrency_model(&self) -> ConcurrencyModel {
+        ConcurrencyModel::Sequential
+    }
 }
 
 #[cfg(test)]
@@ -93,5 +134,51 @@ mod tests {
         token.cancel();
         ctx.cancelled().await;
         assert!(ctx.is_cancelled());
+    }
+
+    #[test]
+    fn test_concurrency_model_default_is_sequential() {
+        use super::ConcurrencyModel;
+
+        struct DummyConsumer;
+
+        #[async_trait::async_trait]
+        impl super::Consumer for DummyConsumer {
+            async fn start(&mut self, _ctx: super::ConsumerContext) -> Result<(), CamelError> {
+                Ok(())
+            }
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                Ok(())
+            }
+        }
+
+        let consumer = DummyConsumer;
+        assert_eq!(consumer.concurrency_model(), ConcurrencyModel::Sequential);
+    }
+
+    #[test]
+    fn test_concurrency_model_concurrent_override() {
+        use super::ConcurrencyModel;
+
+        struct ConcurrentConsumer;
+
+        #[async_trait::async_trait]
+        impl super::Consumer for ConcurrentConsumer {
+            async fn start(&mut self, _ctx: super::ConsumerContext) -> Result<(), CamelError> {
+                Ok(())
+            }
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                Ok(())
+            }
+            fn concurrency_model(&self) -> ConcurrencyModel {
+                ConcurrencyModel::Concurrent { max: Some(16) }
+            }
+        }
+
+        let consumer = ConcurrentConsumer;
+        assert_eq!(
+            consumer.concurrency_model(),
+            ConcurrencyModel::Concurrent { max: Some(16) }
+        );
     }
 }

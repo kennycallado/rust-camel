@@ -24,3 +24,4 @@ tower.workspace = true
 serde_json.workspace = true
 tempfile = "3"
 wiremock = "0.6"
+reqwest = { workspace = true }

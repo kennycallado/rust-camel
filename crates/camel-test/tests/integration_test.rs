@@ -1823,3 +1823,428 @@ async fn test_multicast_parallel_collect_all() {
         result_exchanges[0].input.body
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test: HTTP concurrent pipeline processes multiple requests simultaneously
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_concurrent_pipeline() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("http://0.0.0.0:18080/concurrent-test")
+        .process(|ex| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Ok(ex)
+        })
+        .to("mock:concurrent-result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    // Give server time to start
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Fire 5 requests concurrently
+    let client = reqwest::Client::new();
+    let mut handles = Vec::new();
+    let start = std::time::Instant::now();
+    for i in 0..5 {
+        let client = client.clone();
+        handles.push(tokio::spawn(async move {
+            client
+                .get(&format!("http://127.0.0.1:18080/concurrent-test?i={i}"))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+
+    for handle in handles {
+        let resp = handle.await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    let elapsed = start.elapsed();
+
+    ctx.stop().await.unwrap();
+
+    // With concurrent pipeline: ~100ms (all 5 run in parallel).
+    // With sequential pipeline: ~500ms (one at a time).
+    // Use 350ms as threshold — generous margin but catches sequential.
+    assert!(
+        elapsed < std::time::Duration::from_millis(350),
+        "Expected concurrent execution (<350ms), but took {:?}. \
+         Pipeline may be running sequentially.",
+        elapsed
+    );
+
+    let endpoint = mock.get_endpoint("concurrent-result").unwrap();
+    endpoint.assert_exchange_count(5).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test: HTTP route with .sequential() override processes one at a time
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_sequential_override() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    // Same slow processor, but forced sequential via .sequential()
+    let route = RouteBuilder::from("http://0.0.0.0:18081/sequential-test")
+        .sequential()
+        .process(|ex| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Ok(ex)
+        })
+        .to("mock:sequential-result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Fire 3 requests concurrently
+    let client = reqwest::Client::new();
+    let mut handles = Vec::new();
+    let start = std::time::Instant::now();
+    for i in 0..3 {
+        let client = client.clone();
+        handles.push(tokio::spawn(async move {
+            client
+                .get(&format!("http://127.0.0.1:18081/sequential-test?i={i}"))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+
+    for handle in handles {
+        let resp = handle.await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+    let elapsed = start.elapsed();
+
+    ctx.stop().await.unwrap();
+
+    // Sequential: ~300ms (3 * 100ms). Must be clearly above concurrent threshold.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(250),
+        "Expected sequential execution (>=250ms), but took {:?}. \
+         Pipeline may be running concurrently despite .sequential() override.",
+        elapsed
+    );
+
+    let endpoint = mock.get_endpoint("sequential-result").unwrap();
+    endpoint.assert_exchange_count(3).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test: HTTP route with .concurrent(2) limits parallelism to 2
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_concurrent_with_semaphore_limit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    let peak = Arc::new(AtomicUsize::new(0));
+    let current = Arc::new(AtomicUsize::new(0));
+    let peak_clone = peak.clone();
+    let current_clone = current.clone();
+
+    // Limit to 2 concurrent pipeline executions
+    let route = RouteBuilder::from("http://0.0.0.0:18082/semaphore-test")
+        .concurrent(2)
+        .process(move |ex| {
+            let peak = peak_clone.clone();
+            let current = current_clone.clone();
+            async move {
+                let val = current.fetch_add(1, Ordering::SeqCst) + 1;
+                // Update peak
+                peak.fetch_max(val, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                current.fetch_sub(1, Ordering::SeqCst);
+                Ok(ex)
+            }
+        })
+        .to("mock:semaphore-result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Fire 6 requests concurrently
+    let client = reqwest::Client::new();
+    let mut handles = Vec::new();
+    for i in 0..6 {
+        let client = client.clone();
+        handles.push(tokio::spawn(async move {
+            client
+                .get(&format!("http://127.0.0.1:18082/semaphore-test?i={i}"))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+
+    for handle in handles {
+        let resp = handle.await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    ctx.stop().await.unwrap();
+
+    // Peak concurrency should be exactly 2 (semaphore limit)
+    let peak_val = peak.load(Ordering::SeqCst);
+    assert!(
+        peak_val <= 2,
+        "Expected peak concurrency <= 2, but got {}. Semaphore not working.",
+        peak_val
+    );
+
+    let endpoint = mock.get_endpoint("semaphore-result").unwrap();
+    endpoint.assert_exchange_count(6).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test: HTTP concurrent pipeline with circuit breaker (short duration)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_concurrent_with_circuit_breaker() {
+    use camel_api::error_handler::ErrorHandlerConfig;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    // Use short open_duration (1s) so circuit closes quickly and requests can complete
+    let route = RouteBuilder::from("http://0.0.0.0:18083/cb-test")
+        .process_fn(failing_step("concurrent cb failure"))
+        .circuit_breaker(
+            CircuitBreakerConfig::new()
+                .failure_threshold(2)
+                .open_duration(Duration::from_secs(1)),
+        )
+        .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:dlc"))
+        .to("mock:sink")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    // Give server time to start
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send 5 requests concurrently
+    let client = reqwest::Client::new();
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let client = client.clone();
+        handles.push(tokio::spawn(async move {
+            client
+                .get(&format!("http://127.0.0.1:18083/cb-test?i={i}"))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+
+    // All requests should complete (may take time due to circuit open backoff)
+    for handle in handles {
+        let resp = handle.await.unwrap();
+        // Status could be 200 (DLC handled) or 500 (pipeline error)
+        // We just assert it returns
+        assert!(
+            resp.status() == 200 || resp.status() == 500,
+            "Expected 200 or 500, got {}",
+            resp.status()
+        );
+    }
+
+    ctx.stop().await.unwrap();
+
+    // Due to race conditions in concurrent mode, the circuit breaker
+    // may see 2-5 failures before opening (multiple requests may be
+    // in-flight simultaneously when threshold is reached)
+    let dlc = mock.get_endpoint("dlc").unwrap();
+    let dlc_exchanges = dlc.get_received_exchanges().await;
+    assert!(
+        dlc_exchanges.len() >= 2,
+        "DLC should receive at least 2 exchanges (failure_threshold), got {}",
+        dlc_exchanges.len()
+    );
+    assert!(
+        dlc_exchanges.len() <= 5,
+        "DLC should receive at most 5 exchanges (total requests), got {}",
+        dlc_exchanges.len()
+    );
+
+    // All DLC exchanges should have errors
+    for ex in &dlc_exchanges {
+        assert!(ex.has_error(), "Each DLC exchange should carry an error");
+    }
+
+    // Mock sink receives 0 exchanges (all fail before reaching it)
+    if let Some(sink) = mock.get_endpoint("sink") {
+        assert_eq!(
+            sink.get_received_exchanges().await.len(),
+            0,
+            "mock:sink should receive zero exchanges"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test: HTTP concurrent shutdown drains in-flight exchanges
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_concurrent_shutdown_drains_inflight() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("http://0.0.0.0:18084/shutdown-test")
+        .process(|ex| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(ex)
+        })
+        .to("mock:shutdown-result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    // Give server time to start
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send 3 requests concurrently
+    let client = reqwest::Client::new();
+    let mut handles = Vec::new();
+    for i in 0..3 {
+        let client = client.clone();
+        handles.push(tokio::spawn(async move {
+            client
+                .get(&format!("http://127.0.0.1:18084/shutdown-test?i={i}"))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+
+    // Wait 50ms (some requests started but not completed)
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Stop should wait for in-flight exchanges to drain (default 30s timeout)
+    ctx.stop().await.unwrap();
+
+    // All 3 requests should complete
+    for handle in handles {
+        let resp = handle.await.unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // Mock should have received all 3 exchanges (drain completed)
+    let endpoint = mock.get_endpoint("shutdown-result").unwrap();
+    endpoint.assert_exchange_count(3).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test: HTTP concurrent error propagation to HTTP responses
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_concurrent_error_propagation() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("http://0.0.0.0:18085/error-test")
+        .process(|ex| async move {
+            // Check query param "fail"
+            let should_fail = ex
+                .input
+                .header("CamelHttpQuery")
+                .and_then(|v| v.as_str())
+                .map(|q| q.contains("fail=true"))
+                .unwrap_or(false);
+
+            if should_fail {
+                Err(CamelError::ProcessorError("deliberate".into()))
+            } else {
+                Ok(ex)
+            }
+        })
+        .to("mock:error-result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    // Give server time to start
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send 4 requests concurrently: 2 with fail=true, 2 with fail=false
+    let client = reqwest::Client::new();
+    let mut handles = Vec::new();
+    let mut fail_indices = Vec::new();
+
+    for i in 0..4 {
+        let should_fail = i % 2 == 0; // 0, 2 fail; 1, 3 succeed
+        if should_fail {
+            fail_indices.push(i);
+        }
+        let client = client.clone();
+        handles.push(tokio::spawn(async move {
+            let url = if should_fail {
+                format!("http://127.0.0.1:18085/error-test?i={i}&fail=true")
+            } else {
+                format!("http://127.0.0.1:18085/error-test?i={i}&fail=false")
+            };
+            let resp = client.get(&url).send().await.unwrap();
+            (i, should_fail, resp)
+        }));
+    }
+
+    // Assert response statuses
+    for handle in handles {
+        let (i, should_fail, resp) = handle.await.unwrap();
+        if should_fail {
+            assert_eq!(resp.status(), 500, "Request {i} with fail=true should return 500");
+        } else {
+            assert_eq!(resp.status(), 200, "Request {i} with fail=false should return 200");
+        }
+    }
+
+    ctx.stop().await.unwrap();
+
+    // Mock sink receives exactly 2 exchanges (the successful ones)
+    let endpoint = mock.get_endpoint("error-result").unwrap();
+    endpoint.assert_exchange_count(2).await;
+}

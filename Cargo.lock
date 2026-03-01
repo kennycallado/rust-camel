@@ -336,6 +336,7 @@ dependencies = [
  "camel-mock",
  "camel-processor",
  "camel-timer",
+ "reqwest",
  "serde_json",
  "tempfile",
  "tokio",

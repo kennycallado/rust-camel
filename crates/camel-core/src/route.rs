@@ -11,6 +11,7 @@ use camel_api::{
     AggregatorConfig, BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor,
     MulticastConfig, SplitterConfig,
 };
+use camel_component::ConcurrencyModel;
 
 /// A Route defines a message flow: from a source endpoint, through a composed
 /// Tower Service pipeline.
@@ -19,6 +20,9 @@ pub struct Route {
     pub(crate) from_uri: String,
     /// The composed processor pipeline as a type-erased Tower Service.
     pub(crate) pipeline: BoxProcessor,
+    /// Optional per-route concurrency model override.
+    /// When `None`, the consumer's default concurrency model is used.
+    pub(crate) concurrency: Option<ConcurrencyModel>,
 }
 
 impl Route {
@@ -27,6 +31,7 @@ impl Route {
         Self {
             from_uri: from_uri.into(),
             pipeline,
+            concurrency: None,
         }
     }
 
@@ -38,6 +43,22 @@ impl Route {
     /// Consume the route and return its pipeline.
     pub fn into_pipeline(self) -> BoxProcessor {
         self.pipeline
+    }
+
+    /// Set a concurrency model override for this route.
+    pub fn with_concurrency(mut self, model: ConcurrencyModel) -> Self {
+        self.concurrency = Some(model);
+        self
+    }
+
+    /// Get the concurrency model override, if any.
+    pub fn concurrency_override(&self) -> Option<&ConcurrencyModel> {
+        self.concurrency.as_ref()
+    }
+
+    /// Consume the route, returning the pipeline and optional concurrency override.
+    pub fn into_parts(self) -> (BoxProcessor, Option<ConcurrencyModel>) {
+        (self.pipeline, self.concurrency)
     }
 }
 
@@ -96,6 +117,9 @@ pub struct RouteDefinition {
     pub(crate) error_handler: Option<ErrorHandlerConfig>,
     /// Optional circuit breaker config. Applied between error handler and step pipeline.
     pub(crate) circuit_breaker: Option<CircuitBreakerConfig>,
+    /// User override for the consumer's concurrency model. `None` means
+    /// "use whatever the consumer declares".
+    pub(crate) concurrency: Option<ConcurrencyModel>,
 }
 
 impl RouteDefinition {
@@ -106,6 +130,7 @@ impl RouteDefinition {
             steps,
             error_handler: None,
             circuit_breaker: None,
+            concurrency: None,
         }
     }
 
@@ -134,6 +159,17 @@ impl RouteDefinition {
     /// Get the circuit breaker config, if set.
     pub fn circuit_breaker_config(&self) -> Option<&CircuitBreakerConfig> {
         self.circuit_breaker.as_ref()
+    }
+
+    /// User-specified concurrency override, if any.
+    pub fn concurrency_override(&self) -> Option<&ConcurrencyModel> {
+        self.concurrency.as_ref()
+    }
+
+    /// Override the consumer's concurrency model for this route.
+    pub fn with_concurrency(mut self, model: ConcurrencyModel) -> Self {
+        self.concurrency = Some(model);
+        self
     }
 }
 

@@ -1,0 +1,15 @@
+[package]
+name = "pipeline-concurrency"
+description = "Demonstrates pipeline concurrency modes: auto-concurrent, bounded, and sequential"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-builder.workspace = true
+camel-core.workspace = true
+camel-http.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
