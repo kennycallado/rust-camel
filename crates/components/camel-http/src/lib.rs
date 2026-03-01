@@ -1408,4 +1408,62 @@ mod tests {
 
         token.cancel();
     }
+
+    // -----------------------------------------------------------------------
+    // Integration tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_integration_single_consumer_round_trip() {
+        use camel_component::{ConsumerContext, ExchangeEnvelope};
+
+        // Get an OS-assigned free port (ephemeral)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // Release — ServerRegistry will rebind
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("http://127.0.0.1:{port}/echo"))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client
+            .post(format!("http://127.0.0.1:{port}/echo"))
+            .header("Content-Type", "text/plain")
+            .body("ping")
+            .send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                assert_eq!(
+                    envelope.exchange.input.header("CamelHttpMethod"),
+                    Some(&serde_json::Value::String("POST".into()))
+                );
+                assert_eq!(
+                    envelope.exchange.input.header("CamelHttpPath"),
+                    Some(&serde_json::Value::String("/echo".into()))
+                );
+                envelope.exchange.input.body = camel_api::body::Body::Text("pong".to_string());
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "pong");
+
+        token.cancel();
+    }
 }
