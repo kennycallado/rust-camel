@@ -1,4 +1,5 @@
 pub mod aggregator;
+pub mod dynamic_set_header;
 pub mod set_body;
 pub mod circuit_breaker;
 pub mod error_handler;
@@ -12,6 +13,7 @@ pub use circuit_breaker::{CircuitBreakerLayer, CircuitBreakerService};
 pub use error_handler::{ErrorHandlerLayer, ErrorHandlerService};
 pub use filter::FilterService;
 pub use map_body::{MapBody, MapBodyLayer};
+pub use dynamic_set_header::{DynamicSetHeader, DynamicSetHeaderLayer};
 pub use set_body::{SetBody, SetBodyLayer};
 pub use set_header::{SetHeader, SetHeaderLayer};
 pub use splitter::SplitterService;
