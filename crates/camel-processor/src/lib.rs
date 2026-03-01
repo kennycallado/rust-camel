@@ -1,10 +1,11 @@
 pub mod aggregator;
-pub mod dynamic_set_header;
-pub mod set_body;
 pub mod circuit_breaker;
+pub mod dynamic_set_header;
 pub mod error_handler;
 pub mod filter;
 pub mod map_body;
+pub mod multicast;
+pub mod set_body;
 pub mod set_header;
 pub mod splitter;
 pub mod stop;
@@ -12,10 +13,11 @@ pub mod wire_tap;
 
 pub use aggregator::AggregatorService;
 pub use circuit_breaker::{CircuitBreakerLayer, CircuitBreakerService};
+pub use dynamic_set_header::{DynamicSetHeader, DynamicSetHeaderLayer};
 pub use error_handler::{ErrorHandlerLayer, ErrorHandlerService};
 pub use filter::FilterService;
 pub use map_body::{MapBody, MapBodyLayer};
-pub use dynamic_set_header::{DynamicSetHeader, DynamicSetHeaderLayer};
+pub use multicast::{CAMEL_MULTICAST_COMPLETE, CAMEL_MULTICAST_INDEX, MulticastService};
 pub use set_body::{SetBody, SetBodyLayer};
 pub use set_header::{SetHeader, SetHeaderLayer};
 pub use splitter::SplitterService;

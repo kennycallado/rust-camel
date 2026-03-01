@@ -1,9 +1,12 @@
+use camel_api::aggregator::AggregatorConfig;
 use camel_api::body::Body;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::SplitterConfig;
-use camel_api::{BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProcessorFn, Value};
-use camel_api::aggregator::AggregatorConfig;
+use camel_api::{
+    BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProcessorFn, Value,
+};
 use camel_core::route::{BuilderStep, RouteDefinition};
 use camel_processor::{DynamicSetHeader, MapBody, SetBody, SetHeader, StopService};
 
@@ -26,7 +29,8 @@ pub trait StepAccumulator: Sized {
         Fut: std::future::Future<Output = Result<Exchange, CamelError>> + Send + 'static,
     {
         let svc = ProcessorFn::new(f);
-        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
     }
 
@@ -37,7 +41,8 @@ pub trait StepAccumulator: Sized {
 
     fn set_header(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         let svc = SetHeader::new(IdentityProcessor, key, value);
-        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
     }
 
@@ -46,7 +51,8 @@ pub trait StepAccumulator: Sized {
         F: Fn(Body) -> Body + Clone + Send + Sync + 'static,
     {
         let svc = MapBody::new(IdentityProcessor, mapper);
-        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
     }
 
@@ -56,7 +62,8 @@ pub trait StepAccumulator: Sized {
     {
         let body: Body = body.into();
         let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
-        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
     }
 
@@ -65,7 +72,8 @@ pub trait StepAccumulator: Sized {
         F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
     {
         let svc = SetBody::new(IdentityProcessor, expr);
-        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
     }
 
@@ -74,7 +82,8 @@ pub trait StepAccumulator: Sized {
         F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
     {
         let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
-        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
     }
 
@@ -88,7 +97,8 @@ pub trait StepAccumulator: Sized {
     /// When used inside a `.filter()` block, matching exchanges are halted and
     /// will not reach steps defined after `.end_filter()`.
     fn stop(mut self) -> Self {
-        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(StopService)));
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(StopService)));
         self
     }
 }
@@ -136,8 +146,6 @@ impl RouteBuilder {
         }
     }
 
-
-
     /// Add a WireTap step that sends a clone of the exchange to the given
     /// endpoint URI (fire-and-forget). The original exchange continues
     /// downstream unchanged.
@@ -160,8 +168,6 @@ impl RouteBuilder {
         self
     }
 
-
-
     /// Begin a Splitter sub-pipeline. Steps added after this call (until
     /// `.end_split()`) will be executed per-fragment.
     ///
@@ -172,6 +178,19 @@ impl RouteBuilder {
             parent: self,
             config,
             steps: Vec::new(),
+        }
+    }
+
+    /// Begin a Multicast sub-pipeline. Steps added after this call (until
+    /// `.end_multicast()`) will each receive a copy of the exchange.
+    ///
+    /// Returns a `MulticastBuilder` — you cannot call `.build()` until
+    /// `.end_multicast()` closes the multicast scope (enforced by the type system).
+    pub fn multicast(self) -> MulticastBuilder {
+        MulticastBuilder {
+            parent: self,
+            steps: Vec::new(),
+            config: MulticastConfig::new(),
         }
     }
 
@@ -298,6 +317,61 @@ impl StepAccumulator for FilterInSplitBuilder {
     }
 }
 
+/// Builder for the sub-pipeline within a `.multicast()` ... `.end_multicast()` block.
+///
+/// Exposes the same step methods as `RouteBuilder` (to, process, filter, etc.)
+/// but NOT `.build()` and NOT `.multicast()` (no nested multicasts).
+///
+/// Calling `.end_multicast()` packages the sub-steps into a `BuilderStep::Multicast`
+/// and returns the parent `RouteBuilder`.
+pub struct MulticastBuilder {
+    parent: RouteBuilder,
+    steps: Vec<BuilderStep>,
+    config: MulticastConfig,
+}
+
+impl MulticastBuilder {
+    pub fn parallel(mut self, parallel: bool) -> Self {
+        self.config = self.config.parallel(parallel);
+        self
+    }
+
+    pub fn parallel_limit(mut self, limit: usize) -> Self {
+        self.config = self.config.parallel_limit(limit);
+        self
+    }
+
+    pub fn stop_on_exception(mut self, stop: bool) -> Self {
+        self.config = self.config.stop_on_exception(stop);
+        self
+    }
+
+    pub fn timeout(mut self, duration: std::time::Duration) -> Self {
+        self.config = self.config.timeout(duration);
+        self
+    }
+
+    pub fn aggregation(mut self, strategy: MulticastStrategy) -> Self {
+        self.config = self.config.aggregation(strategy);
+        self
+    }
+
+    pub fn end_multicast(mut self) -> RouteBuilder {
+        let step = BuilderStep::Multicast {
+            steps: self.steps,
+            config: self.config,
+        };
+        self.parent.steps.push(step);
+        self.parent
+    }
+}
+
+impl StepAccumulator for MulticastBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -337,7 +411,7 @@ mod tests {
     fn test_builder_filter_adds_filter_step() {
         let definition = RouteBuilder::from("timer:tick")
             .filter(|_ex| true)
-                .to("mock:result")
+            .to("mock:result")
             .end_filter()
             .build()
             .unwrap();
@@ -380,7 +454,7 @@ mod tests {
         let definition = RouteBuilder::from("timer:tick")
             .set_header("source", Value::String("timer".into()))
             .filter(|ex| ex.input.header("source").is_some())
-                .to("log:info")
+            .to("log:info")
             .end_filter()
             .to("mock:result")
             .build()
@@ -413,10 +487,8 @@ mod tests {
         use camel_processor::FilterService;
 
         let sub = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
-        let mut svc = FilterService::new(
-            |ex: &Exchange| ex.input.body.as_text() == Some("pass"),
-            sub,
-        );
+        let mut svc =
+            FilterService::new(|ex: &Exchange| ex.input.body.as_text() == Some("pass"), sub);
         let exchange = Exchange::new(Message::new("pass"));
         let result = svc.ready().await.unwrap().call(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("pass"));
@@ -427,11 +499,11 @@ mod tests {
         use camel_api::BoxProcessorExt;
         use camel_processor::FilterService;
 
-        let sub = BoxProcessor::from_fn(|_ex| Box::pin(async move { Err(CamelError::ProcessorError("should not reach".into())) }));
-        let mut svc = FilterService::new(
-            |ex: &Exchange| ex.input.body.as_text() == Some("pass"),
-            sub,
-        );
+        let sub = BoxProcessor::from_fn(|_ex| {
+            Box::pin(async move { Err(CamelError::ProcessorError("should not reach".into())) })
+        });
+        let mut svc =
+            FilterService::new(|ex: &Exchange| ex.input.body.as_text() == Some("pass"), sub);
         let exchange = Exchange::new(Message::new("reject"));
         let result = svc.ready().await.unwrap().call(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("reject"));
@@ -520,7 +592,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let cb = definition.circuit_breaker_config().expect("circuit breaker should be set");
+        let cb = definition
+            .circuit_breaker_config()
+            .expect("circuit breaker should be set");
         assert_eq!(cb.failure_threshold, 5);
     }
 
@@ -550,12 +624,12 @@ mod tests {
 
     #[test]
     fn test_split_builder_typestate() {
-        use camel_api::splitter::{split_body_lines, SplitterConfig};
+        use camel_api::splitter::{SplitterConfig, split_body_lines};
 
         // .split() returns SplitBuilder, .end_split() returns RouteBuilder
         let definition = RouteBuilder::from("timer:test?period=1000")
             .split(SplitterConfig::new(split_body_lines()))
-                .to("mock:per-fragment")
+            .to("mock:per-fragment")
             .end_split()
             .to("mock:final")
             .build()
@@ -567,12 +641,12 @@ mod tests {
 
     #[test]
     fn test_split_builder_steps_collected() {
-        use camel_api::splitter::{split_body_lines, SplitterConfig};
+        use camel_api::splitter::{SplitterConfig, split_body_lines};
 
         let definition = RouteBuilder::from("timer:test?period=1000")
             .split(SplitterConfig::new(split_body_lines()))
-                .set_header("fragment", Value::String("yes".into()))
-                .to("mock:per-fragment")
+            .set_header("fragment", Value::String("yes".into()))
+            .to("mock:per-fragment")
             .end_split()
             .build()
             .unwrap();
@@ -589,16 +663,16 @@ mod tests {
 
     #[test]
     fn test_split_builder_config_propagated() {
-        use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
+        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 
         let definition = RouteBuilder::from("timer:test?period=1000")
             .split(
                 SplitterConfig::new(split_body_lines())
                     .parallel(true)
                     .parallel_limit(4)
-                    .aggregation(AggregationStrategy::CollectAll)
+                    .aggregation(AggregationStrategy::CollectAll),
             )
-                .to("mock:per-fragment")
+            .to("mock:per-fragment")
             .end_split()
             .build()
             .unwrap();
@@ -607,7 +681,10 @@ mod tests {
             BuilderStep::Split { config, .. } => {
                 assert!(config.parallel);
                 assert_eq!(config.parallel_limit, Some(4));
-                assert!(matches!(config.aggregation, AggregationStrategy::CollectAll));
+                assert!(matches!(
+                    config.aggregation,
+                    AggregationStrategy::CollectAll
+                ));
             }
             other => panic!("Expected Split, got {:?}", other),
         }
@@ -628,22 +705,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(definition.steps().len(), 1);
-        assert!(matches!(definition.steps()[0], BuilderStep::Aggregate { .. }));
+        assert!(matches!(
+            definition.steps()[0],
+            BuilderStep::Aggregate { .. }
+        ));
     }
 
     #[test]
     fn test_aggregate_in_split_builder() {
         use camel_api::aggregator::AggregatorConfig;
-        use camel_api::splitter::{split_body_lines, SplitterConfig};
+        use camel_api::splitter::{SplitterConfig, split_body_lines};
         use camel_core::route::BuilderStep;
 
         let definition = RouteBuilder::from("timer:tick")
             .split(SplitterConfig::new(split_body_lines()))
-                .aggregate(
-                    AggregatorConfig::correlate_by("key")
-                        .complete_when_size(1)
-                        .build(),
-                )
+            .aggregate(
+                AggregatorConfig::correlate_by("key")
+                    .complete_when_size(1)
+                    .build(),
+            )
             .end_split()
             .build()
             .unwrap();
@@ -693,9 +773,16 @@ mod tests {
             .build()
             .unwrap();
         let pipeline = compose_pipeline(
-            def.steps().iter().filter_map(|s| {
-                if let BuilderStep::Processor(p) = s { Some(p.clone()) } else { None }
-            }).collect()
+            def.steps()
+                .iter()
+                .filter_map(|s| {
+                    if let BuilderStep::Processor(p) = s {
+                        Some(p.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
         );
         let exchange = Exchange::new(Message::new("original"));
         let result = pipeline.oneshot(exchange).await.unwrap();
@@ -712,9 +799,16 @@ mod tests {
             .build()
             .unwrap();
         let pipeline = compose_pipeline(
-            def.steps().iter().filter_map(|s| {
-                if let BuilderStep::Processor(p) = s { Some(p.clone()) } else { None }
-            }).collect()
+            def.steps()
+                .iter()
+                .filter_map(|s| {
+                    if let BuilderStep::Processor(p) = s {
+                        Some(p.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
         );
         let exchange = Exchange::new(Message::new("hello"));
         let result = pipeline.oneshot(exchange).await.unwrap();
@@ -726,20 +820,32 @@ mod tests {
         use camel_core::route::compose_pipeline;
         let def = RouteBuilder::from("t:t")
             .set_header_fn("echo", |ex: &Exchange| {
-                ex.input.body.as_text()
+                ex.input
+                    .body
+                    .as_text()
                     .map(|t| Value::String(t.into()))
                     .unwrap_or(Value::Null)
             })
             .build()
             .unwrap();
         let pipeline = compose_pipeline(
-            def.steps().iter().filter_map(|s| {
-                if let BuilderStep::Processor(p) = s { Some(p.clone()) } else { None }
-            }).collect()
+            def.steps()
+                .iter()
+                .filter_map(|s| {
+                    if let BuilderStep::Processor(p) = s {
+                        Some(p.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
         );
         let exchange = Exchange::new(Message::new("ping"));
         let result = pipeline.oneshot(exchange).await.unwrap();
-        assert_eq!(result.input.header("echo"), Some(&Value::String("ping".into())));
+        assert_eq!(
+            result.input.header("echo"),
+            Some(&Value::String("ping".into()))
+        );
     }
 
     // ── FilterBuilder typestate tests ─────────────────────────────────────
@@ -748,7 +854,7 @@ mod tests {
     fn test_filter_builder_typestate() {
         let result = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
             .filter(|_ex| true)
-                .to("mock:inner")
+            .to("mock:inner")
             .end_filter()
             .to("mock:outer")
             .build();
@@ -759,7 +865,7 @@ mod tests {
     fn test_filter_builder_steps_collected() {
         let definition = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
             .filter(|_ex| true)
-                .to("mock:inner")
+            .to("mock:inner")
             .end_filter()
             .build()
             .unwrap();
@@ -777,7 +883,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(definition.steps().len(), 2);
-        assert!(matches!(&definition.steps()[0], BuilderStep::WireTap { uri } if uri == "mock:tap"));
+        assert!(
+            matches!(&definition.steps()[0], BuilderStep::WireTap { uri } if uri == "mock:tap")
+        );
         assert!(matches!(&definition.steps()[1], BuilderStep::To(uri) if uri == "mock:result"));
+    }
+
+    // ── MulticastBuilder typestate tests ─────────────────────────────────────
+
+    #[test]
+    fn test_multicast_builder_typestate() {
+        let definition = RouteBuilder::from("timer:tick")
+            .multicast()
+            .to("direct:a")
+            .to("direct:b")
+            .end_multicast()
+            .to("mock:result")
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 2); // Multicast + To("mock:result")
+    }
+
+    #[test]
+    fn test_multicast_builder_steps_collected() {
+        let definition = RouteBuilder::from("timer:tick")
+            .multicast()
+            .to("direct:a")
+            .to("direct:b")
+            .end_multicast()
+            .build()
+            .unwrap();
+
+        match &definition.steps()[0] {
+            BuilderStep::Multicast { steps, .. } => {
+                assert_eq!(steps.len(), 2);
+            }
+            other => panic!("Expected Multicast, got {:?}", other),
+        }
     }
 }

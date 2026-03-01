@@ -385,9 +385,8 @@ mod tests {
     // ErrorHandlerService must pass it through without retrying or forwarding to DLC.
     #[tokio::test]
     async fn test_stopped_bypasses_error_handler() {
-        let stopped_inner = BoxProcessor::from_fn(|_ex| {
-            Box::pin(async { Err(CamelError::Stopped) })
-        });
+        let stopped_inner =
+            BoxProcessor::from_fn(|_ex| Box::pin(async { Err(CamelError::Stopped) }));
 
         // DLC that tracks if it was ever called.
         let dlc_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -402,8 +401,15 @@ mod tests {
         let result = svc.oneshot(make_exchange()).await;
 
         // Must propagate Err(Stopped) — not absorb it.
-        assert!(matches!(result, Err(CamelError::Stopped)), "expected Err(Stopped), got: {:?}", result);
+        assert!(
+            matches!(result, Err(CamelError::Stopped)),
+            "expected Err(Stopped), got: {:?}",
+            result
+        );
         // DLC must NOT have been called.
-        assert!(!dlc_called.load(std::sync::atomic::Ordering::SeqCst), "DLC should not be called for Stopped");
+        assert!(
+            !dlc_called.load(std::sync::atomic::Ordering::SeqCst),
+            "DLC should not be called for Stopped"
+        );
     }
 }

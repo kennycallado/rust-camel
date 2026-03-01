@@ -8,12 +8,13 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{BoxProcessor, CamelError};
 use camel_component::{Component, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_endpoint::parse_uri;
-use camel_processor::error_handler::ErrorHandlerLayer;
-use camel_processor::circuit_breaker::CircuitBreakerLayer;
-use camel_processor::splitter::SplitterService;
 use camel_processor::AggregatorService;
 use camel_processor::FilterService;
+use camel_processor::MulticastService;
 use camel_processor::WireTapService;
+use camel_processor::circuit_breaker::CircuitBreakerLayer;
+use camel_processor::error_handler::ErrorHandlerLayer;
+use camel_processor::splitter::SplitterService;
 
 use crate::registry::Registry;
 use crate::route::{BuilderStep, Route, RouteDefinition, compose_pipeline};
@@ -134,6 +135,21 @@ impl CamelContext {
                     let endpoint = component.create_endpoint(&uri)?;
                     let producer = endpoint.create_producer()?;
                     let svc = WireTapService::new(producer);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::Multicast { config, steps } => {
+                    // Each top-level step in the multicast scope becomes an independent endpoint.
+                    // We resolve each step individually (not all together) so that each becomes
+                    // a separate endpoint in the multicast.
+                    let mut endpoints = Vec::new();
+                    for step in steps {
+                        // Resolve this single step into processors
+                        let sub_processors = self.resolve_steps(vec![step])?;
+                        // Compose them into a single endpoint
+                        let endpoint = compose_pipeline(sub_processors);
+                        endpoints.push(endpoint);
+                    }
+                    let svc = MulticastService::new(endpoints, config);
                     processors.push(BoxProcessor::new(svc));
                 }
             }

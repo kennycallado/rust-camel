@@ -109,8 +109,10 @@ where
         let config = self.config.clone();
 
         // Snapshot the current state before calling (briefly lock).
-        let current_is_half_open =
-            matches!(*state.lock().unwrap_or_else(|e| e.into_inner()), CircuitState::HalfOpen);
+        let current_is_half_open = matches!(
+            *state.lock().unwrap_or_else(|e| e.into_inner()),
+            CircuitState::HalfOpen
+        );
 
         Box::pin(async move {
             let result = inner.call(exchange).await;
@@ -130,7 +132,9 @@ where
                 Err(_) => {
                     if current_is_half_open {
                         // Half-open failure → reopen circuit.
-                        tracing::warn!("Circuit breaker transitioning from HalfOpen to Open (probe failed)");
+                        tracing::warn!(
+                            "Circuit breaker transitioning from HalfOpen to Open (probe failed)"
+                        );
                         *st = CircuitState::Open {
                             opened_at: Instant::now(),
                         };

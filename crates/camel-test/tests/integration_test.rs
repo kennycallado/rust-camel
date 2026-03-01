@@ -8,7 +8,7 @@
 
 use camel_api::Value;
 use camel_api::aggregator::AggregatorConfig;
-use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
+use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::CamelContext;
 use camel_file::FileComponent;
@@ -78,7 +78,7 @@ async fn test_timer_filter_mock() {
                 .map(|n| n % 2 == 0)
                 .unwrap_or(false)
         })
-            .to("mock:result")
+        .to("mock:result")
         .end_filter()
         .build()
         .unwrap();
@@ -103,7 +103,11 @@ async fn test_timer_filter_mock() {
                 .expect("CamelTimerCounter header missing")
         })
         .collect();
-    assert_eq!(counters, vec![2, 4], "only even counters should pass filter");
+    assert_eq!(
+        counters,
+        vec![2, 4],
+        "only even counters should pass filter"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -127,12 +131,13 @@ async fn test_filter_matching_exchanges_reach_inner_mock() {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
                 let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                ex.input.set_header("active", Value::Bool(n.is_multiple_of(2)));
+                ex.input
+                    .set_header("active", Value::Bool(n.is_multiple_of(2)));
                 Ok(ex)
             }
         })
         .filter(|ex| ex.input.header("active") == Some(&Value::Bool(true)))
-            .to("mock:matched")
+        .to("mock:matched")
         .end_filter()
         .build()
         .unwrap();
@@ -166,12 +171,13 @@ async fn test_filter_non_matching_continue_outer_pipeline() {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
                 let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                ex.input.set_header("active", Value::Bool(n.is_multiple_of(2)));
+                ex.input
+                    .set_header("active", Value::Bool(n.is_multiple_of(2)));
                 Ok(ex)
             }
         })
         .filter(|ex| ex.input.header("active") == Some(&Value::Bool(true)))
-            .to("mock:inner")
+        .to("mock:inner")
         .end_filter()
         .to("mock:outer") // always reached by all 4 exchanges
         .build()
@@ -711,11 +717,8 @@ async fn test_split_with_timer_and_mock() {
             ex.input.body = camel_api::body::Body::Text("line1\nline2\nline3".to_string());
             Ok(ex)
         })
-        .split(
-            SplitterConfig::new(split_body_lines())
-                .aggregation(AggregationStrategy::CollectAll),
-        )
-            .to("mock:per-line")
+        .split(SplitterConfig::new(split_body_lines()).aggregation(AggregationStrategy::CollectAll))
+        .to("mock:per-line")
         .end_split()
         .to("mock:final")
         .build()
@@ -730,17 +733,28 @@ async fn test_split_with_timer_and_mock() {
     // Each line should have been sent to mock:per-line
     let per_line = mock.get_endpoint("per-line").unwrap();
     let per_line_count = per_line.get_received_exchanges().await.len();
-    assert_eq!(per_line_count, 3, "Expected 3 per-line exchanges, got {per_line_count}");
+    assert_eq!(
+        per_line_count, 3,
+        "Expected 3 per-line exchanges, got {per_line_count}"
+    );
 
     // The aggregated result should have been sent to mock:final
     let final_ep = mock.get_endpoint("final").unwrap();
     let final_exchanges = final_ep.get_received_exchanges().await;
-    assert_eq!(final_exchanges.len(), 1, "Expected 1 final exchange, got {}", final_exchanges.len());
+    assert_eq!(
+        final_exchanges.len(),
+        1,
+        "Expected 1 final exchange, got {}",
+        final_exchanges.len()
+    );
 
     // CollectAll produces a JSON array of the fragment bodies
     let expected = serde_json::json!(["line1", "line2", "line3"]);
     match &final_exchanges[0].input.body {
-        camel_api::body::Body::Json(v) => assert_eq!(*v, expected, "CollectAll should produce JSON array of fragment bodies"),
+        camel_api::body::Body::Json(v) => assert_eq!(
+            *v, expected,
+            "CollectAll should produce JSON array of fragment bodies"
+        ),
         other => panic!("Expected JSON body from CollectAll, got {other:?}"),
     }
 }
@@ -765,7 +779,7 @@ async fn test_split_with_error_handler() {
         })
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:dlc"))
         .split(SplitterConfig::new(split_body_lines()).stop_on_exception(true))
-            .process_fn(failing_step("fragment boom"))
+        .process_fn(failing_step("fragment boom"))
         .end_split()
         .to("mock:sink")
         .build()
@@ -780,7 +794,10 @@ async fn test_split_with_error_handler() {
     // The split error should propagate up to the route's error handler (DLC)
     let dlc = mock.get_endpoint("dlc").unwrap();
     let dlc_count = dlc.get_received_exchanges().await.len();
-    assert_eq!(dlc_count, 1, "Expected exactly 1 DLC exchange (stop_on_exception), got {dlc_count}");
+    assert_eq!(
+        dlc_count, 1,
+        "Expected exactly 1 DLC exchange (stop_on_exception), got {dlc_count}"
+    );
 
     // The sink should NOT have received anything (error stops pipeline)
     let sink = mock.get_endpoint("sink").unwrap();
@@ -824,7 +841,11 @@ async fn test_file_consumer_to_mock() {
 
     let endpoint = mock.get_endpoint("result").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
-    assert!(exchanges.len() >= 2, "Should have read at least 2 files, got {}", exchanges.len());
+    assert!(
+        exchanges.len() >= 2,
+        "Should have read at least 2 files, got {}",
+        exchanges.len()
+    );
 
     for ex in &exchanges {
         assert!(ex.input.header("CamelFileName").is_some());
@@ -857,7 +878,10 @@ async fn test_timer_to_file_producer() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
 
-    assert!(dir.path().join("output.txt").exists(), "File should have been written");
+    assert!(
+        dir.path().join("output.txt").exists(),
+        "File should have been written"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1198,8 +1222,15 @@ async fn test_http_error_handling_e2e() {
     // The exchange should have been routed to the DLC, not mock:result
     let dlc = mock.get_endpoint("dlc").unwrap();
     let dlc_exchanges = dlc.get_received_exchanges().await;
-    assert_eq!(dlc_exchanges.len(), 1, "DLC should receive the failed exchange");
-    assert!(dlc_exchanges[0].has_error(), "Exchange should carry an error");
+    assert_eq!(
+        dlc_exchanges.len(),
+        1,
+        "DLC should receive the failed exchange"
+    );
+    assert!(
+        dlc_exchanges[0].has_error(),
+        "Exchange should carry an error"
+    );
 
     // mock:result should NOT have received anything
     if let Some(result) = mock.get_endpoint("result") {
@@ -1236,7 +1267,9 @@ async fn test_aggregator_collect_all() {
             async move {
                 let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let key = ["A", "B", "C"][(n % 3) as usize];
-                ex.input.headers.insert("orderId".to_string(), serde_json::json!(key));
+                ex.input
+                    .headers
+                    .insert("orderId".to_string(), serde_json::json!(key));
                 ex.input.body = camel_api::body::Body::Text(format!("item-{n}"));
                 Ok(ex)
             }
@@ -1264,7 +1297,12 @@ async fn test_aggregator_collect_all() {
         .iter()
         .filter(|e| e.property("CamelAggregatorPending").is_none())
         .collect();
-    assert_eq!(completed.len(), 3, "expected 3 completed batches, got {}", completed.len());
+    assert_eq!(
+        completed.len(),
+        3,
+        "expected 3 completed batches, got {}",
+        completed.len()
+    );
 
     for ex in &completed {
         let camel_api::body::Body::Json(v) = &ex.input.body else {
@@ -1304,7 +1342,9 @@ async fn test_aggregator_custom_strategy() {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
                 let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                ex.input.headers.insert("key".to_string(), serde_json::json!("X"));
+                ex.input
+                    .headers
+                    .insert("key".to_string(), serde_json::json!("X"));
                 ex.input.body = camel_api::body::Body::Text(n.to_string());
                 Ok(ex)
             }
@@ -1332,7 +1372,12 @@ async fn test_aggregator_custom_strategy() {
         .iter()
         .filter(|e| e.property("CamelAggregatorPending").is_none())
         .collect();
-    assert_eq!(completed.len(), 1, "expected 1 completed aggregate, got {}", completed.len());
+    assert_eq!(
+        completed.len(),
+        1,
+        "expected 1 completed aggregate, got {}",
+        completed.len()
+    );
     assert_eq!(completed[0].input.body.as_text(), Some("0+1+2+3"));
 }
 
@@ -1375,7 +1420,12 @@ async fn test_aggregator_scatter_gather() {
         .iter()
         .filter(|e| e.property("CamelAggregatorPending").is_none())
         .collect();
-    assert_eq!(completed.len(), 1, "expected 1 completed aggregate, got {}", completed.len());
+    assert_eq!(
+        completed.len(),
+        1,
+        "expected 1 completed aggregate, got {}",
+        completed.len()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1581,15 +1631,16 @@ async fn test_stop_inside_filter_prevents_outer_pipeline() {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
                 let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                ex.input.set_header("active", Value::Bool(n.is_multiple_of(2)));
+                ex.input
+                    .set_header("active", Value::Bool(n.is_multiple_of(2)));
                 Ok(ex)
             }
         })
         .filter(|ex| ex.input.header("active") == Some(&Value::Bool(true)))
-            .to("mock:inner")
-            .stop()           // active=true exchanges stop here
+        .to("mock:inner")
+        .stop() // active=true exchanges stop here
         .end_filter()
-        .to("mock:outer")     // only active=false exchanges should reach here
+        .to("mock:outer") // only active=false exchanges should reach here
         .build()
         .unwrap();
 
@@ -1603,4 +1654,172 @@ async fn test_stop_inside_filter_prevents_outer_pipeline() {
 
     inner.assert_exchange_count(2).await; // active=true: exchanges 0 and 2
     outer.assert_exchange_count(2).await; // active=false: exchanges 1 and 3 (stopped exchanges never reach outer)
+}
+
+// ---------------------------------------------------------------------------
+// Multicast EIP integration tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Test: Multicast sends exchange to multiple endpoints
+// ---------------------------------------------------------------------------
+// This test verifies that a route with Multicast correctly sends copies
+// of the exchange to each endpoint defined in the multicast scope.
+
+#[tokio::test]
+async fn test_multicast_sends_to_multiple_endpoints() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    // Multicast: timer → [mock:a, mock:b, mock:c] → mock:final
+    // Each endpoint in the multicast should receive the exchange.
+    let route = RouteBuilder::from("timer:multicast-test?period=50&repeatCount=1")
+        .multicast()
+        .to("mock:a")
+        .to("mock:b")
+        .to("mock:c")
+        .end_multicast()
+        .to("mock:final")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ctx.stop().await.unwrap();
+
+    // Each multicast endpoint should have received 1 exchange
+    let endpoint_a = mock.get_endpoint("a").unwrap();
+    let endpoint_b = mock.get_endpoint("b").unwrap();
+    let endpoint_c = mock.get_endpoint("c").unwrap();
+    let endpoint_final = mock.get_endpoint("final").unwrap();
+
+    endpoint_a.assert_exchange_count(1).await;
+    endpoint_b.assert_exchange_count(1).await;
+    endpoint_c.assert_exchange_count(1).await;
+    endpoint_final.assert_exchange_count(1).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test: Multicast sets metadata properties (index, complete)
+// ---------------------------------------------------------------------------
+// This test verifies that MulticastService correctly sets the CAMEL_MULTICAST_INDEX
+// and CAMEL_MULTICAST_COMPLETE properties on each cloned exchange.
+
+#[tokio::test]
+async fn test_multicast_metadata_properties() {
+    use camel_processor::CAMEL_MULTICAST_INDEX;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    // Multicast with 3 endpoints - each should receive exchange with correct index
+    let route = RouteBuilder::from("timer:multicast-meta?period=50&repeatCount=1")
+        .multicast()
+        .to("mock:meta-a")
+        .to("mock:meta-b")
+        .to("mock:meta-c")
+        .end_multicast()
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ctx.stop().await.unwrap();
+
+    // Verify that each endpoint received an exchange with the correct index property
+    let exchanges_a = mock
+        .get_endpoint("meta-a")
+        .unwrap()
+        .get_received_exchanges()
+        .await;
+    let exchanges_b = mock
+        .get_endpoint("meta-b")
+        .unwrap()
+        .get_received_exchanges()
+        .await;
+    let exchanges_c = mock
+        .get_endpoint("meta-c")
+        .unwrap()
+        .get_received_exchanges()
+        .await;
+
+    assert_eq!(exchanges_a.len(), 1);
+    assert_eq!(exchanges_b.len(), 1);
+    assert_eq!(exchanges_c.len(), 1);
+
+    // The MulticastService should set CAMEL_MULTICAST_INDEX on each exchange
+    // This will FAIL with the current placeholder implementation because it
+    // doesn't use MulticastService at all
+    let idx_a = exchanges_a[0].property(CAMEL_MULTICAST_INDEX);
+    let idx_b = exchanges_b[0].property(CAMEL_MULTICAST_INDEX);
+    let idx_c = exchanges_c[0].property(CAMEL_MULTICAST_INDEX);
+
+    assert!(idx_a.is_some(), "meta-a should have CAMEL_MULTICAST_INDEX");
+    assert!(idx_b.is_some(), "meta-b should have CAMEL_MULTICAST_INDEX");
+    assert!(idx_c.is_some(), "meta-c should have CAMEL_MULTICAST_INDEX");
+
+    // Verify correct index values
+    assert_eq!(idx_a, Some(&Value::from(0i64)));
+    assert_eq!(idx_b, Some(&Value::from(1i64)));
+    assert_eq!(idx_c, Some(&Value::from(2i64)));
+}
+
+// ---------------------------------------------------------------------------
+// Test: Multicast parallel CollectAll aggregation
+// ---------------------------------------------------------------------------
+// This test verifies that parallel multicast with CollectAll strategy produces
+// a JSON array body containing the results from all endpoints.
+
+#[tokio::test]
+async fn test_multicast_parallel_collect_all() {
+    use camel_api::body::Body;
+    use camel_api::multicast::MulticastStrategy;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:multicast-parallel?period=50&repeatCount=1")
+        .multicast()
+        .parallel(true)
+        .aggregation(MulticastStrategy::CollectAll)
+        .to("mock:p-a")
+        .to("mock:p-b")
+        .end_multicast()
+        .to("mock:p-result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ctx.stop().await.unwrap();
+
+    // Each parallel endpoint received one exchange
+    let endpoint_a = mock.get_endpoint("p-a").unwrap();
+    let endpoint_b = mock.get_endpoint("p-b").unwrap();
+    let endpoint_result = mock.get_endpoint("p-result").unwrap();
+
+    endpoint_a.assert_exchange_count(1).await;
+    endpoint_b.assert_exchange_count(1).await;
+    endpoint_result.assert_exchange_count(1).await;
+
+    // The result endpoint should have received a JSON array body (CollectAll)
+    let result_exchanges = endpoint_result.get_received_exchanges().await;
+    assert_eq!(result_exchanges.len(), 1);
+    assert!(
+        matches!(&result_exchanges[0].input.body, Body::Json(v) if v.is_array()),
+        "expected JSON array body from CollectAll aggregation, got {:?}",
+        result_exchanges[0].input.body
+    );
 }

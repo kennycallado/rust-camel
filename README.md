@@ -57,7 +57,7 @@ cargo run -p hello-world
 | `camel-core` | Runtime: `CamelContext`, `Route`, `RouteDefinition`, `SequentialPipeline` |
 | `camel-builder` | Fluent `RouteBuilder` API |
 | `camel-component` | `Component`, `Endpoint`, `Consumer` traits |
-| `camel-processor` | EIP processors: `Filter`, `SetHeader`, `MapBody` + Tower `Layer` types |
+| `camel-processor` | EIP processors: `Filter`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody` + Tower `Layer` types |
 | `camel-endpoint` | Endpoint URI parsing utilities |
 | `camel-timer` | Timer source component |
 | `camel-log` | Log sink component |
@@ -72,6 +72,17 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+## Implemented EIP Patterns
+
+| Pattern | Builder Method | Description |
+|---------|---------------|-------------|
+| Filter | `.filter(predicate)` | Forward exchange only when predicate is true |
+| Splitter | `.split(config)` | Split one exchange into multiple fragments |
+| Aggregator | `.aggregate(config)` | Correlate and aggregate multiple exchanges |
+| WireTap | `.wire_tap(uri)` | Fire-and-forget copy to a tap endpoint |
+| Multicast | `.multicast()` | Send the same exchange to multiple endpoints |
+| Content-Based Router | `.choice()` / `.when()` | Route based on exchange content |
+
 Run an example:
 
 ```sh
@@ -79,6 +90,9 @@ cargo run -p hello-world
 cargo run -p content-based-routing
 cargo run -p multi-route-direct
 cargo run -p transform-pipeline
+cargo run -p splitter
+cargo run -p wiretap
+cargo run -p multicast
 cargo run -p showcase
 ```
 

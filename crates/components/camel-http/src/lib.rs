@@ -170,8 +170,7 @@ impl Component for HttpsComponent {
 }
 
 fn build_client(config: &HttpConfig) -> Result<reqwest::Client, CamelError> {
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(config.connect_timeout);
+    let mut builder = reqwest::Client::builder().connect_timeout(config.connect_timeout);
 
     if !config.follow_redirects {
         builder = builder.redirect(reqwest::redirect::Policy::none());
@@ -226,7 +225,11 @@ impl HttpProducer {
         if let Some(ref method) = config.http_method {
             return method.to_uppercase();
         }
-        if let Some(method) = exchange.input.header("CamelHttpMethod").and_then(|v| v.as_str()) {
+        if let Some(method) = exchange
+            .input
+            .header("CamelHttpMethod")
+            .and_then(|v| v.as_str())
+        {
             return method.to_uppercase();
         }
         if !exchange.input.body.is_empty() {
@@ -236,15 +239,27 @@ impl HttpProducer {
     }
 
     fn resolve_url(exchange: &Exchange, config: &HttpConfig) -> String {
-        if let Some(uri) = exchange.input.header("CamelHttpUri").and_then(|v| v.as_str()) {
+        if let Some(uri) = exchange
+            .input
+            .header("CamelHttpUri")
+            .and_then(|v| v.as_str())
+        {
             let mut url = uri.to_string();
-            if let Some(path) = exchange.input.header("CamelHttpPath").and_then(|v| v.as_str()) {
+            if let Some(path) = exchange
+                .input
+                .header("CamelHttpPath")
+                .and_then(|v| v.as_str())
+            {
                 if !url.ends_with('/') && !path.starts_with('/') {
                     url.push('/');
                 }
                 url.push_str(path);
             }
-            if let Some(query) = exchange.input.header("CamelHttpQuery").and_then(|v| v.as_str()) {
+            if let Some(query) = exchange
+                .input
+                .header("CamelHttpQuery")
+                .and_then(|v| v.as_str())
+            {
                 url.push('?');
                 url.push_str(query);
             }
@@ -253,14 +268,22 @@ impl HttpProducer {
 
         let mut url = config.base_url.clone();
 
-        if let Some(path) = exchange.input.header("CamelHttpPath").and_then(|v| v.as_str()) {
+        if let Some(path) = exchange
+            .input
+            .header("CamelHttpPath")
+            .and_then(|v| v.as_str())
+        {
             if !url.ends_with('/') && !path.starts_with('/') {
                 url.push('/');
             }
             url.push_str(path);
         }
 
-        if let Some(query) = exchange.input.header("CamelHttpQuery").and_then(|v| v.as_str()) {
+        if let Some(query) = exchange
+            .input
+            .header("CamelHttpQuery")
+            .and_then(|v| v.as_str())
+        {
             url.push('?');
             url.push_str(query);
         } else if !config.query_params.is_empty() {
@@ -324,21 +347,23 @@ impl Service<Exchange> for HttpProducer {
             for (key, value) in &exchange.input.headers {
                 if !key.starts_with("Camel")
                     && let Some(val_str) = value.as_str()
-                        && let (Ok(name), Ok(val)) = (
-                            reqwest::header::HeaderName::from_bytes(key.as_bytes()),
-                            reqwest::header::HeaderValue::from_str(val_str),
-                        ) {
-                            request = request.header(name, val);
-                        }
+                    && let (Ok(name), Ok(val)) = (
+                        reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                        reqwest::header::HeaderValue::from_str(val_str),
+                    )
+                {
+                    request = request.header(name, val);
+                }
             }
 
             if let Some(body_bytes) = HttpProducer::body_to_bytes(&exchange.input.body) {
                 request = request.body(body_bytes);
             }
 
-            let response = request.send().await.map_err(|e| {
-                CamelError::ProcessorError(format!("HTTP request failed: {e}"))
-            })?;
+            let response = request
+                .send()
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("HTTP request failed: {e}")))?;
 
             let status_code = response.status().as_u16();
             let status_text = response
@@ -349,10 +374,9 @@ impl Service<Exchange> for HttpProducer {
 
             for (key, value) in response.headers() {
                 if let Ok(val_str) = value.to_str() {
-                    exchange.input.set_header(
-                        key.as_str(),
-                        serde_json::Value::String(val_str.to_string()),
-                    );
+                    exchange
+                        .input
+                        .set_header(key.as_str(), serde_json::Value::String(val_str.to_string()));
                 }
             }
 
@@ -422,9 +446,8 @@ mod tests {
 
     #[test]
     fn test_http_config_ok_status_range() {
-        let config = HttpConfig::from_uri(
-            "http://localhost/api?okStatusCodeRange=200-204"
-        ).unwrap();
+        let config =
+            HttpConfig::from_uri("http://localhost/api?okStatusCodeRange=200-204").unwrap();
         assert_eq!(config.ok_status_code_range, (200, 204));
     }
 
@@ -517,7 +540,10 @@ mod tests {
                         let body = "error body";
                         let response = format!(
                             "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
-                            status, status_text, body.len(), body
+                            status,
+                            status_text,
+                            body.len(),
+                            body
                         );
                         let _ = stream.write_all(response.as_bytes()).await;
                     });
@@ -543,7 +569,9 @@ mod tests {
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
 
-        let status = result.input.header("CamelHttpResponseCode")
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
             .and_then(|v| v.as_u64())
             .unwrap();
         assert_eq!(status, 200);
@@ -566,7 +594,9 @@ mod tests {
         let exchange = Exchange::new(Message::new("request body"));
         let result = producer.oneshot(exchange).await.unwrap();
 
-        let status = result.input.header("CamelHttpResponseCode")
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
             .and_then(|v| v.as_u64())
             .unwrap();
         assert_eq!(status, 200);
@@ -579,16 +609,19 @@ mod tests {
         let (url, _handle) = start_test_server().await;
 
         let component = HttpComponent::new();
-        let endpoint = component
-            .create_endpoint(&format!("{url}/api"))
-            .unwrap();
+        let endpoint = component.create_endpoint(&format!("{url}/api")).unwrap();
         let producer = endpoint.create_producer().unwrap();
 
         let mut exchange = Exchange::new(Message::default());
-        exchange.input.set_header("CamelHttpMethod", serde_json::Value::String("DELETE".to_string()));
+        exchange.input.set_header(
+            "CamelHttpMethod",
+            serde_json::Value::String("DELETE".to_string()),
+        );
 
         let result = producer.oneshot(exchange).await.unwrap();
-        let status = result.input.header("CamelHttpResponseCode")
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
             .and_then(|v| v.as_u64())
             .unwrap();
         assert_eq!(status, 200);
@@ -609,7 +642,9 @@ mod tests {
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
 
-        let status = result.input.header("CamelHttpResponseCode")
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
             .and_then(|v| v.as_u64())
             .unwrap();
         assert_eq!(status, 200);
@@ -654,7 +689,9 @@ mod tests {
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
 
-        let status = result.input.header("CamelHttpResponseCode")
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
             .and_then(|v| v.as_u64())
             .unwrap();
         assert_eq!(status, 500);
@@ -673,10 +710,15 @@ mod tests {
         let producer = endpoint.create_producer().unwrap();
 
         let mut exchange = Exchange::new(Message::default());
-        exchange.input.set_header("CamelHttpUri", serde_json::Value::String(format!("{url}/api")));
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String(format!("{url}/api")),
+        );
 
         let result = producer.oneshot(exchange).await.unwrap();
-        let status = result.input.header("CamelHttpResponseCode")
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
             .and_then(|v| v.as_u64())
             .unwrap();
         assert_eq!(status, 200);
@@ -689,16 +731,16 @@ mod tests {
         let (url, _handle) = start_test_server().await;
 
         let component = HttpComponent::new();
-        let endpoint = component
-            .create_endpoint(&format!("{url}/api"))
-            .unwrap();
+        let endpoint = component.create_endpoint(&format!("{url}/api")).unwrap();
         let producer = endpoint.create_producer().unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
 
-        assert!(result.input.header("content-type").is_some() ||
-                result.input.header("Content-Type").is_some());
+        assert!(
+            result.input.header("content-type").is_some()
+                || result.input.header("Content-Type").is_some()
+        );
         assert!(result.input.header("CamelHttpResponseText").is_some());
     }
 
@@ -719,13 +761,14 @@ mod tests {
                         let mut buf = vec![0u8; 4096];
                         let n = stream.read(&mut buf).await.unwrap_or(0);
                         let request = String::from_utf8_lossy(&buf[..n]).to_string();
-                        
+
                         // Check if this is a request to /final
                         if request.contains("GET /final") {
                             let body = r#"{"status":"final"}"#;
                             let response = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                body.len(), body
+                                body.len(),
+                                body
                             );
                             let _ = stream.write_all(response.as_bytes()).await;
                         } else {
@@ -749,7 +792,9 @@ mod tests {
 
         let component = HttpComponent::new();
         let endpoint = component
-            .create_endpoint(&format!("{url}?followRedirects=false&throwExceptionOnFailure=false"))
+            .create_endpoint(&format!(
+                "{url}?followRedirects=false&throwExceptionOnFailure=false"
+            ))
             .unwrap();
         let producer = endpoint.create_producer().unwrap();
 
@@ -757,10 +802,15 @@ mod tests {
         let result = producer.oneshot(exchange).await.unwrap();
 
         // Should get 302, NOT follow redirect to 200
-        let status = result.input.header("CamelHttpResponseCode")
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
             .and_then(|v| v.as_u64())
             .unwrap();
-        assert_eq!(status, 302, "Should NOT follow redirect when followRedirects=false");
+        assert_eq!(
+            status, 302,
+            "Should NOT follow redirect when followRedirects=false"
+        );
     }
 
     #[tokio::test]
@@ -779,10 +829,15 @@ mod tests {
         let result = producer.oneshot(exchange).await.unwrap();
 
         // Should follow redirect and get 200
-        let status = result.input.header("CamelHttpResponseCode")
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
             .and_then(|v| v.as_u64())
             .unwrap();
-        assert_eq!(status, 200, "Should follow redirect when followRedirects=true");
+        assert_eq!(
+            status, 200,
+            "Should follow redirect when followRedirects=true"
+        );
     }
 
     #[tokio::test]
@@ -803,7 +858,9 @@ mod tests {
 
         // The test server returns the request info in response
         // We just verify it succeeds (the query param was sent)
-        let status = result.input.header("CamelHttpResponseCode")
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
             .and_then(|v| v.as_u64())
             .unwrap();
         assert_eq!(status, 200);
@@ -813,15 +870,27 @@ mod tests {
     async fn test_non_camel_query_params_are_forwarded() {
         // This test verifies Bug #3 fix: non-Camel options should be forwarded
         // We'll test the config parsing, not the actual HTTP call
-        let config = HttpConfig::from_uri("http://example.com/api?apiKey=secret123&httpMethod=GET&token=abc456").unwrap();
-        
+        let config = HttpConfig::from_uri(
+            "http://example.com/api?apiKey=secret123&httpMethod=GET&token=abc456",
+        )
+        .unwrap();
+
         // apiKey and token are NOT Camel options, should be forwarded
-        assert!(config.query_params.contains_key("apiKey"), "apiKey should be preserved");
-        assert!(config.query_params.contains_key("token"), "token should be preserved");
+        assert!(
+            config.query_params.contains_key("apiKey"),
+            "apiKey should be preserved"
+        );
+        assert!(
+            config.query_params.contains_key("token"),
+            "token should be preserved"
+        );
         assert_eq!(config.query_params.get("apiKey").unwrap(), "secret123");
         assert_eq!(config.query_params.get("token").unwrap(), "abc456");
-        
+
         // httpMethod IS a Camel option, should NOT be in query_params
-        assert!(!config.query_params.contains_key("httpMethod"), "httpMethod should not be forwarded");
+        assert!(
+            !config.query_params.contains_key("httpMethod"),
+            "httpMethod should not be forwarded"
+        );
     }
 }

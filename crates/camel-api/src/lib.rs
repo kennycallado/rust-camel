@@ -6,6 +6,7 @@ pub mod error_handler;
 pub mod exchange;
 pub mod filter;
 pub mod message;
+pub mod multicast;
 pub mod processor;
 pub mod splitter;
 pub mod value;
@@ -21,9 +22,10 @@ pub use error_handler::{
 pub use exchange::{Exchange, ExchangePattern};
 pub use filter::FilterPredicate;
 pub use message::Message;
+pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
 pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn};
 pub use splitter::{
-    split_body, split_body_json_array, split_body_lines, AggregationStrategy, SplitExpression,
-    SplitterConfig,
+    AggregationStrategy, SplitExpression, SplitterConfig, split_body, split_body_json_array,
+    split_body_lines,
 };
 pub use value::{Headers, Value};

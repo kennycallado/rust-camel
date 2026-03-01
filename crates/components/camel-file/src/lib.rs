@@ -286,24 +286,28 @@ async fn poll_directory(
             .to_string();
 
         if let Some(ref target_name) = config.file_name
-            && file_name != *target_name {
-                continue;
-            }
+            && file_name != *target_name
+        {
+            continue;
+        }
 
         if let Some(re) = include_re
-            && !re.is_match(&file_name) {
-                continue;
-            }
+            && !re.is_match(&file_name)
+        {
+            continue;
+        }
 
         if let Some(re) = exclude_re
-            && re.is_match(&file_name) {
-                continue;
-            }
+            && re.is_match(&file_name)
+        {
+            continue;
+        }
 
         if let Some(ref move_dir) = config.move_to
-            && file_path.starts_with(base_path.join(move_dir)) {
-                continue;
-            }
+            && file_path.starts_with(base_path.join(move_dir))
+        {
+            continue;
+        }
 
         let content = match fs::read(&file_path).await {
             Ok(c) => c,
@@ -335,11 +339,25 @@ async fn poll_directory(
             .to_string();
 
         let mut exchange = Exchange::new(Message::new(Body::Bytes(bytes::Bytes::from(content))));
-        exchange.input.set_header("CamelFileName", serde_json::Value::String(relative_path));
-        exchange.input.set_header("CamelFileNameOnly", serde_json::Value::String(file_name.clone()));
-        exchange.input.set_header("CamelFileAbsolutePath", serde_json::Value::String(absolute_path));
-        exchange.input.set_header("CamelFileLength", serde_json::Value::Number(file_len.into()));
-        exchange.input.set_header("CamelFileLastModified", serde_json::Value::Number(last_modified.into()));
+        exchange
+            .input
+            .set_header("CamelFileName", serde_json::Value::String(relative_path));
+        exchange.input.set_header(
+            "CamelFileNameOnly",
+            serde_json::Value::String(file_name.clone()),
+        );
+        exchange.input.set_header(
+            "CamelFileAbsolutePath",
+            serde_json::Value::String(absolute_path),
+        );
+        exchange.input.set_header(
+            "CamelFileLength",
+            serde_json::Value::Number(file_len.into()),
+        );
+        exchange.input.set_header(
+            "CamelFileLastModified",
+            serde_json::Value::Number(last_modified.into()),
+        );
 
         if context.send(exchange).await.is_err() {
             break;
@@ -415,7 +433,11 @@ impl FileProducer {
     }
 
     fn resolve_filename(exchange: &Exchange, config: &FileConfig) -> Result<String, CamelError> {
-        if let Some(name) = exchange.input.header("CamelFileName").and_then(|v| v.as_str()) {
+        if let Some(name) = exchange
+            .input
+            .header("CamelFileName")
+            .and_then(|v| v.as_str())
+        {
             return Ok(name.to_string());
         }
         if let Some(ref name) = config.file_name {
@@ -447,9 +469,10 @@ impl Service<Exchange> for FileProducer {
             let target_path = dir_path.join(&file_name);
 
             if config.auto_create
-                && let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent).await.map_err(CamelError::from)?;
-                }
+                && let Some(parent) = target_path.parent()
+            {
+                fs::create_dir_all(parent).await.map_err(CamelError::from)?;
+            }
 
             if target_path.exists() {
                 match config.file_exist {
@@ -488,10 +511,16 @@ impl Service<Exchange> for FileProducer {
                 let temp_name = format!("{prefix}{file_name}");
                 let temp_path = dir_path.join(&temp_name);
 
-                fs::write(&temp_path, &data).await.map_err(CamelError::from)?;
-                fs::rename(&temp_path, &target_path).await.map_err(CamelError::from)?;
+                fs::write(&temp_path, &data)
+                    .await
+                    .map_err(CamelError::from)?;
+                fs::rename(&temp_path, &target_path)
+                    .await
+                    .map_err(CamelError::from)?;
             } else {
-                fs::write(&target_path, &data).await.map_err(CamelError::from)?;
+                fs::write(&target_path, &data)
+                    .await
+                    .map_err(CamelError::from)?;
             }
 
             let abs_path = target_path
@@ -499,10 +528,9 @@ impl Service<Exchange> for FileProducer {
                 .unwrap_or_else(|_| target_path.clone())
                 .to_string_lossy()
                 .to_string();
-            exchange.input.set_header(
-                "CamelFileNameProduced",
-                serde_json::Value::String(abs_path),
-            );
+            exchange
+                .input
+                .set_header("CamelFileNameProduced", serde_json::Value::String(abs_path));
 
             debug!(file = %target_path.display(), "File written");
             Ok(exchange)
@@ -550,8 +578,9 @@ mod tests {
     #[test]
     fn test_file_config_producer_options() {
         let config = FileConfig::from_uri(
-            "file:/data/output?fileExist=Append&tempPrefix=.tmp&autoCreate=false&fileName=out.txt"
-        ).unwrap();
+            "file:/data/output?fileExist=Append&tempPrefix=.tmp&autoCreate=false&fileName=out.txt",
+        )
+        .unwrap();
         assert_eq!(config.file_exist, FileExistStrategy::Append);
         assert_eq!(config.temp_prefix, Some(".tmp".to_string()));
         assert!(!config.auto_create);
@@ -605,7 +634,9 @@ mod tests {
 
         let component = FileComponent::new();
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}?noop=true&initialDelay=0&delay=100"))
+            .create_endpoint(&format!(
+                "file:{dir_path}?noop=true&initialDelay=0&delay=100"
+            ))
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -625,7 +656,8 @@ mod tests {
                     break;
                 }
             }
-        }).await;
+        })
+        .await;
         token.cancel();
 
         assert!(timeout.is_ok(), "Should have received 2 exchanges");
@@ -650,7 +682,9 @@ mod tests {
 
         let component = FileComponent::new();
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}?noop=true&initialDelay=0&delay=100&include=.*\\.csv"))
+            .create_endpoint(&format!(
+                "file:{dir_path}?noop=true&initialDelay=0&delay=100&include=.*\\.csv"
+            ))
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -670,11 +704,14 @@ mod tests {
                     break;
                 }
             }
-        }).await;
+        })
+        .await;
         token.cancel();
 
         assert_eq!(received.len(), 1);
-        let name = received[0].input.header("CamelFileNameOnly")
+        let name = received[0]
+            .input
+            .header("CamelFileNameOnly")
             .and_then(|v| v.as_str())
             .unwrap();
         assert_eq!(name, "data.csv");
@@ -689,7 +726,9 @@ mod tests {
 
         let component = FileComponent::new();
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}?delete=true&initialDelay=0&delay=100"))
+            .create_endpoint(&format!(
+                "file:{dir_path}?delete=true&initialDelay=0&delay=100"
+            ))
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -701,14 +740,15 @@ mod tests {
             consumer.start(ctx).await.unwrap();
         });
 
-        let _ = tokio::time::timeout(Duration::from_millis(500), async {
-            rx.recv().await
-        }).await;
+        let _ = tokio::time::timeout(Duration::from_millis(500), async { rx.recv().await }).await;
         token.cancel();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        assert!(!dir.path().join("deleteme.txt").exists(), "File should be deleted");
+        assert!(
+            !dir.path().join("deleteme.txt").exists(),
+            "File should be deleted"
+        );
     }
 
     #[tokio::test]
@@ -732,15 +772,19 @@ mod tests {
             consumer.start(ctx).await.unwrap();
         });
 
-        let _ = tokio::time::timeout(Duration::from_millis(500), async {
-            rx.recv().await
-        }).await;
+        let _ = tokio::time::timeout(Duration::from_millis(500), async { rx.recv().await }).await;
         token.cancel();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        assert!(!dir.path().join("moveme.txt").exists(), "Original file should be gone");
-        assert!(dir.path().join(".camel").join("moveme.txt").exists(), "File should be in .camel/");
+        assert!(
+            !dir.path().join("moveme.txt").exists(),
+            "Original file should be gone"
+        );
+        assert!(
+            dir.path().join(".camel").join("moveme.txt").exists(),
+            "File should be in .camel/"
+        );
     }
 
     #[tokio::test]
@@ -766,7 +810,10 @@ mod tests {
         token.cancel();
 
         let result = tokio::time::timeout(Duration::from_secs(1), handle).await;
-        assert!(result.is_ok(), "Consumer should have stopped after cancellation");
+        assert!(
+            result.is_ok(),
+            "Consumer should have stopped after cancellation"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -787,7 +834,10 @@ mod tests {
         let producer = endpoint.create_producer().unwrap();
 
         let mut exchange = Exchange::new(Message::new("file content"));
-        exchange.input.set_header("CamelFileName", serde_json::Value::String("output.txt".to_string()));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("output.txt".to_string()),
+        );
 
         let result = producer.oneshot(exchange).await.unwrap();
 
@@ -811,7 +861,10 @@ mod tests {
         let producer = endpoint.create_producer().unwrap();
 
         let mut exchange = Exchange::new(Message::new("nested"));
-        exchange.input.set_header("CamelFileName", serde_json::Value::String("file.txt".to_string()));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("file.txt".to_string()),
+        );
 
         producer.oneshot(exchange).await.unwrap();
 
@@ -834,10 +887,16 @@ mod tests {
         let producer = endpoint.create_producer().unwrap();
 
         let mut exchange = Exchange::new(Message::new("new"));
-        exchange.input.set_header("CamelFileName", serde_json::Value::String("existing.txt".to_string()));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("existing.txt".to_string()),
+        );
 
         let result = producer.oneshot(exchange).await;
-        assert!(result.is_err(), "Should fail when file exists with Fail strategy");
+        assert!(
+            result.is_err(),
+            "Should fail when file exists with Fail strategy"
+        );
     }
 
     #[tokio::test]
@@ -856,7 +915,10 @@ mod tests {
         let producer = endpoint.create_producer().unwrap();
 
         let mut exchange = Exchange::new(Message::new("new"));
-        exchange.input.set_header("CamelFileName", serde_json::Value::String("append.txt".to_string()));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("append.txt".to_string()),
+        );
 
         producer.oneshot(exchange).await.unwrap();
 
@@ -878,7 +940,10 @@ mod tests {
         let producer = endpoint.create_producer().unwrap();
 
         let mut exchange = Exchange::new(Message::new("atomic write"));
-        exchange.input.set_header("CamelFileName", serde_json::Value::String("final.txt".to_string()));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("final.txt".to_string()),
+        );
 
         producer.oneshot(exchange).await.unwrap();
 

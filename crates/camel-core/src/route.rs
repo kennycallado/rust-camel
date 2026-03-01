@@ -7,7 +7,10 @@ use tower::ServiceExt;
 
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{AggregatorConfig, BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, SplitterConfig};
+use camel_api::{
+    AggregatorConfig, BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor,
+    MulticastConfig, SplitterConfig,
+};
 
 /// A Route defines a message flow: from a source endpoint, through a composed
 /// Tower Service pipeline.
@@ -50,17 +53,18 @@ pub enum BuilderStep {
         steps: Vec<BuilderStep>,
     },
     /// An Aggregator step: collects exchanges by correlation key, emits when complete.
-    Aggregate {
-        config: AggregatorConfig,
-    },
+    Aggregate { config: AggregatorConfig },
     /// A Filter sub-pipeline: predicate + nested steps executed only when predicate is true.
     Filter {
         predicate: FilterPredicate,
         steps: Vec<BuilderStep>,
     },
     /// A WireTap step: sends a clone of the exchange to a tap endpoint (fire-and-forget).
-    WireTap {
-        uri: String,
+    WireTap { uri: String },
+    /// A Multicast step: sends the same exchange to multiple destinations.
+    Multicast {
+        steps: Vec<BuilderStep>,
+        config: MulticastConfig,
     },
 }
 
@@ -77,6 +81,9 @@ impl std::fmt::Debug for BuilderStep {
                 write!(f, "BuilderStep::Filter {{ steps: {steps:?}, .. }}")
             }
             BuilderStep::WireTap { uri } => write!(f, "BuilderStep::WireTap {{ uri: {uri:?} }}"),
+            BuilderStep::Multicast { steps, .. } => {
+                write!(f, "BuilderStep::Multicast {{ steps: {steps:?}, .. }}")
+            }
         }
     }
 }
@@ -172,9 +179,9 @@ impl Service<Exchange> for SequentialPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
     use camel_api::BoxProcessorExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A service that returns `Pending` on the first `poll_ready`, then `Ready`.
     #[derive(Clone)]
@@ -212,9 +219,7 @@ mod tests {
             ready: Arc::new(AtomicBool::new(false)),
         };
         let boxed = BoxProcessor::new(inner);
-        let mut pipeline = SequentialPipeline {
-            steps: vec![boxed],
-        };
+        let mut pipeline = SequentialPipeline { steps: vec![boxed] };
 
         // First poll_ready: inner returns Pending, so pipeline must too.
         let first = pipeline.poll_ready(&mut cx);
@@ -230,9 +235,7 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        let mut pipeline = SequentialPipeline {
-            steps: vec![],
-        };
+        let mut pipeline = SequentialPipeline { steps: vec![] };
 
         // Empty pipeline should be immediately ready.
         let result = pipeline.poll_ready(&mut cx);
@@ -244,15 +247,16 @@ mod tests {
     // responsible for silencing Stopped (treating it as a graceful halt, not an error).
     #[tokio::test]
     async fn test_pipeline_stops_gracefully_on_stopped_error() {
-        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
 
         // A flag to detect if a step AFTER stop() was called.
         let after_called = Arc::new(AtomicBool::new(false));
         let after_called_clone = after_called.clone();
 
-        let stop_step = BoxProcessor::from_fn(|_ex| {
-            Box::pin(async { Err(CamelError::Stopped) })
-        });
+        let stop_step = BoxProcessor::from_fn(|_ex| Box::pin(async { Err(CamelError::Stopped) }));
         let after_step = BoxProcessor::from_fn(move |ex| {
             after_called_clone.store(true, Ordering::SeqCst);
             Box::pin(async move { Ok(ex) })
@@ -266,8 +270,27 @@ mod tests {
         let result = pipeline.call(ex).await;
 
         // Pipeline propagates Stopped — callers (context loop) are responsible for silencing it.
-        assert!(matches!(result, Err(CamelError::Stopped)), "expected Err(Stopped), got: {:?}", result);
+        assert!(
+            matches!(result, Err(CamelError::Stopped)),
+            "expected Err(Stopped), got: {:?}",
+            result
+        );
         // The step after stop must NOT have been called.
-        assert!(!after_called.load(Ordering::SeqCst), "step after stop should not be called");
+        assert!(
+            !after_called.load(Ordering::SeqCst),
+            "step after stop should not be called"
+        );
+    }
+
+    #[test]
+    fn test_builder_step_multicast_variant() {
+        use camel_api::MulticastConfig;
+
+        let step = BuilderStep::Multicast {
+            steps: vec![BuilderStep::To("direct:a".into())],
+            config: MulticastConfig::new(),
+        };
+
+        assert!(matches!(step, BuilderStep::Multicast { .. }));
     }
 }

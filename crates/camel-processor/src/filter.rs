@@ -31,7 +31,10 @@ impl FilterService {
 
     /// Create from a pre-boxed `FilterPredicate` (used by `resolve_steps`).
     pub fn from_predicate(predicate: FilterPredicate, sub_pipeline: BoxProcessor) -> Self {
-        Self { predicate, sub_pipeline }
+        Self {
+            predicate,
+            sub_pipeline,
+        }
     }
 }
 

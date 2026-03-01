@@ -92,13 +92,9 @@ mod tests {
     async fn test_dynamic_set_header_from_body() {
         let exchange = Exchange::new(Message::new("world"));
 
-        let svc = DynamicSetHeader::new(
-            IdentityProcessor,
-            "greeting",
-            |ex: &Exchange| {
-                Value::String(format!("hello {}", ex.input.body.as_text().unwrap_or("")))
-            },
-        );
+        let svc = DynamicSetHeader::new(IdentityProcessor, "greeting", |ex: &Exchange| {
+            Value::String(format!("hello {}", ex.input.body.as_text().unwrap_or("")))
+        });
 
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(
@@ -113,11 +109,9 @@ mod tests {
         msg.set_header("key", Value::String("old".into()));
         let exchange = Exchange::new(msg);
 
-        let svc = DynamicSetHeader::new(
-            IdentityProcessor,
-            "key",
-            |ex: &Exchange| Value::String(ex.input.body.as_text().unwrap_or("").into()),
-        );
+        let svc = DynamicSetHeader::new(IdentityProcessor, "key", |ex: &Exchange| {
+            Value::String(ex.input.body.as_text().unwrap_or("").into())
+        });
 
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(
@@ -130,14 +124,10 @@ mod tests {
     async fn test_dynamic_set_header_preserves_body() {
         let exchange = Exchange::new(Message::new("body content"));
 
-        let svc = DynamicSetHeader::new(
-            IdentityProcessor,
-            "len",
-            |ex: &Exchange| {
-                let len = ex.input.body.as_text().map(|t| t.len() as i64).unwrap_or(0);
-                Value::Number(len.into())
-            },
-        );
+        let svc = DynamicSetHeader::new(IdentityProcessor, "len", |ex: &Exchange| {
+            let len = ex.input.body.as_text().map(|t| t.len() as i64).unwrap_or(0);
+            Value::Number(len.into())
+        });
 
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("body content"));
@@ -149,10 +139,9 @@ mod tests {
         use tower::ServiceBuilder;
 
         let svc = ServiceBuilder::new()
-            .layer(DynamicSetHeaderLayer::new(
-                "computed",
-                |_ex: &Exchange| Value::Bool(true),
-            ))
+            .layer(DynamicSetHeaderLayer::new("computed", |_ex: &Exchange| {
+                Value::Bool(true)
+            }))
             .service(IdentityProcessor);
 
         let exchange = Exchange::new(Message::default());

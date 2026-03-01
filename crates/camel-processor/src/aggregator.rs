@@ -7,11 +7,11 @@ use std::task::{Context, Poll};
 use tower::Service;
 
 use camel_api::{
+    CamelError,
     aggregator::{AggregationStrategy, AggregatorConfig, CompletionCondition},
     body::Body,
     exchange::Exchange,
     message::Message,
-    CamelError,
 };
 
 pub const CAMEL_AGGREGATOR_PENDING: &str = "CamelAggregatorPending";
@@ -128,9 +128,9 @@ fn aggregate(
         }
         AggregationStrategy::Custom(f) => {
             let mut iter = exchanges.into_iter();
-            let first = iter
-                .next()
-                .ok_or_else(|| CamelError::ProcessorError("Aggregator: empty bucket".to_string()))?;
+            let first = iter.next().ok_or_else(|| {
+                CamelError::ProcessorError("Aggregator: empty bucket".to_string())
+            })?;
             Ok(iter.fold(first, |acc, next| f(acc, next)))
         }
     }
@@ -148,8 +148,12 @@ mod tests {
     use tower::ServiceExt;
 
     fn make_exchange(header: &str, value: &str, body: &str) -> Exchange {
-        let mut msg = Message { headers: Default::default(), body: Body::Text(body.to_string()) };
-        msg.headers.insert(header.to_string(), serde_json::json!(value));
+        let mut msg = Message {
+            headers: Default::default(),
+            body: Body::Text(body.to_string()),
+        };
+        msg.headers
+            .insert(header.to_string(), serde_json::json!(value));
         Exchange::new(msg)
     }
 
@@ -191,9 +195,22 @@ mod tests {
     #[tokio::test]
     async fn test_collect_all_produces_json_array() {
         let mut svc = AggregatorService::new(config_size(2));
-        svc.ready().await.unwrap().call(make_exchange("orderId", "A", "alpha")).await.unwrap();
-        let result = svc.ready().await.unwrap().call(make_exchange("orderId", "A", "beta")).await.unwrap();
-        let Body::Json(v) = &result.input.body else { panic!("expected Body::Json") };
+        svc.ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "A", "alpha"))
+            .await
+            .unwrap();
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "A", "beta"))
+            .await
+            .unwrap();
+        let Body::Json(v) = &result.input.body else {
+            panic!("expected Body::Json")
+        };
         let arr = v.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0], serde_json::json!("alpha"));
@@ -204,25 +221,68 @@ mod tests {
     async fn test_two_keys_independent_buckets() {
         // completionSize=3 so we can test that A and B accumulate independently.
         let mut svc = AggregatorService::new(config_size(3));
-        svc.ready().await.unwrap().call(make_exchange("orderId", "A", "a1")).await.unwrap();
-        svc.ready().await.unwrap().call(make_exchange("orderId", "B", "b1")).await.unwrap();
-        svc.ready().await.unwrap().call(make_exchange("orderId", "A", "a2")).await.unwrap();
+        svc.ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "A", "a1"))
+            .await
+            .unwrap();
+        svc.ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "B", "b1"))
+            .await
+            .unwrap();
+        svc.ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "A", "a2"))
+            .await
+            .unwrap();
         // A has 2 items, B has 1 item — neither complete yet
-        let ra = svc.ready().await.unwrap().call(make_exchange("orderId", "A", "a3")).await.unwrap();
+        let ra = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "A", "a3"))
+            .await
+            .unwrap();
         // A now has 3 → completes
         assert!(matches!(ra.input.body, Body::Json(_)));
         // B only has 1 → still pending
-        let rb = svc.ready().await.unwrap().call(make_exchange("orderId", "B", "b_check")).await.unwrap();
+        let rb = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "B", "b_check"))
+            .await
+            .unwrap();
         assert!(matches!(rb.input.body, Body::Empty));
     }
 
     #[tokio::test]
     async fn test_bucket_resets_after_completion() {
         let mut svc = AggregatorService::new(config_size(2));
-        svc.ready().await.unwrap().call(make_exchange("orderId", "A", "x")).await.unwrap();
-        svc.ready().await.unwrap().call(make_exchange("orderId", "A", "x")).await.unwrap(); // completes
+        svc.ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "A", "x"))
+            .await
+            .unwrap();
+        svc.ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "A", "x"))
+            .await
+            .unwrap(); // completes
         // New bucket starts
-        let r = svc.ready().await.unwrap().call(make_exchange("orderId", "A", "new")).await.unwrap();
+        let r = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "A", "new"))
+            .await
+            .unwrap();
         assert!(matches!(r.input.body, Body::Empty)); // pending again
     }
 
@@ -236,8 +296,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_aggregation_strategy() {
-        use std::sync::Arc;
         use camel_api::aggregator::AggregationFn;
+        use std::sync::Arc;
 
         let f: AggregationFn = Arc::new(|mut acc: Exchange, next: Exchange| {
             let combined = format!(
@@ -253,8 +313,19 @@ mod tests {
             .strategy(AggregationStrategy::Custom(f))
             .build();
         let mut svc = AggregatorService::new(config);
-        svc.ready().await.unwrap().call(make_exchange("key", "X", "hello")).await.unwrap();
-        let result = svc.ready().await.unwrap().call(make_exchange("key", "X", "world")).await.unwrap();
+        svc.ready()
+            .await
+            .unwrap()
+            .call(make_exchange("key", "X", "hello"))
+            .await
+            .unwrap();
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("key", "X", "world"))
+            .await
+            .unwrap();
         assert_eq!(result.input.body.as_text(), Some("hello+world"));
     }
 
@@ -262,24 +333,48 @@ mod tests {
     async fn test_completion_predicate() {
         let config = AggregatorConfig::correlate_by("key")
             .complete_when(|bucket| {
-                bucket.iter().any(|e| e.input.body.as_text() == Some("DONE"))
+                bucket
+                    .iter()
+                    .any(|e| e.input.body.as_text() == Some("DONE"))
             })
             .build();
         let mut svc = AggregatorService::new(config);
-        svc.ready().await.unwrap().call(make_exchange("key", "K", "first")).await.unwrap();
-        svc.ready().await.unwrap().call(make_exchange("key", "K", "second")).await.unwrap();
-        let result = svc.ready().await.unwrap().call(make_exchange("key", "K", "DONE")).await.unwrap();
+        svc.ready()
+            .await
+            .unwrap()
+            .call(make_exchange("key", "K", "first"))
+            .await
+            .unwrap();
+        svc.ready()
+            .await
+            .unwrap()
+            .call(make_exchange("key", "K", "second"))
+            .await
+            .unwrap();
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("key", "K", "DONE"))
+            .await
+            .unwrap();
         assert!(result.property(CAMEL_AGGREGATOR_PENDING).is_none());
     }
 
     #[tokio::test]
     async fn test_missing_header_returns_error() {
         let mut svc = AggregatorService::new(config_size(2));
-        let msg = Message { headers: Default::default(), body: Body::Text("no key".into()) };
+        let msg = Message {
+            headers: Default::default(),
+            body: Body::Text("no key".into()),
+        };
         let ex = Exchange::new(msg);
         let result = svc.ready().await.unwrap().call(ex).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), camel_api::CamelError::ProcessorError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            camel_api::CamelError::ProcessorError(_)
+        ));
     }
 
     #[tokio::test]
@@ -287,9 +382,21 @@ mod tests {
         let svc1 = AggregatorService::new(config_size(2));
         let mut svc2 = svc1.clone();
         // send first exchange via svc1
-        svc1.clone().ready().await.unwrap().call(make_exchange("orderId", "A", "from-svc1")).await.unwrap();
+        svc1.clone()
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "A", "from-svc1"))
+            .await
+            .unwrap();
         // send second exchange via svc2 — should complete because same Arc<Mutex>
-        let result = svc2.ready().await.unwrap().call(make_exchange("orderId", "A", "from-svc2")).await.unwrap();
+        let result = svc2
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("orderId", "A", "from-svc2"))
+            .await
+            .unwrap();
         assert!(result.property(CAMEL_AGGREGATOR_PENDING).is_none());
     }
 

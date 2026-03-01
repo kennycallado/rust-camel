@@ -1,9 +1,10 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::multicast::MulticastStrategy;
 use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_json_array};
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
@@ -173,36 +174,46 @@ async fn main() -> Result<(), CamelError> {
         .to("log:filter-after?showBody=true&showHeaders=true") // all messages
         .build()?;
 
-    // Route 8 (Stop EIP): Timer -> process (alternate vip/regular) -> filter(vip) -> log + stop
-    // Demonstrates Apache Camel Stop EIP semantics:
-    //   - VIP messages enter the filter, hit log:stop-vip, then STOP — never reach log:stop-all
-    //   - regular messages skip the filter block entirely and reach log:stop-all
-    // Contrast with Route 7: there, ALL messages reach the outer log. Here, only regular ones do.
-    static STOP_COUNTER: AtomicU32 = AtomicU32::new(0);
+    // Route 8 (Stop EIP): Timer -> filter -> stop (halt matching) -> log (not reached for halted)
+    // Demonstrates the Stop EIP: exchanges matching the predicate are halted inside the filter.
+    // The step after end_filter() only receives non-matching exchanges.
+    let stop_counter = Arc::new(AtomicU64::new(0));
+    let stop_counter_clone = Arc::clone(&stop_counter);
 
-    let route8 = RouteBuilder::from("timer:stop-demo?period=2000&repeatCount=6")
+    let route8 = RouteBuilder::from("timer:stop-demo?period=3000&repeatCount=4")
+        .process(move |mut exchange| {
+            let n = stop_counter_clone.fetch_add(1, Ordering::SeqCst);
+            let label = if n.is_multiple_of(2) {
+                "halt-me"
+            } else {
+                "pass-me"
+            };
+            exchange.input.body = Body::Text(label.to_string());
+            async move { Ok(exchange) }
+        })
+        .filter(|ex| ex.input.body.as_text() == Some("halt-me"))
+        .to("log:stop-inside?showBody=true") // only "halt-me" reaches here
+        .stop() // halt: exchange does not continue past end_filter
+        .end_filter()
+        .to("log:stop-after?showBody=true") // only "pass-me" reaches here
+        .build()?;
+
+    // Route 9 (Multicast): Timer -> multicast (parallel, CollectAll) -> log summary
+    // Demonstrates fan-out: the same exchange is sent to all three log endpoints in
+    // parallel, and CollectAll aggregation gathers all responses into a JSON array.
+    let route9 = RouteBuilder::from("timer:multicast-demo?period=4000&repeatCount=3")
         .process(|mut exchange| async move {
-            let n = STOP_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let msg_type = if n % 2 == 0 { "vip" } else { "regular" };
-            exchange.input.body = Body::Text(format!(
-                "{}: {} message #{}",
-                msg_type.to_uppercase(),
-                msg_type,
-                n
-            ));
+            exchange.input.body = Body::Text("broadcast message".to_string());
             Ok(exchange)
         })
-        .filter(|ex| {
-            ex.input
-                .body
-                .as_text()
-                .map(|t| t.starts_with("VIP"))
-                .unwrap_or(false)
-        })
-        .to("log:stop-vip?showBody=true") // vip messages logged here ...
-        .stop() // ... then stopped: never reach log:stop-all
-        .end_filter()
-        .to("log:stop-all?showBody=true") // only regular messages arrive here
+        .multicast()
+        .parallel(true)
+        .aggregation(MulticastStrategy::CollectAll)
+        .to("log:mc-channel-a?showBody=true")
+        .to("log:mc-channel-b?showBody=true")
+        .to("log:mc-channel-c?showBody=true")
+        .end_multicast()
+        .to("log:mc-summary?showBody=true") // receives JSON array of all three responses
         .build()?;
 
     ctx.add_route_definition(route1)?;
@@ -213,17 +224,18 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(route6)?;
     ctx.add_route_definition(route7)?;
     ctx.add_route_definition(route8)?;
-
+    ctx.add_route_definition(route9)?;
     ctx.start().await?;
 
     println!("Showcase running. Routes:");
-    println!("  - timer:events (1s)       -> direct:dispatcher -> filter(typeA) -> log");
-    println!("  - timer:orders (3s)       -> split -> log");
-    println!("  - timer:file-writer (2s)  -> file:{file_path}/events.log");
-    println!("  - timer:http-poll (5s)    -> https:httpbin.org/get -> log");
-    println!("  - timer:monitor (4s)      -> wire_tap -> log");
-    println!("  - timer:filter-demo (2s)  -> filter(important) -> log inside + log after(all)");
-    println!("  - timer:stop-demo (2s)    -> filter(vip) -> log:stop-vip + stop | log:stop-all");
+    println!("  - timer:events (1s)         -> direct:dispatcher -> filter(typeA) -> log");
+    println!("  - timer:orders (3s)         -> split -> log");
+    println!("  - timer:file-writer (2s)    -> file:{file_path}/events.log");
+    println!("  - timer:http-poll (5s)      -> https:httpbin.org/get -> log");
+    println!("  - timer:monitor (4s)        -> wire_tap -> log");
+    println!("  - timer:filter-demo (2s)    -> filter(important) -> log inside + log after(all)");
+    println!("  - timer:stop-demo (3s)      -> filter -> stop(halt-me) -> log(pass-me only)");
+    println!("  - timer:multicast-demo (4s) -> multicast(parallel, CollectAll) -> log summary");
     println!();
     println!("Press Ctrl+C to stop...");
 

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use camel_api::CamelError;
 use camel_api::aggregator::AggregatorConfig;
 use camel_api::body::Body;
-use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_log::LogComponent;

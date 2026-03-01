@@ -73,8 +73,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use camel_api::{Exchange, IdentityProcessor, Message};
     use camel_api::body::Body;
+    use camel_api::{Exchange, IdentityProcessor, Message};
     use tower::ServiceExt;
 
     use super::*;
@@ -82,7 +82,9 @@ mod tests {
     #[tokio::test]
     async fn test_set_body_static_replaces_body() {
         let exchange = Exchange::new(Message::new("original"));
-        let svc = SetBody::new(IdentityProcessor, |_ex: &Exchange| Body::Text("replaced".into()));
+        let svc = SetBody::new(IdentityProcessor, |_ex: &Exchange| {
+            Body::Text("replaced".into())
+        });
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("replaced"));
     }
@@ -95,7 +97,9 @@ mod tests {
 
         let svc = SetBody::new(IdentityProcessor, |ex: &Exchange| {
             let base = ex.input.body.as_text().unwrap_or("");
-            let suffix = ex.input.header("suffix")
+            let suffix = ex
+                .input
+                .header("suffix")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             Body::Text(format!("{}{}", base, suffix))
@@ -113,7 +117,10 @@ mod tests {
 
         let svc = SetBody::new(IdentityProcessor, |_ex: &Exchange| Body::Text("new".into()));
         let result = svc.oneshot(exchange).await.unwrap();
-        assert_eq!(result.input.header("keep"), Some(&camel_api::Value::Bool(true)));
+        assert_eq!(
+            result.input.header("keep"),
+            Some(&camel_api::Value::Bool(true))
+        );
         assert_eq!(result.input.body.as_text(), Some("new"));
     }
 
@@ -122,7 +129,9 @@ mod tests {
         use tower::ServiceBuilder;
 
         let svc = ServiceBuilder::new()
-            .layer(SetBodyLayer::new(|_ex: &Exchange| Body::Text("layered".into())))
+            .layer(SetBodyLayer::new(|_ex: &Exchange| {
+                Body::Text("layered".into())
+            }))
             .service(IdentityProcessor);
 
         let exchange = Exchange::new(Message::default());

@@ -30,6 +30,7 @@ members = [
     "examples/http-client",
     "examples/aggregator",
     "examples/wiretap",
+    "examples/multicast",
 ]
 
 [workspace.package]

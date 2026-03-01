@@ -40,9 +40,10 @@ fn fail_n_times(times: u32) -> BoxProcessor {
             let n = c.fetch_add(1, Ordering::SeqCst);
             if n < times {
                 tracing::warn!(attempt = n + 1, "Transient failure (will retry)");
-                Err(CamelError::ProcessorError(
-                    format!("transient error, attempt {}", n + 1),
-                ))
+                Err(CamelError::ProcessorError(format!(
+                    "transient error, attempt {}",
+                    n + 1
+                )))
             } else {
                 tracing::info!(attempt = n + 1, "Recovered after retries");
                 Ok(ex)
@@ -90,10 +91,7 @@ async fn main() -> Result<(), CamelError> {
     // The DLC is never reached because the retry recovers the exchange.
     // -----------------------------------------------------------------------
     let route2 = RouteBuilder::from("timer:route2?period=2000&repeatCount=1")
-        .set_header(
-            "example",
-            Value::String("retry-backoff".into()),
-        )
+        .set_header("example", Value::String("retry-backoff".into()))
         .process_fn(fail_n_times(2))
         .error_handler(
             ErrorHandlerConfig::dead_letter_channel(
@@ -101,11 +99,7 @@ async fn main() -> Result<(), CamelError> {
             )
             .on_exception(|_| true) // match all errors
             .retry(3)
-            .with_backoff(
-                Duration::from_millis(50),
-                2.0,
-                Duration::from_secs(1),
-            )
+            .with_backoff(Duration::from_millis(50), 2.0, Duration::from_secs(1))
             .build(),
         )
         .build()?;
@@ -117,10 +111,7 @@ async fn main() -> Result<(), CamelError> {
     // instead of the default DLC. Other error types would still go to the DLC.
     // -----------------------------------------------------------------------
     let route3 = RouteBuilder::from("timer:route3?period=2000&repeatCount=1")
-        .set_header(
-            "example",
-            Value::String("on-exception-handled-by".into()),
-        )
+        .set_header("example", Value::String("on-exception-handled-by".into()))
         .process_fn(always_fail("route3: processor error"))
         .error_handler(
             ErrorHandlerConfig::dead_letter_channel(
@@ -145,10 +136,7 @@ async fn main() -> Result<(), CamelError> {
         .build()?;
 
     let route4 = RouteBuilder::from("timer:route4?period=2000&repeatCount=1")
-        .set_header(
-            "example",
-            Value::String("direct-bubble-up".into()),
-        )
+        .set_header("example", Value::String("direct-bubble-up".into()))
         .to("direct:fragile")
         .error_handler(ErrorHandlerConfig::dead_letter_channel(
             "log:route4-dlc?showHeaders=true&showBody=true",
@@ -169,10 +157,7 @@ async fn main() -> Result<(), CamelError> {
         .build()?;
 
     let route5 = RouteBuilder::from("timer:route5?period=2000&repeatCount=1")
-        .set_header(
-            "example",
-            Value::String("direct-contained".into()),
-        )
+        .set_header("example", Value::String("direct-contained".into()))
         .to("direct:resilient")
         .to("log:route5-continued?showHeaders=true&showBody=true")
         .build()?;
@@ -184,10 +169,7 @@ async fn main() -> Result<(), CamelError> {
     // set on CamelContext via ctx.set_error_handler().
     // -----------------------------------------------------------------------
     let route6 = RouteBuilder::from("timer:route6?period=2000&repeatCount=1")
-        .set_header(
-            "example",
-            Value::String("global-fallback".into()),
-        )
+        .set_header("example", Value::String("global-fallback".into()))
         .process_fn(always_fail("route6: uses global handler"))
         .build()?;
 

@@ -1,0 +1,15 @@
+[package]
+name = "multicast"
+description = "Multicast EIP example — route the same message to multiple endpoints"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-timer.workspace = true
+camel-log.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

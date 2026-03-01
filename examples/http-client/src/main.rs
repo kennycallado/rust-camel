@@ -1,4 +1,4 @@
-use camel_api::{body::Body, CamelError};
+use camel_api::{CamelError, body::Body};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_http::{HttpComponent, HttpsComponent};
@@ -22,7 +22,10 @@ async fn main() -> Result<(), CamelError> {
                 Ok(exchange)
             })
         })
-        .set_header("Content-Type", camel_api::Value::String("application/json".into()))
+        .set_header(
+            "Content-Type",
+            camel_api::Value::String("application/json".into()),
+        )
         .to("https://httpbin.org/post?httpMethod=POST")
         .process(|exchange| {
             Box::pin(async move {
@@ -34,7 +37,10 @@ async fn main() -> Result<(), CamelError> {
                 if let Some(text) = body_str
                     && let Ok(json) = serde_json::from_str::<serde_json::Value>(text)
                 {
-                    println!("Response status: {:?}", exchange.input.header("CamelHttpResponseCode"));
+                    println!(
+                        "Response status: {:?}",
+                        exchange.input.header("CamelHttpResponseCode")
+                    );
                     if let Some(url) = json.get("url") {
                         println!("Posted to: {}", url);
                     }

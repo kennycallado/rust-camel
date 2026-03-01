@@ -7,8 +7,7 @@ use tokio::sync::Semaphore;
 use tower::Service;
 
 use camel_api::{
-    AggregationStrategy, Body, BoxProcessor, CamelError, Exchange, SplitterConfig,
-    Value,
+    AggregationStrategy, Body, BoxProcessor, CamelError, Exchange, SplitterConfig, Value,
 };
 
 // ── Metadata property keys ─────────────────────────────────────────────
@@ -92,8 +91,7 @@ impl Service<Exchange> for SplitterService {
 
             // Process fragments through the sub-pipeline.
             let results = if parallel {
-                process_parallel(fragments, sub_pipeline, parallel_limit, stop_on_exception)
-                    .await
+                process_parallel(fragments, sub_pipeline, parallel_limit, stop_on_exception).await
             } else {
                 process_sequential(fragments, sub_pipeline, stop_on_exception).await
             };
@@ -179,10 +177,7 @@ fn aggregate(
     match strategy {
         AggregationStrategy::LastWins => {
             // Return the last result (error or success).
-            results
-                .into_iter()
-                .last()
-                .unwrap_or_else(|| Ok(original))
+            results.into_iter().last().unwrap_or_else(|| Ok(original))
         }
         AggregationStrategy::CollectAll => {
             // Collect all bodies into a JSON array. Errors propagate.
@@ -205,9 +200,7 @@ fn aggregate(
         AggregationStrategy::Custom(fold_fn) => {
             // Fold using the custom function, starting from the first result.
             let mut iter = results.into_iter();
-            let first = iter
-                .next()
-                .unwrap_or_else(|| Ok(original.clone()))?;
+            let first = iter.next().unwrap_or_else(|| Ok(original.clone()))?;
             iter.try_fold(first, |acc, next_result| {
                 let next = next_result?;
                 Ok(fold_fn(acc, next))
@@ -222,8 +215,8 @@ fn aggregate(
 mod tests {
     use super::*;
     use camel_api::{BoxProcessorExt, Message};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 
     // ── Test helpers ───────────────────────────────────────────────────
@@ -276,7 +269,13 @@ mod tests {
             .aggregation(AggregationStrategy::LastWins);
         let mut svc = SplitterService::new(config, uppercase_pipeline());
 
-        let result = svc.ready().await.unwrap().call(make_exchange("a\nb\nc")).await.unwrap();
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("a\nb\nc"))
+            .await
+            .unwrap();
         assert_eq!(result.input.body.as_text(), Some("C"));
     }
 
@@ -288,7 +287,13 @@ mod tests {
             .aggregation(AggregationStrategy::CollectAll);
         let mut svc = SplitterService::new(config, uppercase_pipeline());
 
-        let result = svc.ready().await.unwrap().call(make_exchange("a\nb\nc")).await.unwrap();
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("a\nb\nc"))
+            .await
+            .unwrap();
         let expected = serde_json::json!(["A", "B", "C"]);
         match &result.input.body {
             Body::Json(v) => assert_eq!(*v, expected),
@@ -304,7 +309,13 @@ mod tests {
             .aggregation(AggregationStrategy::Original);
         let mut svc = SplitterService::new(config, uppercase_pipeline());
 
-        let result = svc.ready().await.unwrap().call(make_exchange("a\nb\nc")).await.unwrap();
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("a\nb\nc"))
+            .await
+            .unwrap();
         // Original body should be unchanged.
         assert_eq!(result.input.body.as_text(), Some("a\nb\nc"));
     }
@@ -325,7 +336,13 @@ mod tests {
             .aggregation(AggregationStrategy::Custom(joiner));
         let mut svc = SplitterService::new(config, uppercase_pipeline());
 
-        let result = svc.ready().await.unwrap().call(make_exchange("a\nb\nc")).await.unwrap();
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("a\nb\nc"))
+            .await
+            .unwrap();
         assert_eq!(result.input.body.as_text(), Some("A+B+C"));
     }
 
@@ -334,8 +351,7 @@ mod tests {
     #[tokio::test]
     async fn test_split_stop_on_exception() {
         // 5 fragments, fail on the 2nd (index 1), stop=true
-        let config = SplitterConfig::new(camel_api::split_body_lines())
-            .stop_on_exception(true);
+        let config = SplitterConfig::new(camel_api::split_body_lines()).stop_on_exception(true);
         let mut svc = SplitterService::new(config, fail_on_nth(1));
 
         let result = svc
@@ -476,7 +492,10 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         let poll = Pin::new(&mut svc).poll_ready(&mut cx);
-        assert!(poll.is_pending(), "expected Pending when sub_pipeline not ready");
+        assert!(
+            poll.is_pending(),
+            "expected Pending when sub_pipeline not ready"
+        );
 
         // Mark inner as ready.
         ready_flag.store(true, Ordering::SeqCst);

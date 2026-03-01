@@ -116,11 +116,17 @@ mod tests {
 
     #[test]
     fn test_parse_https_uri_with_camel_params() {
-        let result = parse_uri("https://api.example.com/v1/data?httpMethod=POST&throwExceptionOnFailure=false").unwrap();
+        let result = parse_uri(
+            "https://api.example.com/v1/data?httpMethod=POST&throwExceptionOnFailure=false",
+        )
+        .unwrap();
         assert_eq!(result.scheme, "https");
         assert_eq!(result.path, "//api.example.com/v1/data");
         assert_eq!(result.params.get("httpMethod"), Some(&"POST".to_string()));
-        assert_eq!(result.params.get("throwExceptionOnFailure"), Some(&"false".to_string()));
+        assert_eq!(
+            result.params.get("throwExceptionOnFailure"),
+            Some(&"false".to_string())
+        );
     }
 
     #[test]
@@ -136,6 +142,9 @@ mod tests {
         let result = parse_uri("http://example.com:3000/api?connectTimeout=5000").unwrap();
         assert_eq!(result.scheme, "http");
         assert_eq!(result.path, "//example.com:3000/api");
-        assert_eq!(result.params.get("connectTimeout"), Some(&"5000".to_string()));
+        assert_eq!(
+            result.params.get("connectTimeout"),
+            Some(&"5000".to_string())
+        );
     }
 }
