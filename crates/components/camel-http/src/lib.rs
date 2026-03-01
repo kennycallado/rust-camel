@@ -1466,4 +1466,79 @@ mod tests {
 
         token.cancel();
     }
+
+    #[tokio::test]
+    async fn test_integration_two_consumers_shared_port() {
+        use camel_component::{ConsumerContext, ExchangeEnvelope};
+
+        // Get an OS-assigned free port (ephemeral)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let component = HttpComponent::new();
+
+        // Consumer A: /hello
+        let endpoint_a = component
+            .create_endpoint(&format!("http://127.0.0.1:{port}/hello"))
+            .unwrap();
+        let mut consumer_a = endpoint_a.create_consumer().unwrap();
+
+        // Consumer B: /world
+        let endpoint_b = component
+            .create_endpoint(&format!("http://127.0.0.1:{port}/world"))
+            .unwrap();
+        let mut consumer_b = endpoint_b.create_consumer().unwrap();
+
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token_a = tokio_util::sync::CancellationToken::new();
+        let ctx_a = ConsumerContext::new(tx_a, token_a.clone());
+
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token_b = tokio_util::sync::CancellationToken::new();
+        let ctx_b = ConsumerContext::new(tx_b, token_b.clone());
+
+        tokio::spawn(async move { consumer_a.start(ctx_a).await.unwrap() });
+        tokio::spawn(async move { consumer_b.start(ctx_b).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+
+        // Request to /hello
+        let fut_hello = client
+            .get(format!("http://127.0.0.1:{port}/hello"))
+            .send();
+        let (resp_hello, _) = tokio::join!(fut_hello, async {
+            if let Some(mut envelope) = rx_a.recv().await {
+                envelope.exchange.input.body =
+                    camel_api::body::Body::Text("hello-response".to_string());
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        // Request to /world
+        let fut_world = client
+            .get(format!("http://127.0.0.1:{port}/world"))
+            .send();
+        let (resp_world, _) = tokio::join!(fut_world, async {
+            if let Some(mut envelope) = rx_b.recv().await {
+                envelope.exchange.input.body =
+                    camel_api::body::Body::Text("world-response".to_string());
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let body_a = resp_hello.unwrap().text().await.unwrap();
+        let body_b = resp_world.unwrap().text().await.unwrap();
+
+        assert_eq!(body_a, "hello-response");
+        assert_eq!(body_b, "world-response");
+
+        token_a.cancel();
+        token_b.cancel();
+    }
 }
