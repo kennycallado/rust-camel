@@ -1,7 +1,7 @@
 use camel_api::body::Body;
 use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
 use camel_api::CamelError;
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_log::LogComponent;
 use camel_timer::TimerComponent;
@@ -27,7 +27,7 @@ async fn main() -> Result<(), CamelError> {
 
     let route = RouteBuilder::from("timer:batch?period=2000&repeatCount=3")
         // Simulate incoming CSV data
-        .process(|mut exchange| {
+        .process(|mut exchange: camel_api::Exchange| {
             Box::pin(async move {
                 exchange.input.body =
                     Body::Text("alice,100\nbob,200\ncharlie,300".to_string());
@@ -40,7 +40,7 @@ async fn main() -> Result<(), CamelError> {
                 .aggregation(AggregationStrategy::CollectAll),
         )
             // Transform each CSV line into a JSON object
-            .map_body(|body| {
+            .map_body(|body: Body| {
                 let text = body.as_text().unwrap_or("");
                 let parts: Vec<&str> = text.splitn(2, ',').collect();
                 let (name, amount) = match parts.as_slice() {

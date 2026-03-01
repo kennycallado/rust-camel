@@ -207,7 +207,6 @@ pub struct SplitBuilder {
     steps: Vec<BuilderStep>,
 }
 
-// TODO: Extract StepAccumulator trait to DRY step methods shared with RouteBuilder.
 impl SplitBuilder {
     /// Open a filter scope within the split sub-pipeline.
     pub fn filter<F>(self, predicate: F) -> FilterInSplitBuilder

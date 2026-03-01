@@ -1,5 +1,5 @@
 use camel_api::{CamelError, Value};
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_file::FileComponent;
 use camel_log::LogComponent;

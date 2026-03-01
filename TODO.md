@@ -21,8 +21,8 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | Aggregator v2: estado compartido cross-route                         | Aggregator design Deferred             | Baja — requiere registry de agregadores nombrados en `CamelContext`            |        |
 | Aggregator v2: estado persistente                                    | Aggregator design Deferred             | Baja — buckets son in-memory, se pierden en restart                            |        |
 | Aggregator v2: `forceCompletionOnStop`/`discardOnAggregationFailure` | Aggregator design Deferred             | Baja — opciones Java Camel diferidas                                           |        |
-| WireTap v2: prepare/processor function                                | WireTap postmortem                     | Baja — transformar copia antes de enviar; Apache Camel tiene esto              |        |
-| WireTap v2: synchronous tap with timeout                               | WireTap design Non-Goals               | Baja — viola fire-and-forget, añade complejidad                                |        |
+| WireTap v2: prepare/processor function                               | WireTap postmortem                     | Baja — transformar copia antes de enviar; Apache Camel tiene esto              |        |
+| WireTap v2: synchronous tap with timeout                             | WireTap design Non-Goals               | Baja — viola fire-and-forget, añade complejidad                                |        |
 | Multicast EIP                                                        | Splitter design Future EIPs            | Media — mismo patrón que Splitter (clone N, aggregate)                         |        |
 | Routing Slip EIP                                                     | Core design                            | Media-baja                                                                     |        |
 | HTTP consumer (server/webhook endpoint)                              | File-HTTP plan implícito               | Media-baja — HttpConsumer no implementado, solo producer                       |        |
@@ -30,7 +30,7 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | Pipeline concurrency (Option E typestate)                            | Pipeline concurrency analysis          | Media-baja — struct-based consumers con concurrency compile-time               |        |
 | HttpOperationFailed: añadir URL y método                             | File-HTTP postmortem \#7               | Baja — mejora de debugging en logs                                             |        |
 | Recipient List EIP                                                   | Splitter design Future EIPs            | Baja — Multicast dinámico                                                      |        |
-| StepAccumulator trait (DRY SplitBuilder/RouteBuilder)                | Splitter postmortem Task 4             | Baja — refactoring puro, sin impacto funcional; ahora afecta 3 builders:       |        |
+| StepAccumulator trait (DRY SplitBuilder/RouteBuilder)                | Splitter postmortem Task 4             | Baja — refactoring puro, sin impacto funcional; ahora afecta 4 builders:       | DONE   |
 |                                                                      |                                        | RouteBuilder, SplitBuilder,                                                    |        |
 |                                                                      |                                        | y cualquier builder futuro que añada `.aggregate()`                            |        |
 | Parallel stop_on_exception con future cancellation                   | Splitter design Non-Goals + postmortem | Baja — fallback funcional existe (join_all, retorna primer error)              |        |

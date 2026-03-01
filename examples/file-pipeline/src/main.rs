@@ -1,5 +1,5 @@
 use camel_api::{body::Body, CamelError, Value};
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_file::FileComponent;
 use camel_log::LogComponent;
@@ -26,7 +26,7 @@ async fn main() -> Result<(), CamelError> {
         "file:{}?delete=true&initialDelay=0&delay=500",
         input_path
     ))
-    .process(|mut exchange| {
+    .process(|mut exchange: camel_api::Exchange| {
         Box::pin(async move {
             if let Body::Text(text) = &exchange.input.body {
                 let original_len = text.len();

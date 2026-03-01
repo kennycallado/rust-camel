@@ -1,6 +1,6 @@
 use camel_api::body::Body;
 use camel_api::{CamelError, Value};
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_direct::DirectComponent;
 use camel_log::LogComponent;
@@ -25,7 +25,7 @@ async fn main() -> Result<(), CamelError> {
 
     // Route 2: Receive from direct:pipeline -> uppercase body -> log
     let route2 = RouteBuilder::from("direct:pipeline")
-        .map_body(|body| {
+        .map_body(|body: Body| {
             if let Some(text) = body.as_text() {
                 Body::Text(text.to_uppercase())
             } else {

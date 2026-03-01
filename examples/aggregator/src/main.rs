@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use camel_api::aggregator::AggregatorConfig;
 use camel_api::body::Body;
 use camel_api::CamelError;
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_log::LogComponent;
 use camel_timer::TimerComponent;
@@ -34,7 +34,7 @@ async fn main() -> Result<(), CamelError> {
     // Each timer fire sets orderId = "A" | "B" | "C" (cycling) and a body.
     // After 3 exchanges with the same orderId, the aggregator emits a batch.
     let route = RouteBuilder::from("timer:orders?period=200&repeatCount=9")
-        .process(move |mut ex| {
+        .process(move |mut ex: camel_api::Exchange| {
             let c = Arc::clone(&counter_clone);
             Box::pin(async move {
                 let n = c.fetch_add(1, Ordering::SeqCst);
@@ -54,7 +54,7 @@ async fn main() -> Result<(), CamelError> {
         )
         // Pending exchanges (Body::Empty, CamelAggregatorPending=true) still flow
         // through the pipeline — log only completed batches.
-        .process(|ex| {
+        .process(|ex: camel_api::Exchange| {
             Box::pin(async move {
                 if ex.property("CamelAggregatorPending").is_some() {
                     // Not yet complete — skip logging
@@ -62,11 +62,11 @@ async fn main() -> Result<(), CamelError> {
                 }
                 let key = ex
                     .property("CamelAggregatedKey")
-                    .map(|v| v.to_string())
+                    .map(|v: &serde_json::Value| v.to_string())
                     .unwrap_or_default();
                 let size = ex
                     .property("CamelAggregatedSize")
-                    .map(|v| v.to_string())
+                    .map(|v: &serde_json::Value| v.to_string())
                     .unwrap_or_default();
                 println!(
                     "[aggregated] orderId={key}  size={size}  body={:?}",

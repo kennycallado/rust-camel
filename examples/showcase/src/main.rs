@@ -6,7 +6,7 @@ use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::splitter::{split_body_json_array, AggregationStrategy, SplitterConfig};
 use camel_api::{CamelError, Value};
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_direct::DirectComponent;
 use camel_file::FileComponent;
@@ -37,7 +37,7 @@ async fn main() -> Result<(), CamelError> {
     let counter_clone = Arc::clone(&counter);
 
     let route1 = RouteBuilder::from("timer:events?period=1000&repeatCount=8")
-        .process(move |mut exchange| {
+        .process(move |mut exchange: camel_api::Exchange| {
             let c = Arc::clone(&counter_clone);
             Box::pin(async move {
                 let n = c.fetch_add(1, Ordering::SeqCst);
@@ -56,7 +56,7 @@ async fn main() -> Result<(), CamelError> {
     // Route 2: Receive -> filter typeA only -> uppercase -> mark processed -> log
     let route2 = RouteBuilder::from("direct:dispatcher")
         .filter(|ex| ex.input.body.as_text() == Some("typeA"))
-            .map_body(|body| {
+            .map_body(|body: Body| {
                 if let Some(text) = body.as_text() {
                     Body::Text(text.to_uppercase())
                 } else {
@@ -79,7 +79,7 @@ async fn main() -> Result<(), CamelError> {
 
     // Route 3: Timer -> set JSON array body -> parallel split -> enrich each -> log aggregated
     let route3 = RouteBuilder::from("timer:orders?period=3000&repeatCount=3")
-        .process(|mut exchange| {
+        .process(|mut exchange: camel_api::Exchange| {
             Box::pin(async move {
                 exchange.input.body = Body::Json(serde_json::json!([
                     {"id": 1, "item": "widget", "qty": 5},
@@ -95,7 +95,7 @@ async fn main() -> Result<(), CamelError> {
                 .parallel(true)
                 .parallel_limit(2),
         )
-            .map_body(|body| {
+            .map_body(|body: Body| {
                 if let Body::Json(mut v) = body {
                     v["processed"] = serde_json::json!(true);
                     Body::Json(v)
@@ -114,7 +114,7 @@ async fn main() -> Result<(), CamelError> {
     let file_path = output_dir.to_str().unwrap();
 
     let route4 = RouteBuilder::from("timer:file-writer?period=2000&repeatCount=5")
-        .process(|mut exchange| {
+        .process(|mut exchange: camel_api::Exchange| {
             Box::pin(async move {
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -138,7 +138,7 @@ async fn main() -> Result<(), CamelError> {
     // Route 6 (WireTap): Timer -> wire_tap (monitoring) -> log (main)
     // Demonstrates fire-and-forget: tap receives a copy while original continues
     let route6 = RouteBuilder::from("timer:monitor?period=4000&repeatCount=3")
-        .process(|mut exchange| {
+        .process(|mut exchange: camel_api::Exchange| {
             Box::pin(async move {
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

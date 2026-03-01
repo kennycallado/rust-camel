@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Value};
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_direct::DirectComponent;
 use camel_log::LogComponent;

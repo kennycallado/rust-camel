@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use camel_api::CamelError;
 use camel_api::body::Body;
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_log::LogComponent;
 use camel_timer::TimerComponent;
@@ -21,7 +21,7 @@ async fn main() -> Result<(), CamelError> {
     let counter_clone = Arc::clone(&counter);
 
     let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=10")
-        .process(move |mut exchange| {
+        .process(move |mut exchange: camel_api::Exchange| {
             let c = Arc::clone(&counter_clone);
             Box::pin(async move {
                 let n = c.fetch_add(1, Ordering::SeqCst);

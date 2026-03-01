@@ -1,5 +1,5 @@
 use camel_api::{body::Body, CamelError};
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_http::{HttpComponent, HttpsComponent};
 use camel_log::LogComponent;

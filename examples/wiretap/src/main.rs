@@ -1,5 +1,5 @@
 use camel_api::CamelError;
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_log::LogComponent;
 use camel_mock::MockComponent;
