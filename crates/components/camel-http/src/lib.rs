@@ -315,9 +315,7 @@ impl Service<Exchange> for HttpProducer {
                 CamelError::ProcessorError(format!("Invalid HTTP method '{}': {}", method_str, e))
             })?;
 
-            let mut request = client
-                .request(method, &url)
-                .timeout(config.connect_timeout);
+            let mut request = client.request(method, &url);
 
             if let Some(timeout) = config.response_timeout {
                 request = request.timeout(timeout);
