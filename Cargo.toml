@@ -33,6 +33,7 @@ members = [
     "examples/multicast",
     "examples/http-server",
     "examples/pipeline-concurrency",
+    "examples/log-eip",
 ]
 
 [workspace.package]
