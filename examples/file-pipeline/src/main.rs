@@ -1,4 +1,4 @@
-use camel_api::{CamelError, Value, body::Body};
+use camel_api::{body::Body, CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_file::FileComponent;
@@ -38,7 +38,7 @@ async fn main() -> Result<(), CamelError> {
             Ok(exchange)
         })
     })
-    .to(format!("file:{}?fileExist=Override", output_path))
+    .to(&format!("file:{}?fileExist=Override", output_path))
     .to("log:pipeline?showHeaders=true&showBody=true")
     .build()?;
 
