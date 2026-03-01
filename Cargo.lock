@@ -2062,6 +2062,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wiretap"
+version = "0.1.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-core",
+ "camel-log",
+ "camel-mock",
+ "camel-timer",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
