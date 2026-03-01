@@ -1,6 +1,6 @@
 [package]
-name = "camel-file"
-description = "File component for rust-camel"
+name = "camel-http"
+description = "HTTP client component for rust-camel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,8 @@ camel-component.workspace = true
 camel-endpoint.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
+tower.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-regex.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
