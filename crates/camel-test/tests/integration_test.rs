@@ -127,7 +127,7 @@ async fn test_filter_matching_exchanges_reach_inner_mock() {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
                 let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                ex.input.set_header("active", Value::Bool(n % 2 == 0));
+                ex.input.set_header("active", Value::Bool(n.is_multiple_of(2)));
                 Ok(ex)
             }
         })
@@ -166,7 +166,7 @@ async fn test_filter_non_matching_continue_outer_pipeline() {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
                 let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                ex.input.set_header("active", Value::Bool(n % 2 == 0));
+                ex.input.set_header("active", Value::Bool(n.is_multiple_of(2)));
                 Ok(ex)
             }
         })
@@ -1376,6 +1376,123 @@ async fn test_aggregator_scatter_gather() {
         .filter(|e| e.property("CamelAggregatorPending").is_none())
         .collect();
     assert_eq!(completed.len(), 1, "expected 1 completed aggregate, got {}", completed.len());
+}
+
+// ---------------------------------------------------------------------------
+// set_body / set_body_fn / set_header_fn integration tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Test 29: set_body("enriched") replaces body end-to-end
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_route_set_body_static() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:set-body-static?period=50&repeatCount=1")
+        .set_body("enriched")
+        .to("mock:set-body-static")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ctx.stop().await.unwrap();
+
+    let endpoint = mock.get_endpoint("set-body-static").unwrap();
+    endpoint.assert_exchange_count(1).await;
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert_eq!(
+        exchanges[0].input.body.as_text(),
+        Some("enriched"),
+        "set_body should replace body with static string"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 30: set_body_fn reads exchange and transforms body
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_route_set_body_fn() {
+    use camel_api::body::Body;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:set-body-fn?period=50&repeatCount=1")
+        // First set a known body so set_body_fn has something to read.
+        .set_body("hello")
+        .set_body_fn(|ex: &camel_api::Exchange| {
+            let text = ex.input.body.as_text().unwrap_or("");
+            Body::Text(text.to_uppercase())
+        })
+        .to("mock:set-body-fn")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ctx.stop().await.unwrap();
+
+    let endpoint = mock.get_endpoint("set-body-fn").unwrap();
+    endpoint.assert_exchange_count(1).await;
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert_eq!(
+        exchanges[0].input.body.as_text(),
+        Some("HELLO"),
+        "set_body_fn should uppercase the body read from the exchange"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 31: set_header_fn reads body and writes it into a header
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_route_set_header_fn() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:set-header-fn?period=50&repeatCount=1")
+        // Set a known body first so set_header_fn can echo it.
+        .set_body("ping")
+        .set_header_fn("echo", |ex: &camel_api::Exchange| {
+            Value::String(ex.input.body.as_text().unwrap_or("").into())
+        })
+        .to("mock:set-header-fn")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ctx.stop().await.unwrap();
+
+    let endpoint = mock.get_endpoint("set-header-fn").unwrap();
+    endpoint.assert_exchange_count(1).await;
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert_eq!(
+        exchanges[0].input.header("echo"),
+        Some(&Value::String("ping".into())),
+        "set_header_fn should copy body text into the 'echo' header"
+    );
 }
 
 // ---------------------------------------------------------------------------
