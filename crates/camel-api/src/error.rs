@@ -33,10 +33,45 @@ pub enum CamelError {
 
     #[error("Circuit breaker open: {0}")]
     CircuitOpen(String),
+
+    #[error("HTTP operation failed: {status_code} {status_text}")]
+    HttpOperationFailed {
+        status_code: u16,
+        status_text: String,
+        response_body: Option<String>,
+    },
 }
 
 impl From<std::io::Error> for CamelError {
     fn from(err: std::io::Error) -> Self {
         CamelError::Io(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_http_operation_failed_display() {
+        let err = CamelError::HttpOperationFailed {
+            status_code: 404,
+            status_text: "Not Found".to_string(),
+            response_body: Some("page not found".to_string()),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("404"));
+        assert!(msg.contains("Not Found"));
+    }
+
+    #[test]
+    fn test_http_operation_failed_clone() {
+        let err = CamelError::HttpOperationFailed {
+            status_code: 500,
+            status_text: "Internal Server Error".to_string(),
+            response_body: None,
+        };
+        let cloned = err.clone();
+        assert!(matches!(cloned, CamelError::HttpOperationFailed { status_code: 500, .. }));
     }
 }
