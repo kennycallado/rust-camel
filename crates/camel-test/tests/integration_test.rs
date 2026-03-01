@@ -9,7 +9,7 @@
 use camel_api::Value;
 use camel_api::aggregator::AggregatorConfig;
 use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::CamelContext;
 use camel_file::FileComponent;
 use camel_http::HttpComponent;

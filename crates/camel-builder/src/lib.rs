@@ -247,77 +247,6 @@ pub struct FilterBuilder {
 }
 
 impl FilterBuilder {
-    pub fn to(mut self, uri: impl Into<String>) -> Self {
-        self.steps.push(BuilderStep::To(uri.into()));
-        self
-    }
-
-    pub fn process<F, Fut>(mut self, f: F) -> Self
-    where
-        F: Fn(Exchange) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<Exchange, CamelError>> + Send + 'static,
-    {
-        let svc = ProcessorFn::new(f);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    pub fn process_fn(mut self, processor: BoxProcessor) -> Self {
-        self.steps.push(BuilderStep::Processor(processor));
-        self
-    }
-
-    pub fn set_header(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
-        let svc = SetHeader::new(IdentityProcessor, key, value);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    pub fn map_body<F>(mut self, mapper: F) -> Self
-    where
-        F: Fn(Body) -> Body + Clone + Send + Sync + 'static,
-    {
-        let svc = MapBody::new(IdentityProcessor, mapper);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set body to a static value within the filter sub-pipeline.
-    pub fn set_body<B>(mut self, body: B) -> Self
-    where
-        B: Into<Body> + Clone + Send + Sync + 'static,
-    {
-        let body: Body = body.into();
-        let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set body using a closure within the filter sub-pipeline.
-    pub fn set_body_fn<F>(mut self, expr: F) -> Self
-    where
-        F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
-    {
-        let svc = SetBody::new(IdentityProcessor, expr);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set a header dynamically using a closure within the filter sub-pipeline.
-    pub fn set_header_fn<F>(mut self, key: impl Into<String>, expr: F) -> Self
-    where
-        F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
-    {
-        let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    pub fn aggregate(mut self, config: AggregatorConfig) -> Self {
-        self.steps.push(BuilderStep::Aggregate { config });
-        self
-    }
-
     /// Close the filter scope. Packages the accumulated sub-steps into a
     /// `BuilderStep::Filter` and returns the parent `RouteBuilder`.
     pub fn end_filter(mut self) -> RouteBuilder {
@@ -330,6 +259,12 @@ impl FilterBuilder {
     }
 }
 
+impl StepAccumulator for FilterBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
+    }
+}
+
 /// Builder for a filter scope nested inside a `.split()` block.
 pub struct FilterInSplitBuilder {
     parent: SplitBuilder,
@@ -338,77 +273,6 @@ pub struct FilterInSplitBuilder {
 }
 
 impl FilterInSplitBuilder {
-    pub fn to(mut self, uri: impl Into<String>) -> Self {
-        self.steps.push(BuilderStep::To(uri.into()));
-        self
-    }
-
-    pub fn process<F, Fut>(mut self, f: F) -> Self
-    where
-        F: Fn(Exchange) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<Exchange, CamelError>> + Send + 'static,
-    {
-        let svc = ProcessorFn::new(f);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    pub fn process_fn(mut self, processor: BoxProcessor) -> Self {
-        self.steps.push(BuilderStep::Processor(processor));
-        self
-    }
-
-    pub fn set_header(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
-        let svc = SetHeader::new(IdentityProcessor, key, value);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    pub fn map_body<F>(mut self, mapper: F) -> Self
-    where
-        F: Fn(Body) -> Body + Clone + Send + Sync + 'static,
-    {
-        let svc = MapBody::new(IdentityProcessor, mapper);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set body to a static value within the filter-in-split sub-pipeline.
-    pub fn set_body<B>(mut self, body: B) -> Self
-    where
-        B: Into<Body> + Clone + Send + Sync + 'static,
-    {
-        let body: Body = body.into();
-        let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set body using a closure within the filter-in-split sub-pipeline.
-    pub fn set_body_fn<F>(mut self, expr: F) -> Self
-    where
-        F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
-    {
-        let svc = SetBody::new(IdentityProcessor, expr);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set a header dynamically using a closure within the filter-in-split sub-pipeline.
-    pub fn set_header_fn<F>(mut self, key: impl Into<String>, expr: F) -> Self
-    where
-        F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
-    {
-        let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    pub fn aggregate(mut self, config: AggregatorConfig) -> Self {
-        self.steps.push(BuilderStep::Aggregate { config });
-        self
-    }
-
     /// Close the filter scope and return the parent `SplitBuilder`.
     pub fn end_filter(mut self) -> SplitBuilder {
         let step = BuilderStep::Filter {
@@ -417,6 +281,12 @@ impl FilterInSplitBuilder {
         };
         self.parent.steps.push(step);
         self.parent
+    }
+}
+
+impl StepAccumulator for FilterInSplitBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
     }
 }
 
