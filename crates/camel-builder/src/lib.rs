@@ -7,6 +7,83 @@ use camel_api::aggregator::AggregatorConfig;
 use camel_core::route::{BuilderStep, RouteDefinition};
 use camel_processor::{DynamicSetHeader, MapBody, SetBody, SetHeader};
 
+/// Shared step-accumulation methods for all builder types.
+///
+/// Implementors provide `steps_mut()` and get 9 step-adding methods for free.
+/// `filter()` and other branching methods are NOT included — they return
+/// different types per builder and stay as per-builder methods.
+pub trait StepAccumulator: Sized {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep>;
+
+    fn to(mut self, endpoint: impl Into<String>) -> Self {
+        self.steps_mut().push(BuilderStep::To(endpoint.into()));
+        self
+    }
+
+    fn process<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(Exchange) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Exchange, CamelError>> + Send + 'static,
+    {
+        let svc = ProcessorFn::new(f);
+        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    fn process_fn(mut self, processor: BoxProcessor) -> Self {
+        self.steps_mut().push(BuilderStep::Processor(processor));
+        self
+    }
+
+    fn set_header(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        let svc = SetHeader::new(IdentityProcessor, key, value);
+        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    fn map_body<F>(mut self, mapper: F) -> Self
+    where
+        F: Fn(Body) -> Body + Clone + Send + Sync + 'static,
+    {
+        let svc = MapBody::new(IdentityProcessor, mapper);
+        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    fn set_body<B>(mut self, body: B) -> Self
+    where
+        B: Into<Body> + Clone + Send + Sync + 'static,
+    {
+        let body: Body = body.into();
+        let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
+        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    fn set_body_fn<F>(mut self, expr: F) -> Self
+    where
+        F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
+    {
+        let svc = SetBody::new(IdentityProcessor, expr);
+        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    fn set_header_fn<F>(mut self, key: impl Into<String>, expr: F) -> Self
+    where
+        F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
+    {
+        let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
+        self.steps_mut().push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    fn aggregate(mut self, config: AggregatorConfig) -> Self {
+        self.steps_mut().push(BuilderStep::Aggregate { config });
+        self
+    }
+}
+
 /// A fluent builder for constructing routes.
 ///
 /// # Example
@@ -50,81 +127,7 @@ impl RouteBuilder {
         }
     }
 
-    /// Add a processor step defined by an arbitrary async closure.
-    pub fn process<F, Fut>(mut self, f: F) -> Self
-    where
-        F: Fn(Exchange) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<Exchange, CamelError>> + Send + 'static,
-    {
-        let svc = ProcessorFn::new(f);
-        self.steps
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
 
-    /// Add a pre-built `BoxProcessor` step.
-    pub fn process_fn(mut self, processor: BoxProcessor) -> Self {
-        self.steps.push(BuilderStep::Processor(processor));
-        self
-    }
-
-    /// Add a step that sets a header on the exchange's input message.
-    pub fn set_header(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
-        let svc = SetHeader::new(IdentityProcessor, key, value);
-        self.steps
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Add a step that transforms the message body.
-    pub fn map_body<F>(mut self, mapper: F) -> Self
-    where
-        F: Fn(Body) -> Body + Clone + Send + Sync + 'static,
-    {
-        let svc = MapBody::new(IdentityProcessor, mapper);
-        self.steps
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set body to a static value (any type implementing `Into<Body>`).
-    pub fn set_body<B>(mut self, body: B) -> Self
-    where
-        B: Into<Body> + Clone + Send + Sync + 'static,
-    {
-        let body: Body = body.into();
-        let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set body using a closure that receives the full exchange.
-    pub fn set_body_fn<F>(mut self, expr: F) -> Self
-    where
-        F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
-    {
-        let svc = SetBody::new(IdentityProcessor, expr);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Set a header dynamically using a closure that receives the full exchange.
-    pub fn set_header_fn<F>(mut self, key: impl Into<String>, expr: F) -> Self
-    where
-        F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
-    {
-        let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
-        self.steps.push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
-    }
-
-    /// Add a "to" destination step that sends the exchange to the given
-    /// endpoint URI. The actual send is handled at runtime when the
-    /// CamelContext resolves the RouteDefinition.
-    pub fn to(mut self, endpoint: &str) -> Self {
-        self.steps.push(BuilderStep::To(endpoint.to_string()));
-        self
-    }
 
     /// Set a per-route error handler. Overrides the global error handler on `CamelContext`.
     pub fn error_handler(mut self, config: ErrorHandlerConfig) -> Self {
@@ -138,15 +141,7 @@ impl RouteBuilder {
         self
     }
 
-    /// Add an Aggregator step. Collects exchanges by correlation key header,
-    /// emitting an aggregated exchange downstream when the completion condition is met.
-    ///
-    /// Exchanges that do not complete the bucket return with `Body::Empty` and
-    /// the `CamelAggregatorPending = true` property.
-    pub fn aggregate(mut self, config: AggregatorConfig) -> Self {
-        self.steps.push(BuilderStep::Aggregate { config });
-        self
-    }
+
 
     /// Begin a Splitter sub-pipeline. Steps added after this call (until
     /// `.end_split()`) will be executed per-fragment.
@@ -180,6 +175,12 @@ impl RouteBuilder {
             definition
         };
         Ok(definition)
+    }
+}
+
+impl StepAccumulator for RouteBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
     }
 }
 
