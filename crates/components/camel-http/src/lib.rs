@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use tokio::sync::RwLock;
 use tower::Service;
 use tracing::debug;
 
@@ -184,6 +186,80 @@ pub struct HttpReply {
     pub status:  u16,
     pub headers: Vec<(String, String)>,
     pub body:    bytes::Bytes,
+}
+
+// ---------------------------------------------------------------------------
+// DispatchTable / ServerRegistry
+// ---------------------------------------------------------------------------
+
+/// Maps URL path → channel sender for the consumer that owns that path.
+pub type DispatchTable = Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<RequestEnvelope>>>>;
+
+/// Handle to a running Axum server on one port.
+struct ServerHandle {
+    dispatch: DispatchTable,
+    /// Kept alive so the task isn't dropped; not used directly.
+    _task: tokio::task::JoinHandle<()>,
+}
+
+/// Process-global registry mapping port → running Axum server handle.
+pub struct ServerRegistry {
+    inner: Mutex<HashMap<u16, ServerHandle>>,
+}
+
+impl ServerRegistry {
+    /// Returns the global singleton.
+    pub fn global() -> &'static Self {
+        static INSTANCE: OnceLock<ServerRegistry> = OnceLock::new();
+        INSTANCE.get_or_init(|| ServerRegistry {
+            inner: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Returns the `DispatchTable` for `port`, spawning a new Axum server if
+    /// none is running on that port yet.
+    pub async fn get_or_spawn(
+        &'static self,
+        host: &str,
+        port: u16,
+    ) -> Result<DispatchTable, CamelError> {
+        // Fast path: check without spawning.
+        {
+            let guard = self.inner.lock().map_err(|_| {
+                CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
+            })?;
+            if let Some(handle) = guard.get(&port) {
+                return Ok(Arc::clone(&handle.dispatch));
+            }
+        }
+
+        // Slow path: need to bind and spawn.
+        let addr = format!("{}:{}", host, port);
+        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+            CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
+        })?;
+
+        let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
+        let dispatch_for_server = Arc::clone(&dispatch);
+        let task = tokio::spawn(run_axum_server(listener, dispatch_for_server));
+
+        // Re-acquire lock to insert — handle the race where another task won.
+        let mut guard = self.inner.lock().map_err(|_| {
+            CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
+        })?;
+        // If another task already registered this port while we were binding,
+        // our server will fail at accept-time (address in use) — that's fine.
+        // Use the winner's dispatch table.
+        if let Some(existing) = guard.get(&port) {
+            return Ok(Arc::clone(&existing.dispatch));
+        }
+        guard.insert(port, ServerHandle { dispatch: Arc::clone(&dispatch), _task: task });
+        Ok(dispatch)
+    }
+}
+
+async fn run_axum_server(_listener: tokio::net::TcpListener, _dispatch: DispatchTable) {
+    // Implemented in Task 5
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,5 +1084,16 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<RequestEnvelope>();
         assert_send::<HttpReply>();
+    }
+
+    // -----------------------------------------------------------------------
+    // ServerRegistry tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_server_registry_global_is_singleton() {
+        let r1 = ServerRegistry::global();
+        let r2 = ServerRegistry::global();
+        assert!(std::ptr::eq(r1 as *const _, r2 as *const _));
     }
 }
