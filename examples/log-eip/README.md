@@ -18,15 +18,30 @@ Simple logging for human-readable messages:
 
 ```rust
 RouteBuilder::from("timer:demo")
-    .log("Starting processing")           // Just logs the string
+    .log("Starting processing")           // INFO level (default)
     .log("Processing order")              // Simple status message
     .log("Done")                          // Milestone marker
 ```
 
+**With explicit log levels:**
+
+```rust
+RouteBuilder::from("timer:demo")
+    .log_level(LogLevel::Trace, "Entering method")    // Most verbose
+    .log_level(LogLevel::Debug, "Variable x = 42")    // Debugging info
+    .log_level(LogLevel::Info, "Order received")      // Business events
+    .log_level(LogLevel::Warn, "Rate limit approaching") // Warnings
+    .log_level(LogLevel::Error, "Payment failed")     // Errors
+```
+
 **Output:**
 ```
+TRACE Entering method
+DEBUG Variable x = 42
 INFO Starting processing
 INFO Processing order
+WARN Rate limit approaching
+ERROR Payment failed
 INFO Done
 ```
 

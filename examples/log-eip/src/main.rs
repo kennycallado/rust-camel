@@ -24,22 +24,27 @@ async fn main() -> Result<(), CamelError> {
                 "items": ["widget", "gadget"],
                 "total": 99.99
             }));
-            ex.input.set_header("source", camel_api::Value::String("timer".into()));
-            ex.input.set_header("priority", camel_api::Value::String("high".into()));
+            ex.input
+                .set_header("source", camel_api::Value::String("timer".into()));
+            ex.input
+                .set_header("priority", camel_api::Value::String("high".into()));
             Ok(ex)
         })
         .log("Order data prepared")
+        .log_level(LogLevel::Debug, "Checking order priority")
         .to("log:exchange-full?showBody=true&showHeaders=true&multiline=true")
         .process(|mut ex| async move {
             if let Some(priority) = ex.input.header("priority").and_then(|v| v.as_str()) {
                 if priority == "high" {
-                    ex.input.set_header("CamelLogPriority", camel_api::Value::Bool(true));
+                    ex.input
+                        .set_header("CamelLogPriority", camel_api::Value::Bool(true));
                 }
             }
             Ok(ex)
         })
-        .log_level(LogLevel::Debug, "Processing high priority order")
+        .log_level(LogLevel::Info, "Processing high priority order")
         .to("log:after-processing?showBody=true")
+        .log_level(LogLevel::Trace, "Route execution complete")
         .log("=== Processing cycle complete ===")
         .to("mock:result")
         .build()?;
