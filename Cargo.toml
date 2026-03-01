@@ -17,6 +17,7 @@ members = [
     "crates/components/camel-file",
     "crates/components/camel-direct",
     "crates/components/camel-mock",
+    "crates/components/camel-http",
     "examples/hello-world",
     "examples/content-based-routing",
     "examples/multi-route-direct",
@@ -24,6 +25,9 @@ members = [
     "examples/showcase",
     "examples/error-handling",
     "examples/splitter",
+    "examples/file-polling",
+    "examples/file-pipeline",
+    "examples/http-client",
 ]
 
 [workspace.package]
@@ -49,6 +53,7 @@ camel-log = { path = "crates/components/camel-log" }
 camel-file = { path = "crates/components/camel-file" }
 camel-direct = { path = "crates/components/camel-direct" }
 camel-mock = { path = "crates/components/camel-mock" }
+camel-http = { path = "crates/components/camel-http" }
 
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
@@ -61,3 +66,5 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+regex = "1"

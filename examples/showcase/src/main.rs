@@ -9,6 +9,8 @@ use camel_api::{CamelError, Value};
 use camel_builder::RouteBuilder;
 use camel_core::context::CamelContext;
 use camel_direct::DirectComponent;
+use camel_file::FileComponent;
+use camel_http::{HttpComponent, HttpsComponent};
 use camel_log::LogComponent;
 use camel_timer::TimerComponent;
 
@@ -22,8 +24,10 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(direct);
+    ctx.register_component(FileComponent::new());
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(HttpsComponent::new());
 
-    // Global error handler: catch-all for any route without its own handler.
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel(
         "log:global-dlc?showHeaders=true&showBody=true",
     ));
@@ -50,7 +54,6 @@ async fn main() -> Result<(), CamelError> {
         .build()?;
 
     // Route 2: Receive -> filter typeA only -> uppercase -> mark processed -> log
-    // With error handling: retry processing errors up to 2 times before logging.
     let route2 = RouteBuilder::from("direct:dispatcher")
         .filter(|ex| ex.input.body.as_text() == Some("typeA"))
         .map_body(|body| {
@@ -91,7 +94,6 @@ async fn main() -> Result<(), CamelError> {
                 .parallel(true)
                 .parallel_limit(2),
         )
-            // Enrich each order fragment with a "processed" flag
             .map_body(|body| {
                 if let Body::Json(mut v) = body {
                     v["processed"] = serde_json::json!(true);
@@ -105,10 +107,47 @@ async fn main() -> Result<(), CamelError> {
         .to("log:orders-aggregated?showBody=true")
         .build()?;
 
+    // Route 4 (File): Timer -> append events to file
+    let output_dir = std::env::temp_dir().join("rust-camel-showcase");
+    std::fs::create_dir_all(&output_dir).ok();
+    let file_path = output_dir.to_str().unwrap();
+
+    let route4 = RouteBuilder::from("timer:file-writer?period=2000&repeatCount=5")
+        .process(|mut exchange| {
+            Box::pin(async move {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                exchange.input.body = Body::Text(format!("[{timestamp}] Event logged\n"));
+                Ok(exchange)
+            })
+        })
+        .set_header("CamelFileName", Value::String("events.log".into()))
+        .to(&format!("file:{file_path}?fileExist=Append"))
+        .to("log:file-written?showBody=true")
+        .build()?;
+
+    // Route 5 (HTTP): Timer -> HTTP GET -> log response
+    let route5 = RouteBuilder::from("timer:http-poll?period=5000&repeatCount=3")
+        .to("https://httpbin.org/get?source=rust-camel")
+        .to("log:http-response?showHeaders=true&showBody=true")
+        .build()?;
+
     ctx.add_route_definition(route1)?;
     ctx.add_route_definition(route2)?;
     ctx.add_route_definition(route3)?;
+    ctx.add_route_definition(route4)?;
+    ctx.add_route_definition(route5)?;
     ctx.start().await?;
+
+    println!("Showcase running. Routes:");
+    println!("  - timer:events (1s) -> direct:dispatcher -> filter -> log");
+    println!("  - timer:orders (3s) -> split -> log");
+    println!("  - timer:file-writer (2s) -> file:{file_path}/events.log");
+    println!("  - timer:http-poll (5s) -> https:httpbin.org/get -> log");
+    println!();
+    println!("Press Ctrl+C to stop...");
 
     tokio::signal::ctrl_c()
         .await

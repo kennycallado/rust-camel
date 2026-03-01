@@ -10,6 +10,8 @@ use camel_api::Value;
 use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
 use camel_builder::RouteBuilder;
 use camel_core::CamelContext;
+use camel_file::FileComponent;
+use camel_http::HttpComponent;
 use camel_log::LogComponent;
 use camel_mock::MockComponent;
 use camel_timer::TimerComponent;
@@ -697,4 +699,481 @@ async fn test_split_with_error_handler() {
     let sink = mock.get_endpoint("sink").unwrap();
     let sink_count = sink.get_received_exchanges().await.len();
     assert_eq!(sink_count, 0, "Expected 0 sink exchanges, got {sink_count}");
+}
+
+// ---------------------------------------------------------------------------
+// File component integration tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Test 17: File consumer → Mock (read files from directory)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_file_consumer_to_mock() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_str().unwrap();
+
+    std::fs::write(dir.path().join("a.txt"), "alpha").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "beta").unwrap();
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(FileComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from(&format!(
+        "file:{dir_path}?noop=true&initialDelay=0&delay=100"
+    ))
+    .to("mock:result")
+    .build()
+    .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    let endpoint = mock.get_endpoint("result").unwrap();
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert!(exchanges.len() >= 2, "Should have read at least 2 files, got {}", exchanges.len());
+
+    for ex in &exchanges {
+        assert!(ex.input.header("CamelFileName").is_some());
+        assert!(ex.input.header("CamelFileNameOnly").is_some());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 18: Timer → File producer (write files)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_timer_to_file_producer() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_str().unwrap();
+
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(FileComponent::new());
+
+    let route = RouteBuilder::from("timer:write-test?period=50&repeatCount=2")
+        .set_header("CamelFileName", Value::String("output.txt".into()))
+        .to(&format!("file:{dir_path}?fileExist=Append"))
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ctx.stop().await.unwrap();
+
+    assert!(dir.path().join("output.txt").exists(), "File should have been written");
+}
+
+// ---------------------------------------------------------------------------
+// Test 19: File consumer → Transform → File producer (file-to-file pipeline)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_file_to_file_pipeline() {
+    let input_dir = tempfile::tempdir().unwrap();
+    let output_dir = tempfile::tempdir().unwrap();
+    let input_path = input_dir.path().to_str().unwrap();
+    let output_path = output_dir.path().to_str().unwrap();
+
+    std::fs::write(input_dir.path().join("source.txt"), "hello world").unwrap();
+
+    let mut ctx = CamelContext::new();
+    ctx.register_component(FileComponent::new());
+
+    let route = RouteBuilder::from(&format!(
+        "file:{input_path}?noop=true&initialDelay=0&delay=100"
+    ))
+    .to(&format!("file:{output_path}"))
+    .build()
+    .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    assert!(
+        output_dir.path().join("source.txt").exists(),
+        "File should have been copied to output directory"
+    );
+    let content = std::fs::read_to_string(output_dir.path().join("source.txt")).unwrap();
+    assert_eq!(content, "hello world");
+}
+
+// ---------------------------------------------------------------------------
+// HTTP component integration tests
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Test 20: HTTP component registration and endpoint creation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_component_registration_and_endpoint_creation() {
+    use camel_component::Component;
+
+    let component = HttpComponent::new();
+
+    // Verify component scheme
+    assert_eq!(component.scheme(), "http");
+
+    // Verify endpoint can be created with config
+    let endpoint = component
+        .create_endpoint("http://example.com/api?httpMethod=POST&connectTimeout=5000")
+        .unwrap();
+    assert!(endpoint.uri().contains("httpMethod=POST"));
+}
+
+// ---------------------------------------------------------------------------
+// Test 21: HTTP query params are forwarded (Bug #3 verification)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_query_params_forwarding_config() {
+    use camel_http::HttpConfig;
+
+    // Verify config parsing forwards non-Camel query params
+    let config = HttpConfig::from_uri(
+        "http://api.example.com/v1/users?apiKey=secret123&httpMethod=GET&token=abc456",
+    )
+    .unwrap();
+
+    // apiKey and token should be preserved for forwarding
+    assert!(
+        config.query_params.contains_key("apiKey"),
+        "apiKey should be preserved"
+    );
+    assert!(
+        config.query_params.contains_key("token"),
+        "token should be preserved"
+    );
+    assert_eq!(config.query_params.get("apiKey").unwrap(), "secret123");
+    assert_eq!(config.query_params.get("token").unwrap(), "abc456");
+
+    // httpMethod should NOT be in query_params (it's a Camel option)
+    assert!(
+        !config.query_params.contains_key("httpMethod"),
+        "httpMethod should not be forwarded"
+    );
+}
+
+// ===========================================================================
+// HTTP end-to-end integration tests (wiremock)
+//
+// These tests exercise the full pipeline path:
+//   Timer/Direct → HttpProducer → real HTTP request → wiremock → Mock
+//
+// Unlike tests 20-21 which only verify config parsing, these prove that
+// the HTTP component actually sends requests and maps responses correctly
+// when wired into a CamelContext pipeline.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Test 22: HTTP GET end-to-end — timer fires, HTTP producer GETs wiremock,
+//          response body lands in mock endpoint
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_get_e2e() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/greeting"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("hello from wiremock"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Timer produces a non-empty body so resolve_method would pick POST.
+    // Force GET via httpMethod param (same as Apache Camel usage).
+    let http_uri = format!(
+        "http://127.0.0.1:{}/api/greeting?httpMethod=GET",
+        server.address().port()
+    );
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(&http_uri)
+        .to("mock:result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    // Verify mock captured the exchange with response body
+    let endpoint = mock.get_endpoint("result").unwrap();
+    endpoint.assert_exchange_count(1).await;
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    let ex = &exchanges[0];
+
+    // Response body should be the wiremock response (arrives as Body::Bytes)
+    match &ex.input.body {
+        camel_api::body::Body::Bytes(b) => {
+            assert_eq!(std::str::from_utf8(b).unwrap(), "hello from wiremock");
+        }
+        other => panic!("expected Body::Bytes, got {:?}", other),
+    }
+
+    // CamelHttpResponseCode header should be 200
+    assert_eq!(
+        ex.input.header("CamelHttpResponseCode"),
+        Some(&serde_json::Value::Number(200.into()))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 23: HTTP POST with body — set_header sets method, body is forwarded
+//          to wiremock, response captured by mock
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_post_with_body_e2e() {
+    use wiremock::matchers::{body_string, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/data"))
+        .and(body_string("payload-from-camel"))
+        .respond_with(ResponseTemplate::new(201).set_body_string("created"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let http_uri = format!(
+        "http://127.0.0.1:{}/api/data?httpMethod=POST",
+        server.address().port()
+    );
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .map_body(|_body| camel_api::body::Body::Text("payload-from-camel".into()))
+        .to(&http_uri)
+        .to("mock:result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    let endpoint = mock.get_endpoint("result").unwrap();
+    endpoint.assert_exchange_count(1).await;
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    let ex = &exchanges[0];
+
+    // Status 201
+    assert_eq!(
+        ex.input.header("CamelHttpResponseCode"),
+        Some(&serde_json::Value::Number(201.into()))
+    );
+
+    // Response body
+    match &ex.input.body {
+        camel_api::body::Body::Bytes(b) => {
+            assert_eq!(std::str::from_utf8(b).unwrap(), "created");
+        }
+        other => panic!("expected Body::Bytes, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 24: HTTP response headers are mapped into exchange headers
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_response_headers_mapped_e2e() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/headers"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-custom-header", "custom-value")
+                .insert_header("x-request-id", "req-42")
+                .set_body_string("ok"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let http_uri = format!(
+        "http://127.0.0.1:{}/api/headers?httpMethod=GET",
+        server.address().port()
+    );
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(&http_uri)
+        .to("mock:result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    let endpoint = mock.get_endpoint("result").unwrap();
+    endpoint.assert_exchange_count(1).await;
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    let ex = &exchanges[0];
+
+    // Custom response headers should be mapped into exchange headers
+    assert_eq!(
+        ex.input.header("x-custom-header"),
+        Some(&serde_json::Value::String("custom-value".into()))
+    );
+    assert_eq!(
+        ex.input.header("x-request-id"),
+        Some(&serde_json::Value::String("req-42".into()))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 25: HTTP 500 with throwExceptionOnFailure=true triggers error
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_error_handling_e2e() {
+    use camel_api::error_handler::ErrorHandlerConfig;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/fail"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // throwExceptionOnFailure=true is the default; force GET since timer has body
+    let http_uri = format!(
+        "http://127.0.0.1:{}/api/fail?httpMethod=GET",
+        server.address().port()
+    );
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(&http_uri)
+        .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:dlc"))
+        .to("mock:result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    // The exchange should have been routed to the DLC, not mock:result
+    let dlc = mock.get_endpoint("dlc").unwrap();
+    let dlc_exchanges = dlc.get_received_exchanges().await;
+    assert_eq!(dlc_exchanges.len(), 1, "DLC should receive the failed exchange");
+    assert!(dlc_exchanges[0].has_error(), "Exchange should carry an error");
+
+    // mock:result should NOT have received anything
+    if let Some(result) = mock.get_endpoint("result") {
+        assert_eq!(
+            result.get_received_exchanges().await.len(),
+            0,
+            "mock:result should not receive the failed exchange"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 26: HTTP query params forwarded in actual request to wiremock
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_query_params_forwarded_e2e() {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/search"))
+        .and(query_param("apiKey", "secret123"))
+        .and(query_param("lang", "rust"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("found"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Non-Camel params (apiKey, lang) are forwarded; httpMethod is consumed by Camel
+    let http_uri = format!(
+        "http://127.0.0.1:{}/api/search?httpMethod=GET&apiKey=secret123&lang=rust",
+        server.address().port()
+    );
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(HttpComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(&http_uri)
+        .to("mock:result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    let endpoint = mock.get_endpoint("result").unwrap();
+    endpoint.assert_exchange_count(1).await;
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    match &exchanges[0].input.body {
+        camel_api::body::Body::Bytes(b) => {
+            assert_eq!(std::str::from_utf8(b).unwrap(), "found");
+        }
+        other => panic!("expected Body::Bytes, got {:?}", other),
+    }
 }
