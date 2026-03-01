@@ -148,7 +148,12 @@ impl HttpServerConfig {
             let port_str = &authority[colon + 1..];
             match port_str.parse::<u16>() {
                 Ok(p) => (authority[..colon].to_string(), p),
-                Err(_) => (authority.to_string(), 80),
+                Err(_) => {
+                    return Err(CamelError::InvalidUri(format!(
+                        "invalid port '{}' in URI '{}'",
+                        port_str, uri
+                    )));
+                }
             }
         } else {
             (authority.to_string(), 80)
@@ -968,5 +973,10 @@ mod tests {
     #[test]
     fn test_http_server_config_wrong_scheme() {
         assert!(HttpServerConfig::from_uri("file:/tmp").is_err());
+    }
+
+    #[test]
+    fn test_http_server_config_invalid_port() {
+        assert!(HttpServerConfig::from_uri("http://localhost:abc/path").is_err());
     }
 }
