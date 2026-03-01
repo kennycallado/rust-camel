@@ -162,7 +162,14 @@ impl Service<Exchange> for SequentialPipeline {
         Box::pin(async move {
             let mut ex = exchange;
             for step in &mut steps {
-                ex = step.ready().await?.call(ex).await?;
+                ex = match step.ready().await?.call(ex).await {
+                    Ok(result) => result,
+                    Err(CamelError::FilteredOut(boxed)) => {
+                        // Filter blocked the exchange - stop pipeline normally
+                        return Ok(*boxed);
+                    }
+                    Err(e) => return Err(e),
+                };
             }
             Ok(ex)
         })

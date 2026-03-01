@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::Exchange;
+
 /// Core error type for the Camel framework.
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
@@ -40,6 +42,11 @@ pub enum CamelError {
         status_text: String,
         response_body: Option<String>,
     },
+
+    /// Exchange was filtered out by Filter EIP. Pipeline should stop normally.
+    /// The wrapped exchange is returned as the final result.
+    #[error("Exchange filtered out")]
+    FilteredOut(Box<Exchange>),
 }
 
 impl From<std::io::Error> for CamelError {
@@ -72,6 +79,12 @@ mod tests {
             response_body: None,
         };
         let cloned = err.clone();
-        assert!(matches!(cloned, CamelError::HttpOperationFailed { status_code: 500, .. }));
+        assert!(matches!(
+            cloned,
+            CamelError::HttpOperationFailed {
+                status_code: 500,
+                ..
+            }
+        ));
     }
 }

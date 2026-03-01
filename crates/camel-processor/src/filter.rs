@@ -49,7 +49,7 @@ impl Service<Exchange> for FilterService {
             let fut = self.sub_pipeline.call(exchange);
             Box::pin(fut)
         } else {
-            Box::pin(async move { Ok(exchange) })
+            Box::pin(async move { Err(CamelError::FilteredOut(Box::new(exchange))) })
         }
     }
 }
@@ -58,6 +58,8 @@ impl Service<Exchange> for FilterService {
 mod tests {
     use super::*;
     use camel_api::{Body, BoxProcessorExt, Message, Value};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     fn passthrough() -> BoxProcessor {
@@ -94,7 +96,7 @@ mod tests {
         assert_eq!(result.input.body.as_text(), Some("HELLO"));
     }
 
-    // 2. Non-matching exchange is returned as-is, sub_pipeline not called.
+    // 2. Non-matching exchange is returned as FilteredOut, sub_pipeline not called.
     #[tokio::test]
     async fn test_filter_blocks_non_matching_exchange() {
         let mut svc = FilterService::new(
@@ -102,9 +104,16 @@ mod tests {
             uppercase_body(),
         );
         let ex = Exchange::new(Message::new("hello"));
-        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
-        // body unchanged — uppercase_body was NOT called
-        assert_eq!(result.input.body.as_text(), Some("hello"));
+        let result = svc.ready().await.unwrap().call(ex).await;
+        
+        // Should return FilteredOut error with the original exchange
+        match result {
+            Err(CamelError::FilteredOut(boxed_ex)) => {
+                // body unchanged — uppercase_body was NOT called
+                assert_eq!(boxed_ex.input.body.as_text(), Some("hello"));
+            }
+            _ => panic!("Expected FilteredOut error, got {:?}", result),
+        }
     }
 
     // 3. Result is the sub_pipeline's output, not the original exchange.
@@ -146,5 +155,37 @@ mod tests {
         let ex = Exchange::new(Message::new("hi"));
         let result = clone.ready().await.unwrap().call(ex).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("hi"));
+    }
+
+    // 7. Filtered out exchange should stop pipeline (not continue to next steps).
+    #[tokio::test]
+    async fn test_filter_stops_pipeline_when_predicate_false() {
+        use camel_api::BoxProcessorExt;
+        
+        // Track if second processor was called
+        let second_called = Arc::new(AtomicBool::new(false));
+        let second_called_clone = second_called.clone();
+        
+        let second = BoxProcessor::from_fn(move |ex| {
+            let flag = second_called_clone.clone();
+            Box::pin(async move {
+                flag.store(true, Ordering::SeqCst);
+                Ok(ex)
+            })
+        });
+        
+        let mut filter = FilterService::new(
+            |ex: &Exchange| ex.input.header("active").is_some(),
+            passthrough(),
+        );
+        
+        let ex = Exchange::new(Message::new("hello")); // NO "active" header
+        let result = filter.ready().await.unwrap().call(ex).await;
+        
+        // Should return FilteredOut error, not Ok
+        assert!(matches!(result, Err(CamelError::FilteredOut(_))));
+        
+        // Second processor should NOT have been called
+        assert!(!second_called.load(Ordering::SeqCst));
     }
 }
