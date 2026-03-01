@@ -4,9 +4,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use regex::Regex;
+use tokio::fs;
+use tokio::time;
 use tower::Service;
+use tracing::{debug, warn};
 
-use camel_api::{BoxProcessor, CamelError, Exchange};
+use camel_api::{BoxProcessor, CamelError, Exchange, Message, body::Body};
 use camel_component::{Component, Consumer, ConsumerContext, Endpoint};
 use camel_endpoint::parse_uri;
 
@@ -200,7 +204,7 @@ impl Endpoint for FileEndpoint {
 }
 
 // ---------------------------------------------------------------------------
-// FileConsumer (stub)
+// FileConsumer
 // ---------------------------------------------------------------------------
 
 struct FileConsumer {
@@ -209,13 +213,188 @@ struct FileConsumer {
 
 #[async_trait]
 impl Consumer for FileConsumer {
-    async fn start(&mut self, _context: ConsumerContext) -> Result<(), CamelError> {
-        todo!("File consumer not yet implemented")
+    async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
+        let config = self.config.clone();
+
+        let include_re = config
+            .include
+            .as_ref()
+            .map(|p| Regex::new(p))
+            .transpose()
+            .map_err(|e| CamelError::InvalidUri(format!("invalid include regex: {e}")))?;
+        let exclude_re = config
+            .exclude
+            .as_ref()
+            .map(|p| Regex::new(p))
+            .transpose()
+            .map_err(|e| CamelError::InvalidUri(format!("invalid exclude regex: {e}")))?;
+
+        if !config.initial_delay.is_zero() {
+            tokio::select! {
+                _ = time::sleep(config.initial_delay) => {}
+                _ = context.cancelled() => {
+                    debug!(directory = config.directory, "File consumer cancelled during initial delay");
+                    return Ok(());
+                }
+            }
+        }
+
+        let mut interval = time::interval(config.delay);
+
+        loop {
+            tokio::select! {
+                _ = context.cancelled() => {
+                    debug!(directory = config.directory, "File consumer received cancellation, stopping");
+                    break;
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = poll_directory(
+                        &config,
+                        &context,
+                        &include_re,
+                        &exclude_re,
+                    ).await {
+                        warn!(directory = config.directory, error = %e, "Error polling directory");
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
         Ok(())
     }
+}
+
+async fn poll_directory(
+    config: &FileConfig,
+    context: &ConsumerContext,
+    include_re: &Option<Regex>,
+    exclude_re: &Option<Regex>,
+) -> Result<(), CamelError> {
+    let base_path = std::path::Path::new(&config.directory);
+
+    let files = list_files(base_path, config.recursive).await?;
+
+    for file_path in files {
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+
+        if let Some(ref target_name) = config.file_name {
+            if file_name != *target_name {
+                continue;
+            }
+        }
+
+        if let Some(re) = include_re {
+            if !re.is_match(&file_name) {
+                continue;
+            }
+        }
+
+        if let Some(re) = exclude_re {
+            if re.is_match(&file_name) {
+                continue;
+            }
+        }
+
+        if let Some(ref move_dir) = config.move_to {
+            if file_path.starts_with(base_path.join(move_dir)) {
+                continue;
+            }
+        }
+
+        let content = match fs::read(&file_path).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(file = %file_path.display(), error = %e, "Failed to read file");
+                continue;
+            }
+        };
+
+        let metadata = fs::metadata(&file_path).await.ok();
+        let file_len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let last_modified = metadata
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let relative_path = file_path
+            .strip_prefix(base_path)
+            .unwrap_or(&file_path)
+            .to_string_lossy()
+            .to_string();
+
+        let absolute_path = file_path
+            .canonicalize()
+            .unwrap_or_else(|_| file_path.clone())
+            .to_string_lossy()
+            .to_string();
+
+        let mut exchange = Exchange::new(Message::new(Body::Bytes(bytes::Bytes::from(content))));
+        exchange.input.set_header("CamelFileName", serde_json::Value::String(relative_path));
+        exchange.input.set_header("CamelFileNameOnly", serde_json::Value::String(file_name.clone()));
+        exchange.input.set_header("CamelFileAbsolutePath", serde_json::Value::String(absolute_path));
+        exchange.input.set_header("CamelFileLength", serde_json::Value::Number(file_len.into()));
+        exchange.input.set_header("CamelFileLastModified", serde_json::Value::Number(last_modified.into()));
+
+        if context.send(exchange).await.is_err() {
+            break;
+        }
+
+        if config.noop {
+            // Do nothing
+        } else if config.delete {
+            if let Err(e) = fs::remove_file(&file_path).await {
+                warn!(file = %file_path.display(), error = %e, "Failed to delete file");
+            }
+        } else if let Some(ref move_dir) = config.move_to {
+            let target_dir = base_path.join(move_dir);
+            if let Err(e) = fs::create_dir_all(&target_dir).await {
+                warn!(dir = %target_dir.display(), error = %e, "Failed to create move directory");
+                continue;
+            }
+            let target_path = target_dir.join(&file_name);
+            if let Err(e) = fs::rename(&file_path, &target_path).await {
+                warn!(
+                    from = %file_path.display(),
+                    to = %target_path.display(),
+                    error = %e,
+                    "Failed to move file"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn list_files(
+    dir: &std::path::Path,
+    recursive: bool,
+) -> Result<Vec<std::path::PathBuf>, CamelError> {
+    let mut files = Vec::new();
+    let mut read_dir = fs::read_dir(dir).await.map_err(CamelError::from)?;
+
+    while let Some(entry) = read_dir.next_entry().await.map_err(CamelError::from)? {
+        let path = entry.path();
+        if path.is_file() {
+            files.push(path);
+        } else if path.is_dir() && recursive {
+            let mut sub_files = Box::pin(list_files(&path, true)).await?;
+            files.append(&mut sub_files);
+        }
+    }
+
+    files.sort();
+    Ok(files)
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +426,7 @@ impl Service<Exchange> for FileProducer {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn test_file_config_defaults() {
@@ -321,5 +501,183 @@ mod tests {
         let component = FileComponent::new();
         let endpoint = component.create_endpoint("file:/tmp/test");
         assert!(endpoint.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Consumer tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_file_consumer_reads_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        std::fs::write(dir.path().join("test1.txt"), "hello").unwrap();
+        std::fs::write(dir.path().join("test2.txt"), "world").unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?noop=true&initialDelay=0&delay=100"))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        let mut received = Vec::new();
+        let timeout = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(envelope) = rx.recv().await {
+                received.push(envelope.exchange);
+                if received.len() == 2 {
+                    break;
+                }
+            }
+        }).await;
+        token.cancel();
+
+        assert!(timeout.is_ok(), "Should have received 2 exchanges");
+        assert_eq!(received.len(), 2);
+
+        for ex in &received {
+            assert!(ex.input.header("CamelFileName").is_some());
+            assert!(ex.input.header("CamelFileNameOnly").is_some());
+            assert!(ex.input.header("CamelFileAbsolutePath").is_some());
+            assert!(ex.input.header("CamelFileLength").is_some());
+            assert!(ex.input.header("CamelFileLastModified").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_file_consumer_include_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        std::fs::write(dir.path().join("data.csv"), "a,b,c").unwrap();
+        std::fs::write(dir.path().join("readme.txt"), "hello").unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?noop=true&initialDelay=0&delay=100&include=.*\\.csv"))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        let mut received = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(500), async {
+            while let Some(envelope) = rx.recv().await {
+                received.push(envelope.exchange);
+                if received.len() == 1 {
+                    break;
+                }
+            }
+        }).await;
+        token.cancel();
+
+        assert_eq!(received.len(), 1);
+        let name = received[0].input.header("CamelFileNameOnly")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(name, "data.csv");
+    }
+
+    #[tokio::test]
+    async fn test_file_consumer_delete_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        std::fs::write(dir.path().join("deleteme.txt"), "bye").unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?delete=true&initialDelay=0&delay=100"))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        let _ = tokio::time::timeout(Duration::from_millis(500), async {
+            rx.recv().await
+        }).await;
+        token.cancel();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(!dir.path().join("deleteme.txt").exists(), "File should be deleted");
+    }
+
+    #[tokio::test]
+    async fn test_file_consumer_move_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        std::fs::write(dir.path().join("moveme.txt"), "data").unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?initialDelay=0&delay=100"))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        let _ = tokio::time::timeout(Duration::from_millis(500), async {
+            rx.recv().await
+        }).await;
+        token.cancel();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(!dir.path().join("moveme.txt").exists(), "Original file should be gone");
+        assert!(dir.path().join(".camel").join("moveme.txt").exists(), "File should be in .camel/");
+    }
+
+    #[tokio::test]
+    async fn test_file_consumer_respects_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?initialDelay=0&delay=50"))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        let handle = tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        token.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(result.is_ok(), "Consumer should have stopped after cancellation");
     }
 }
