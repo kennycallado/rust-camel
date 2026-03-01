@@ -195,13 +195,74 @@ impl Endpoint for HttpEndpoint {
 }
 
 // ---------------------------------------------------------------------------
-// HttpProducer (stub)
+// HttpProducer
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct HttpProducer {
     config: HttpConfig,
     client: reqwest::Client,
+}
+
+impl HttpProducer {
+    fn resolve_method(exchange: &Exchange, config: &HttpConfig) -> String {
+        if let Some(ref method) = config.http_method {
+            return method.to_uppercase();
+        }
+        if let Some(method) = exchange.input.header("CamelHttpMethod").and_then(|v| v.as_str()) {
+            return method.to_uppercase();
+        }
+        if !exchange.input.body.is_empty() {
+            return "POST".to_string();
+        }
+        "GET".to_string()
+    }
+
+    fn resolve_url(exchange: &Exchange, config: &HttpConfig) -> String {
+        if let Some(uri) = exchange.input.header("CamelHttpUri").and_then(|v| v.as_str()) {
+            let mut url = uri.to_string();
+            if let Some(path) = exchange.input.header("CamelHttpPath").and_then(|v| v.as_str()) {
+                if !url.ends_with('/') && !path.starts_with('/') {
+                    url.push('/');
+                }
+                url.push_str(path);
+            }
+            if let Some(query) = exchange.input.header("CamelHttpQuery").and_then(|v| v.as_str()) {
+                url.push('?');
+                url.push_str(query);
+            }
+            return url;
+        }
+
+        let mut url = config.base_url.clone();
+
+        if let Some(path) = exchange.input.header("CamelHttpPath").and_then(|v| v.as_str()) {
+            if !url.ends_with('/') && !path.starts_with('/') {
+                url.push('/');
+            }
+            url.push_str(path);
+        }
+
+        if let Some(query) = exchange.input.header("CamelHttpQuery").and_then(|v| v.as_str()) {
+            url.push('?');
+            url.push_str(query);
+        }
+
+        url
+    }
+
+    fn body_to_bytes(body: &Body) -> Option<Vec<u8>> {
+        match body {
+            Body::Empty => None,
+            Body::Bytes(b) => Some(b.to_vec()),
+            Body::Text(s) => Some(s.as_bytes().to_vec()),
+            Body::Json(v) => Some(v.to_string().into_bytes()),
+        }
+    }
+
+    fn is_ok_status(status: u16, range: (u16, u16)) -> bool {
+        status >= range.0 && status <= range.1
+    }
 }
 
 impl Service<Exchange> for HttpProducer {
@@ -213,9 +274,94 @@ impl Service<Exchange> for HttpProducer {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, _exchange: Exchange) -> Self::Future {
+    fn call(&mut self, mut exchange: Exchange) -> Self::Future {
+        let config = self.config.clone();
+        let client = self.client.clone();
+
         Box::pin(async move {
-            todo!("HTTP producer not yet implemented")
+            let method_str = HttpProducer::resolve_method(&exchange, &config);
+            let url = HttpProducer::resolve_url(&exchange, &config);
+
+            debug!(method = %method_str, url = %url, "HTTP request");
+
+            let method = method_str.parse::<reqwest::Method>().map_err(|e| {
+                CamelError::ProcessorError(format!("Invalid HTTP method '{}': {}", method_str, e))
+            })?;
+
+            let mut request = client
+                .request(method, &url)
+                .timeout(config.connect_timeout);
+
+            if let Some(timeout) = config.response_timeout {
+                request = request.timeout(timeout);
+            }
+
+            for (key, value) in &exchange.input.headers {
+                if !key.starts_with("Camel") {
+                    if let Some(val_str) = value.as_str() {
+                        if let (Ok(name), Ok(val)) = (
+                            reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                            reqwest::header::HeaderValue::from_str(val_str),
+                        ) {
+                            request = request.header(name, val);
+                        }
+                    }
+                }
+            }
+
+            if let Some(body_bytes) = HttpProducer::body_to_bytes(&exchange.input.body) {
+                request = request.body(body_bytes);
+            }
+
+            let response = request.send().await.map_err(|e| {
+                CamelError::ProcessorError(format!("HTTP request failed: {e}"))
+            })?;
+
+            let status_code = response.status().as_u16();
+            let status_text = response
+                .status()
+                .canonical_reason()
+                .unwrap_or("Unknown")
+                .to_string();
+
+            for (key, value) in response.headers() {
+                if let Ok(val_str) = value.to_str() {
+                    exchange.input.set_header(
+                        key.as_str(),
+                        serde_json::Value::String(val_str.to_string()),
+                    );
+                }
+            }
+
+            exchange.input.set_header(
+                "CamelHttpResponseCode",
+                serde_json::Value::Number(status_code.into()),
+            );
+            exchange.input.set_header(
+                "CamelHttpResponseText",
+                serde_json::Value::String(status_text.clone()),
+            );
+
+            let response_body = response.bytes().await.map_err(|e| {
+                CamelError::ProcessorError(format!("Failed to read response body: {e}"))
+            })?;
+
+            if config.throw_exception_on_failure
+                && !HttpProducer::is_ok_status(status_code, config.ok_status_code_range)
+            {
+                return Err(CamelError::HttpOperationFailed {
+                    status_code,
+                    status_text,
+                    response_body: Some(String::from_utf8_lossy(&response_body).to_string()),
+                });
+            }
+
+            if !response_body.is_empty() {
+                exchange.input.body = Body::Bytes(bytes::Bytes::from(response_body.to_vec()));
+            }
+
+            debug!(status = status_code, url = %url, "HTTP response");
+            Ok(exchange)
         })
     }
 }
@@ -288,5 +434,247 @@ mod tests {
         let component = HttpComponent::new();
         let endpoint = component.create_endpoint("http://localhost/api").unwrap();
         assert!(endpoint.create_producer().is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Producer tests
+    // -----------------------------------------------------------------------
+
+    async fn start_test_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let handle = tokio::spawn(async move {
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut buf = vec![0u8; 4096];
+                        let n = stream.read(&mut buf).await.unwrap_or(0);
+                        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+
+                        let method = request.split_whitespace().next().unwrap_or("GET");
+
+                        let body = format!(r#"{{"method":"{}","echo":"ok"}}"#, method);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Custom: test-value\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            }
+        });
+
+        (url, handle)
+    }
+
+    async fn start_status_server(status: u16) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let handle = tokio::spawn(async move {
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let status = status;
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut buf = vec![0u8; 4096];
+                        let _ = stream.read(&mut buf).await;
+
+                        let status_text = match status {
+                            404 => "Not Found",
+                            500 => "Internal Server Error",
+                            _ => "Error",
+                        };
+                        let body = "error body";
+                        let response = format!(
+                            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
+                            status, status_text, body.len(), body
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            }
+        });
+
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_get_request() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_test_server().await;
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api/test"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        let status = result.input.header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+
+        assert!(!result.input.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_post_with_body() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_test_server().await;
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api/data"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::new("request body"));
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        let status = result.input.header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_method_from_header() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_test_server().await;
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header("CamelHttpMethod", serde_json::Value::String("DELETE".to_string()));
+
+        let result = producer.oneshot(exchange).await.unwrap();
+        let status = result.input.header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_forced_method() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_test_server().await;
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api?httpMethod=PUT"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        let status = result.input.header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_throw_exception_on_failure() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_status_server(404).await;
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("{url}/not-found"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            CamelError::HttpOperationFailed { status_code, .. } => {
+                assert_eq!(status_code, 404);
+            }
+            e => panic!("Expected HttpOperationFailed, got: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_no_throw_on_failure() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_status_server(500).await;
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("{url}/error?throwExceptionOnFailure=false"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        let status = result.input.header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 500);
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_uri_override() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_test_server().await;
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint("http://localhost:1/does-not-exist")
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header("CamelHttpUri", serde_json::Value::String(format!("{url}/api")));
+
+        let result = producer.oneshot(exchange).await.unwrap();
+        let status = result.input.header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_response_headers_mapped() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_test_server().await;
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        assert!(result.input.header("content-type").is_some() ||
+                result.input.header("Content-Type").is_some());
+        assert!(result.input.header("CamelHttpResponseText").is_some());
     }
 }
