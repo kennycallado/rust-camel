@@ -258,8 +258,92 @@ impl ServerRegistry {
     }
 }
 
-async fn run_axum_server(_listener: tokio::net::TcpListener, _dispatch: DispatchTable) {
-    // Implemented in Task 5
+// ---------------------------------------------------------------------------
+// Axum server
+// ---------------------------------------------------------------------------
+
+use axum::{
+    Router,
+    body::Body as AxumBody,
+    extract::{Request, State},
+    http::{Response, StatusCode},
+    response::IntoResponse,
+};
+
+async fn run_axum_server(listener: tokio::net::TcpListener, dispatch: DispatchTable) {
+    let app = Router::new()
+        .fallback(dispatch_handler)
+        .with_state(dispatch);
+
+    axum::serve(listener, app).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e, "Axum server error");
+    });
+}
+
+async fn dispatch_handler(
+    State(dispatch): State<DispatchTable>,
+    req: Request,
+) -> impl IntoResponse {
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or("").to_string();
+    let headers = req.headers().clone();
+
+    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+        Ok(b) => b,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(AxumBody::empty())
+                .unwrap();
+        }
+    };
+
+    // Look up handler for this path
+    let sender = {
+        let table = dispatch.read().await;
+        table.get(&path).cloned()
+    };
+
+    let Some(sender) = sender else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(AxumBody::from("No consumer registered for this path"))
+            .unwrap();
+    };
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<HttpReply>();
+    let envelope = RequestEnvelope {
+        method,
+        path,
+        query,
+        headers,
+        body: body_bytes,
+        reply_tx,
+    };
+
+    if sender.send(envelope).await.is_err() {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(AxumBody::from("Consumer unavailable"))
+            .unwrap();
+    }
+
+    match reply_rx.await {
+        Ok(reply) => {
+            let status = StatusCode::from_u16(reply.status)
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut builder = Response::builder().status(status);
+            for (k, v) in &reply.headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            builder.body(AxumBody::from(reply.body)).unwrap()
+        }
+        Err(_) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(AxumBody::from("Pipeline error"))
+            .unwrap(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,5 +1179,26 @@ mod tests {
         let r1 = ServerRegistry::global();
         let r2 = ServerRegistry::global();
         assert!(std::ptr::eq(r1 as *const _, r2 as *const _));
+    }
+
+    // -----------------------------------------------------------------------
+    // Axum dispatch handler tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_dispatch_handler_returns_404_for_unknown_path() {
+        let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
+        // Nothing registered in the dispatch table
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(run_axum_server(listener, dispatch));
+
+        // Wait for server to start
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/unknown"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
     }
 }
