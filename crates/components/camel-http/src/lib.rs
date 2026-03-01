@@ -359,15 +359,11 @@ async fn dispatch_handler(
 
 pub struct HttpConsumer {
     config: HttpServerConfig,
-    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl HttpConsumer {
     pub fn new(config: HttpServerConfig) -> Self {
-        Self {
-            config,
-            cancel: tokio_util::sync::CancellationToken::new(),
-        }
+        Self { config }
     }
 }
 
@@ -388,17 +384,9 @@ impl Consumer for HttpConsumer {
         }
 
         let path = self.config.path.clone();
-        let cancel = self.cancel.clone();
-
-        // Deregister on exit
-        let dispatch_deregister = Arc::clone(&dispatch);
-        let path_deregister = path.clone();
 
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => {
-                    break;
-                }
                 _ = ctx.cancelled() => {
                     break;
                 }
@@ -468,11 +456,14 @@ impl Consumer for HttpConsumer {
                                 body: body_bytes,
                             }
                         }
-                        Err(_) => HttpReply {
-                            status: 500,
-                            headers: vec![],
-                            body: bytes::Bytes::from("Internal Server Error"),
-                        },
+                        Err(e) => {
+                            tracing::error!(error = %e, path = %path, "Pipeline error processing HTTP request");
+                            HttpReply {
+                                status: 500,
+                                headers: vec![],
+                                body: bytes::Bytes::from("Internal Server Error"),
+                            }
+                        }
                     };
 
                     // Reply to Axum handler (ignore error if client disconnected)
@@ -483,15 +474,14 @@ impl Consumer for HttpConsumer {
 
         // Deregister this path
         {
-            let mut table = dispatch_deregister.write().await;
-            table.remove(&path_deregister);
+            let mut table = dispatch.write().await;
+            table.remove(&path);
         }
 
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
-        self.cancel.cancel();
         Ok(())
     }
 }
@@ -1360,7 +1350,11 @@ mod tests {
     async fn test_http_consumer_start_registers_path() {
         use camel_component::ConsumerContext;
 
-        let port = 19001u16;
+        // Get an OS-assigned free port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // Release port — ServerRegistry will rebind it
+
         let consumer_cfg = HttpServerConfig {
             host: "127.0.0.1".to_string(),
             port,
