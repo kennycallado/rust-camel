@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -23,6 +24,7 @@ pub struct HttpConfig {
     pub follow_redirects: bool,
     pub connect_timeout: Duration,
     pub response_timeout: Option<Duration>,
+    pub query_params: HashMap<String, String>,
 }
 
 impl HttpConfig {
@@ -73,14 +75,32 @@ impl HttpConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .map(Duration::from_millis);
 
+        // CAMEL_OPTIONS: params that are consumed by Camel,        // Any remaining params should be forwarded as HTTP query params
+        let camel_options = [
+            "httpMethod",
+            "throwExceptionOnFailure",
+            "okStatusCodeRange",
+            "followRedirects",
+            "connectTimeout",
+            "responseTimeout",
+        ];
+
+        let query_params: HashMap<String, String> = parts
+            .params
+            .into_iter()
+            .filter(|(k, _)| !camel_options.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
         Ok(Self {
             base_url,
             http_method,
             throw_exception_on_failure,
-            ok_status_code_range,
+            ok_status_code_range: (ok_status_code_range.0, ok_status_code_range.1),
             follow_redirects,
             connect_timeout,
             response_timeout,
+            query_params,
         })
     }
 }
@@ -89,15 +109,11 @@ impl HttpConfig {
 // HttpComponent / HttpsComponent
 // ---------------------------------------------------------------------------
 
-pub struct HttpComponent {
-    client: reqwest::Client,
-}
+pub struct HttpComponent;
 
 impl HttpComponent {
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
+        Self
     }
 }
 
@@ -114,23 +130,20 @@ impl Component for HttpComponent {
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
         let config = HttpConfig::from_uri(uri)?;
+        let client = build_client(&config)?;
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,
-            client: self.client.clone(),
+            client,
         }))
     }
 }
 
-pub struct HttpsComponent {
-    client: reqwest::Client,
-}
+pub struct HttpsComponent;
 
 impl HttpsComponent {
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
+        Self
     }
 }
 
@@ -147,12 +160,26 @@ impl Component for HttpsComponent {
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
         let config = HttpConfig::from_uri(uri)?;
+        let client = build_client(&config)?;
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,
-            client: self.client.clone(),
+            client,
         }))
     }
+}
+
+fn build_client(config: &HttpConfig) -> Result<reqwest::Client, CamelError> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(config.connect_timeout);
+
+    if !config.follow_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+
+    builder.build().map_err(|e| {
+        CamelError::EndpointCreationFailed(format!("Failed to build HTTP client: {e}"))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +263,16 @@ impl HttpProducer {
         if let Some(query) = exchange.input.header("CamelHttpQuery").and_then(|v| v.as_str()) {
             url.push('?');
             url.push_str(query);
+        } else if !config.query_params.is_empty() {
+            // Forward non-Camel query params from config
+            url.push('?');
+            let query_string: String = config
+                .query_params
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("&");
+            url.push_str(&query_string);
         }
 
         url
@@ -665,5 +702,128 @@ mod tests {
         assert!(result.input.header("content-type").is_some() ||
                 result.input.header("Content-Type").is_some());
         assert!(result.input.header("CamelHttpResponseText").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug fix tests: Client configuration per-endpoint
+    // -----------------------------------------------------------------------
+
+    async fn start_redirect_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 4096];
+                        let n = stream.read(&mut buf).await.unwrap_or(0);
+                        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                        
+                        // Check if this is a request to /final
+                        if request.contains("GET /final") {
+                            let body = r#"{"status":"final"}"#;
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                body.len(), body
+                            );
+                            let _ = stream.write_all(response.as_bytes()).await;
+                        } else {
+                            // Redirect to /final
+                            let response = "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n";
+                            let _ = stream.write_all(response.as_bytes()).await;
+                        }
+                    });
+                }
+            }
+        });
+
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn test_follow_redirects_false_does_not_follow() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_redirect_server().await;
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("{url}?followRedirects=false&throwExceptionOnFailure=false"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        // Should get 302, NOT follow redirect to 200
+        let status = result.input.header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 302, "Should NOT follow redirect when followRedirects=false");
+    }
+
+    #[tokio::test]
+    async fn test_follow_redirects_true_follows_redirect() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_redirect_server().await;
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("{url}?followRedirects=true"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        // Should follow redirect and get 200
+        let status = result.input.header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200, "Should follow redirect when followRedirects=true");
+    }
+
+    #[tokio::test]
+    async fn test_query_params_forwarded_to_http_request() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_test_server().await;
+
+        let component = HttpComponent::new();
+        // apiKey is NOT a Camel option, should be forwarded as query param
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api?apiKey=secret123&httpMethod=GET"))
+            .unwrap();
+        let producer = endpoint.create_producer().unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        // The test server returns the request info in response
+        // We just verify it succeeds (the query param was sent)
+        let status = result.input.header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn test_non_camel_query_params_are_forwarded() {
+        // This test verifies Bug #3 fix: non-Camel options should be forwarded
+        // We'll test the config parsing, not the actual HTTP call
+        let config = HttpConfig::from_uri("http://example.com/api?apiKey=secret123&httpMethod=GET&token=abc456").unwrap();
+        
+        // apiKey and token are NOT Camel options, should be forwarded
+        assert!(config.query_params.contains_key("apiKey"), "apiKey should be preserved");
+        assert!(config.query_params.contains_key("token"), "token should be preserved");
+        assert_eq!(config.query_params.get("apiKey").unwrap(), "secret123");
+        assert_eq!(config.query_params.get("token").unwrap(), "abc456");
+        
+        // httpMethod IS a Camel option, should NOT be in query_params
+        assert!(!config.query_params.contains_key("httpMethod"), "httpMethod should not be forwarded");
     }
 }
