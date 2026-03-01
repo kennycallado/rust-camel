@@ -164,6 +164,28 @@ impl HttpServerConfig {
 }
 
 // ---------------------------------------------------------------------------
+// RequestEnvelope / HttpReply
+// ---------------------------------------------------------------------------
+
+/// An inbound HTTP request sent from the Axum dispatch handler to an
+/// `HttpConsumer` receive loop.
+pub struct RequestEnvelope {
+    pub method:   String,
+    pub path:     String,
+    pub query:    String,
+    pub headers:  http::HeaderMap,
+    pub body:     bytes::Bytes,
+    pub reply_tx: tokio::sync::oneshot::Sender<HttpReply>,
+}
+
+/// The HTTP response that `HttpConsumer` sends back to the Axum handler.
+pub struct HttpReply {
+    pub status:  u16,
+    pub headers: Vec<(String, String)>,
+    pub body:    bytes::Bytes,
+}
+
+// ---------------------------------------------------------------------------
 // HttpComponent / HttpsComponent
 // ---------------------------------------------------------------------------
 
@@ -978,5 +1000,12 @@ mod tests {
     #[test]
     fn test_http_server_config_invalid_port() {
         assert!(HttpServerConfig::from_uri("http://localhost:abc/path").is_err());
+    }
+
+    #[test]
+    fn test_request_envelope_and_reply_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<RequestEnvelope>();
+        assert_send::<HttpReply>();
     }
 }
