@@ -117,6 +117,7 @@ fn create_user_route(
     request_count: Arc<AtomicU64>,
 ) -> Result<RouteDefinition, CamelError> {
     RouteBuilder::from("http://0.0.0.0:8080/api/users/create")
+        .log("Received create user request")
         .process(move |mut exchange| {
             let storage = Arc::clone(&storage);
             let rc = Arc::clone(&request_count);
@@ -164,6 +165,7 @@ fn create_user_route(
                 Ok(exchange)
             }
         })
+        .log("Create user request completed")
         .build()
 }
 

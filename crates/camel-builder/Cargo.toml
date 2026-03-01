@@ -15,3 +15,6 @@ tower.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+camel-timer.workspace = true
+camel-direct.workspace = true
+camel-mock.workspace = true

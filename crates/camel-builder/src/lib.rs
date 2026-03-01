@@ -8,11 +8,11 @@ use camel_api::{
     BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProcessorFn, Value,
 };
 use camel_core::route::{BuilderStep, RouteDefinition};
-use camel_processor::{DynamicSetHeader, MapBody, SetBody, SetHeader, StopService};
+use camel_processor::{DynamicSetHeader, LogLevel, MapBody, SetBody, SetHeader, StopService};
 
 /// Shared step-accumulation methods for all builder types.
 ///
-/// Implementors provide `steps_mut()` and get 9 step-adding methods for free.
+/// Implementors provide `steps_mut()` and get step-adding methods for free.
 /// `filter()` and other branching methods are NOT included — they return
 /// different types per builder and stay as per-builder methods.
 pub trait StepAccumulator: Sized {
@@ -100,6 +100,24 @@ pub trait StepAccumulator: Sized {
     fn stop(mut self) -> Self {
         self.steps_mut()
             .push(BuilderStep::Processor(BoxProcessor::new(StopService)));
+        self
+    }
+
+    /// Log a message at INFO level.
+    ///
+    /// The message will be logged when an exchange passes through this step.
+    fn log(self, message: impl Into<String>) -> Self {
+        self.log_level(LogLevel::Info, message)
+    }
+
+    /// Log a message at the specified level.
+    ///
+    /// The message will be logged when an exchange passes through this step.
+    fn log_level(mut self, level: LogLevel, message: impl Into<String>) -> Self {
+        use camel_processor::LogProcessor;
+        let svc = LogProcessor::new(level, message.into());
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
     }
 }

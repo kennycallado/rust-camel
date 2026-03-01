@@ -47,3 +47,5 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | camel-dsl (YAML/JSON routes)                                         | Core design + Error handling Non-Goals | Baja — crate ya existe vacío                                                   |        |
 | Más components (kafka, etc.)                                         | Core design Future Extensions          | Baja — depende de casos de uso                                                 |        |
 | Management API (health, metrics)                                     | Core design Future Extensions          | Baja — camel-health ya existe vacío                                            |        |
+| Tracer (message flow tracing)                                        | Apache Camel Tracer                    | Media — tracing automático del flujo de mensajes                              |        |
+| Log EIP (.log() DSL method)                                          | Apache Camel Log EIP                   | Alta — logging simple para mensajes humanos                                   | DONE   |

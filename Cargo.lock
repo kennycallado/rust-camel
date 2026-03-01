@@ -148,8 +148,11 @@ dependencies = [
  "camel-api",
  "camel-component",
  "camel-core",
+ "camel-direct",
  "camel-endpoint",
+ "camel-mock",
  "camel-processor",
+ "camel-timer",
  "tokio",
  "tower",
 ]
