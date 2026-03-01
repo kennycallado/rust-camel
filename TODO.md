@@ -12,7 +12,7 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | HTTP component (producer)                                            | Core design Future Extensions          | Media — integración con APIs externas                                          | DONE   |
 | WireTap EIP                                                          | Splitter design Future EIPs            | Media-baja — Exchange clone + fire-and-forget, casi trivial                    | DONE   |
 | Aggregator EIP                                                       | Splitter design Future EIPs            | Media —                                                                        | DONE   |
-| Filter real stopping behavior                                        | Aggregator postmortem                  | Media — Filter devuelve exchange as-is cuando predicate=false;                 |        |
+| Filter real stopping behavior                                        | Aggregator postmortem                  | Media — Filter devuelve exchange as-is cuando predicate=false;                 | DONE   |
 |                                                                      |                                        | pipeline no se detiene;                                                        |        |
 |                                                                      |                                        | afecta Multicast, cualquier EIP que quiera filtrar downstream                  |        |
 | Aggregator v2: completion by timeout                                 | Aggregator design Deferred             | Media-baja — requiere `tokio::spawn` interno por bucket + `CancellationToken`  |        |
