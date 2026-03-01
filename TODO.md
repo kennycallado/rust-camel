@@ -12,7 +12,7 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | HTTP component (producer)                                            | Core design Future Extensions          | Media — integración con APIs externas                                          | DONE   |
 | WireTap EIP                                                          | Splitter design Future EIPs            | Media-baja — Exchange clone + fire-and-forget, casi trivial                    | DONE   |
 | Aggregator EIP                                                       | Splitter design Future EIPs            | Media —                                                                        | DONE   |
-| Stop EIP (.stop() dentro de filter)                                  | Apache Camel docs                      | Baja — Filter NO hace full stop (es correcto así según Camel);                 |        |
+| Stop EIP (.stop() dentro de filter)                                  | Apache Camel docs                      | Baja — Filter NO hace full stop (es correcto así según Camel);                 | DONE   |
 |                                                                      |                                        | para parar el pipeline hace falta un Stop EIP explícito dentro del bloque      |        |
 | Aggregator v2: completion by timeout                                 | Aggregator design Deferred             | Media-baja — requiere `tokio::spawn` interno por bucket + `CancellationToken`  |        |
 | Aggregator v2: correlation key por función                           | Aggregator design Deferred             | Baja — cambiar `header_name: String` a `CorrelationKeyFn`;                     |        |
@@ -22,13 +22,16 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | Aggregator v2: `forceCompletionOnStop`/`discardOnAggregationFailure` | Aggregator design Deferred             | Baja — opciones Java Camel diferidas                                           |        |
 | WireTap v2: prepare/processor function                               | WireTap postmortem                     | Baja — transformar copia antes de enviar; Apache Camel tiene esto              |        |
 | WireTap v2: synchronous tap with timeout                             | WireTap design Non-Goals               | Baja — viola fire-and-forget, añade complejidad                                |        |
-| Multicast EIP                                                        | Splitter design Future EIPs            | Media — mismo patrón que Splitter (clone N, aggregate)                         |        |
+| Multicast EIP                                                        | Splitter design Future EIPs            | Media — mismo patrón que Splitter (clone N, aggregate)                         | DONE   |
 | Routing Slip EIP                                                     | Core design                            | Media-baja                                                                     |        |
 | HTTP consumer (server/webhook endpoint)                              | File-HTTP plan implícito               | Media-baja — HttpConsumer no implementado, solo producer                       |        |
 | Idempotent file consumer (seen-file tracking)                        | File-HTTP postmortem \#6               | Media-baja — noop=true re-envía duplicados cada poll, necesita idempotent repo |        |
 | Pipeline concurrency (Option E typestate)                            | Pipeline concurrency analysis          | Media-baja — struct-based consumers con concurrency compile-time               |        |
 | HttpOperationFailed: añadir URL y método                             | File-HTTP postmortem \#7               | Baja — mejora de debugging en logs                                             |        |
 | Recipient List EIP                                                   | Splitter design Future EIPs            | Baja — Multicast dinámico                                                      |        |
+| Multicast v2: onPrepare processor                                    | Multicast design Future Enhancements   | Baja — transformar copia por endpoint antes de enviar; Apache Camel tiene esto |        |
+| Multicast v2: streaming mode (out-of-order)                         | Multicast design Future Enhancements   | Baja — agrega resultados en orden de llegada, no de envío                      |        |
+| Multicast v2: shareUnitOfWork                                        | Multicast design Future Enhancements   | Baja — coordinar transacciones entre endpoints del multicast                   |        |
 | StepAccumulator trait (DRY SplitBuilder/RouteBuilder)                | Splitter postmortem Task 4             | Baja — refactoring puro, sin impacto funcional; ahora afecta 4 builders:       | DONE   |
 |                                                                      |                                        | RouteBuilder, SplitBuilder,                                                    |        |
 |                                                                      |                                        | y cualquier builder futuro que añada `.aggregate()`                            |        |
