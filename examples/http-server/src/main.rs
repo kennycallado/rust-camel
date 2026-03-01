@@ -2,7 +2,7 @@ use camel_api::body::Body;
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
-use camel_http::HttpComponent;
+use camel_http::{HttpComponent, HttpsComponent};
 
 /// HTTP Server example demonstrating multiple routes on the same port.
 ///
@@ -18,7 +18,9 @@ async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt::init();
 
     let mut ctx = CamelContext::new();
+
     ctx.register_component(HttpComponent::new());
+    ctx.register_component(HttpsComponent::new());
 
     // Route 1: Echo server - returns request body unchanged
     let echo_route = RouteBuilder::from("http://0.0.0.0:8080/echo")
@@ -29,8 +31,9 @@ async fn main() -> Result<(), CamelError> {
                 .header("CamelHttpMethod")
                 .and_then(|v| v.as_str())
                 .unwrap_or("UNKNOWN");
+
             tracing::info!(method, "Echo request received");
-            
+
             // Echo the body back (no modification needed)
             Ok(exchange)
         })
@@ -44,16 +47,20 @@ async fn main() -> Result<(), CamelError> {
                 "service": "rust-camel-http-server",
                 "timestamp": chrono_timestamp(),
             }));
-            exchange
-                .input
-                .set_header("Content-Type", Value::String("application/json".into()));
+            // Don't set Content-Type manually - let framework handle it from Body::Json
             Ok(exchange)
         })
         .build()?;
 
-    // Route 3: Reverse proxy to httpbin.org
+    // Route 3: Simple GET handler
     let proxy_route = RouteBuilder::from("http://0.0.0.0:8080/proxy")
-        .to("https://httpbin.org/get?source=rust-camel&throwExceptionOnFailure=false")
+        .process(|mut exchange| async move {
+            exchange.input.body = Body::Json(serde_json::json!({
+                "message": "This is a simple GET endpoint",
+                "hint": "For actual proxying, use .to(\"https://...\") with HttpProducer",
+            }));
+            Ok(exchange)
+        })
         .build()?;
 
     // Route 4: POST handler with JSON transformation
@@ -61,18 +68,13 @@ async fn main() -> Result<(), CamelError> {
         .process(|mut exchange| async move {
             // Read request body and transform
             let input = exchange.input.body.as_text().unwrap_or("");
-            
+
             exchange.input.body = Body::Json(serde_json::json!({
                 "original": input,
                 "transformed": input.to_uppercase(),
                 "length": input.len(),
             }));
-            exchange
-                .input
-                .set_header("Content-Type", Value::String("application/json".into()));
-            exchange
-                .input
-                .set_header("CamelHttpResponseCode", Value::from(201u16));
+            // Don't set headers manually - let framework handle it
             
             Ok(exchange)
         })
