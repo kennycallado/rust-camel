@@ -447,21 +447,44 @@ impl Consumer for HttpConsumer {
                                 // Filter Camel internal headers
                                 .filter(|(k, _)| !k.starts_with("Camel"))
                                 // Filter hop-by-hop and request-only headers
+                                // Based on Apache Camel's HttpUtil.addCommonFilters()
                                 .filter(|(k, _)| {
                                     !matches!(
                                         k.to_lowercase().as_str(),
+                                        // RFC 2616 Section 4.5 - General headers
                                         "content-length" |      // Auto-calculated by framework
-                                        "transfer-encoding" |  // Hop-by-hop
-                                        "connection" |         // Hop-by-hop
-                                        "keep-alive" |         // Hop-by-hop
-                                        "upgrade" |            // Hop-by-hop
-                                        "host" |               // Request-only
-                                        "user-agent" |         // Request-only
-                                        "accept" |             // Request-only
-                                        "accept-encoding" |    // Request-only
-                                        "accept-language" |    // Request-only
-                                        "authorization" |      // Request-only (security)
-                                        "proxy-authorization"  // Request-only (security)
+                                        "content-type" |        // Auto-calculated from body
+                                        "transfer-encoding" |   // Hop-by-hop
+                                        "connection" |          // Hop-by-hop
+                                        "cache-control" |       // Hop-by-hop
+                                        "date" |                // Auto-generated
+                                        "pragma" |              // Hop-by-hop
+                                        "trailer" |             // Hop-by-hop
+                                        "upgrade" |             // Hop-by-hop
+                                        "via" |                 // Hop-by-hop
+                                        "warning" |             // Hop-by-hop
+                                        // Request-only headers
+                                        "host" |                // Request-only
+                                        "user-agent" |          // Request-only
+                                        "accept" |              // Request-only
+                                        "accept-encoding" |     // Request-only
+                                        "accept-language" |     // Request-only
+                                        "accept-charset" |      // Request-only
+                                        "authorization" |       // Request-only (security)
+                                        "proxy-authorization" | // Request-only (security)
+                                        "cookie" |              // Request-only
+                                        "expect" |              // Request-only
+                                        "from" |                // Request-only
+                                        "if-match" |            // Request-only
+                                        "if-modified-since" |   // Request-only
+                                        "if-none-match" |       // Request-only
+                                        "if-range" |            // Request-only
+                                        "if-unmodified-since" | // Request-only
+                                        "max-forwards" |        // Request-only
+                                        "proxy-connection" |    // Request-only
+                                        "range" |               // Request-only
+                                        "referer" |             // Request-only
+                                        "te"                    // Request-only
                                     )
                                 })
                                 .filter_map(|(k, v)| {
