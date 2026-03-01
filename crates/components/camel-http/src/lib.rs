@@ -354,6 +354,149 @@ async fn dispatch_handler(
 }
 
 // ---------------------------------------------------------------------------
+// HttpConsumer
+// ---------------------------------------------------------------------------
+
+pub struct HttpConsumer {
+    config: HttpServerConfig,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+impl HttpConsumer {
+    pub fn new(config: HttpServerConfig) -> Self {
+        Self {
+            config,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Consumer for HttpConsumer {
+    async fn start(&mut self, ctx: camel_component::ConsumerContext) -> Result<(), CamelError> {
+        use camel_api::{Exchange, Message, body::Body};
+
+        let dispatch = ServerRegistry::global()
+            .get_or_spawn(&self.config.host, self.config.port)
+            .await?;
+
+        // Create a channel for this path and register it
+        let (env_tx, mut env_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(64);
+        {
+            let mut table = dispatch.write().await;
+            table.insert(self.config.path.clone(), env_tx);
+        }
+
+        let path = self.config.path.clone();
+        let cancel = self.cancel.clone();
+
+        // Deregister on exit
+        let dispatch_deregister = Arc::clone(&dispatch);
+        let path_deregister = path.clone();
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    break;
+                }
+                _ = ctx.cancelled() => {
+                    break;
+                }
+                envelope = env_rx.recv() => {
+                    let Some(envelope) = envelope else { break; };
+
+                    // Build Exchange from HTTP request
+                    let mut msg = Message::default();
+
+                    // Set standard Camel HTTP headers
+                    msg.set_header("CamelHttpMethod",
+                        serde_json::Value::String(envelope.method.clone()));
+                    msg.set_header("CamelHttpPath",
+                        serde_json::Value::String(envelope.path.clone()));
+                    msg.set_header("CamelHttpQuery",
+                        serde_json::Value::String(envelope.query.clone()));
+
+                    // Forward HTTP headers (skip pseudo-headers)
+                    for (k, v) in &envelope.headers {
+                        if let Ok(val_str) = v.to_str() {
+                            msg.set_header(
+                                k.as_str(),
+                                serde_json::Value::String(val_str.to_string()),
+                            );
+                        }
+                    }
+
+                    // Body
+                    if !envelope.body.is_empty() {
+                        msg.body = Body::Bytes(envelope.body.clone());
+                    }
+
+                    let exchange = Exchange::new(msg);
+
+                    // Send through pipeline and await result
+                    let result = ctx.send_and_wait(exchange).await;
+
+                    let reply = match result {
+                        Ok(out) => {
+                            let status = out
+                                .input
+                                .header("CamelHttpResponseCode")
+                                .and_then(|v| v.as_u64())
+                                .map(|s| s as u16)
+                                .unwrap_or(200);
+
+                            let body_bytes = match &out.input.body {
+                                Body::Empty => bytes::Bytes::new(),
+                                Body::Bytes(b) => b.clone(),
+                                Body::Text(s) => bytes::Bytes::from(s.clone().into_bytes()),
+                                Body::Json(v) => bytes::Bytes::from(v.to_string().into_bytes()),
+                            };
+
+                            let resp_headers: Vec<(String, String)> = out
+                                .input
+                                .headers
+                                .iter()
+                                .filter(|(k, _)| !k.starts_with("Camel"))
+                                .filter_map(|(k, v)| {
+                                    v.as_str().map(|s| (k.clone(), s.to_string()))
+                                })
+                                .collect();
+
+                            HttpReply {
+                                status,
+                                headers: resp_headers,
+                                body: body_bytes,
+                            }
+                        }
+                        Err(_) => HttpReply {
+                            status: 500,
+                            headers: vec![],
+                            body: bytes::Bytes::from("Internal Server Error"),
+                        },
+                    };
+
+                    // Reply to Axum handler (ignore error if client disconnected)
+                    let _ = envelope.reply_tx.send(reply);
+                }
+            }
+        }
+
+        // Deregister this path
+        {
+            let mut table = dispatch_deregister.write().await;
+            table.remove(&path_deregister);
+        }
+
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<(), CamelError> {
+        self.cancel.cancel();
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HttpComponent / HttpsComponent
 // ---------------------------------------------------------------------------
 
@@ -1207,5 +1350,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status().as_u16(), 404);
+    }
+
+    // -----------------------------------------------------------------------
+    // HttpConsumer tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_http_consumer_start_registers_path() {
+        use camel_component::ConsumerContext;
+
+        let port = 19001u16;
+        let consumer_cfg = HttpServerConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/ping".to_string(),
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component::ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move {
+            consumer.start(ctx).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let resp_future = client
+            .post(format!("http://127.0.0.1:{port}/ping"))
+            .body("hello world")
+            .send();
+
+        let (http_result, _) = tokio::join!(resp_future, async {
+            if let Some(mut envelope) = rx.recv().await {
+                // Set a custom status code
+                envelope.exchange.input.set_header(
+                    "CamelHttpResponseCode",
+                    serde_json::Value::Number(201.into()),
+                );
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 201);
+
+        token.cancel();
     }
 }
