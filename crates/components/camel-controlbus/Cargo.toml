@@ -1,5 +1,5 @@
 [package]
-name = "camel-controlbus"
+name = "camel-component-controlbus"
 description = "ControlBus component for rust-camel"
 version.workspace = true
 edition.workspace = true

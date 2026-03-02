@@ -1,5 +1,5 @@
 [package]
-name = "camel-file"
+name = "camel-component-file"
 description = "File component for rust-camel"
 version.workspace = true
 edition.workspace = true

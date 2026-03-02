@@ -7,7 +7,7 @@ use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_core::route::RouteDefinition;
-use camel_http::HttpComponent;
+use camel_component_http::HttpComponent;
 use camel_processor::LogLevel;
 use errors::ApiError;
 use models::{CreateUserRequest, UpdateUserRequest};

@@ -11,13 +11,13 @@ camel-core.workspace = true
 camel-builder.workspace = true
 camel-component.workspace = true
 camel-processor.workspace = true
-camel-mock.workspace = true
-camel-timer.workspace = true
-camel-log.workspace = true
-camel-direct.workspace = true
-camel-file.workspace = true
-camel-http.workspace = true
-camel-controlbus.workspace = true
+camel-component-mock.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+camel-component-direct.workspace = true
+camel-component-file.workspace = true
+camel-component-http.workspace = true
+camel-component-controlbus.workspace = true
 tokio.workspace = true
 tower.workspace = true
 
@@ -28,4 +28,4 @@ wiremock = "0.6"
 reqwest = { workspace = true }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["redis"] }
-camel-redis = { path = "../components/camel-redis" }
+camel-component-redis = { path = "../components/camel-redis" }

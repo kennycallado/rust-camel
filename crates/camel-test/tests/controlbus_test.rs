@@ -8,10 +8,10 @@ use std::time::Duration;
 
 use camel_api::{RouteController, RouteStatus};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_controlbus::ControlBusComponent;
+use camel_component_controlbus::ControlBusComponent;
 use camel_core::CamelContext;
-use camel_mock::MockComponent;
-use camel_timer::TimerComponent;
+use camel_component_mock::MockComponent;
+use camel_component_timer::TimerComponent;
 
 // ---------------------------------------------------------------------------
 // Test 1: Route with auto_startup(false) does not start on ctx.start()

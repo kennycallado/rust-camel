@@ -7,9 +7,9 @@
 use camel_api::Value;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::CamelContext;
-use camel_mock::MockComponent;
-use camel_redis::RedisComponent;
-use camel_timer::TimerComponent;
+use camel_component_mock::MockComponent;
+use camel_component_redis::RedisComponent;
+use camel_component_timer::TimerComponent;
 use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::redis::Redis;

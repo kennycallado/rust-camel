@@ -1,9 +1,9 @@
 use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
-use camel_log::LogComponent;
-use camel_mock::MockComponent;
-use camel_timer::TimerComponent;
+use camel_component_log::LogComponent;
+use camel_component_mock::MockComponent;
+use camel_component_timer::TimerComponent;
 
 /// WireTap EIP example — send a copy of exchanges to a monitoring endpoint.
 ///

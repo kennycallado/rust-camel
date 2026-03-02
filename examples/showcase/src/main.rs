@@ -26,15 +26,15 @@ use camel_api::multicast::MulticastStrategy;
 use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_json_array};
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_controlbus::ControlBusComponent;
+use camel_component_controlbus::ControlBusComponent;
 use camel_core::context::CamelContext;
-use camel_direct::DirectComponent;
-use camel_file::FileComponent;
-use camel_http::{HttpComponent, HttpsComponent};
-use camel_log::LogComponent;
-use camel_mock::MockComponent;
+use camel_component_direct::DirectComponent;
+use camel_component_file::FileComponent;
+use camel_component_http::{HttpComponent, HttpsComponent};
+use camel_component_log::LogComponent;
+use camel_component_mock::MockComponent;
 use camel_processor::LogLevel;
-use camel_timer::TimerComponent;
+use camel_component_timer::TimerComponent;
 
 // =============================================================================
 // Custom Metrics Collector

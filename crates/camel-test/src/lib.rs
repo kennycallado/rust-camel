@@ -4,4 +4,4 @@
 //! rust-camel framework. It re-exports commonly needed types and provides
 //! test-specific utilities.
 
-pub use camel_mock::MockComponent;
+pub use camel_component_mock::MockComponent;

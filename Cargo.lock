@@ -8,9 +8,9 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-timer",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -237,12 +237,12 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-component",
+ "camel-component-direct",
+ "camel-component-mock",
+ "camel-component-timer",
  "camel-core",
- "camel-direct",
  "camel-endpoint",
- "camel-mock",
  "camel-processor",
- "camel-timer",
  "tokio",
  "tower",
 ]
@@ -261,7 +261,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "camel-controlbus"
+name = "camel-component-controlbus"
 version = "0.2.0"
 dependencies = [
  "async-trait",
@@ -271,6 +271,117 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "tracing",
+]
+
+[[package]]
+name = "camel-component-direct"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component",
+ "camel-endpoint",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "camel-component-file"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "camel-api",
+ "camel-component",
+ "camel-endpoint",
+ "regex",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "camel-component-http"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "camel-api",
+ "camel-component",
+ "camel-endpoint",
+ "http",
+ "reqwest",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "camel-component-log"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component",
+ "camel-endpoint",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "camel-component-mock"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component",
+ "camel-endpoint",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "camel-component-redis"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component",
+ "camel-endpoint",
+ "futures-util",
+ "redis",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "camel-component-timer"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component",
+ "camel-endpoint",
+ "serde_json",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -287,20 +398,6 @@ dependencies = [
  "camel-util",
  "futures",
  "thiserror",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
-]
-
-[[package]]
-name = "camel-direct"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "camel-api",
- "camel-component",
- "camel-endpoint",
  "tokio",
  "tokio-util",
  "tower",
@@ -329,78 +426,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "camel-file"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "bytes",
- "camel-api",
- "camel-component",
- "camel-endpoint",
- "regex",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
-]
-
-[[package]]
 name = "camel-health"
 version = "0.2.0"
 dependencies = [
  "async-trait",
  "camel-api",
  "camel-core",
-]
-
-[[package]]
-name = "camel-http"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "axum",
- "bytes",
- "camel-api",
- "camel-component",
- "camel-endpoint",
- "http",
- "reqwest",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "camel-log"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "camel-api",
- "camel-component",
- "camel-endpoint",
- "serde_json",
- "tokio",
- "tower",
- "tracing",
-]
-
-[[package]]
-name = "camel-mock"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "camel-api",
- "camel-component",
- "camel-endpoint",
- "tokio",
- "tower",
 ]
 
 [[package]]
@@ -415,23 +446,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "tower",
- "tracing",
-]
-
-[[package]]
-name = "camel-redis"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "camel-api",
- "camel-component",
- "camel-endpoint",
- "futures-util",
- "redis",
- "serde_json",
- "tokio",
- "tokio-util",
  "tower",
  "tracing",
 ]
@@ -452,16 +466,16 @@ dependencies = [
  "camel-api",
  "camel-builder",
  "camel-component",
- "camel-controlbus",
+ "camel-component-controlbus",
+ "camel-component-direct",
+ "camel-component-file",
+ "camel-component-http",
+ "camel-component-log",
+ "camel-component-mock",
+ "camel-component-redis",
+ "camel-component-timer",
  "camel-core",
- "camel-direct",
- "camel-file",
- "camel-http",
- "camel-log",
- "camel-mock",
  "camel-processor",
- "camel-redis",
- "camel-timer",
  "reqwest",
  "serde_json",
  "tempfile",
@@ -470,20 +484,6 @@ dependencies = [
  "tokio",
  "tower",
  "wiremock",
-]
-
-[[package]]
-name = "camel-timer"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "camel-api",
- "camel-component",
- "camel-endpoint",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -536,10 +536,10 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-direct",
- "camel-log",
- "camel-timer",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -565,9 +565,9 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-timer",
  "tokio",
  "tracing-subscriber",
 ]
@@ -578,10 +578,10 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
- "camel-controlbus",
+ "camel-component-controlbus",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-timer",
  "tokio",
  "tracing-subscriber",
 ]
@@ -734,10 +734,10 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-direct",
- "camel-log",
- "camel-timer",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -766,9 +766,9 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-file",
+ "camel-component-log",
  "camel-core",
- "camel-file",
- "camel-log",
  "tokio",
  "tracing-subscriber",
 ]
@@ -779,9 +779,9 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-file",
+ "camel-component-log",
  "camel-core",
- "camel-file",
- "camel-log",
  "chrono",
  "tokio",
  "tracing-subscriber",
@@ -1011,9 +1011,9 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-timer",
  "tokio",
  "tracing-subscriber",
 ]
@@ -1078,10 +1078,10 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-http",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-http",
- "camel-log",
- "camel-timer",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -1094,8 +1094,8 @@ version = "0.1.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-http",
  "camel-core",
- "camel-http",
  "camel-processor",
  "dashmap",
  "serde",
@@ -1409,9 +1409,9 @@ version = "0.1.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-timer",
  "tokio",
  "tracing-subscriber",
 ]
@@ -1479,11 +1479,11 @@ version = "0.1.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-mock",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-mock",
  "camel-processor",
- "camel-timer",
  "serde_json",
  "tokio",
  "tracing",
@@ -1514,9 +1514,9 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-timer",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -1545,10 +1545,10 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-direct",
- "camel-log",
- "camel-timer",
  "tokio",
  "tracing-subscriber",
 ]
@@ -1559,9 +1559,9 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-timer",
  "tokio",
  "tracing-subscriber",
  "uuid",
@@ -1704,8 +1704,8 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-http",
  "camel-core",
- "camel-http",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -2301,15 +2301,15 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
- "camel-controlbus",
+ "camel-component-controlbus",
+ "camel-component-direct",
+ "camel-component-file",
+ "camel-component-http",
+ "camel-component-log",
+ "camel-component-mock",
+ "camel-component-timer",
  "camel-core",
- "camel-direct",
- "camel-file",
- "camel-http",
- "camel-log",
- "camel-mock",
  "camel-processor",
- "camel-timer",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -2353,9 +2353,9 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-timer",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -2757,9 +2757,9 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-timer",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -3312,10 +3312,10 @@ version = "0.2.0"
 dependencies = [
  "camel-api",
  "camel-builder",
+ "camel-component-log",
+ "camel-component-mock",
+ "camel-component-timer",
  "camel-core",
- "camel-log",
- "camel-mock",
- "camel-timer",
  "tokio",
  "tracing-subscriber",
 ]

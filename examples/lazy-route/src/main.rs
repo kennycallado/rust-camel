@@ -6,8 +6,8 @@
 use camel_api::{CamelError, RouteController};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
-use camel_log::LogComponent;
-use camel_timer::TimerComponent;
+use camel_component_log::LogComponent;
+use camel_component_timer::TimerComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {

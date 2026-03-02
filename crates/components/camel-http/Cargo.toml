@@ -1,5 +1,5 @@
 [package]
-name = "camel-http"
+name = "camel-component-http"
 description = "HTTP client component for rust-camel"
 version.workspace = true
 edition.workspace = true

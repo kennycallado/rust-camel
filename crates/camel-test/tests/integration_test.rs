@@ -11,11 +11,11 @@ use camel_api::aggregator::AggregatorConfig;
 use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::CamelContext;
-use camel_file::FileComponent;
-use camel_http::HttpComponent;
-use camel_log::LogComponent;
-use camel_mock::MockComponent;
-use camel_timer::TimerComponent;
+use camel_component_file::FileComponent;
+use camel_component_http::HttpComponent;
+use camel_component_log::LogComponent;
+use camel_component_mock::MockComponent;
+use camel_component_timer::TimerComponent;
 
 // ---------------------------------------------------------------------------
 // Test 1: Timer → Mock (verify exchanges received)
@@ -525,7 +525,7 @@ async fn test_per_route_overrides_global() {
 #[tokio::test]
 async fn test_direct_error_bubbles_to_caller() {
     use camel_api::error_handler::ErrorHandlerConfig;
-    use camel_direct::DirectComponent;
+    use camel_component_direct::DirectComponent;
 
     let mut ctx = CamelContext::new();
     let mock = MockComponent::new();
@@ -565,7 +565,7 @@ async fn test_direct_error_bubbles_to_caller() {
 #[tokio::test]
 async fn test_direct_error_contained_in_subroute() {
     use camel_api::error_handler::ErrorHandlerConfig;
-    use camel_direct::DirectComponent;
+    use camel_component_direct::DirectComponent;
 
     let mut ctx = CamelContext::new();
     let mock = MockComponent::new();
@@ -951,7 +951,7 @@ async fn test_http_component_registration_and_endpoint_creation() {
 
 #[tokio::test]
 async fn test_http_query_params_forwarding_config() {
-    use camel_http::HttpConfig;
+    use camel_component_http::HttpConfig;
 
     // Verify config parsing forwards non-Camel query params
     let config = HttpConfig::from_uri(

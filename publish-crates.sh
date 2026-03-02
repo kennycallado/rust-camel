@@ -20,6 +20,15 @@ publish_crate() {
     echo ""
     echo "📦 Publishing $crate..."
     cd "$path"
+    
+    # Check if crate already exists
+    if cargo search "$crate" 2>&1 | grep -q "^$crate = "; then
+        local existing_version=$(cargo search "$crate" | grep "^$crate = " | grep -oP '\d+\.\d+\.\d+')
+        echo "⚠️  $crate@$existing_version already exists on crates.io, skipping..."
+        cd - > /dev/null
+        return 0
+    fi
+    
     cargo publish $DRY_RUN
     cd - > /dev/null
     if [ -z "$DRY_RUN" ]; then
@@ -35,20 +44,20 @@ publish_crate "camel-support" "crates/camel-support"
 publish_crate "camel-endpoint" "crates/camel-endpoint"
 publish_crate "camel-component" "crates/camel-component"
 publish_crate "camel-processor" "crates/camel-processor"
+publish_crate "camel-core" "crates/camel-core"
 publish_crate "camel-health" "crates/camel-health"
 publish_crate "camel-dsl" "crates/camel-dsl"
 publish_crate "camel-builder" "crates/camel-builder"
-publish_crate "camel-core" "crates/camel-core"
 
 # Component crates
-publish_crate "camel-timer" "crates/components/camel-timer"
-publish_crate "camel-log" "crates/components/camel-log"
-publish_crate "camel-direct" "crates/components/camel-direct"
-publish_crate "camel-mock" "crates/components/camel-mock"
-publish_crate "camel-file" "crates/components/camel-file"
-publish_crate "camel-http" "crates/components/camel-http"
-publish_crate "camel-redis" "crates/components/camel-redis"
-publish_crate "camel-controlbus" "crates/components/camel-controlbus"
+publish_crate "camel-component-timer" "crates/components/camel-timer"
+publish_crate "camel-component-log" "crates/components/camel-log"
+publish_crate "camel-component-direct" "crates/components/camel-direct"
+publish_crate "camel-component-mock" "crates/components/camel-mock"
+publish_crate "camel-component-file" "crates/components/camel-file"
+publish_crate "camel-component-http" "crates/components/camel-http"
+publish_crate "camel-component-redis" "crates/components/camel-redis"
+publish_crate "camel-component-controlbus" "crates/components/camel-controlbus"
 
 echo ""
 echo "✅ All crates published successfully!"

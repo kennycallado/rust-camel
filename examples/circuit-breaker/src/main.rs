@@ -8,9 +8,9 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
-use camel_direct::DirectComponent;
-use camel_log::LogComponent;
-use camel_timer::TimerComponent;
+use camel_component_direct::DirectComponent;
+use camel_component_log::LogComponent;
+use camel_component_timer::TimerComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {

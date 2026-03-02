@@ -7,7 +7,7 @@ edition = "2021"
 camel-api = { path = "../../crates/camel-api" }
 camel-builder = { path = "../../crates/camel-builder" }
 camel-core = { path = "../../crates/camel-core" }
-camel-timer = { path = "../../crates/components/camel-timer" }
-camel-log = { path = "../../crates/components/camel-log" }
+camel-component-timer = { path = "../../crates/components/camel-timer" }
+camel-component-log = { path = "../../crates/components/camel-log" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tracing-subscriber = "0.3"

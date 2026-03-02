@@ -64,14 +64,14 @@ camel-builder = { path = "crates/camel-builder", version = "0.2.0" }
 camel-component = { path = "crates/camel-component", version = "0.2.0" }
 camel-endpoint = { path = "crates/camel-endpoint", version = "0.2.0" }
 camel-test = { path = "crates/camel-test", version = "0.2.0" }
-camel-timer = { path = "crates/components/camel-timer", version = "0.2.0" }
-camel-log = { path = "crates/components/camel-log", version = "0.2.0" }
-camel-file = { path = "crates/components/camel-file", version = "0.2.0" }
-camel-direct = { path = "crates/components/camel-direct", version = "0.2.0" }
-camel-mock = { path = "crates/components/camel-mock", version = "0.2.0" }
-camel-http = { path = "crates/components/camel-http", version = "0.2.0" }
-camel-redis = { path = "crates/components/camel-redis", version = "0.2.0" }
-camel-controlbus = { path = "crates/components/camel-controlbus", version = "0.2.0" }
+camel-component-timer = { path = "crates/components/camel-timer", version = "0.2.0" }
+camel-component-log = { path = "crates/components/camel-log", version = "0.2.0" }
+camel-component-file = { path = "crates/components/camel-file", version = "0.2.0" }
+camel-component-direct = { path = "crates/components/camel-direct", version = "0.2.0" }
+camel-component-mock = { path = "crates/components/camel-mock", version = "0.2.0" }
+camel-component-http = { path = "crates/components/camel-http", version = "0.2.0" }
+camel-component-redis = { path = "crates/components/camel-redis", version = "0.2.0" }
+camel-component-controlbus = { path = "crates/components/camel-controlbus", version = "0.2.0" }
 
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
