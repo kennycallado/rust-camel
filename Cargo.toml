@@ -18,6 +18,7 @@ members = [
     "crates/components/camel-direct",
     "crates/components/camel-mock",
     "crates/components/camel-http",
+    "crates/components/camel-redis",
     "crates/components/camel-controlbus",
     "examples/hello-world",
     "examples/content-based-routing",
@@ -65,6 +66,7 @@ camel-file = { path = "crates/components/camel-file" }
 camel-direct = { path = "crates/components/camel-direct" }
 camel-mock = { path = "crates/components/camel-mock" }
 camel-http = { path = "crates/components/camel-http" }
+camel-redis = { path = "crates/components/camel-redis" }
 camel-controlbus = { path = "crates/components/camel-controlbus" }
 
 tokio = { version = "1", features = ["full"] }

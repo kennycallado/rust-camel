@@ -1,0 +1,18 @@
+[package]
+name = "camel-redis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api = { workspace = true }
+camel-component = { workspace = true }
+camel-endpoint = { workspace = true }
+redis = { version = "1", features = ["tokio-comp", "aio"] }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tower = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = "0.3"
