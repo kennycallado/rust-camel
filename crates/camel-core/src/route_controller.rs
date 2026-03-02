@@ -128,9 +128,8 @@ impl DefaultRouteController {
         &self,
         config: ErrorHandlerConfig,
         producer_ctx: &ProducerContext,
+        registry: &Registry,
     ) -> Result<ErrorHandlerLayer, CamelError> {
-        let registry = self.registry.lock().unwrap();
-
         // Resolve DLC URI → producer.
         let dlc_producer = if let Some(ref uri) = config.dlc_uri {
             let parsed = parse_uri(uri)?;
@@ -259,7 +258,7 @@ impl DefaultRouteController {
             .ok_or_else(|| CamelError::RouteError("RouteController self_ref not set".into()))?;
 
         // Lock registry for step resolution
-        let registry = self.registry.lock().unwrap();
+        let registry = self.registry.lock().expect("mutex poisoned: another thread panicked while holding this lock");
 
         // Resolve steps into processors (takes ownership of steps)
         let processors = self.resolve_steps(definition.steps, &producer_ctx, &registry)?;
@@ -277,7 +276,7 @@ impl DefaultRouteController {
             .or_else(|| self.global_error_handler.clone());
 
         if let Some(config) = eh_config {
-            let layer = self.resolve_error_handler(config, &producer_ctx)?;
+            let layer = self.resolve_error_handler(config, &producer_ctx, &registry)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
         }
 
@@ -358,7 +357,7 @@ impl DefaultRouteController {
         }
 
         // Get the managed route again (can't hold across await)
-        let managed = self.routes.get_mut(route_id).unwrap();
+        let managed = self.routes.get_mut(route_id).expect("invariant: route must exist after prior existence check");
 
         // Create a fresh cancellation token for next start
         managed.cancel_token = CancellationToken::new();
@@ -403,7 +402,7 @@ impl RouteController for DefaultRouteController {
 
         // Get the resolved route info
         let (from_uri, pipeline, concurrency) = {
-            let managed = self.routes.get(route_id).unwrap();
+            let managed = self.routes.get(route_id).expect("invariant: route must exist after prior existence check");
             (
                 managed.from_uri.clone(),
                 Arc::clone(&managed.pipeline),
@@ -413,7 +412,7 @@ impl RouteController for DefaultRouteController {
 
         // Parse from URI and create consumer (lock registry for lookup)
         let parsed = parse_uri(&from_uri)?;
-        let registry = self.registry.lock().unwrap();
+        let registry = self.registry.lock().expect("mutex poisoned: another thread panicked while holding this lock");
         let component = registry.get_or_err(&parsed.scheme)?;
         let endpoint = component.create_endpoint(&from_uri)?;
         let mut consumer = endpoint.create_consumer()?;
@@ -425,7 +424,7 @@ impl RouteController for DefaultRouteController {
         let effective_concurrency = concurrency.unwrap_or(consumer_concurrency);
 
         // Get the managed route for mutation
-        let managed = self.routes.get_mut(route_id).unwrap();
+        let managed = self.routes.get_mut(route_id).expect("invariant: route must exist after prior existence check");
 
         // Create channel for consumer to send exchanges
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(256);
@@ -447,7 +446,7 @@ impl RouteController for DefaultRouteController {
             ConcurrencyModel::Sequential => {
                 tokio::spawn(async move {
                     // Clone pipeline from the Sync wrapper
-                    let mut pipeline = pipeline.lock().unwrap().clone();
+                    let mut pipeline = pipeline.lock().expect("mutex poisoned: another thread panicked while holding this lock").clone();
                     while let Some(envelope) = rx.recv().await {
                         let ExchangeEnvelope { exchange, reply_tx } = envelope;
 
@@ -485,7 +484,7 @@ impl RouteController for DefaultRouteController {
                             };
 
                             // Clone pipeline from the Sync wrapper
-                            let mut pipe = pipe_clone.lock().unwrap().clone();
+                            let mut pipe = pipe_clone.lock().expect("mutex poisoned: another thread panicked while holding this lock").clone();
 
                             // Wait for service ready with circuit breaker backoff
                             if let Err(e) = ready_with_backoff(&mut pipe, &cancel).await {
@@ -510,7 +509,7 @@ impl RouteController for DefaultRouteController {
         };
 
         // Store handles and update status
-        let managed = self.routes.get_mut(route_id).unwrap();
+        let managed = self.routes.get_mut(route_id).expect("invariant: route must exist after prior existence check");
         managed.consumer_handle = Some(consumer_handle);
         managed.pipeline_handle = Some(pipeline_handle);
         managed.status = RouteStatus::Started;
@@ -531,7 +530,7 @@ impl RouteController for DefaultRouteController {
 
     async fn suspend_route(&mut self, route_id: &str) -> Result<(), CamelError> {
         self.stop_route_internal(route_id).await?;
-        let managed = self.routes.get_mut(route_id).unwrap();
+        let managed = self.routes.get_mut(route_id).expect("invariant: route must exist after prior existence check");
         managed.status = RouteStatus::Suspended;
         info!(route_id = %route_id, "Route suspended");
         Ok(())

@@ -51,7 +51,7 @@ impl CamelContext {
         // Use try_lock since we just created it and nobody else has access yet
         controller
             .try_lock()
-            .unwrap()
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
             .set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
 
         Self {
@@ -66,22 +66,14 @@ impl CamelContext {
     pub fn set_error_handler(&mut self, config: ErrorHandlerConfig) {
         self.route_controller
             .try_lock()
-            .unwrap()
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
             .set_error_handler(config);
     }
 
     /// Register a component with this context.
     pub fn register_component<C: Component + 'static>(&mut self, component: C) {
         info!(scheme = component.scheme(), "Registering component");
-        match self.registry.lock() {
-            Ok(mut guard) => guard.register(component),
-            Err(e) => {
-                tracing::error!("Registry mutex poisoned, recovering: {}", e);
-                // Recover by taking the poisoned value
-                let mut guard = e.into_inner();
-                guard.register(component);
-            }
-        }
+        self.registry.lock().expect("mutex poisoned: another thread panicked while holding this lock").register(component);
     }
 
     /// Add a route definition to this context.
@@ -101,16 +93,13 @@ impl CamelContext {
 
         self.route_controller
             .try_lock()
-            .unwrap()
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
             .add_route(definition)
     }
 
     /// Access the component registry.
     pub fn registry(&self) -> std::sync::MutexGuard<'_, Registry> {
-        self.registry.lock().unwrap_or_else(|e| {
-            tracing::warn!("Registry mutex poisoned, recovering");
-            e.into_inner()
-        })
+        self.registry.lock().expect("mutex poisoned: another thread panicked while holding this lock")
     }
 
     /// Access the route controller.

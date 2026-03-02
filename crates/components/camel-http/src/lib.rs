@@ -328,7 +328,7 @@ async fn dispatch_handler(
             return Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(AxumBody::empty())
-                .unwrap();
+                .expect("Response::builder() with a known-valid status code and body is infallible");
         }
     };
 
@@ -342,7 +342,7 @@ async fn dispatch_handler(
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(AxumBody::from("No consumer registered for this path"))
-            .unwrap();
+            .expect("Response::builder() with a known-valid status code and body is infallible");
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<HttpReply>();
@@ -359,7 +359,7 @@ async fn dispatch_handler(
         return Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .body(AxumBody::from("Consumer unavailable"))
-            .unwrap();
+            .expect("Response::builder() with a known-valid status code and body is infallible");
     }
 
     match reply_rx.await {
@@ -376,13 +376,13 @@ async fn dispatch_handler(
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(AxumBody::from("Invalid response headers from consumer"))
-                        .unwrap()
+                        .expect("Response::builder() with a known-valid status code and body is infallible")
                 })
         }
         Err(_) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .body(AxumBody::from("Pipeline error"))
-            .unwrap(),
+            .expect("Response::builder() with a known-valid status code and body is infallible"),
     }
 }
 
