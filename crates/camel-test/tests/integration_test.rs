@@ -1010,7 +1010,7 @@ async fn test_http_get_e2e() {
     // Timer produces a non-empty body so resolve_method would pick POST.
     // Force GET via httpMethod param (same as Apache Camel usage).
     let http_uri = format!(
-        "http://127.0.0.1:{}/api/greeting?httpMethod=GET",
+        "http://127.0.0.1:{}/api/greeting?httpMethod=GET&allowPrivateIps=true",
         server.address().port()
     );
 
@@ -1073,7 +1073,7 @@ async fn test_http_post_with_body_e2e() {
         .await;
 
     let http_uri = format!(
-        "http://127.0.0.1:{}/api/data?httpMethod=POST",
+        "http://127.0.0.1:{}/api/data?httpMethod=POST&allowPrivateIps=true",
         server.address().port()
     );
 
@@ -1139,7 +1139,7 @@ async fn test_http_response_headers_mapped_e2e() {
         .await;
 
     let http_uri = format!(
-        "http://127.0.0.1:{}/api/headers?httpMethod=GET",
+        "http://127.0.0.1:{}/api/headers?httpMethod=GET&allowPrivateIps=true",
         server.address().port()
     );
 
@@ -1197,7 +1197,7 @@ async fn test_http_error_handling_e2e() {
 
     // throwExceptionOnFailure=true is the default; force GET since timer has body
     let http_uri = format!(
-        "http://127.0.0.1:{}/api/fail?httpMethod=GET",
+        "http://127.0.0.1:{}/api/fail?httpMethod=GET&allowPrivateIps=true",
         server.address().port()
     );
 
@@ -1566,7 +1566,7 @@ async fn test_http_query_params_forwarded_e2e() {
 
     // Non-Camel params (apiKey, lang) are forwarded; httpMethod is consumed by Camel
     let http_uri = format!(
-        "http://127.0.0.1:{}/api/search?httpMethod=GET&apiKey=secret123&lang=rust",
+        "http://127.0.0.1:{}/api/search?httpMethod=GET&allowPrivateIps=true&apiKey=secret123&lang=rust",
         server.address().port()
     );
 
