@@ -42,12 +42,14 @@ impl ApiError {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_details(mut self, details: Vec<String>) -> Self {
         self.details = Some(details);
         self
     }
 }
 
+#[allow(dead_code)]
 pub fn validation_error(message: impl Into<String>) -> ApiError {
     ApiError::bad_request(message)
 }

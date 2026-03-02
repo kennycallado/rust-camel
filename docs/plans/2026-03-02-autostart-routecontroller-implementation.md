@@ -1561,3 +1561,55 @@ git commit -m "chore: format and lint"
 - SupervisingRouteController (retry logic, health checks)
 - Stats action for ControlBus
 - More sophisticated suspend/resume
+
+---
+
+## Postmortem
+
+**Fecha de ejecución:** 2026-03-02  
+**Commits:** `d4de09f` → `00f247b` (20 commits)  
+**Rama:** `feature/autostart-routecontroller`  
+**Tiempo real:** ~2 sesiones
+
+### Qué salió bien
+
+**Arquitectura correcta desde el primer intento.** El diseño en `camel-api` para `RouteController` y `ProducerContext` evitó dependencias cíclicas (`camel-core` → `camel-component` → `camel-core`) y no requirió refactoring posterior de la estructura.
+
+**Refactor de dependencia cíclica detectado temprano.** En Task 3/4 se identificó que `RouteController` y `ProducerContext` no podían vivir en `camel-core` ni `camel-component` respectivamente. Se creó un commit de refactor (`ebe400d`) limpio antes de continuar con Tasks 5–11.
+
+**`SyncPipeline` pattern.** El problema de `BoxProcessor: Send + !Sync` se resolvió con `Arc<std::sync::Mutex<BoxProcessor>>` sin necesidad de rediseñar el trait. El shutdown pattern correcto con `CancellationToken` + `JoinHandle.take()` + timeout también quedó bien desde el segundo intento.
+
+**Tests de integración útiles.** Los 6 tests de `controlbus_test.rs` cubren los casos principales (autoStartup=false, controlbus start/stop, startup_order, mixed) y detectaron bugs reales durante el desarrollo.
+
+### Desviaciones del plan
+
+**`RouteDefinitionInfo` no se implementó.** El plan original almacenaba `RouteDefinition` completo en `ManagedRoute`, pero la decisión de diseño fue mantener la `RouteDefinition` directamente (con `SyncPipeline` para el processor). La struct `RouteDefinitionInfo` descrita en las notas de arquitectura no fue necesaria porque `RouteDefinition` no contiene `BoxProcessor` directamente — la pipeline se construye en tiempo de arranque.
+
+**`set_self_ref()` no implementado.** Las notas de arquitectura mencionaban un patrón `self_ref: Option<Arc<Mutex<dyn RouteController>>>` para que `DefaultRouteController` se pase a sí mismo como `ProducerContext`. No fue necesario porque `CamelContext` gestiona el `Arc<Mutex<DefaultRouteController>>` y lo pasa directamente al construir el `ProducerContext`.
+
+**`camel-controlbus` no añadido al `camel-test` crate map de README.** El README se actualizó con la tabla de crates incluyendo `camel-controlbus`, pero `camel-controlbus` no aparece en la lista de `cargo run` examples de la sección "Run an example". Correcto — no tiene binario.
+
+**`suspend_route` implementado como alias de `stop_route`.** El plan indicaba una implementación más sofisticada. La implementación actual marca el status como `Suspended` pero el comportamiento es idéntico a `stop`. Una suspensión real debería pausar el consumer sin perder estado de in-flight messages (diferido).
+
+### Bugs encontrados durante la implementación
+
+1. **Task shutdown pattern incorrecto** (`09a6f7d`): La primera implementación usaba `handle.abort()` directamente. El patrón correcto es `cancel_token.cancel()` + `join` con timeout, que permite graceful shutdown. Se necesitaron 2 commits de fix (`1f6564f`, `09a6f7d`).
+
+2. **Race condition en startup** (`1f6564f`): Si el consumer fallaba durante el arranque, `start_route` devolvía `Ok(())` pero el status quedaba en `Starting`. Corregido notificando el error vía canal.
+
+3. **`ManagedRoute` faltaba campo `definition`** (`7328f42`): La struct se creó sin el campo `definition` en el primer commit de `DefaultRouteController`. Los tests de unidad lo detectaron.
+
+### Problemas de infraestructura
+
+**Disco lleno durante Task 21.** El worktree acumuló 7.4 GB en `target/` mientras el repo principal tenía 9.7 GB — total ~17 GB sobre un disco de 79 GB (100% lleno). `cargo test --workspace` se bloqueó silenciosamente en el subagente porque el linker falló con `No space left on device` sin terminar el proceso. Solución: borrar `target/` del worktree.
+
+**Tests de integración se cuelgan en paralelo.** Los tests de `camel-test` usan timers reales de Tokio. Cuando se ejecutan en paralelo (comportamiento por defecto de `cargo test`) los runtimes se interfieren. Todos pasan con `--test-threads=1`. Este es un problema pre-existente del repositorio, no introducido por esta feature.
+
+### Trabajo futuro identificado
+
+Ver sección **Future Work** arriba y `TODO.md` en la raíz del proyecto para el backlog completo. Items específicos de esta feature:
+
+- `SupervisingRouteController`: reintentos automáticos cuando una ruta falla en runtime (consumer crash). Actualmente hay un `TODO` en `route_controller.rs:436` — el status no se actualiza a `Failed` cuando el consumer task termina inesperadamente.
+- `suspend_route` / `resume_route` reales: pausa sin pérdida de estado, buffer de mensajes in-flight.
+- `ControlBus stats action`: devolver métricas de la ruta (exchanges procesados, tiempo de arranque, etc.).
+- Tests de integración con `serial_test` o `tokio::test` aislados para evitar el problema de paralelismo.

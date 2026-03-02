@@ -6,6 +6,7 @@ pub mod error_handler;
 pub mod exchange;
 pub mod filter;
 pub mod message;
+pub mod metrics;
 pub mod multicast;
 pub mod processor;
 pub mod producer;
@@ -24,6 +25,7 @@ pub use error_handler::{
 pub use exchange::{Exchange, ExchangePattern};
 pub use filter::FilterPredicate;
 pub use message::Message;
+pub use metrics::{MetricsCollector, NoOpMetrics};
 pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
 pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn};
 pub use producer::ProducerContext;

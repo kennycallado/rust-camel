@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use uuid::Uuid;
+
 use crate::error::CamelError;
 use crate::message::Message;
 use crate::value::Value;
@@ -30,6 +32,8 @@ pub struct Exchange {
     pub error: Option<CamelError>,
     /// The exchange pattern.
     pub pattern: ExchangePattern,
+    /// Unique correlation ID for distributed tracing.
+    pub correlation_id: String,
 }
 
 impl Exchange {
@@ -41,6 +45,7 @@ impl Exchange {
             properties: HashMap::new(),
             error: None,
             pattern: ExchangePattern::default(),
+            correlation_id: Uuid::new_v4().to_string(),
         }
     }
 
@@ -52,7 +57,13 @@ impl Exchange {
             properties: HashMap::new(),
             error: None,
             pattern: ExchangePattern::InOut,
+            correlation_id: Uuid::new_v4().to_string(),
         }
+    }
+
+    /// Get the correlation ID for this exchange.
+    pub fn correlation_id(&self) -> &str {
+        &self.correlation_id
     }
 
     /// Get a property value.

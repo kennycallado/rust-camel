@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::exchange::Exchange;
 
@@ -33,6 +34,12 @@ pub struct AggregatorConfig {
     pub completion: CompletionCondition,
     /// How to combine the bucket into one exchange.
     pub strategy: AggregationStrategy,
+    /// Maximum number of correlation key buckets (memory protection).
+    /// When limit is reached, new correlation keys are rejected.
+    pub max_buckets: Option<usize>,
+    /// Time-to-live for inactive buckets (memory protection).
+    /// Buckets not updated for this duration are evicted.
+    pub bucket_ttl: Option<Duration>,
 }
 
 impl AggregatorConfig {
@@ -42,6 +49,8 @@ impl AggregatorConfig {
             header_name: header.into(),
             completion: None,
             strategy: AggregationStrategy::CollectAll,
+            max_buckets: None,
+            bucket_ttl: None,
         }
     }
 }
@@ -51,6 +60,8 @@ pub struct AggregatorConfigBuilder {
     header_name: String,
     completion: Option<CompletionCondition>,
     strategy: AggregationStrategy,
+    max_buckets: Option<usize>,
+    bucket_ttl: Option<Duration>,
 }
 
 impl AggregatorConfigBuilder {
@@ -75,12 +86,28 @@ impl AggregatorConfigBuilder {
         self
     }
 
+    /// Set the maximum number of correlation key buckets.
+    /// When the limit is reached, new correlation keys are rejected with an error.
+    pub fn max_buckets(mut self, max: usize) -> Self {
+        self.max_buckets = Some(max);
+        self
+    }
+
+    /// Set the time-to-live for inactive buckets.
+    /// Buckets that haven't been updated for this duration will be evicted.
+    pub fn bucket_ttl(mut self, ttl: Duration) -> Self {
+        self.bucket_ttl = Some(ttl);
+        self
+    }
+
     /// Build the config. Panics if no completion condition was set.
     pub fn build(self) -> AggregatorConfig {
         AggregatorConfig {
             header_name: self.header_name,
             completion: self.completion.expect("completion condition required"),
             strategy: self.strategy,
+            max_buckets: self.max_buckets,
+            bucket_ttl: self.bucket_ttl,
         }
     }
 }

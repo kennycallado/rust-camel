@@ -97,6 +97,48 @@ cargo run -p multicast
 cargo run -p showcase
 ```
 
+## Security Features
+
+rust-camel includes production-ready security features:
+
+### SSRF Protection (HTTP Component)
+
+```rust
+// Block private IPs by default
+RouteBuilder::from("direct:start")
+    .to("http://api.example.com?allowPrivateIps=false")
+    .build()?
+
+// Custom blocked hosts
+RouteBuilder::from("direct:start")
+    .to("http://api.example.com?blockedHosts=localhost,internal.company.com")
+    .build()?
+```
+
+### Path Traversal Protection (File Component)
+
+All file operations validate that resolved paths remain within the configured base directory. Attempts to use `../` or absolute paths outside base are rejected.
+
+### Timeouts
+
+All I/O operations have configurable timeouts:
+- File: `readTimeout`, `writeTimeout` (default: 30s)
+- HTTP: `connectTimeout`, `responseTimeout`
+
+### Memory Limits
+
+Aggregator supports `max_buckets` and `bucket_ttl` to prevent memory leaks.
+
+## Observability
+
+### Correlation IDs
+
+Every exchange has a unique `correlation_id` for distributed tracing.
+
+### Metrics
+
+Implement `MetricsCollector` trait to integrate with Prometheus, OpenTelemetry, etc.
+
 ## Route Lifecycle Management
 
 rust-camel supports controlling when and how routes start:

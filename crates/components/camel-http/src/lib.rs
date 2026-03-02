@@ -27,6 +27,9 @@ pub struct HttpConfig {
     pub connect_timeout: Duration,
     pub response_timeout: Option<Duration>,
     pub query_params: HashMap<String, String>,
+    // Security settings
+    pub allow_private_ips: bool,
+    pub blocked_hosts: Vec<String>,
 }
 
 impl HttpConfig {
@@ -77,6 +80,19 @@ impl HttpConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .map(Duration::from_millis);
 
+        // SSRF protection settings
+        let allow_private_ips = parts
+            .params
+            .get("allowPrivateIps")
+            .map(|v| v == "true")
+            .unwrap_or(false); // Default: block private IPs
+
+        let blocked_hosts = parts
+            .params
+            .get("blockedHosts")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default();
+
         // CAMEL_OPTIONS: params that are consumed by Camel,        // Any remaining params should be forwarded as HTTP query params
         let camel_options = [
             "httpMethod",
@@ -85,6 +101,8 @@ impl HttpConfig {
             "followRedirects",
             "connectTimeout",
             "responseTimeout",
+            "allowPrivateIps",
+            "blockedHosts",
         ];
 
         let query_params: HashMap<String, String> = parts
@@ -103,6 +121,8 @@ impl HttpConfig {
             connect_timeout,
             response_timeout,
             query_params,
+            allow_private_ips,
+            blocked_hosts,
         })
     }
 }
@@ -702,10 +722,65 @@ impl Endpoint for HttpEndpoint {
 
     fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(HttpProducer {
-            config: self.config.clone(),
+            config: Arc::new(self.config.clone()),
             client: self.client.clone(),
         }))
     }
+}
+
+// ---------------------------------------------------------------------------
+// SSRF Protection
+// ---------------------------------------------------------------------------
+
+fn validate_url_for_ssrf(url: &str, config: &HttpConfig) -> Result<(), CamelError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| CamelError::ProcessorError(format!("Invalid URL: {}", e)))?;
+
+    // Check blocked hosts
+    if let Some(host) = parsed.host_str()
+        && config.blocked_hosts.iter().any(|blocked| host == blocked)
+    {
+        return Err(CamelError::ProcessorError(format!(
+            "Host '{}' is blocked",
+            host
+        )));
+    }
+
+    // Check private IPs if not allowed
+    if !config.allow_private_ips
+        && let Some(host) = parsed.host()
+    {
+        match host {
+            url::Host::Ipv4(ip) => {
+                if ip.is_private() || ip.is_loopback() || ip.is_link_local() {
+                    return Err(CamelError::ProcessorError(format!(
+                        "Private IP '{}' not allowed (set allowPrivateIps=true to override)",
+                        ip
+                    )));
+                }
+            }
+            url::Host::Ipv6(ip) => {
+                if ip.is_loopback() {
+                    return Err(CamelError::ProcessorError(format!(
+                        "Loopback IP '{}' not allowed",
+                        ip
+                    )));
+                }
+            }
+            url::Host::Domain(domain) => {
+                // Block common internal domains
+                let blocked_domains = ["localhost", "127.0.0.1", "0.0.0.0", "local"];
+                if blocked_domains.contains(&domain) {
+                    return Err(CamelError::ProcessorError(format!(
+                        "Domain '{}' is not allowed",
+                        domain
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -714,7 +789,7 @@ impl Endpoint for HttpEndpoint {
 
 #[derive(Clone)]
 struct HttpProducer {
-    config: HttpConfig,
+    config: Arc<HttpConfig>,
     client: reqwest::Client,
 }
 
@@ -830,7 +905,15 @@ impl Service<Exchange> for HttpProducer {
             let method_str = HttpProducer::resolve_method(&exchange, &config);
             let url = HttpProducer::resolve_url(&exchange, &config);
 
-            debug!(method = %method_str, url = %url, "HTTP request");
+            // SECURITY: Validate URL for SSRF
+            validate_url_for_ssrf(&url, &config)?;
+
+            debug!(
+                correlation_id = %exchange.correlation_id(),
+                method = %method_str,
+                url = %url,
+                "HTTP request"
+            );
 
             let method = method_str.parse::<reqwest::Method>().map_err(|e| {
                 CamelError::ProcessorError(format!("Invalid HTTP method '{}': {}", method_str, e))
@@ -905,7 +988,12 @@ impl Service<Exchange> for HttpProducer {
                 exchange.input.body = Body::Bytes(bytes::Bytes::from(response_body.to_vec()));
             }
 
-            debug!(status = status_code, url = %url, "HTTP response");
+            debug!(
+                correlation_id = %exchange.correlation_id(),
+                status = status_code,
+                url = %url,
+                "HTTP response"
+            );
             Ok(exchange)
         })
     }
@@ -1109,7 +1197,7 @@ mod tests {
 
         let component = HttpComponent::new();
         let endpoint = component
-            .create_endpoint(&format!("{url}/api/test"))
+            .create_endpoint(&format!("{url}/api/test?allowPrivateIps=true"))
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1135,7 +1223,7 @@ mod tests {
 
         let component = HttpComponent::new();
         let endpoint = component
-            .create_endpoint(&format!("{url}/api/data"))
+            .create_endpoint(&format!("{url}/api/data?allowPrivateIps=true"))
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1158,7 +1246,9 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
-        let endpoint = component.create_endpoint(&format!("{url}/api")).unwrap();
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api?allowPrivateIps=true"))
+            .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
@@ -1185,7 +1275,7 @@ mod tests {
 
         let component = HttpComponent::new();
         let endpoint = component
-            .create_endpoint(&format!("{url}/api?httpMethod=PUT"))
+            .create_endpoint(&format!("{url}/api?httpMethod=PUT&allowPrivateIps=true"))
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1209,7 +1299,7 @@ mod tests {
 
         let component = HttpComponent::new();
         let endpoint = component
-            .create_endpoint(&format!("{url}/not-found"))
+            .create_endpoint(&format!("{url}/not-found?allowPrivateIps=true"))
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1234,7 +1324,9 @@ mod tests {
 
         let component = HttpComponent::new();
         let endpoint = component
-            .create_endpoint(&format!("{url}/error?throwExceptionOnFailure=false"))
+            .create_endpoint(&format!(
+                "{url}/error?throwExceptionOnFailure=false&allowPrivateIps=true"
+            ))
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1258,7 +1350,7 @@ mod tests {
 
         let component = HttpComponent::new();
         let endpoint = component
-            .create_endpoint("http://localhost:1/does-not-exist")
+            .create_endpoint("http://localhost:1/does-not-exist?allowPrivateIps=true")
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1285,7 +1377,9 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
-        let endpoint = component.create_endpoint(&format!("{url}/api")).unwrap();
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api?allowPrivateIps=true"))
+            .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
@@ -1348,7 +1442,7 @@ mod tests {
         let component = HttpComponent::new();
         let endpoint = component
             .create_endpoint(&format!(
-                "{url}?followRedirects=false&throwExceptionOnFailure=false"
+                "{url}?followRedirects=false&throwExceptionOnFailure=false&allowPrivateIps=true"
             ))
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1377,7 +1471,7 @@ mod tests {
 
         let component = HttpComponent::new();
         let endpoint = component
-            .create_endpoint(&format!("{url}?followRedirects=true"))
+            .create_endpoint(&format!("{url}?followRedirects=true&allowPrivateIps=true"))
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1406,7 +1500,9 @@ mod tests {
         let component = HttpComponent::new();
         // apiKey is NOT a Camel option, should be forwarded as query param
         let endpoint = component
-            .create_endpoint(&format!("{url}/api?apiKey=secret123&httpMethod=GET"))
+            .create_endpoint(&format!(
+                "{url}/api?apiKey=secret123&httpMethod=GET&allowPrivateIps=true"
+            ))
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1449,6 +1545,135 @@ mod tests {
             !config.query_params.contains_key("httpMethod"),
             "httpMethod should not be forwarded"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // SSRF Protection tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_http_producer_blocks_metadata_endpoint() {
+        use tower::ServiceExt;
+
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint("http://example.com/api?allowPrivateIps=false")
+            .unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://169.254.169.254/latest/meta-data/".to_string()),
+        );
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "Should block AWS metadata endpoint");
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Private IP"),
+            "Error should mention private IP blocking, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_ssrf_config_defaults() {
+        let config = HttpConfig::from_uri("http://example.com/api").unwrap();
+        assert!(
+            !config.allow_private_ips,
+            "Private IPs should be blocked by default"
+        );
+        assert!(
+            config.blocked_hosts.is_empty(),
+            "Blocked hosts should be empty by default"
+        );
+    }
+
+    #[test]
+    fn test_ssrf_config_allow_private_ips() {
+        let config = HttpConfig::from_uri("http://example.com/api?allowPrivateIps=true").unwrap();
+        assert!(
+            config.allow_private_ips,
+            "Private IPs should be allowed when explicitly set"
+        );
+    }
+
+    #[test]
+    fn test_ssrf_config_blocked_hosts() {
+        let config =
+            HttpConfig::from_uri("http://example.com/api?blockedHosts=evil.com,malware.net")
+                .unwrap();
+        assert_eq!(config.blocked_hosts, vec!["evil.com", "malware.net"]);
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_blocks_localhost() {
+        use tower::ServiceExt;
+
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::new();
+        let endpoint = component.create_endpoint("http://example.com/api").unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://localhost:8080/internal".to_string()),
+        );
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "Should block localhost");
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_blocks_loopback_ip() {
+        use tower::ServiceExt;
+
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::new();
+        let endpoint = component.create_endpoint("http://example.com/api").unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://127.0.0.1:8080/internal".to_string()),
+        );
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "Should block loopback IP");
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_allows_private_ip_when_enabled() {
+        use tower::ServiceExt;
+
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::new();
+        // With allowPrivateIps=true, the validation should pass
+        // (actual connection will fail, but that's expected)
+        let endpoint = component
+            .create_endpoint("http://192.168.1.1/api?allowPrivateIps=true")
+            .unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+
+        // The request will fail because we can't connect, but it should NOT fail
+        // due to SSRF protection
+        let result = producer.oneshot(exchange).await;
+        // We expect connection error, not SSRF error
+        if let Err(ref e) = result {
+            let err_str = e.to_string();
+            assert!(
+                !err_str.contains("Private IP") && !err_str.contains("not allowed"),
+                "Should not be SSRF error, got: {}",
+                err_str
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

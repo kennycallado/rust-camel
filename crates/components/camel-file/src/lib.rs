@@ -54,6 +54,9 @@ pub struct FileConfig {
     pub file_exist: FileExistStrategy,
     pub temp_prefix: Option<String>,
     pub auto_create: bool,
+    // Timeout fields for preventing hanging on slow filesystems
+    pub read_timeout: Duration,
+    pub write_timeout: Duration,
 }
 
 impl FileConfig {
@@ -126,6 +129,20 @@ impl FileConfig {
             .map(|v| v != "false")
             .unwrap_or(true);
 
+        let read_timeout = parts
+            .params
+            .get("readTimeout")
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_secs(30));
+
+        let write_timeout = parts
+            .params
+            .get("writeTimeout")
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_secs(30));
+
         Ok(Self {
             directory: parts.path,
             delay: Duration::from_millis(delay),
@@ -140,6 +157,8 @@ impl FileConfig {
             file_exist,
             temp_prefix,
             auto_create,
+            read_timeout,
+            write_timeout,
         })
     }
 }
@@ -309,10 +328,22 @@ async fn poll_directory(
             continue;
         }
 
-        let content = match fs::read(&file_path).await {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(file = %file_path.display(), error = %e, "Failed to read file");
+        let content = match tokio::time::timeout(config.read_timeout, fs::read(&file_path)).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                warn!(
+                    file = %file_path.display(),
+                    error = %e,
+                    "Failed to read file"
+                );
+                continue;
+            }
+            Err(_) => {
+                warn!(
+                    file = %file_path.display(),
+                    timeout_ms = config.read_timeout.as_millis(),
+                    "Timeout reading file"
+                );
                 continue;
             }
         };
@@ -357,6 +388,12 @@ async fn poll_directory(
         exchange.input.set_header(
             "CamelFileLastModified",
             serde_json::Value::Number(last_modified.into()),
+        );
+
+        debug!(
+            file = %file_path.display(),
+            correlation_id = %exchange.correlation_id(),
+            "Processing file"
         );
 
         if context.send(exchange).await.is_err() {
@@ -409,6 +446,59 @@ async fn list_files(
 
     files.sort();
     Ok(files)
+}
+
+// ---------------------------------------------------------------------------
+// Path validation for security
+// ---------------------------------------------------------------------------
+
+fn validate_path_is_within_base(
+    base_dir: &std::path::Path,
+    target_path: &std::path::Path,
+) -> Result<(), CamelError> {
+    let canonical_base = base_dir.canonicalize().map_err(|e| {
+        CamelError::ProcessorError(format!("Cannot canonicalize base directory: {}", e))
+    })?;
+
+    // For non-existent paths, canonicalize the parent and construct the full path
+    let canonical_target = if target_path.exists() {
+        target_path.canonicalize().map_err(|e| {
+            CamelError::ProcessorError(format!("Cannot canonicalize target path: {}", e))
+        })?
+    } else if let Some(parent) = target_path.parent() {
+        // Ensure parent exists (should have been created by auto_create)
+        if !parent.exists() {
+            return Err(CamelError::ProcessorError(format!(
+                "Parent directory '{}' does not exist",
+                parent.display()
+            )));
+        }
+        let canonical_parent = parent.canonicalize().map_err(|e| {
+            CamelError::ProcessorError(format!("Cannot canonicalize parent directory: {}", e))
+        })?;
+        // Reconstruct the full path with the filename
+        if let Some(filename) = target_path.file_name() {
+            canonical_parent.join(filename)
+        } else {
+            return Err(CamelError::ProcessorError(
+                "Invalid target path: no filename".to_string(),
+            ));
+        }
+    } else {
+        return Err(CamelError::ProcessorError(
+            "Invalid target path: no parent directory".to_string(),
+        ));
+    };
+
+    if !canonical_target.starts_with(&canonical_base) {
+        return Err(CamelError::ProcessorError(format!(
+            "Path '{}' is outside base directory '{}'",
+            canonical_target.display(),
+            canonical_base.display()
+        )));
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -471,8 +561,14 @@ impl Service<Exchange> for FileProducer {
             if config.auto_create
                 && let Some(parent) = target_path.parent()
             {
-                fs::create_dir_all(parent).await.map_err(CamelError::from)?;
+                tokio::time::timeout(config.write_timeout, fs::create_dir_all(parent))
+                    .await
+                    .map_err(|_| CamelError::ProcessorError("Timeout creating directories".into()))?
+                    .map_err(CamelError::from)?;
             }
+
+            // SECURITY: Validate path is within base directory
+            validate_path_is_within_base(dir_path, &target_path)?;
 
             if target_path.exists() {
                 match config.file_exist {
@@ -484,13 +580,24 @@ impl Service<Exchange> for FileProducer {
                     }
                     FileExistStrategy::Append => {
                         use tokio::io::AsyncWriteExt;
-                        let mut file = fs::OpenOptions::new()
-                            .append(true)
-                            .open(&target_path)
-                            .await
-                            .map_err(CamelError::from)?;
-                        file.write_all(&data).await.map_err(CamelError::from)?;
-                        file.flush().await.map_err(CamelError::from)?;
+                        let mut file = tokio::time::timeout(
+                            config.write_timeout,
+                            fs::OpenOptions::new().append(true).open(&target_path),
+                        )
+                        .await
+                        .map_err(|_| {
+                            CamelError::ProcessorError("Timeout opening file for append".into())
+                        })?
+                        .map_err(CamelError::from)?;
+
+                        tokio::time::timeout(config.write_timeout, async {
+                            file.write_all(&data).await?;
+                            file.flush().await?;
+                            Ok::<_, std::io::Error>(())
+                        })
+                        .await
+                        .map_err(|_| CamelError::ProcessorError("Timeout writing to file".into()))?
+                        .map_err(CamelError::from)?;
 
                         let abs_path = target_path
                             .canonicalize()
@@ -511,15 +618,19 @@ impl Service<Exchange> for FileProducer {
                 let temp_name = format!("{prefix}{file_name}");
                 let temp_path = dir_path.join(&temp_name);
 
-                fs::write(&temp_path, &data)
+                tokio::time::timeout(config.write_timeout, fs::write(&temp_path, &data))
                     .await
+                    .map_err(|_| CamelError::ProcessorError("Timeout writing temp file".into()))?
                     .map_err(CamelError::from)?;
-                fs::rename(&temp_path, &target_path)
+
+                tokio::time::timeout(config.write_timeout, fs::rename(&temp_path, &target_path))
                     .await
+                    .map_err(|_| CamelError::ProcessorError("Timeout renaming file".into()))?
                     .map_err(CamelError::from)?;
             } else {
-                fs::write(&target_path, &data)
+                tokio::time::timeout(config.write_timeout, fs::write(&target_path, &data))
                     .await
+                    .map_err(|_| CamelError::ProcessorError("Timeout writing file".into()))?
                     .map_err(CamelError::from)?;
             }
 
@@ -532,7 +643,11 @@ impl Service<Exchange> for FileProducer {
                 .input
                 .set_header("CamelFileNameProduced", serde_json::Value::String(abs_path));
 
-            debug!(file = %target_path.display(), "File written");
+            debug!(
+                file = %target_path.display(),
+                correlation_id = %exchange.correlation_id(),
+                "File written"
+            );
             Ok(exchange)
         })
     }
@@ -597,6 +712,9 @@ mod tests {
         assert_eq!(config.file_exist, FileExistStrategy::Override);
         assert!(config.temp_prefix.is_none());
         assert!(config.auto_create);
+        // New timeout defaults
+        assert_eq!(config.read_timeout, Duration::from_secs(30));
+        assert_eq!(config.write_timeout, Duration::from_secs(30));
     }
 
     #[test]
@@ -1033,5 +1151,67 @@ mod tests {
 
         let result = producer.oneshot(exchange).await;
         assert!(result.is_err(), "Should error when no filename is provided");
+    }
+
+    // -----------------------------------------------------------------------
+    // Security tests - Path traversal protection
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_file_producer_rejects_path_traversal_parent_directory() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        // Create a subdirectory
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "secret").unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}/subdir"))
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("malicious"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("../secret.txt".to_string()),
+        );
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "Should reject path traversal attempt");
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("outside"),
+            "Error should mention path is outside base directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_rejects_absolute_path_outside_base() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}"))
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("malicious"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("/etc/passwd".to_string()),
+        );
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "Should reject absolute path outside base");
     }
 }

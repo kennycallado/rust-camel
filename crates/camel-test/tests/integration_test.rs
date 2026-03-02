@@ -868,7 +868,7 @@ async fn test_timer_to_file_producer() {
 
     let route = RouteBuilder::from("timer:write-test?period=50&repeatCount=2")
         .set_header("CamelFileName", Value::String("output.txt".into()))
-        .to(&format!("file:{dir_path}?fileExist=Append"))
+        .to(format!("file:{dir_path}?fileExist=Append"))
         .build()
         .unwrap();
 
@@ -903,7 +903,7 @@ async fn test_file_to_file_pipeline() {
     let route = RouteBuilder::from(&format!(
         "file:{input_path}?noop=true&initialDelay=0&delay=100"
     ))
-    .to(&format!("file:{output_path}"))
+    .to(format!("file:{output_path}"))
     .build()
     .unwrap();
 
@@ -1858,7 +1858,7 @@ async fn test_http_concurrent_pipeline() {
         let client = client.clone();
         handles.push(tokio::spawn(async move {
             client
-                .get(&format!("http://127.0.0.1:18080/concurrent-test?i={i}"))
+                .get(format!("http://127.0.0.1:18080/concurrent-test?i={i}"))
                 .send()
                 .await
                 .unwrap()
@@ -1922,7 +1922,7 @@ async fn test_http_sequential_override() {
         let client = client.clone();
         handles.push(tokio::spawn(async move {
             client
-                .get(&format!("http://127.0.0.1:18081/sequential-test?i={i}"))
+                .get(format!("http://127.0.0.1:18081/sequential-test?i={i}"))
                 .send()
                 .await
                 .unwrap()
@@ -1999,7 +1999,7 @@ async fn test_http_concurrent_with_semaphore_limit() {
         let client = client.clone();
         handles.push(tokio::spawn(async move {
             client
-                .get(&format!("http://127.0.0.1:18082/semaphore-test?i={i}"))
+                .get(format!("http://127.0.0.1:18082/semaphore-test?i={i}"))
                 .send()
                 .await
                 .unwrap()
@@ -2064,7 +2064,7 @@ async fn test_http_concurrent_with_circuit_breaker() {
         let client = client.clone();
         handles.push(tokio::spawn(async move {
             client
-                .get(&format!("http://127.0.0.1:18083/cb-test?i={i}"))
+                .get(format!("http://127.0.0.1:18083/cb-test?i={i}"))
                 .send()
                 .await
                 .unwrap()
@@ -2149,7 +2149,7 @@ async fn test_http_concurrent_shutdown_drains_inflight() {
         let client = client.clone();
         handles.push(tokio::spawn(async move {
             client
-                .get(&format!("http://127.0.0.1:18084/shutdown-test?i={i}"))
+                .get(format!("http://127.0.0.1:18084/shutdown-test?i={i}"))
                 .send()
                 .await
                 .unwrap()

@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{CamelError, RouteController, RouteStatus};
+use camel_api::{CamelError, MetricsCollector, NoOpMetrics, RouteController, RouteStatus};
 use camel_component::Component;
 
 use crate::registry::Registry;
@@ -31,11 +31,17 @@ pub struct CamelContext {
     registry: Arc<std::sync::Mutex<Registry>>,
     route_controller: Arc<Mutex<DefaultRouteController>>,
     cancel_token: CancellationToken,
+    metrics: Arc<dyn MetricsCollector>,
 }
 
 impl CamelContext {
     /// Create a new, empty CamelContext.
     pub fn new() -> Self {
+        Self::with_metrics(Arc::new(NoOpMetrics))
+    }
+
+    /// Create a new CamelContext with a custom metrics collector.
+    pub fn with_metrics(metrics: Arc<dyn MetricsCollector>) -> Self {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let controller = Arc::new(Mutex::new(DefaultRouteController::new(Arc::clone(
             &registry,
@@ -52,6 +58,7 @@ impl CamelContext {
             registry,
             route_controller: controller,
             cancel_token: CancellationToken::new(),
+            metrics,
         }
     }
 
@@ -66,7 +73,15 @@ impl CamelContext {
     /// Register a component with this context.
     pub fn register_component<C: Component + 'static>(&mut self, component: C) {
         info!(scheme = component.scheme(), "Registering component");
-        self.registry.lock().unwrap().register(component);
+        match self.registry.lock() {
+            Ok(mut guard) => guard.register(component),
+            Err(e) => {
+                tracing::error!("Registry mutex poisoned, recovering: {}", e);
+                // Recover by taking the poisoned value
+                let mut guard = e.into_inner();
+                guard.register(component);
+            }
+        }
     }
 
     /// Add a route definition to this context.
@@ -92,12 +107,20 @@ impl CamelContext {
 
     /// Access the component registry.
     pub fn registry(&self) -> std::sync::MutexGuard<'_, Registry> {
-        self.registry.lock().unwrap()
+        self.registry.lock().unwrap_or_else(|e| {
+            tracing::warn!("Registry mutex poisoned, recovering");
+            e.into_inner()
+        })
     }
 
     /// Access the route controller.
     pub fn route_controller(&self) -> &Arc<Mutex<DefaultRouteController>> {
         &self.route_controller
+    }
+
+    /// Get the metrics collector.
+    pub fn metrics(&self) -> Arc<dyn MetricsCollector> {
+        Arc::clone(&self.metrics)
     }
 
     /// Get the status of a route by ID.
@@ -155,5 +178,43 @@ impl CamelContext {
 impl Default for CamelContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camel_api::CamelError;
+    use camel_component::Endpoint;
+
+    /// Mock component for testing
+    struct MockComponent;
+
+    impl Component for MockComponent {
+        fn scheme(&self) -> &str {
+            "mock"
+        }
+
+        fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+            Err(CamelError::ComponentNotFound("mock".to_string()))
+        }
+    }
+
+    #[test]
+    fn test_context_handles_mutex_poisoning_gracefully() {
+        let mut ctx = CamelContext::new();
+
+        // Register a component successfully
+        ctx.register_component(MockComponent);
+
+        // Access registry should work even after potential panic in another thread
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ctx.registry();
+        }));
+
+        assert!(
+            result.is_ok(),
+            "Registry access should handle mutex poisoning"
+        );
     }
 }

@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use tower::Service;
 
@@ -18,10 +19,42 @@ pub const CAMEL_AGGREGATOR_PENDING: &str = "CamelAggregatorPending";
 pub const CAMEL_AGGREGATED_SIZE: &str = "CamelAggregatedSize";
 pub const CAMEL_AGGREGATED_KEY: &str = "CamelAggregatedKey";
 
+/// Internal bucket structure with timestamp tracking for TTL eviction.
+struct Bucket {
+    exchanges: Vec<Exchange>,
+    #[allow(dead_code)]
+    created_at: Instant,
+    last_updated: Instant,
+}
+
+impl Bucket {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            exchanges: Vec::new(),
+            created_at: now,
+            last_updated: now,
+        }
+    }
+
+    fn push(&mut self, exchange: Exchange) {
+        self.exchanges.push(exchange);
+        self.last_updated = Instant::now();
+    }
+
+    fn len(&self) -> usize {
+        self.exchanges.len()
+    }
+
+    fn is_expired(&self, ttl: Duration) -> bool {
+        Instant::now().duration_since(self.last_updated) >= ttl
+    }
+}
+
 #[derive(Clone)]
 pub struct AggregatorService {
     config: AggregatorConfig,
-    buckets: Arc<Mutex<HashMap<String, Vec<Exchange>>>>,
+    buckets: Arc<Mutex<HashMap<String, Bucket>>>,
 }
 
 impl AggregatorService {
@@ -67,16 +100,38 @@ impl Service<Exchange> for AggregatorService {
             // 2. Insert into bucket and check completion (lock scope)
             let completed_bucket = {
                 let mut guard = buckets.lock().unwrap_or_else(|e| e.into_inner());
-                let bucket = guard.entry(key_str.clone()).or_default();
+
+                // Evict expired buckets if TTL is configured
+                if let Some(ttl) = config.bucket_ttl {
+                    guard.retain(|_, bucket| !bucket.is_expired(ttl));
+                }
+
+                // Enforce max buckets limit - reject new correlation keys if at limit
+                if let Some(max) = config.max_buckets
+                    && !guard.contains_key(&key_str)
+                    && guard.len() >= max
+                {
+                    tracing::warn!(
+                        max_buckets = max,
+                        correlation_key = %key_str,
+                        "Aggregator reached max buckets limit, rejecting new correlation key"
+                    );
+                    return Err(CamelError::ProcessorError(format!(
+                        "Aggregator reached maximum {} buckets",
+                        max
+                    )));
+                }
+
+                let bucket = guard.entry(key_str.clone()).or_insert_with(Bucket::new);
                 bucket.push(exchange);
 
                 let is_complete = match &config.completion {
                     CompletionCondition::Size(n) => bucket.len() >= *n,
-                    CompletionCondition::Predicate(pred) => pred(bucket),
+                    CompletionCondition::Predicate(pred) => pred(&bucket.exchanges),
                 };
 
                 if is_complete {
-                    guard.remove(&key_str)
+                    guard.remove(&key_str).map(|b| b.exchanges)
                 } else {
                     None
                 }
@@ -409,5 +464,84 @@ mod tests {
             result.property(CAMEL_AGGREGATED_KEY),
             Some(&serde_json::json!("ORDER-42"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_aggregator_enforces_max_buckets() {
+        let config = AggregatorConfig::correlate_by("orderId")
+            .complete_when_size(2)
+            .max_buckets(3)
+            .build();
+
+        let mut svc = AggregatorService::new(config);
+
+        // Create 3 different correlation keys (fills limit)
+        for i in 0..3 {
+            let ex = make_exchange("orderId", &format!("key-{}", i), "body");
+            let _ = svc.ready().await.unwrap().call(ex).await.unwrap();
+        }
+
+        // 4th key should be rejected
+        let ex = make_exchange("orderId", "key-4", "body");
+        let result = svc.ready().await.unwrap().call(ex).await;
+
+        assert!(result.is_err(), "Should reject when max buckets reached");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("maximum"),
+            "Error message should contain 'maximum': {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_buckets_allows_existing_key() {
+        let config = AggregatorConfig::correlate_by("orderId")
+            .complete_when_size(5) // Large size so bucket doesn't complete
+            .max_buckets(2)
+            .build();
+
+        let mut svc = AggregatorService::new(config);
+
+        // Create 2 different correlation keys (fills limit)
+        let ex1 = make_exchange("orderId", "key-A", "body1");
+        let _ = svc.ready().await.unwrap().call(ex1).await.unwrap();
+        let ex2 = make_exchange("orderId", "key-B", "body2");
+        let _ = svc.ready().await.unwrap().call(ex2).await.unwrap();
+
+        // Should still allow adding to existing key
+        let ex3 = make_exchange("orderId", "key-A", "body3");
+        let result = svc.ready().await.unwrap().call(ex3).await;
+        assert!(
+            result.is_ok(),
+            "Should allow adding to existing bucket even at max limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bucket_ttl_eviction() {
+        let config = AggregatorConfig::correlate_by("orderId")
+            .complete_when_size(10) // Large size so bucket doesn't complete normally
+            .bucket_ttl(Duration::from_millis(50))
+            .build();
+
+        let mut svc = AggregatorService::new(config);
+
+        // Create a bucket
+        let ex1 = make_exchange("orderId", "key-A", "body1");
+        let _ = svc.ready().await.unwrap().call(ex1).await.unwrap();
+
+        // Wait for TTL to expire
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Create a new bucket - this should trigger eviction of the old one
+        let ex2 = make_exchange("orderId", "key-B", "body2");
+        let _ = svc.ready().await.unwrap().call(ex2).await.unwrap();
+
+        // The expired bucket should have been evicted, so we should be able to
+        // add a new key-A bucket again
+        let ex3 = make_exchange("orderId", "key-A", "body3");
+        let result = svc.ready().await.unwrap().call(ex3).await;
+        assert!(result.is_ok(), "Should be able to recreate evicted bucket");
     }
 }
