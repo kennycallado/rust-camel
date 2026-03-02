@@ -4,6 +4,11 @@ description = "Core traits and interfaces for rust-camel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/camel-api"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 async-trait.workspace = true

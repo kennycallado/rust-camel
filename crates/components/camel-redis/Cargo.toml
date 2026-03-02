@@ -1,8 +1,14 @@
 [package]
 name = "camel-redis"
+description = "Redis component for rust-camel integration framework"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/camel-redis"
+readme.workspace = true
+keywords = ["camel", "redis", "integration", "messaging", "cache"]
+categories = ["database", "asynchronous", "network-programming"]
 
 [dependencies]
 camel-api = { workspace = true }

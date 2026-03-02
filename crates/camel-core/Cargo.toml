@@ -4,6 +4,11 @@ description = "Core engine for rust-camel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/camel-core"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true

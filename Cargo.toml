@@ -43,10 +43,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/user/rust-camel"
+repository = "https://github.com/kennycallado/rust-camel"
+documentation = "https://docs.rs/camel-api"
+readme = "README.md"
+keywords = ["camel", "integration", "messaging", "routing", "enterprise"]
+categories = ["network-programming", "asynchronous", "development-tools"]
 
 [workspace.dependencies]
 camel-api = { path = "crates/camel-api" }
