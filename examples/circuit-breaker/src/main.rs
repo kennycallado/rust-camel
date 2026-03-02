@@ -5,10 +5,10 @@ use std::time::Duration;
 use camel_api::body::Body;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{CamelError, Value};
+use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
-use camel_http::HttpComponent;
+use camel_direct::DirectComponent;
 use camel_log::LogComponent;
 use camel_timer::TimerComponent;
 
@@ -19,57 +19,68 @@ async fn main() -> Result<(), CamelError> {
     let mut ctx = CamelContext::new();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
-    ctx.register_component(HttpComponent::new());
+    ctx.register_component(DirectComponent::new());
 
     let failure_count = Arc::new(AtomicU32::new(0));
     let failure_clone = Arc::clone(&failure_count);
 
-    // This example demonstrates circuit breaker pattern:
-    // - First 5 calls will fail (simulating service outage)
-    // - Circuit opens after 3 consecutive failures
-    // - After open_duration (3s), circuit enters half-open state
-    // - If probe succeeds, circuit closes and normal operation resumes
-    let route = RouteBuilder::from("timer:cb-test?period=1000&repeatCount=15")
-        .route_id("circuit-breaker-demo")
-        .process(move |mut exchange| {
+    // Simulated failing service - fails first 5 calls, then succeeds
+    let failing_service = RouteBuilder::from("direct:failing-service")
+        .route_id("failing-service")
+        .process(move |exchange| {
             let fc = Arc::clone(&failure_clone);
             async move {
                 let n = fc.fetch_add(1, Ordering::SeqCst);
-                // Fail first 5 calls, then succeed
                 if n < 5 {
-                    exchange.input.body = Body::Text(format!("call-{} (will fail)", n));
-                    exchange.input.set_header(
-                        "CamelHttpUrl",
-                        Value::String("https://httpbin.org/status/500".into()),
-                    );
+                    println!("[SERVICE] Call {} - SIMULATING FAILURE", n);
+                    Err(CamelError::ProcessorError(format!(
+                        "Service unavailable (call {})",
+                        n
+                    )))
                 } else {
-                    exchange.input.body = Body::Text(format!("call-{} (should succeed)", n));
-                    exchange.input.set_header(
-                        "CamelHttpUrl",
-                        Value::String("https://httpbin.org/get".into()),
-                    );
+                    println!("[SERVICE] Call {} - SUCCESS", n);
+                    Ok(exchange)
                 }
-                Ok(exchange)
             }
         })
-        .to("header:CamelHttpUrl?allowPrivateIps=false")
-        .to("log:cb-result?showBody=true&showCorrelationId=true")
+        .build()?;
+
+    // Main route with circuit breaker
+    let main_route = RouteBuilder::from("timer:cb-test?period=1000&repeatCount=15")
+        .route_id("circuit-breaker-demo")
+        .process(|mut exchange| async move {
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            exchange.input.body = Body::Text(format!("request-{}", n));
+            Ok(exchange)
+        })
+        .to("direct:failing-service")
         .circuit_breaker(
             CircuitBreakerConfig::new()
                 .failure_threshold(3)
                 .open_duration(Duration::from_secs(3)),
         )
-        .error_handler(ErrorHandlerConfig::dead_letter_channel(
-            "log:cb-dlc?showBody=true&showCorrelationId=true",
-        ))
+        .to("log:cb-success?showBody=true&showCorrelationId=true")
+        .error_handler(
+            ErrorHandlerConfig::dead_letter_channel(
+                "log:cb-fallback?showBody=true&showHeaders=true&showCorrelationId=true",
+            )
+            .on_exception(|_| true)
+            .build(),
+        )
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(failing_service)?;
+    ctx.add_route_definition(main_route)?;
     ctx.start().await?;
 
     println!("Circuit Breaker example running.");
-    println!("First 5 calls will fail (HTTP 500), then succeed (HTTP 200).");
-    println!("Circuit opens after 3 failures, attempts recovery after 3 seconds.");
+    println!("  - Service fails first 5 calls, then succeeds");
+    println!("  - Circuit opens after 3 consecutive failures");
+    println!("  - After 3s, circuit enters half-open state");
+    println!("  - Watch logs: cb-success (working) vs cb-fallback (circuit open)");
     println!("Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await.ok();

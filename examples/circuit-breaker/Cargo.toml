@@ -1,6 +1,6 @@
 [package]
 name = "circuit-breaker"
-description = "Circuit Breaker EIP example — resilient HTTP calls with fallback"
+description = "Circuit Breaker EIP example — resilient service calls with fallback"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,9 @@ license.workspace = true
 camel-api.workspace = true
 camel-core.workspace = true
 camel-builder.workspace = true
-camel-http.workspace = true
+camel-direct.workspace = true
 camel-log.workspace = true
 camel-timer.workspace = true
-camel-processor.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
