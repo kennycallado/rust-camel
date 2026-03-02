@@ -133,6 +133,9 @@ pub struct RouteBuilder {
     error_handler: Option<ErrorHandlerConfig>,
     circuit_breaker_config: Option<CircuitBreakerConfig>,
     concurrency: Option<ConcurrencyModel>,
+    route_id: Option<String>,
+    auto_startup: Option<bool>,
+    startup_order: Option<i32>,
 }
 
 impl RouteBuilder {
@@ -144,6 +147,9 @@ impl RouteBuilder {
             error_handler: None,
             circuit_breaker_config: None,
             concurrency: None,
+            route_id: None,
+            auto_startup: None,
+            startup_order: None,
         }
     }
 
@@ -211,6 +217,30 @@ impl RouteBuilder {
         self
     }
 
+    /// Set the route ID for this route.
+    ///
+    /// If not set, the route will be assigned an auto-generated ID.
+    pub fn route_id(mut self, id: impl Into<String>) -> Self {
+        self.route_id = Some(id.into());
+        self
+    }
+
+    /// Set whether this route should automatically start when the context starts.
+    ///
+    /// Default is `true`.
+    pub fn auto_startup(mut self, auto: bool) -> Self {
+        self.auto_startup = Some(auto);
+        self
+    }
+
+    /// Set the startup order for this route.
+    ///
+    /// Routes with lower values start first. Default is 1000.
+    pub fn startup_order(mut self, order: i32) -> Self {
+        self.startup_order = Some(order);
+        self
+    }
+
     /// Begin a Splitter sub-pipeline. Steps added after this call (until
     /// `.end_split()`) will be executed per-fragment.
     ///
@@ -257,6 +287,21 @@ impl RouteBuilder {
         };
         let definition = if let Some(concurrency) = self.concurrency {
             definition.with_concurrency(concurrency)
+        } else {
+            definition
+        };
+        let definition = if let Some(id) = self.route_id {
+            definition.with_route_id(id)
+        } else {
+            definition
+        };
+        let definition = if let Some(auto) = self.auto_startup {
+            definition.with_auto_startup(auto)
+        } else {
+            definition
+        };
+        let definition = if let Some(order) = self.startup_order {
+            definition.with_startup_order(order)
         } else {
             definition
         };
@@ -1029,5 +1074,46 @@ mod tests {
             .unwrap();
 
         assert_eq!(definition.concurrency_override(), None);
+    }
+
+    // ── Route lifecycle builder tests ─────────────────────────────────────
+
+    #[test]
+    fn test_builder_route_id_sets_id() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("my-route")
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.route_id(), Some("my-route"));
+    }
+
+    #[test]
+    fn test_builder_auto_startup_false() {
+        let definition = RouteBuilder::from("timer:tick")
+            .auto_startup(false)
+            .build()
+            .unwrap();
+
+        assert!(!definition.auto_startup());
+    }
+
+    #[test]
+    fn test_builder_startup_order_custom() {
+        let definition = RouteBuilder::from("timer:tick")
+            .startup_order(50)
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.startup_order(), 50);
+    }
+
+    #[test]
+    fn test_builder_defaults() {
+        let definition = RouteBuilder::from("timer:tick").build().unwrap();
+
+        assert_eq!(definition.route_id(), None);
+        assert!(definition.auto_startup());
+        assert_eq!(definition.startup_order(), 1000);
     }
 }

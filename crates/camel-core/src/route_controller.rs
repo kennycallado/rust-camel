@@ -1,0 +1,657 @@
+//! Default implementation of RouteController.
+//!
+//! This module provides [`DefaultRouteController`], which manages route lifecycle
+//! including starting, stopping, suspending, and resuming routes.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tower::{Layer, Service, ServiceExt};
+use tracing::{error, info, warn};
+
+use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::{BoxProcessor, CamelError, ProducerContext, RouteController, RouteStatus};
+use camel_component::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
+use camel_endpoint::parse_uri;
+use camel_processor::circuit_breaker::CircuitBreakerLayer;
+use camel_processor::error_handler::ErrorHandlerLayer;
+
+use crate::registry::Registry;
+use crate::route::{BuilderStep, RouteDefinition, RouteDefinitionInfo, compose_pipeline};
+
+/// A Sync-safe wrapper around BoxProcessor.
+///
+/// BoxProcessor (BoxCloneService) is Send but not Sync. By wrapping in Arc<Mutex>,
+/// we get both Send and Sync for storage in DefaultRouteController.
+type SyncPipeline = Arc<std::sync::Mutex<BoxProcessor>>;
+
+/// Internal state for a managed route.
+struct ManagedRoute {
+    /// The route definition metadata (for introspection).
+    definition: RouteDefinitionInfo,
+    /// Source endpoint URI.
+    from_uri: String,
+    /// Resolved processor pipeline (wrapped for Sync).
+    pipeline: SyncPipeline,
+    /// Concurrency model override (if any).
+    concurrency: Option<ConcurrencyModel>,
+    /// Current lifecycle status.
+    status: RouteStatus,
+    /// Handle for the consumer task (if running).
+    consumer_handle: Option<JoinHandle<()>>,
+    /// Handle for the pipeline task (if running).
+    pipeline_handle: Option<JoinHandle<()>>,
+    /// Cancellation token for stopping this route.
+    cancel_token: CancellationToken,
+}
+
+/// Wait for a pipeline service to be ready with circuit breaker backoff.
+///
+/// This helper encapsulates the pattern of repeatedly calling `ready()` on a
+/// service while handling `CircuitOpen` errors with a fixed 1-second backoff and
+/// cancellation checks. It returns `Ok(())` when the service is ready, or
+/// `Err(e)` if cancellation occurred or a fatal error was encountered.
+async fn ready_with_backoff(
+    pipeline: &mut BoxProcessor,
+    cancel: &CancellationToken,
+) -> Result<(), CamelError> {
+    loop {
+        match pipeline.ready().await {
+            Ok(_) => return Ok(()),
+            Err(CamelError::CircuitOpen(ref msg)) => {
+                warn!("Circuit open, backing off: {msg}");
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        continue;
+                    }
+                    _ = cancel.cancelled() => {
+                        // Shutting down — don't retry.
+                        return Err(CamelError::CircuitOpen(msg.clone()));
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Pipeline not ready: {e}");
+                return Err(e);
+            }
+        }
+    }
+}
+
+/// Default implementation of [`RouteController`].
+///
+/// Manages route lifecycle with support for:
+/// - Starting/stopping individual routes
+/// - Suspending and resuming routes
+/// - Auto-startup with startup ordering
+/// - Graceful shutdown
+pub struct DefaultRouteController {
+    /// Routes indexed by route ID.
+    routes: HashMap<String, ManagedRoute>,
+    /// Reference to the component registry for resolving endpoints.
+    registry: Arc<std::sync::Mutex<Registry>>,
+    /// Self-reference for creating ProducerContext.
+    /// Set after construction via `set_self_ref()`.
+    self_ref: Option<Arc<Mutex<dyn RouteController>>>,
+    /// Optional global error handler applied to all routes without a per-route handler.
+    global_error_handler: Option<ErrorHandlerConfig>,
+}
+
+impl DefaultRouteController {
+    /// Create a new `DefaultRouteController` with the given registry.
+    pub fn new(registry: Arc<std::sync::Mutex<Registry>>) -> Self {
+        Self {
+            routes: HashMap::new(),
+            registry,
+            self_ref: None,
+            global_error_handler: None,
+        }
+    }
+
+    /// Set the self-reference for creating ProducerContext.
+    ///
+    /// This must be called after wrapping the controller in `Arc<Mutex<>>`.
+    pub fn set_self_ref(&mut self, self_ref: Arc<Mutex<dyn RouteController>>) {
+        self.self_ref = Some(self_ref);
+    }
+
+    /// Set a global error handler applied to all routes without a per-route handler.
+    pub fn set_error_handler(&mut self, config: ErrorHandlerConfig) {
+        self.global_error_handler = Some(config);
+    }
+
+    /// Resolve an `ErrorHandlerConfig` into an `ErrorHandlerLayer`.
+    fn resolve_error_handler(
+        &self,
+        config: ErrorHandlerConfig,
+        producer_ctx: &ProducerContext,
+    ) -> Result<ErrorHandlerLayer, CamelError> {
+        let registry = self.registry.lock().unwrap();
+
+        // Resolve DLC URI → producer.
+        let dlc_producer = if let Some(ref uri) = config.dlc_uri {
+            let parsed = parse_uri(uri)?;
+            let component = registry.get_or_err(&parsed.scheme)?;
+            let endpoint = component.create_endpoint(uri)?;
+            Some(endpoint.create_producer(producer_ctx)?)
+        } else {
+            None
+        };
+
+        // Resolve per-policy `handled_by` URIs.
+        let mut resolved_policies = Vec::new();
+        for policy in config.policies {
+            let handler_producer = if let Some(ref uri) = policy.handled_by {
+                let parsed = parse_uri(uri)?;
+                let component = registry.get_or_err(&parsed.scheme)?;
+                let endpoint = component.create_endpoint(uri)?;
+                Some(endpoint.create_producer(producer_ctx)?)
+            } else {
+                None
+            };
+            resolved_policies.push((policy, handler_producer));
+        }
+
+        Ok(ErrorHandlerLayer::new(dlc_producer, resolved_policies))
+    }
+
+    /// Resolve BuilderSteps into BoxProcessors.
+    fn resolve_steps(
+        &self,
+        steps: Vec<BuilderStep>,
+        producer_ctx: &ProducerContext,
+        registry: &Registry,
+    ) -> Result<Vec<BoxProcessor>, CamelError> {
+        let mut processors: Vec<BoxProcessor> = Vec::new();
+        for step in steps {
+            match step {
+                BuilderStep::Processor(svc) => {
+                    processors.push(svc);
+                }
+                BuilderStep::To(uri) => {
+                    let parsed = parse_uri(&uri)?;
+                    let component = registry.get_or_err(&parsed.scheme)?;
+                    let endpoint = component.create_endpoint(&uri)?;
+                    let producer = endpoint.create_producer(producer_ctx)?;
+                    processors.push(producer);
+                }
+                BuilderStep::Split { config, steps } => {
+                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_pipeline = compose_pipeline(sub_processors);
+                    let splitter =
+                        camel_processor::splitter::SplitterService::new(config, sub_pipeline);
+                    processors.push(BoxProcessor::new(splitter));
+                }
+                BuilderStep::Aggregate { config } => {
+                    let svc = camel_processor::AggregatorService::new(config);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::Filter { predicate, steps } => {
+                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_pipeline = compose_pipeline(sub_processors);
+                    let svc =
+                        camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::WireTap { uri } => {
+                    let parsed = parse_uri(&uri)?;
+                    let component = registry.get_or_err(&parsed.scheme)?;
+                    let endpoint = component.create_endpoint(&uri)?;
+                    let producer = endpoint.create_producer(producer_ctx)?;
+                    let svc = camel_processor::WireTapService::new(producer);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::Multicast { config, steps } => {
+                    // Each top-level step in the multicast scope becomes an independent endpoint.
+                    let mut endpoints = Vec::new();
+                    for step in steps {
+                        let sub_processors =
+                            self.resolve_steps(vec![step], producer_ctx, registry)?;
+                        let endpoint = compose_pipeline(sub_processors);
+                        endpoints.push(endpoint);
+                    }
+                    let svc = camel_processor::MulticastService::new(endpoints, config);
+                    processors.push(BoxProcessor::new(svc));
+                }
+            }
+        }
+        Ok(processors)
+    }
+
+    /// Add a route definition to the controller.
+    ///
+    /// Steps are resolved immediately using the registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The route doesn't have an ID
+    /// - A route with the same ID already exists
+    /// - Step resolution fails
+    pub fn add_route(&mut self, definition: RouteDefinition) -> Result<(), CamelError> {
+        let route_id = definition
+            .route_id()
+            .ok_or_else(|| CamelError::RouteError("Route must have an ID".into()))?
+            .to_string();
+
+        if self.routes.contains_key(&route_id) {
+            return Err(CamelError::RouteError(format!(
+                "Route '{}' already exists",
+                route_id
+            )));
+        }
+
+        info!(route_id = %route_id, "Adding route to controller");
+
+        // Extract definition info for storage before steps are consumed
+        let definition_info = definition.to_info();
+        let from_uri = definition.from_uri.to_string();
+        let concurrency = definition.concurrency;
+
+        // Create ProducerContext from self_ref for step resolution
+        let producer_ctx = self
+            .self_ref
+            .clone()
+            .map(ProducerContext::new)
+            .ok_or_else(|| CamelError::RouteError("RouteController self_ref not set".into()))?;
+
+        // Lock registry for step resolution
+        let registry = self.registry.lock().unwrap();
+
+        // Resolve steps into processors (takes ownership of steps)
+        let processors = self.resolve_steps(definition.steps, &producer_ctx, &registry)?;
+        let mut pipeline = compose_pipeline(processors);
+
+        // Apply circuit breaker if configured
+        if let Some(cb_config) = definition.circuit_breaker {
+            let cb_layer = CircuitBreakerLayer::new(cb_config);
+            pipeline = BoxProcessor::new(cb_layer.layer(pipeline));
+        }
+
+        // Determine which error handler config to use (per-route takes precedence)
+        let eh_config = definition
+            .error_handler
+            .or_else(|| self.global_error_handler.clone());
+
+        if let Some(config) = eh_config {
+            let layer = self.resolve_error_handler(config, &producer_ctx)?;
+            pipeline = BoxProcessor::new(layer.layer(pipeline));
+        }
+
+        // Drop the lock before modifying self.routes
+        drop(registry);
+
+        self.routes.insert(
+            route_id.clone(),
+            ManagedRoute {
+                definition: definition_info,
+                from_uri,
+                pipeline: Arc::new(std::sync::Mutex::new(pipeline)),
+                concurrency,
+                status: RouteStatus::Stopped,
+                consumer_handle: None,
+                pipeline_handle: None,
+                cancel_token: CancellationToken::new(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Returns the number of routes in the controller.
+    pub fn route_count(&self) -> usize {
+        self.routes.len()
+    }
+
+    /// Returns all route IDs.
+    pub fn route_ids(&self) -> Vec<String> {
+        self.routes.keys().cloned().collect()
+    }
+
+    /// Internal stop implementation that can set custom status.
+    async fn stop_route_internal(&mut self, route_id: &str) -> Result<(), CamelError> {
+        let managed = self
+            .routes
+            .get_mut(route_id)
+            .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
+
+        let current_status = managed.status.clone();
+        if current_status != RouteStatus::Started && current_status != RouteStatus::Suspended {
+            return Ok(()); // Already stopped or stopping
+        }
+
+        info!(route_id = %route_id, "Stopping route");
+        managed.status = RouteStatus::Stopping;
+
+        // Cancel the token to signal shutdown
+        managed.cancel_token.cancel();
+
+        // Take handles directly (no Arc<Mutex> wrapper needed)
+        let consumer_handle = managed.consumer_handle.take();
+        let pipeline_handle = managed.pipeline_handle.take();
+
+        // Wait for tasks to complete with timeout
+        // The CancellationToken already signaled tasks to stop gracefully.
+        // If timeout fires, log a warning — tasks will stop on their own when
+        // they check the cancel token. This is standard Tokio shutdown practice.
+        let timeout_result = tokio::time::timeout(Duration::from_secs(30), async {
+            match (consumer_handle, pipeline_handle) {
+                (Some(c), Some(p)) => {
+                    let _ = tokio::join!(c, p);
+                }
+                (Some(c), None) => {
+                    let _ = c.await;
+                }
+                (None, Some(p)) => {
+                    let _ = p.await;
+                }
+                (None, None) => {}
+            }
+        })
+        .await;
+
+        if timeout_result.is_err() {
+            warn!(route_id = %route_id, "Route shutdown timed out after 30s — tasks may still be running");
+        }
+
+        // Get the managed route again (can't hold across await)
+        let managed = self.routes.get_mut(route_id).unwrap();
+
+        // Create a fresh cancellation token for next start
+        managed.cancel_token = CancellationToken::new();
+        managed.status = RouteStatus::Stopped;
+
+        info!(route_id = %route_id, "Route stopped");
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl RouteController for DefaultRouteController {
+    async fn start_route(&mut self, route_id: &str) -> Result<(), CamelError> {
+        // Check if route exists and can be started, and update status atomically
+        {
+            let managed = self
+                .routes
+                .get_mut(route_id)
+                .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
+
+            match managed.status {
+                RouteStatus::Started => return Ok(()), // Already running
+                RouteStatus::Starting => {
+                    return Err(CamelError::RouteError(format!(
+                        "Route '{}' is already starting",
+                        route_id
+                    )));
+                }
+                RouteStatus::Stopped | RouteStatus::Failed(_) => {} // OK to start
+                RouteStatus::Stopping => {
+                    return Err(CamelError::RouteError(format!(
+                        "Route '{}' is stopping",
+                        route_id
+                    )));
+                }
+                RouteStatus::Suspended => {} // OK to resume
+            }
+            managed.status = RouteStatus::Starting;
+        }
+
+        info!(route_id = %route_id, "Starting route");
+
+        // Get the resolved route info
+        let (from_uri, pipeline, concurrency) = {
+            let managed = self.routes.get(route_id).unwrap();
+            (
+                managed.from_uri.clone(),
+                Arc::clone(&managed.pipeline),
+                managed.concurrency.clone(),
+            )
+        };
+
+        // Parse from URI and create consumer (lock registry for lookup)
+        let parsed = parse_uri(&from_uri)?;
+        let registry = self.registry.lock().unwrap();
+        let component = registry.get_or_err(&parsed.scheme)?;
+        let endpoint = component.create_endpoint(&from_uri)?;
+        let mut consumer = endpoint.create_consumer()?;
+        let consumer_concurrency = consumer.concurrency_model();
+        // Drop the lock before spawning tasks
+        drop(registry);
+
+        // Resolve effective concurrency: route override > consumer default
+        let effective_concurrency = concurrency.unwrap_or(consumer_concurrency);
+
+        // Get the managed route for mutation
+        let managed = self.routes.get_mut(route_id).unwrap();
+
+        // Create channel for consumer to send exchanges
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(256);
+        let child_token = managed.cancel_token.child_token();
+        let consumer_ctx = ConsumerContext::new(tx, child_token.clone());
+
+        // Start consumer in background task
+        // TODO: Update route status to Failed when consumer crashes (requires Arc<Mutex<RouteStatus>> or channel)
+        let route_id_for_consumer = route_id.to_string();
+        let consumer_handle = tokio::spawn(async move {
+            if let Err(e) = consumer.start(consumer_ctx).await {
+                error!(route_id = %route_id_for_consumer, "Consumer error: {e}");
+            }
+        });
+
+        // Spawn pipeline task
+        let pipeline_cancel = child_token;
+        let pipeline_handle = match effective_concurrency {
+            ConcurrencyModel::Sequential => {
+                tokio::spawn(async move {
+                    // Clone pipeline from the Sync wrapper
+                    let mut pipeline = pipeline.lock().unwrap().clone();
+                    while let Some(envelope) = rx.recv().await {
+                        let ExchangeEnvelope { exchange, reply_tx } = envelope;
+
+                        if let Err(e) = ready_with_backoff(&mut pipeline, &pipeline_cancel).await {
+                            if let Some(tx) = reply_tx {
+                                let _ = tx.send(Err(e));
+                            }
+                            return;
+                        }
+
+                        let result = pipeline.call(exchange).await;
+                        if let Some(tx) = reply_tx {
+                            let _ = tx.send(result);
+                        } else if let Err(ref e) = result
+                            && !matches!(e, CamelError::Stopped)
+                        {
+                            error!("Pipeline error: {e}");
+                        }
+                    }
+                })
+            }
+            ConcurrencyModel::Concurrent { max } => {
+                let sem = max.map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+                tokio::spawn(async move {
+                    while let Some(envelope) = rx.recv().await {
+                        let ExchangeEnvelope { exchange, reply_tx } = envelope;
+                        let pipe_clone = Arc::clone(&pipeline);
+                        let sem = sem.clone();
+                        let cancel = pipeline_cancel.clone();
+                        tokio::spawn(async move {
+                            // Acquire semaphore permit if bounded
+                            let _permit = match &sem {
+                                Some(s) => Some(s.acquire().await.expect("semaphore closed")),
+                                None => None,
+                            };
+
+                            // Clone pipeline from the Sync wrapper
+                            let mut pipe = pipe_clone.lock().unwrap().clone();
+
+                            // Wait for service ready with circuit breaker backoff
+                            if let Err(e) = ready_with_backoff(&mut pipe, &cancel).await {
+                                if let Some(tx) = reply_tx {
+                                    let _ = tx.send(Err(e));
+                                }
+                                return;
+                            }
+
+                            let result = pipe.call(exchange).await;
+                            if let Some(tx) = reply_tx {
+                                let _ = tx.send(result);
+                            } else if let Err(ref e) = result
+                                && !matches!(e, CamelError::Stopped)
+                            {
+                                error!("Pipeline error: {e}");
+                            }
+                        });
+                    }
+                })
+            }
+        };
+
+        // Store handles and update status
+        let managed = self.routes.get_mut(route_id).unwrap();
+        managed.consumer_handle = Some(consumer_handle);
+        managed.pipeline_handle = Some(pipeline_handle);
+        managed.status = RouteStatus::Started;
+
+        info!(route_id = %route_id, "Route started");
+        Ok(())
+    }
+
+    async fn stop_route(&mut self, route_id: &str) -> Result<(), CamelError> {
+        self.stop_route_internal(route_id).await
+    }
+
+    async fn restart_route(&mut self, route_id: &str) -> Result<(), CamelError> {
+        self.stop_route(route_id).await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.start_route(route_id).await
+    }
+
+    async fn suspend_route(&mut self, route_id: &str) -> Result<(), CamelError> {
+        self.stop_route_internal(route_id).await?;
+        let managed = self.routes.get_mut(route_id).unwrap();
+        managed.status = RouteStatus::Suspended;
+        info!(route_id = %route_id, "Route suspended");
+        Ok(())
+    }
+
+    async fn resume_route(&mut self, route_id: &str) -> Result<(), CamelError> {
+        // Resume only if Suspended
+        let is_suspended = self
+            .routes
+            .get(route_id)
+            .map(|r| r.status == RouteStatus::Suspended)
+            .unwrap_or(false);
+
+        if !is_suspended {
+            return Err(CamelError::RouteError(format!(
+                "Route '{}' is not suspended",
+                route_id
+            )));
+        }
+
+        self.start_route(route_id).await
+    }
+
+    fn route_status(&self, route_id: &str) -> Option<RouteStatus> {
+        self.routes.get(route_id).map(|r| r.status.clone())
+    }
+
+    async fn start_all_routes(&mut self) -> Result<(), CamelError> {
+        // Only start routes where auto_startup() == true
+        // Sort by startup_order() ascending before starting
+        let route_ids: Vec<String> = {
+            let mut pairs: Vec<_> = self
+                .routes
+                .iter()
+                .filter(|(_, r)| r.definition.auto_startup())
+                .map(|(id, r)| (id.clone(), r.definition.startup_order()))
+                .collect();
+            pairs.sort_by_key(|(_, order)| *order);
+            pairs.into_iter().map(|(id, _)| id).collect()
+        };
+
+        info!("Starting {} auto-startup routes", route_ids.len());
+
+        // Collect errors but continue starting remaining routes
+        let mut errors: Vec<String> = Vec::new();
+        for route_id in route_ids {
+            if let Err(e) = self.start_route(&route_id).await {
+                errors.push(format!("Route '{}': {}", route_id, e));
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(CamelError::RouteError(format!(
+                "Failed to start routes: {}",
+                errors.join(", ")
+            )));
+        }
+
+        info!("All auto-startup routes started");
+        Ok(())
+    }
+
+    async fn stop_all_routes(&mut self) -> Result<(), CamelError> {
+        // Sort by startup_order descending (reverse order)
+        let route_ids: Vec<String> = {
+            let mut pairs: Vec<_> = self
+                .routes
+                .iter()
+                .map(|(id, r)| (id.clone(), r.definition.startup_order()))
+                .collect();
+            pairs.sort_by_key(|(_, order)| std::cmp::Reverse(*order));
+            pairs.into_iter().map(|(id, _)| id).collect()
+        };
+
+        info!("Stopping {} routes", route_ids.len());
+
+        for route_id in route_ids {
+            let _ = self.stop_route(&route_id).await;
+        }
+
+        info!("All routes stopped");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_add_route_requires_id() {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let mut controller = DefaultRouteController::new(registry);
+
+        // Set self_ref to avoid error during add_route
+        let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
+            DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
+        ));
+        controller.set_self_ref(controller_arc);
+
+        let definition = crate::route::RouteDefinition::new("timer:tick", vec![]);
+        // RouteDefinition with no route_id should fail
+        assert!(controller.add_route(definition).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_add_route_with_id_succeeds() {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let mut controller = DefaultRouteController::new(registry);
+
+        // Set self_ref to avoid error during add_route
+        let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
+            DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
+        ));
+        controller.set_self_ref(controller_arc);
+
+        let definition =
+            crate::route::RouteDefinition::new("timer:tick", vec![]).with_route_id("test-route");
+        assert!(controller.add_route(definition).is_ok());
+        assert_eq!(controller.route_count(), 1);
+    }
+}

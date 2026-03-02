@@ -6,7 +6,7 @@ use tower::Service;
 use tracing::{debug, error, info, trace, warn};
 
 use camel_api::{BoxProcessor, CamelError, Exchange};
-use camel_component::{Component, Consumer, Endpoint};
+use camel_component::{Component, Consumer, Endpoint, ProducerContext};
 use camel_endpoint::parse_uri;
 
 // ---------------------------------------------------------------------------
@@ -146,7 +146,7 @@ impl Endpoint for LogEndpoint {
         ))
     }
 
-    fn create_producer(&self) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(LogProducer {
             config: self.config.clone(),
         }))
@@ -229,7 +229,43 @@ impl Service<Exchange> for LogProducer {
 mod tests {
     use super::*;
     use camel_api::Message;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
     use tower::ServiceExt;
+
+    // NullRouteController for testing
+    struct NullRouteController;
+    #[async_trait::async_trait]
+    impl camel_api::RouteController for NullRouteController {
+        async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
+            None
+        }
+        async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+    }
+
+    fn test_producer_ctx() -> ProducerContext {
+        ProducerContext::new(Arc::new(Mutex::new(NullRouteController)))
+    }
 
     #[test]
     fn test_log_config_defaults() {
@@ -271,18 +307,20 @@ mod tests {
 
     #[test]
     fn test_log_endpoint_creates_producer() {
+        let ctx = test_producer_ctx();
         let component = LogComponent::new();
         let endpoint = component.create_endpoint("log:info").unwrap();
-        assert!(endpoint.create_producer().is_ok());
+        assert!(endpoint.create_producer(&ctx).is_ok());
     }
 
     #[tokio::test]
     async fn test_log_producer_processes_exchange() {
+        let ctx = test_producer_ctx();
         let component = LogComponent::new();
         let endpoint = component
             .create_endpoint("log:test?showHeaders=true")
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("hello world"));
         exchange

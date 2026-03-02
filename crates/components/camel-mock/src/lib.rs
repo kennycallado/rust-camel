@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use tower::Service;
 
 use camel_api::{BoxProcessor, CamelError, Exchange};
-use camel_component::{Component, Consumer, Endpoint};
+use camel_component::{Component, Consumer, Endpoint, ProducerContext};
 use camel_endpoint::parse_uri;
 
 // ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ impl Endpoint for MockEndpoint {
         ))
     }
 
-    fn create_producer(&self) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(MockProducer {
             received: Arc::clone(&self.0.received),
         }))
@@ -181,7 +181,43 @@ impl Service<Exchange> for MockProducer {
 mod tests {
     use super::*;
     use camel_api::Message;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
     use tower::ServiceExt;
+
+    // NullRouteController for testing
+    struct NullRouteController;
+    #[async_trait::async_trait]
+    impl camel_api::RouteController for NullRouteController {
+        async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
+            None
+        }
+        async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+    }
+
+    fn test_producer_ctx() -> ProducerContext {
+        ProducerContext::new(Arc::new(Mutex::new(NullRouteController)))
+    }
 
     #[test]
     fn test_mock_component_scheme() {
@@ -212,17 +248,19 @@ mod tests {
 
     #[test]
     fn test_mock_endpoint_creates_producer() {
+        let ctx = test_producer_ctx();
         let component = MockComponent::new();
         let endpoint = component.create_endpoint("mock:result").unwrap();
-        assert!(endpoint.create_producer().is_ok());
+        assert!(endpoint.create_producer(&ctx).is_ok());
     }
 
     #[tokio::test]
     async fn test_mock_producer_records_exchange() {
+        let ctx = test_producer_ctx();
         let component = MockComponent::new();
         let endpoint = component.create_endpoint("mock:test").unwrap();
 
-        let mut producer = endpoint.create_producer().unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         let ex1 = Exchange::new(Message::new("first"));
         let ex2 = Exchange::new(Message::new("second"));
@@ -240,10 +278,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_producer_passes_through_exchange() {
+        let ctx = test_producer_ctx();
         let component = MockComponent::new();
         let endpoint = component.create_endpoint("mock:passthrough").unwrap();
 
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
         let exchange = Exchange::new(Message::new("hello"));
         let result = producer.oneshot(exchange).await.unwrap();
 
@@ -259,7 +298,8 @@ mod tests {
 
         inner.assert_exchange_count(0).await;
 
-        let mut producer = endpoint.create_producer().unwrap();
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
         producer
             .call(Exchange::new(Message::new("one")))
             .await
@@ -287,13 +327,14 @@ mod tests {
         let ep2 = component.create_endpoint("mock:shared").unwrap();
 
         // Producing via ep1's producer...
-        let mut p1 = ep1.create_producer().unwrap();
+        let ctx = test_producer_ctx();
+        let mut p1 = ep1.create_producer(&ctx).unwrap();
         p1.call(Exchange::new(Message::new("from-ep1")))
             .await
             .unwrap();
 
         // ...and via ep2's producer...
-        let mut p2 = ep2.create_producer().unwrap();
+        let mut p2 = ep2.create_producer(&ctx).unwrap();
         p2.call(Exchange::new(Message::new("from-ep2")))
             .await
             .unwrap();

@@ -11,7 +11,7 @@ use tower::Service;
 use tracing::{debug, warn};
 
 use camel_api::{BoxProcessor, CamelError, Exchange, Message, body::Body};
-use camel_component::{Component, Consumer, ConsumerContext, Endpoint};
+use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 use camel_endpoint::parse_uri;
 
 // ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ impl Endpoint for FileEndpoint {
         }))
     }
 
-    fn create_producer(&self) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(FileProducer {
             config: self.config.clone(),
         }))
@@ -541,8 +541,45 @@ impl Service<Exchange> for FileProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Mutex;
     use tokio_util::sync::CancellationToken;
+
+    // NullRouteController for testing
+    struct NullRouteController;
+
+    #[async_trait::async_trait]
+    impl camel_api::RouteController for NullRouteController {
+        async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
+            None
+        }
+        async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+    }
+
+    fn test_producer_ctx() -> ProducerContext {
+        ProducerContext::new(Arc::new(Mutex::new(NullRouteController)))
+    }
 
     #[test]
     fn test_file_config_defaults() {
@@ -831,7 +868,8 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("file:{dir_path}"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("file content"));
         exchange.input.set_header(
@@ -858,7 +896,8 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("file:{dir_path}/sub/dir"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("nested"));
         exchange.input.set_header(
@@ -884,7 +923,8 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("file:{dir_path}?fileExist=Fail"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("new"));
         exchange.input.set_header(
@@ -912,7 +952,8 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("file:{dir_path}?fileExist=Append"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("new"));
         exchange.input.set_header(
@@ -937,7 +978,8 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("file:{dir_path}?tempPrefix=.tmp"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("atomic write"));
         exchange.input.set_header(
@@ -964,7 +1006,8 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("file:{dir_path}?fileName=fixed.txt"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("content"));
 
@@ -983,7 +1026,8 @@ mod tests {
         let endpoint = component
             .create_endpoint(&format!("file:{dir_path}"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("content"));
 

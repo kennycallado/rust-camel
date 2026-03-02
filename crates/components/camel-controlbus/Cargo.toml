@@ -1,6 +1,6 @@
 [package]
-name = "camel-log"
-description = "Log component for rust-camel"
+name = "camel-controlbus"
+description = "ControlBus component for rust-camel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,11 @@ license.workspace = true
 camel-api.workspace = true
 camel-component.workspace = true
 camel-endpoint.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 tower.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

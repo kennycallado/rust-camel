@@ -5,7 +5,7 @@ use tokio::time;
 use tracing::debug;
 
 use camel_api::{BoxProcessor, CamelError, Exchange, Message};
-use camel_component::{Component, Consumer, ConsumerContext, Endpoint};
+use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 use camel_endpoint::parse_uri;
 
 // ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ impl Endpoint for TimerEndpoint {
         }))
     }
 
-    fn create_producer(&self) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
         Err(CamelError::EndpointCreationFailed(
             "timer endpoint does not support producers".to_string(),
         ))
@@ -244,9 +244,43 @@ mod tests {
 
     #[test]
     fn test_timer_endpoint_no_producer() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        // NullRouteController for testing
+        struct NullRouteController;
+        #[async_trait::async_trait]
+        impl camel_api::RouteController for NullRouteController {
+            async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+                Ok(())
+            }
+            async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+                Ok(())
+            }
+            async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+                Ok(())
+            }
+            async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+                Ok(())
+            }
+            async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+                Ok(())
+            }
+            fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
+                None
+            }
+            async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+                Ok(())
+            }
+            async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+                Ok(())
+            }
+        }
+
+        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
         let component = TimerComponent::new();
         let endpoint = component.create_endpoint("timer:tick").unwrap();
-        let producer = endpoint.create_producer();
+        let producer = endpoint.create_producer(&ctx);
         assert!(producer.is_err());
     }
 

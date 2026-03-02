@@ -10,7 +10,7 @@ use tower::Service;
 use tracing::debug;
 
 use camel_api::{BoxProcessor, CamelError, Exchange, body::Body};
-use camel_component::{Component, Consumer, Endpoint};
+use camel_component::{Component, Consumer, Endpoint, ProducerContext};
 use camel_endpoint::parse_uri;
 
 // ---------------------------------------------------------------------------
@@ -700,7 +700,7 @@ impl Endpoint for HttpEndpoint {
         Ok(Box::new(HttpConsumer::new(self.server_config.clone())))
     }
 
-    fn create_producer(&self) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(HttpProducer {
             config: self.config.clone(),
             client: self.client.clone(),
@@ -915,7 +915,43 @@ impl Service<Exchange> for HttpProducer {
 mod tests {
     use super::*;
     use camel_api::Message;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Mutex;
+
+    // NullRouteController for testing
+    struct NullRouteController;
+    #[async_trait::async_trait]
+    impl camel_api::RouteController for NullRouteController {
+        async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
+            None
+        }
+        async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+    }
+
+    fn test_producer_ctx() -> ProducerContext {
+        ProducerContext::new(Arc::new(Mutex::new(NullRouteController)))
+    }
 
     #[test]
     fn test_http_config_defaults() {
@@ -987,9 +1023,10 @@ mod tests {
 
     #[test]
     fn test_http_endpoint_creates_producer() {
+        let ctx = test_producer_ctx();
         let component = HttpComponent::new();
         let endpoint = component.create_endpoint("http://localhost/api").unwrap();
-        assert!(endpoint.create_producer().is_ok());
+        assert!(endpoint.create_producer(&ctx).is_ok());
     }
 
     // -----------------------------------------------------------------------
@@ -1068,12 +1105,13 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_test_server().await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         let endpoint = component
             .create_endpoint(&format!("{url}/api/test"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -1093,12 +1131,13 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_test_server().await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         let endpoint = component
             .create_endpoint(&format!("{url}/api/data"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("request body"));
         let result = producer.oneshot(exchange).await.unwrap();
@@ -1116,10 +1155,11 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_test_server().await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         let endpoint = component.create_endpoint(&format!("{url}/api")).unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         exchange.input.set_header(
@@ -1141,12 +1181,13 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_test_server().await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         let endpoint = component
             .create_endpoint(&format!("{url}/api?httpMethod=PUT"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -1164,12 +1205,13 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_status_server(404).await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         let endpoint = component
             .create_endpoint(&format!("{url}/not-found"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await;
@@ -1188,12 +1230,13 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_status_server(500).await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         let endpoint = component
             .create_endpoint(&format!("{url}/error?throwExceptionOnFailure=false"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -1211,12 +1254,13 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_test_server().await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         let endpoint = component
             .create_endpoint("http://localhost:1/does-not-exist")
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         exchange.input.set_header(
@@ -1238,10 +1282,11 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_test_server().await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         let endpoint = component.create_endpoint(&format!("{url}/api")).unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -1298,6 +1343,7 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_redirect_server().await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         let endpoint = component
@@ -1305,7 +1351,7 @@ mod tests {
                 "{url}?followRedirects=false&throwExceptionOnFailure=false"
             ))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -1327,12 +1373,13 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_redirect_server().await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         let endpoint = component
             .create_endpoint(&format!("{url}?followRedirects=true"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();
@@ -1354,13 +1401,14 @@ mod tests {
         use tower::ServiceExt;
 
         let (url, _handle) = start_test_server().await;
+        let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
         // apiKey is NOT a Camel option, should be forwarded as query param
         let endpoint = component
             .create_endpoint(&format!("{url}/api?apiKey=secret123&httpMethod=GET"))
             .unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
         let result = producer.oneshot(exchange).await.unwrap();

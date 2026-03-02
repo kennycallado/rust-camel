@@ -64,6 +64,7 @@ cargo run -p hello-world
 | `camel-direct` | In-memory synchronous component |
 | `camel-mock` | Test component with assertions on received exchanges |
 | `camel-test` | Integration test harness |
+| `camel-controlbus` | Control routes dynamically from within routes |
 
 ## Building & Testing
 
@@ -95,6 +96,58 @@ cargo run -p wiretap
 cargo run -p multicast
 cargo run -p showcase
 ```
+
+## Route Lifecycle Management
+
+rust-camel supports controlling when and how routes start:
+
+### Auto Startup
+
+By default, all routes start automatically when `ctx.start()` is called. You can disable this:
+
+```rust
+let route = RouteBuilder::from("timer:tick")
+    .route_id("lazy-route")
+    .auto_startup(false)  // Won't start automatically
+    .to("log:info")
+    .build()?;
+```
+
+### Startup Order
+
+Control the order in which routes start (useful for dependencies):
+
+```rust
+let route_a = RouteBuilder::from("direct:a")
+    .route_id("route-a")
+    .startup_order(10)  // Starts first
+    .to("log:info")
+    .build()?;
+
+let route_b = RouteBuilder::from("direct:b")
+    .route_id("route-b")
+    .startup_order(20)  // Starts after route-a
+    .to("direct:a")
+    .build()?;
+```
+
+### Runtime Control
+
+Control routes dynamically from code or from other routes:
+
+```rust
+// From code:
+ctx.route_controller().lock().await.start_route("lazy-route").await?;
+ctx.route_controller().lock().await.stop_route("route-a").await?;
+
+// From another route (using controlbus):
+RouteBuilder::from("timer:monitor")
+    .set_header("CamelRouteId", Value::String("backup-route".into()))
+    .to("controlbus:route?action=start")
+    .build()?
+```
+
+See `examples/lazy-route` for a complete example.
 
 ## License
 

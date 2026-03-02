@@ -8,6 +8,8 @@ pub mod filter;
 pub mod message;
 pub mod multicast;
 pub mod processor;
+pub mod producer;
+pub mod route_controller;
 pub mod splitter;
 pub mod value;
 
@@ -24,6 +26,8 @@ pub use filter::FilterPredicate;
 pub use message::Message;
 pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
 pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn};
+pub use producer::ProducerContext;
+pub use route_controller::{RouteAction, RouteController, RouteStatus};
 pub use splitter::{
     AggregationStrategy, SplitExpression, SplitterConfig, split_body, split_body_json_array,
     split_body_lines,

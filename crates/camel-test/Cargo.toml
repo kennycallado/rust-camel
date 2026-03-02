@@ -17,6 +17,7 @@ camel-log.workspace = true
 camel-direct.workspace = true
 camel-file.workspace = true
 camel-http.workspace = true
+camel-controlbus.workspace = true
 tokio.workspace = true
 tower.workspace = true
 

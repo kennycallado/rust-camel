@@ -171,6 +171,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-controlbus"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component",
+ "camel-endpoint",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "camel-core"
 version = "0.1.0"
 dependencies = [
@@ -276,6 +290,7 @@ dependencies = [
 name = "camel-log"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "camel-api",
  "camel-component",
  "camel-endpoint",
@@ -289,6 +304,7 @@ dependencies = [
 name = "camel-mock"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "camel-api",
  "camel-component",
  "camel-endpoint",
@@ -328,6 +344,7 @@ dependencies = [
  "camel-api",
  "camel-builder",
  "camel-component",
+ "camel-controlbus",
  "camel-core",
  "camel-direct",
  "camel-file",
@@ -974,6 +991,19 @@ checksum = "b49715b7073f385ba4bc528e5747d02e66cb39c6146efb66b781f131f0fb399c"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "lazy-route"
+version = "0.1.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-core",
+ "camel-log",
+ "camel-timer",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

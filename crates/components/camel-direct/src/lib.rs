@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tower::Service;
 
 use camel_api::{BoxProcessor, CamelError, Exchange};
-use camel_component::{Component, Consumer, ConsumerContext, Endpoint};
+use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 use camel_endpoint::parse_uri;
 
 // ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ impl Endpoint for DirectEndpoint {
         }))
     }
 
-    fn create_producer(&self) -> Result<BoxProcessor, CamelError> {
+    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(DirectProducer {
             name: self.name.clone(),
             registry: Arc::clone(&self.registry),
@@ -222,6 +222,40 @@ mod tests {
     use camel_component::ExchangeEnvelope;
     use tower::ServiceExt;
 
+    // NullRouteController for testing
+    struct NullRouteController;
+    #[async_trait::async_trait]
+    impl camel_api::RouteController for NullRouteController {
+        async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
+            None
+        }
+        async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+    }
+
+    fn test_producer_ctx() -> ProducerContext {
+        ProducerContext::new(Arc::new(Mutex::new(NullRouteController)))
+    }
+
     #[test]
     fn test_direct_component_scheme() {
         let component = DirectComponent::new();
@@ -251,16 +285,18 @@ mod tests {
 
     #[test]
     fn test_direct_endpoint_creates_producer() {
+        let ctx = test_producer_ctx();
         let component = DirectComponent::new();
         let endpoint = component.create_endpoint("direct:foo").unwrap();
-        assert!(endpoint.create_producer().is_ok());
+        assert!(endpoint.create_producer(&ctx).is_ok());
     }
 
     #[tokio::test]
     async fn test_direct_producer_no_consumer_registered() {
+        let ctx = test_producer_ctx();
         let component = DirectComponent::new();
         let endpoint = component.create_endpoint("direct:missing").unwrap();
-        let producer = endpoint.create_producer().unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("test"));
         let result = producer.oneshot(exchange).await;
@@ -298,8 +334,9 @@ mod tests {
         });
 
         // Now send an exchange via the producer
+        let ctx = test_producer_ctx();
         let producer_endpoint = component.create_endpoint("direct:test").unwrap();
-        let producer = producer_endpoint.create_producer().unwrap();
+        let producer = producer_endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("hello direct"));
         let result = producer.oneshot(exchange).await;
@@ -334,8 +371,9 @@ mod tests {
             }
         });
 
+        let ctx = test_producer_ctx();
         let producer_endpoint = component.create_endpoint("direct:err-test").unwrap();
-        let producer = producer_endpoint.create_producer().unwrap();
+        let producer = producer_endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("test"));
         let result = producer.oneshot(exchange).await;

@@ -18,6 +18,7 @@ members = [
     "crates/components/camel-direct",
     "crates/components/camel-mock",
     "crates/components/camel-http",
+    "crates/components/camel-controlbus",
     "examples/hello-world",
     "examples/content-based-routing",
     "examples/multi-route-direct",
@@ -34,6 +35,7 @@ members = [
     "examples/http-server",
     "examples/pipeline-concurrency",
     "examples/log-eip",
+    "examples/lazy-route",
 ]
 
 [workspace.package]
@@ -60,6 +62,7 @@ camel-file = { path = "crates/components/camel-file" }
 camel-direct = { path = "crates/components/camel-direct" }
 camel-mock = { path = "crates/components/camel-mock" }
 camel-http = { path = "crates/components/camel-http" }
+camel-controlbus = { path = "crates/components/camel-controlbus" }
 
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }

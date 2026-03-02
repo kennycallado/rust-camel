@@ -120,6 +120,12 @@ pub struct RouteDefinition {
     /// User override for the consumer's concurrency model. `None` means
     /// "use whatever the consumer declares".
     pub(crate) concurrency: Option<ConcurrencyModel>,
+    /// Optional unique identifier for this route. If not set, one will be generated.
+    pub(crate) route_id: Option<String>,
+    /// Whether this route should start automatically when the context starts.
+    pub(crate) auto_startup: bool,
+    /// Order in which routes are started. Lower values start first.
+    pub(crate) startup_order: i32,
 }
 
 impl RouteDefinition {
@@ -131,6 +137,9 @@ impl RouteDefinition {
             error_handler: None,
             circuit_breaker: None,
             concurrency: None,
+            route_id: None,
+            auto_startup: true,
+            startup_order: 1000,
         }
     }
 
@@ -170,6 +179,78 @@ impl RouteDefinition {
     pub fn with_concurrency(mut self, model: ConcurrencyModel) -> Self {
         self.concurrency = Some(model);
         self
+    }
+
+    /// Get the route ID, if explicitly set.
+    pub fn route_id(&self) -> Option<&str> {
+        self.route_id.as_deref()
+    }
+
+    /// Whether this route should start automatically when the context starts.
+    pub fn auto_startup(&self) -> bool {
+        self.auto_startup
+    }
+
+    /// Order in which routes are started. Lower values start first.
+    pub fn startup_order(&self) -> i32 {
+        self.startup_order
+    }
+
+    /// Set a unique identifier for this route.
+    pub fn with_route_id(mut self, id: impl Into<String>) -> Self {
+        self.route_id = Some(id.into());
+        self
+    }
+
+    /// Set whether this route should start automatically.
+    pub fn with_auto_startup(mut self, auto: bool) -> Self {
+        self.auto_startup = auto;
+        self
+    }
+
+    /// Set the startup order. Lower values start first.
+    pub fn with_startup_order(mut self, order: i32) -> Self {
+        self.startup_order = order;
+        self
+    }
+
+    /// Extract the metadata fields needed for introspection.
+    /// This is used by RouteController to store route info without the non-Sync steps.
+    pub fn to_info(&self) -> RouteDefinitionInfo {
+        RouteDefinitionInfo {
+            route_id: self.route_id.clone(),
+            auto_startup: self.auto_startup,
+            startup_order: self.startup_order,
+        }
+    }
+}
+
+/// Minimal route definition metadata for introspection.
+///
+/// This struct contains only the metadata fields from [`RouteDefinition`]
+/// that are needed for route lifecycle management, without the `steps` field
+/// (which contains non-Sync types and cannot be stored in a Sync struct).
+#[derive(Clone)]
+pub struct RouteDefinitionInfo {
+    route_id: Option<String>,
+    auto_startup: bool,
+    startup_order: i32,
+}
+
+impl RouteDefinitionInfo {
+    /// Get the route ID, if explicitly set.
+    pub fn route_id(&self) -> Option<&str> {
+        self.route_id.as_deref()
+    }
+
+    /// Whether this route should start automatically when the context starts.
+    pub fn auto_startup(&self) -> bool {
+        self.auto_startup
+    }
+
+    /// Order in which routes are started. Lower values start first.
+    pub fn startup_order(&self) -> i32 {
+        self.startup_order
     }
 }
 
@@ -328,5 +409,24 @@ mod tests {
         };
 
         assert!(matches!(step, BuilderStep::Multicast { .. }));
+    }
+
+    #[test]
+    fn test_route_definition_defaults() {
+        let def = RouteDefinition::new("direct:test", vec![]);
+        assert_eq!(def.route_id(), None);
+        assert!(def.auto_startup());
+        assert_eq!(def.startup_order(), 1000);
+    }
+
+    #[test]
+    fn test_route_definition_builders() {
+        let def = RouteDefinition::new("direct:test", vec![])
+            .with_route_id("my-route")
+            .with_auto_startup(false)
+            .with_startup_order(50);
+        assert_eq!(def.route_id(), Some("my-route"));
+        assert!(!def.auto_startup());
+        assert_eq!(def.startup_order(), 50);
     }
 }
