@@ -41,7 +41,10 @@ impl MockComponent {
     ///
     /// This is the primary way to inspect recorded exchanges in tests.
     pub fn get_endpoint(&self, name: &str) -> Option<Arc<MockEndpointInner>> {
-        let registry = self.registry.lock().expect("mutex poisoned: another thread panicked while holding this lock");
+        let registry = self
+            .registry
+            .lock()
+            .expect("mutex poisoned: another thread panicked while holding this lock");
         registry.get(name).cloned()
     }
 }

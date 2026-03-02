@@ -73,7 +73,10 @@ impl CamelContext {
     /// Register a component with this context.
     pub fn register_component<C: Component + 'static>(&mut self, component: C) {
         info!(scheme = component.scheme(), "Registering component");
-        self.registry.lock().expect("mutex poisoned: another thread panicked while holding this lock").register(component);
+        self.registry
+            .lock()
+            .expect("mutex poisoned: another thread panicked while holding this lock")
+            .register(component);
     }
 
     /// Add a route definition to this context.
@@ -99,7 +102,9 @@ impl CamelContext {
 
     /// Access the component registry.
     pub fn registry(&self) -> std::sync::MutexGuard<'_, Registry> {
-        self.registry.lock().expect("mutex poisoned: another thread panicked while holding this lock")
+        self.registry
+            .lock()
+            .expect("mutex poisoned: another thread panicked while holding this lock")
     }
 
     /// Access the route controller.

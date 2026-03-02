@@ -328,7 +328,9 @@ async fn dispatch_handler(
             return Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(AxumBody::empty())
-                .expect("Response::builder() with a known-valid status code and body is infallible");
+                .expect(
+                    "Response::builder() with a known-valid status code and body is infallible",
+                );
         }
     };
 
