@@ -3,7 +3,7 @@
 //! Demonstrates a route with `auto_startup(false)` that doesn't start automatically.
 //! The route is manually started after a delay using the RouteController API.
 
-use camel_api::{CamelError, RouteController, RouteStatus};
+use camel_api::{CamelError, RouteController};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_log::LogComponent;
@@ -11,7 +11,7 @@ use camel_timer::TimerComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let mut ctx = CamelContext::new();
 
@@ -20,16 +20,23 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
 
     // Create a "lazy" route that doesn't auto-start
-    let lazy_route = RouteBuilder::from("timer:lazy?period=2000")
+    let lazy_route = RouteBuilder::from("timer:lazy?period=1000")
         .route_id("lazy-route")
         .auto_startup(false)
-        .to("log:info")
+        .to("log:info?showHeaders=true&showCorrelationId=true")
         .build()?;
 
     ctx.add_route_definition(lazy_route)?;
 
     // Start the context - only auto_startup routes will start
     ctx.start().await?;
+
+    println!("Lazy route example running.");
+    println!("Route 'lazy-route' is NOT started automatically.");
+    println!("It will be started manually in 3 seconds...");
+
+    // Wait 3 seconds before manually starting the lazy route
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
     // Check status: lazy route should be Stopped
     let status = ctx
@@ -38,14 +45,9 @@ async fn main() -> Result<(), CamelError> {
         .await
         .route_status("lazy-route");
     println!("Route status before manual start: {:?}", status);
-    assert_eq!(status, Some(RouteStatus::Stopped));
-
-    // Wait 3 seconds before manually starting the lazy route
-    println!("Waiting 3 seconds before manually starting the lazy route...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
     // Manually start the lazy route
-    println!("Manually starting the lazy route...");
+    println!("Starting route 'lazy-route' now...");
     ctx.route_controller()
         .lock()
         .await
@@ -59,16 +61,10 @@ async fn main() -> Result<(), CamelError> {
         .await
         .route_status("lazy-route");
     println!("Route status after manual start: {:?}", status);
-    assert_eq!(status, Some(RouteStatus::Started));
 
-    // Let the route run for 3 more seconds
-    println!("Route is now running. Waiting 3 more seconds...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    println!("Route started! Press Ctrl+C to stop.");
 
-    // Stop the context cleanly
-    println!("Stopping context...");
+    tokio::signal::ctrl_c().await.ok();
     ctx.stop().await?;
-
-    println!("Done!");
     Ok(())
 }

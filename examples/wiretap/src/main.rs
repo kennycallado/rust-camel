@@ -17,7 +17,7 @@ use camel_timer::TimerComponent;
 ///   timer -> wireTap(log:monitor) -> log:main
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let mut ctx = CamelContext::new();
 
@@ -26,10 +26,11 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(MockComponent::new());
 
     let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=5")
+        .route_id("wiretap-demo")
         // Tap: send a clone to monitoring (fire-and-forget)
-        .wire_tap("log:monitor?showBody=true")
+        .wire_tap("log:monitor?showBody=true&showCorrelationId=true")
         // Main pipeline continues normally
-        .to("log:main?showBody=true")
+        .to("log:main?showBody=true&showCorrelationId=true")
         .build()?;
 
     ctx.add_route_definition(route)?;
@@ -39,9 +40,9 @@ async fn main() -> Result<(), CamelError> {
         .await
         .map_err(|e| CamelError::Io(e.to_string()))?;
 
-    println!("Shutting down...");
+    println!("Shutting down wiretap example...");
     ctx.stop().await?;
-    println!("Done.");
+    println!("Wiretap example stopped cleanly.");
 
     Ok(())
 }

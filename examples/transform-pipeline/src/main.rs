@@ -1,4 +1,5 @@
 use camel_api::body::Body;
+use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
@@ -7,34 +8,42 @@ use camel_timer::TimerComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let mut ctx = CamelContext::new();
 
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
-    let route = RouteBuilder::from("timer:tick?period=1000&repeatCount=5")
-        .set_header("timestamp", Value::String("processed".into()))
-        .set_header("version", Value::Number(1.into()))
-        .map_body(|body: Body| {
-            let original = body.as_text().unwrap_or("empty").to_string();
-            Body::Json(serde_json::json!({
-                "original": original,
-                "transformed": true,
-            }))
+    let route = RouteBuilder::from("timer:transform?period=1000&repeatCount=3")
+        .route_id("transform-pipeline")
+        .process(|mut exchange| async move {
+            exchange.input.body = Body::Text("hello world".to_string());
+            Ok(exchange)
         })
-        .to("log:output?showHeaders=true&showBody=true")
+        .map_body(|body: Body| {
+            if let Some(text) = body.as_text() {
+                Body::Text(text.to_uppercase())
+            } else {
+                body
+            }
+        })
+        .set_header("transformed", Value::Bool(true))
+        .to("log:info?showHeaders=true&showBody=true&showCorrelationId=true")
+        .error_handler(
+            ErrorHandlerConfig::log_only()
+                .on_exception(|_| true)
+                .retry(1)
+                .build(),
+        )
         .build()?;
 
     ctx.add_route_definition(route)?;
     ctx.start().await?;
 
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|e| CamelError::Io(e.to_string()))?;
+    println!("Transform pipeline running. Press Ctrl+C to stop.");
 
+    tokio::signal::ctrl_c().await.ok();
     ctx.stop().await?;
-
     Ok(())
 }

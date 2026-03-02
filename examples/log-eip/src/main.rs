@@ -1,4 +1,5 @@
 use camel_api::body::Body;
+use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
@@ -9,7 +10,7 @@ use camel_timer::TimerComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let mut ctx = CamelContext::new();
     ctx.register_component(TimerComponent::new());
@@ -17,6 +18,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(MockComponent::new());
 
     let route = RouteBuilder::from("timer:demo?period=3000&repeatCount=5")
+        .route_id("log-eip-demo")
         .log("=== Starting processing cycle ===", LogLevel::Warn)
         .process(|mut ex| async move {
             ex.input.body = Body::Json(serde_json::json!({
@@ -32,7 +34,7 @@ async fn main() -> Result<(), CamelError> {
         })
         .log("Order data prepared", LogLevel::Info)
         .log("Checking order priority", LogLevel::Error)
-        .to("log:exchange-full?showBody=true&showHeaders=true&multiline=true")
+        .to("log:exchange-full?showBody=true&showHeaders=true&multiline=true&showCorrelationId=true")
         .process(|mut ex| async move {
             if let Some(priority) = ex.input.header("priority").and_then(|v| v.as_str()) {
                 if priority == "high" {
@@ -43,10 +45,16 @@ async fn main() -> Result<(), CamelError> {
             Ok(ex)
         })
         .log("Processing high priority order", LogLevel::Info)
-        .to("log:after-processing?showBody=true")
+        .to("log:after-processing?showBody=true&showCorrelationId=true")
         .log("Route execution complete", LogLevel::Trace)
         .log("=== Processing cycle complete ===", LogLevel::Info)
         .to("mock:result")
+        .error_handler(
+            ErrorHandlerConfig::log_only()
+                .on_exception(|_| true)
+                .retry(1)
+                .build(),
+        )
         .build()?;
 
     ctx.add_route_definition(route)?;
@@ -71,8 +79,9 @@ async fn main() -> Result<(), CamelError> {
     println!();
     println!("Running for 5 cycles (3s each)...");
     println!("─────────────────────────────────────────────────────────────");
+    println!("Press Ctrl+C to stop.");
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(16)).await;
+    tokio::signal::ctrl_c().await.ok();
 
     println!();
     println!("Demo complete. Stopping...");

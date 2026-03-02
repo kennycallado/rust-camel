@@ -2,6 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use camel_api::CamelError;
 use camel_api::body::Body;
+use camel_api::error_handler::ErrorHandlerConfig;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_http::HttpComponent;
@@ -15,7 +16,7 @@ fn now_ms() -> u64 {
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let mut ctx = CamelContext::new();
     ctx.register_component(HttpComponent::new());
@@ -26,6 +27,7 @@ async fn main() -> Result<(), CamelError> {
     // runtime spawns a task per exchange with no semaphore limit. Send 8
     // requests simultaneously and all 8 finish in ~200ms total.
     let route_slow = RouteBuilder::from("http://0.0.0.0:8080/slow")
+        .route_id("concurrent-auto")
         .process(|mut exchange| async move {
             let started = now_ms();
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -38,6 +40,12 @@ async fn main() -> Result<(), CamelError> {
             }));
             Ok(exchange)
         })
+        .error_handler(
+            ErrorHandlerConfig::log_only()
+                .on_exception(|_| true)
+                .retry(1)
+                .build(),
+        )
         .build()?;
 
     // Route 2: /limited — .concurrent(4) override.
@@ -46,6 +54,7 @@ async fn main() -> Result<(), CamelError> {
     // The 5th request blocks until one of the first 4 finishes. Send 8
     // requests and they complete in two batches: ~400ms total.
     let route_limited = RouteBuilder::from("http://0.0.0.0:8080/limited")
+        .route_id("concurrent-bounded")
         .concurrent(4)
         .process(|mut exchange| async move {
             let started = now_ms();
@@ -59,6 +68,12 @@ async fn main() -> Result<(), CamelError> {
             }));
             Ok(exchange)
         })
+        .error_handler(
+            ErrorHandlerConfig::log_only()
+                .on_exception(|_| true)
+                .retry(1)
+                .build(),
+        )
         .build()?;
 
     // Route 3: /sequential — .sequential() override.
@@ -68,6 +83,7 @@ async fn main() -> Result<(), CamelError> {
     // exits the pipeline. Correct choice when shared mutable state requires
     // strict ordering. Send 8 requests and they complete one-by-one: ~1600ms.
     let route_sequential = RouteBuilder::from("http://0.0.0.0:8080/sequential")
+        .route_id("sequential")
         .sequential()
         .process(|mut exchange| async move {
             let started = now_ms();
@@ -81,6 +97,12 @@ async fn main() -> Result<(), CamelError> {
             }));
             Ok(exchange)
         })
+        .error_handler(
+            ErrorHandlerConfig::log_only()
+                .on_exception(|_| true)
+                .retry(1)
+                .build(),
+        )
         .build()?;
 
     ctx.add_route_definition(route_slow)?;

@@ -1,12 +1,19 @@
+use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_file::FileComponent;
 use camel_log::LogComponent;
 
+fn chrono_timestamp() -> String {
+    chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S%.3f")
+        .to_string()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let input_dir = std::env::temp_dir().join("rust-camel-input");
     std::fs::create_dir_all(&input_dir).ok();
@@ -18,11 +25,19 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
 
     let route = RouteBuilder::from(&format!(
-        "file:{}?noop=true&initialDelay=0&delay=1000",
+        "file:{}?noop=true&initialDelay=0&delay=1000&readTimeout=5000",
         input_path
     ))
+    .route_id("file-polling-demo")
     .set_header("processed-by", Value::String("file-polling-example".into()))
-    .to("log:file-events?showHeaders=true&showBody=true&showExchangeId=true")
+    .set_header("timestamp", Value::String(chrono_timestamp()))
+    .to("log:file-events?showHeaders=true&showBody=true&showExchangeId=true&showCorrelationId=true")
+    .error_handler(
+        ErrorHandlerConfig::log_only()
+            .on_exception(|_| true)
+            .retry(2)
+            .build(),
+    )
     .build()?;
 
     ctx.add_route_definition(route)?;
@@ -40,9 +55,9 @@ async fn main() -> Result<(), CamelError> {
         .await
         .map_err(|e| CamelError::Io(e.to_string()))?;
 
-    println!("\nShutting down...");
+    println!("\nShutting down file polling example...");
     ctx.stop().await?;
-    println!("Done.");
+    println!("File polling example stopped cleanly.");
 
     Ok(())
 }

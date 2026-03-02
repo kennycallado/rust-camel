@@ -1,5 +1,6 @@
 use camel_api::CamelError;
 use camel_api::body::Body;
+use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
@@ -18,7 +19,7 @@ use camel_timer::TimerComponent;
 ///   -> log aggregated result
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let mut ctx = CamelContext::new();
 
@@ -26,6 +27,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
 
     let route = RouteBuilder::from("timer:batch?period=2000&repeatCount=3")
+        .route_id("splitter-demo")
         // Simulate incoming CSV data
         .process(|mut exchange: camel_api::Exchange| {
             Box::pin(async move {
@@ -48,20 +50,29 @@ async fn main() -> Result<(), CamelError> {
                 "amount": amount,
             }))
         })
-        .to("log:fragment?showBody=true")
+        .to("log:fragment?showBody=true&showCorrelationId=true")
         .end_split()
         // After split: aggregated JSON array of all fragments
-        .to("log:aggregated?showBody=true")
+        .to("log:aggregated?showBody=true&showCorrelationId=true")
+        .error_handler(
+            ErrorHandlerConfig::log_only()
+                .on_exception(|_| true)
+                .retry(1)
+                .build(),
+        )
         .build()?;
 
     ctx.add_route_definition(route)?;
     ctx.start().await?;
 
+    println!("Splitter example running.");
+    println!("CSV data split into fragments, processed, then aggregated.");
+    println!("Press Ctrl+C to stop.");
+
     tokio::signal::ctrl_c()
         .await
         .map_err(|e| CamelError::Io(e.to_string()))?;
 
-    println!("Shutting down...");
     ctx.stop().await?;
     println!("Done.");
 

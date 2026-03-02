@@ -17,7 +17,7 @@ use storage::UserStorage;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let mut ctx = CamelContext::new();
     ctx.register_component(HttpComponent::new());
@@ -60,7 +60,7 @@ fn create_health_route(
     request_count: Arc<AtomicU64>,
 ) -> Result<RouteDefinition, CamelError> {
     RouteBuilder::from("http://0.0.0.0:8080/health")
-        .to("log:health?showHeaders=true&showBody=true")
+        .to("log:health?showHeaders=true&showBody=true&showCorrelationId=true")
         .process(move |mut exchange| {
             let storage = Arc::clone(&storage);
             let rc = Arc::clone(&request_count);
@@ -79,6 +79,7 @@ fn create_health_route(
                     "requests_processed": rc.load(Ordering::Relaxed),
                     "users_count": storage.count(),
                     "timestamp": current_timestamp(),
+                    "correlation_id": exchange.correlation_id,
                 }));
                 Ok(exchange)
             }
@@ -310,7 +311,8 @@ fn delete_user_route(
                     Some(user) => {
                         exchange.input.body = Body::Json(serde_json::json!({
                             "message": "User deleted successfully",
-                            "user": user
+                            "user": user,
+                            "correlation_id": exchange.correlation_id,
                         }));
                     }
                     None => {

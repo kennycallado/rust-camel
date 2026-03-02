@@ -1,32 +1,33 @@
-use camel_api::{CamelError, body::Body};
+use camel_api::body::Body;
+use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
-use camel_http::{HttpComponent, HttpsComponent};
+use camel_http::HttpComponent;
 use camel_log::LogComponent;
 use camel_timer::TimerComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let mut ctx = CamelContext::new();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(HttpComponent::new());
-    ctx.register_component(HttpsComponent::new());
     ctx.register_component(LogComponent::new());
 
-    let route = RouteBuilder::from("timer:http-poll?period=10000")
+    let route = RouteBuilder::from("timer:http-poll?period=5000&repeatCount=3")
+        .route_id("http-client")
         .process(|mut exchange| {
             Box::pin(async move {
-                exchange.input.body = Body::Text("{}".into());
+                exchange.input.body = Body::Empty;
+                exchange
+                    .input
+                    .set_header("X-Request-Id", Value::String(uuid_header()));
                 Ok(exchange)
             })
         })
-        .set_header(
-            "Content-Type",
-            camel_api::Value::String("application/json".into()),
-        )
-        .to("https://httpbin.org/post?httpMethod=POST")
+        .to("https://httpbin.org/get?source=rust-camel&allowPrivateIps=false")
         .process(|exchange| {
             Box::pin(async move {
                 let body_str = match &exchange.input.body {
@@ -42,32 +43,38 @@ async fn main() -> Result<(), CamelError> {
                         exchange.input.header("CamelHttpResponseCode")
                     );
                     if let Some(url) = json.get("url") {
-                        println!("Posted to: {}", url);
+                        println!("Response from: {}", url);
                     }
                 }
                 Ok(exchange)
             })
         })
-        .to("log:http-response?showHeaders=true&showBody=true")
+        .to("log:http-response?showHeaders=true&showBody=true&showCorrelationId=true")
+        .error_handler(
+            ErrorHandlerConfig::dead_letter_channel("log:http-dlc?showBody=true")
+                .on_exception(|_| true)
+                .retry(2)
+                .build(),
+        )
         .build()?;
 
     ctx.add_route_definition(route)?;
     ctx.start().await?;
 
     println!("HTTP client example running.");
-    println!("  Endpoint: https://httpbin.org/post");
-    println!("  Method: POST");
-    println!("  Period: 10 seconds");
-    println!();
-    println!("Press Ctrl+C to stop...");
+    println!("Polling https://httpbin.org/get every 5 seconds.");
+    println!("Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c()
         .await
         .map_err(|e| CamelError::Io(e.to_string()))?;
 
-    println!("\nShutting down...");
     ctx.stop().await?;
     println!("Done.");
 
     Ok(())
+}
+
+fn uuid_header() -> String {
+    uuid::Uuid::new_v4().to_string()
 }

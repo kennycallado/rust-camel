@@ -1,4 +1,6 @@
-use camel_api::{CamelError, Value, body::Body};
+use camel_api::body::Body;
+use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::context::CamelContext;
 use camel_file::FileComponent;
@@ -6,7 +8,7 @@ use camel_log::LogComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let base_dir = std::env::temp_dir().join("rust-camel-pipeline");
     let input_dir = base_dir.join("input");
@@ -23,9 +25,10 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
 
     let route = RouteBuilder::from(&format!(
-        "file:{}?delete=true&initialDelay=0&delay=500",
+        "file:{}?delete=true&initialDelay=0&delay=500&readTimeout=5000",
         input_path
     ))
+    .route_id("file-pipeline-demo")
     .process(|mut exchange: camel_api::Exchange| {
         Box::pin(async move {
             if let Body::Text(text) = &exchange.input.body {
@@ -38,8 +41,14 @@ async fn main() -> Result<(), CamelError> {
             Ok(exchange)
         })
     })
-    .to(format!("file:{}?fileExist=Override", output_path))
-    .to("log:pipeline?showHeaders=true&showBody=true")
+    .to(format!(
+        "file:{}?fileExist=Override&writeTimeout=5000",
+        output_path
+    ))
+    .to("log:pipeline?showHeaders=true&showBody=true&showCorrelationId=true")
+    .error_handler(ErrorHandlerConfig::dead_letter_channel(
+        "log:dead-letter?showBody=true&showHeaders=true&showCorrelationId=true",
+    ))
     .build()?;
 
     ctx.add_route_definition(route)?;
@@ -61,9 +70,9 @@ async fn main() -> Result<(), CamelError> {
         .await
         .map_err(|e| CamelError::Io(e.to_string()))?;
 
-    println!("\nShutting down...");
+    println!("\nShutting down file pipeline example...");
     ctx.stop().await?;
-    println!("Done.");
+    println!("File pipeline example stopped cleanly.");
 
     Ok(())
 }

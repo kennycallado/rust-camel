@@ -36,6 +36,9 @@ members = [
     "examples/pipeline-concurrency",
     "examples/log-eip",
     "examples/lazy-route",
+    "examples/circuit-breaker",
+    "examples/metrics-demo",
+    "examples/controlbus",
 ]
 
 [workspace.package]

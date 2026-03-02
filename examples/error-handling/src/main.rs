@@ -54,7 +54,7 @@ fn fail_n_times(times: u32) -> BoxProcessor {
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     let mut ctx = CamelContext::new();
 
@@ -66,7 +66,7 @@ async fn main() -> Result<(), CamelError> {
     // Global error handler: any route without a per-route handler uses this.
     // -----------------------------------------------------------------------
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel(
-        "log:global-dlc?showHeaders=true&showBody=true",
+        "log:global-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
     ));
 
     // -----------------------------------------------------------------------
@@ -79,7 +79,7 @@ async fn main() -> Result<(), CamelError> {
         .set_header("example", Value::String("basic-dlc".into()))
         .process_fn(always_fail("route1: permanent failure"))
         .error_handler(ErrorHandlerConfig::dead_letter_channel(
-            "log:route1-dlc?showHeaders=true&showBody=true",
+            "log:route1-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
         ))
         .build()?;
 
@@ -95,7 +95,7 @@ async fn main() -> Result<(), CamelError> {
         .process_fn(fail_n_times(2))
         .error_handler(
             ErrorHandlerConfig::dead_letter_channel(
-                "log:route2-dlc?showHeaders=true&showBody=true",
+                "log:route2-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
             )
             .on_exception(|_| true) // match all errors
             .retry(3)
@@ -115,11 +115,13 @@ async fn main() -> Result<(), CamelError> {
         .process_fn(always_fail("route3: processor error"))
         .error_handler(
             ErrorHandlerConfig::dead_letter_channel(
-                "log:route3-dlc?showHeaders=true&showBody=true",
+                "log:route3-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
             )
             .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
             .retry(1)
-            .handled_by("log:processor-errors?showHeaders=true&showBody=true")
+            .handled_by(
+                "log:processor-errors?showHeaders=true&showBody=true&showCorrelationId=true",
+            )
             .build(),
         )
         .build()?;
@@ -139,7 +141,7 @@ async fn main() -> Result<(), CamelError> {
         .set_header("example", Value::String("direct-bubble-up".into()))
         .to("direct:fragile")
         .error_handler(ErrorHandlerConfig::dead_letter_channel(
-            "log:route4-dlc?showHeaders=true&showBody=true",
+            "log:route4-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
         ))
         .build()?;
 
@@ -152,14 +154,14 @@ async fn main() -> Result<(), CamelError> {
     let subroute_with_handler = RouteBuilder::from("direct:resilient")
         .process_fn(always_fail("subroute: resilient step failed"))
         .error_handler(ErrorHandlerConfig::dead_letter_channel(
-            "log:subroute-dlc?showHeaders=true&showBody=true",
+            "log:subroute-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
         ))
         .build()?;
 
     let route5 = RouteBuilder::from("timer:route5?period=2000&repeatCount=1")
         .set_header("example", Value::String("direct-contained".into()))
         .to("direct:resilient")
-        .to("log:route5-continued?showHeaders=true&showBody=true")
+        .to("log:route5-continued?showHeaders=true&showBody=true&showCorrelationId=true")
         .build()?;
 
     // -----------------------------------------------------------------------

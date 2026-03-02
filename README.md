@@ -87,14 +87,26 @@ cargo test --workspace
 Run an example:
 
 ```sh
-cargo run -p hello-world
+cargo run -p aggregator
+cargo run -p circuit-breaker
 cargo run -p content-based-routing
-cargo run -p multi-route-direct
-cargo run -p transform-pipeline
-cargo run -p splitter
-cargo run -p wiretap
+cargo run -p controlbus
+cargo run -p error-handling
+cargo run -p file-pipeline
+cargo run -p file-polling
+cargo run -p hello-world
+cargo run -p http-client
+cargo run -p http-server
+cargo run -p lazy-route
+cargo run -p log-eip
+cargo run -p metrics-demo
 cargo run -p multicast
+cargo run -p multi-route-direct
+cargo run -p pipeline-concurrency
 cargo run -p showcase
+cargo run -p splitter
+cargo run -p transform-pipeline
+cargo run -p wiretap
 ```
 
 ## Security Features
