@@ -45,15 +45,19 @@ publish_crate "camel-endpoint" "crates/camel-endpoint"
 publish_crate "camel-component" "crates/camel-component"
 publish_crate "camel-processor" "crates/camel-processor"
 publish_crate "camel-core" "crates/camel-core"
+
+# Component crates needed for tests (publish before camel-builder)
+publish_crate "camel-component-timer" "crates/components/camel-timer"
+publish_crate "camel-component-direct" "crates/components/camel-direct"
+publish_crate "camel-component-mock" "crates/components/camel-mock"
+
+# Remaining core crates
 publish_crate "camel-health" "crates/camel-health"
 publish_crate "camel-dsl" "crates/camel-dsl"
 publish_crate "camel-builder" "crates/camel-builder"
 
-# Component crates
-publish_crate "camel-component-timer" "crates/components/camel-timer"
+# Remaining component crates
 publish_crate "camel-component-log" "crates/components/camel-log"
-publish_crate "camel-component-direct" "crates/components/camel-direct"
-publish_crate "camel-component-mock" "crates/components/camel-mock"
 publish_crate "camel-component-file" "crates/components/camel-file"
 publish_crate "camel-component-http" "crates/components/camel-http"
 publish_crate "camel-component-redis" "crates/components/camel-redis"
