@@ -10,12 +10,12 @@ use camel_api::Value;
 use camel_api::aggregator::AggregatorConfig;
 use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_core::CamelContext;
 use camel_component_file::FileComponent;
 use camel_component_http::HttpComponent;
 use camel_component_log::LogComponent;
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
+use camel_core::CamelContext;
 
 // ---------------------------------------------------------------------------
 // Test 1: Timer → Mock (verify exchanges received)

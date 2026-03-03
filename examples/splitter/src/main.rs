@@ -3,9 +3,9 @@ use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_core::context::CamelContext;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
+use camel_core::context::CamelContext;
 
 /// Splitter EIP example — batch CSV processor.
 ///

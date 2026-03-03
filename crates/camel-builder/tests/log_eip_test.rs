@@ -6,11 +6,11 @@
 use camel_api::Value;
 use camel_api::body::Body;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_core::CamelContext;
 use camel_component_direct::DirectComponent;
 use camel_component_mock::MockComponent;
-use camel_processor::LogLevel;
 use camel_component_timer::TimerComponent;
+use camel_core::CamelContext;
+use camel_processor::LogLevel;
 
 // ---------------------------------------------------------------------------
 // Test 1: Log EIP with timer trigger

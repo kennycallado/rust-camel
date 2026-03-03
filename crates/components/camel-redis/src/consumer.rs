@@ -57,10 +57,7 @@ impl RedisConsumer {
                 patterns: config.channels.clone(),
             },
             RedisCommand::Blpop | RedisCommand::Brpop => {
-                let key = config
-                    .key
-                    .clone()
-                    .unwrap_or_else(|| "queue".to_string());
+                let key = config.key.clone().unwrap_or_else(|| "queue".to_string());
                 RedisConsumerMode::Queue {
                     key,
                     timeout: config.timeout,
@@ -101,20 +98,15 @@ impl Consumer for RedisConsumer {
         info!("Starting Redis consumer in {:?} mode", mode);
 
         // Spawn the appropriate consumer loop based on mode
-        let handle = match mode {
-            RedisConsumerMode::PubSub { channels, patterns } => {
-                tokio::spawn(run_pubsub_consumer(
-                    config,
-                    channels,
-                    patterns,
-                    ctx,
-                    cancel_token,
-                ))
-            }
-            RedisConsumerMode::Queue { key, timeout } => {
-                tokio::spawn(run_queue_consumer(config, key, timeout, ctx, cancel_token))
-            }
-        };
+        let handle =
+            match mode {
+                RedisConsumerMode::PubSub { channels, patterns } => tokio::spawn(
+                    run_pubsub_consumer(config, channels, patterns, ctx, cancel_token),
+                ),
+                RedisConsumerMode::Queue { key, timeout } => {
+                    tokio::spawn(run_queue_consumer(config, key, timeout, ctx, cancel_token))
+                }
+            };
 
         self.task_handle = Some(handle);
         Ok(())
@@ -174,43 +166,30 @@ async fn run_pubsub_consumer(
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
 ) -> Result<(), CamelError> {
-    info!(
-        "PubSub consumer connecting to {}",
-        config.redis_url()
-    );
+    info!("PubSub consumer connecting to {}", config.redis_url());
 
     // Create dedicated PubSub connection
     let client = redis::Client::open(config.redis_url())
         .map_err(|e| CamelError::ProcessorError(format!("Failed to create Redis client: {}", e)))?;
 
-    let mut pubsub = client
-        .get_async_pubsub()
-        .await
-        .map_err(|e| CamelError::ProcessorError(format!("Failed to create PubSub connection: {}", e)))?;
+    let mut pubsub = client.get_async_pubsub().await.map_err(|e| {
+        CamelError::ProcessorError(format!("Failed to create PubSub connection: {}", e))
+    })?;
 
     // Subscribe to channels
     for channel in &channels {
         info!("Subscribing to channel: {}", channel);
-        pubsub
-            .subscribe(channel)
-            .await
-            .map_err(|e| {
-                CamelError::ProcessorError(format!("Failed to subscribe to channel {}: {}", channel, e))
-            })?;
+        pubsub.subscribe(channel).await.map_err(|e| {
+            CamelError::ProcessorError(format!("Failed to subscribe to channel {}: {}", channel, e))
+        })?;
     }
 
     // Subscribe to patterns
     for pattern in &patterns {
         info!("Subscribing to pattern: {}", pattern);
-        pubsub
-            .psubscribe(pattern)
-            .await
-            .map_err(|e| {
-                CamelError::ProcessorError(format!(
-                    "Failed to subscribe to pattern {}: {}",
-                    pattern, e
-                ))
-            })?;
+        pubsub.psubscribe(pattern).await.map_err(|e| {
+            CamelError::ProcessorError(format!("Failed to subscribe to pattern {}: {}", pattern, e))
+        })?;
     }
 
     info!("PubSub consumer started, waiting for messages");
@@ -330,11 +309,12 @@ fn build_exchange_from_pubsub(msg: Msg) -> Exchange {
     );
 
     // Set pattern header if this is from a pattern subscription
-    if msg.from_pattern() && let Ok(pattern) = msg.get_pattern::<String>() {
-        exchange.input.set_header(
-            "CamelRedis.Pattern",
-            serde_json::Value::String(pattern),
-        );
+    if msg.from_pattern()
+        && let Ok(pattern) = msg.get_pattern::<String>()
+    {
+        exchange
+            .input
+            .set_header("CamelRedis.Pattern", serde_json::Value::String(pattern));
     }
 
     exchange

@@ -1,9 +1,9 @@
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_core::context::CamelContext;
 use camel_component_file::FileComponent;
 use camel_component_log::LogComponent;
+use camel_core::context::CamelContext;
 
 fn chrono_timestamp() -> String {
     chrono::Local::now()

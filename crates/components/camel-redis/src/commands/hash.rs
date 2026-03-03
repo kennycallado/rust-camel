@@ -1,8 +1,8 @@
+use super::{get_i64_header, get_str_header, get_str_vec_header, require_key, require_value};
+use crate::config::RedisCommand;
+use camel_api::{CamelError, Exchange, body::Body};
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
-use camel_api::{CamelError, Exchange, body::Body};
-use crate::config::RedisCommand;
-use super::{get_str_header, get_i64_header, get_str_vec_header, require_key, require_value};
 
 pub async fn dispatch(
     cmd: &RedisCommand,
@@ -15,7 +15,9 @@ pub async fn dispatch(
             let field = get_str_header(exchange, "CamelRedis.Field")
                 .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Field".into()))?;
             let value = require_value(exchange)?;
-            let n: i64 = conn.hset(&key, field, value.to_string()).await
+            let n: i64 = conn
+                .hset(&key, field, value.to_string())
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HSET failed: {e}")))?;
             serde_json::json!(n)
         }
@@ -23,28 +25,36 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let field = get_str_header(exchange, "CamelRedis.Field")
                 .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Field".into()))?;
-            let val: Option<String> = conn.hget(&key, field).await
+            let val: Option<String> = conn
+                .hget(&key, field)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HGET failed: {e}")))?;
-            val.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+            val.map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null)
         }
         RedisCommand::Hsetnx => {
             let key = require_key(exchange)?;
             let field = get_str_header(exchange, "CamelRedis.Field")
                 .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Field".into()))?;
             let value = require_value(exchange)?;
-            let ok: bool = conn.hset_nx(&key, field, value.to_string()).await
+            let ok: bool = conn
+                .hset_nx(&key, field, value.to_string())
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HSETNX failed: {e}")))?;
             serde_json::json!(ok)
         }
         RedisCommand::Hmset => {
             let key = require_key(exchange)?;
-            let values = exchange.input.header("CamelRedis.Values")
+            let values = exchange
+                .input
+                .header("CamelRedis.Values")
                 .and_then(|v| v.as_object())
                 .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Values".into()))?
                 .iter()
                 .map(|(f, v)| (f.clone(), v.to_string()))
                 .collect::<Vec<_>>();
-            conn.hset_multiple::<_, _, _, ()>(&key, &values).await
+            conn.hset_multiple::<_, _, _, ()>(&key, &values)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HMSET failed: {e}")))?;
             serde_json::Value::Null
         }
@@ -58,17 +68,25 @@ pub async fn dispatch(
             for field in &fields {
                 cmd.arg(field);
             }
-            let vals: Vec<Option<String>> = cmd.query_async(conn).await
+            let vals: Vec<Option<String>> = cmd
+                .query_async(conn)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HMGET failed: {e}")))?;
-            serde_json::json!(vals.into_iter()
-                .map(|v| v.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null))
-                .collect::<Vec<_>>())
+            serde_json::json!(
+                vals.into_iter()
+                    .map(|v| v
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null))
+                    .collect::<Vec<_>>()
+            )
         }
         RedisCommand::Hdel => {
             let key = require_key(exchange)?;
             let field = get_str_header(exchange, "CamelRedis.Field")
                 .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Field".into()))?;
-            let n: i64 = conn.hdel(&key, field).await
+            let n: i64 = conn
+                .hdel(&key, field)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HDEL failed: {e}")))?;
             serde_json::json!(n)
         }
@@ -76,31 +94,41 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let field = get_str_header(exchange, "CamelRedis.Field")
                 .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Field".into()))?;
-            let ok: bool = conn.hexists(&key, field).await
+            let ok: bool = conn
+                .hexists(&key, field)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HEXISTS failed: {e}")))?;
             serde_json::json!(ok)
         }
         RedisCommand::Hlen => {
             let key = require_key(exchange)?;
-            let n: i64 = conn.hlen(&key).await
+            let n: i64 = conn
+                .hlen(&key)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HLEN failed: {e}")))?;
             serde_json::json!(n)
         }
         RedisCommand::Hkeys => {
             let key = require_key(exchange)?;
-            let keys: Vec<String> = conn.hkeys(&key).await
+            let keys: Vec<String> = conn
+                .hkeys(&key)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HKEYS failed: {e}")))?;
             serde_json::json!(keys)
         }
         RedisCommand::Hvals => {
             let key = require_key(exchange)?;
-            let vals: Vec<String> = conn.hvals(&key).await
+            let vals: Vec<String> = conn
+                .hvals(&key)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HVALS failed: {e}")))?;
             serde_json::json!(vals)
         }
         RedisCommand::Hgetall => {
             let key = require_key(exchange)?;
-            let map: std::collections::HashMap<String, String> = conn.hgetall(&key).await
+            let map: std::collections::HashMap<String, String> = conn
+                .hgetall(&key)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HGETALL failed: {e}")))?;
             serde_json::json!(map)
         }
@@ -109,7 +137,9 @@ pub async fn dispatch(
             let field = get_str_header(exchange, "CamelRedis.Field")
                 .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Field".into()))?;
             let by = get_i64_header(exchange, "CamelRedis.Increment").unwrap_or(1);
-            let n: i64 = conn.hincr(&key, field, by).await
+            let n: i64 = conn
+                .hincr(&key, field, by)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis HINCRBY failed: {e}")))?;
             serde_json::json!(n)
         }
@@ -139,9 +169,7 @@ mod tests {
 
     #[test]
     fn test_hset_requires_field() {
-        let ex = ex_with(&[
-            ("CamelRedis.Key", serde_json::json!("mykey")),
-        ]);
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
         // Field is extracted via get_str_header, so we test that it returns None
         assert!(crate::commands::get_str_header(&ex, "CamelRedis.Field").is_none());
     }
@@ -154,8 +182,14 @@ mod tests {
             ("CamelRedis.Value", serde_json::json!("myvalue")),
         ]);
         assert_eq!(crate::commands::require_key(&ex).unwrap(), "mykey");
-        assert_eq!(crate::commands::get_str_header(&ex, "CamelRedis.Field"), Some("myfield"));
-        assert_eq!(crate::commands::require_value(&ex).unwrap(), serde_json::json!("myvalue"));
+        assert_eq!(
+            crate::commands::get_str_header(&ex, "CamelRedis.Field"),
+            Some("myfield")
+        );
+        assert_eq!(
+            crate::commands::require_value(&ex).unwrap(),
+            serde_json::json!("myvalue")
+        );
     }
 
     #[test]
@@ -165,7 +199,10 @@ mod tests {
             ("CamelRedis.Fields", serde_json::json!(["f1", "f2", "f3"])),
         ]);
         let fields = crate::commands::get_str_vec_header(&ex, "CamelRedis.Fields");
-        assert_eq!(fields, Some(vec!["f1".to_string(), "f2".to_string(), "f3".to_string()]));
+        assert_eq!(
+            fields,
+            Some(vec!["f1".to_string(), "f2".to_string(), "f3".to_string()])
+        );
     }
 
     #[test]
@@ -175,16 +212,25 @@ mod tests {
             ("CamelRedis.Field", serde_json::json!("counter")),
             ("CamelRedis.Increment", serde_json::json!(5i64)),
         ]);
-        assert_eq!(crate::commands::get_i64_header(&ex, "CamelRedis.Increment"), Some(5));
+        assert_eq!(
+            crate::commands::get_i64_header(&ex, "CamelRedis.Increment"),
+            Some(5)
+        );
     }
 
     #[test]
     fn test_hmset_values_extraction() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
-            ("CamelRedis.Values", serde_json::json!({"f1": "v1", "f2": "v2"})),
+            (
+                "CamelRedis.Values",
+                serde_json::json!({"f1": "v1", "f2": "v2"}),
+            ),
         ]);
-        let values = ex.input.header("CamelRedis.Values").and_then(|v| v.as_object());
+        let values = ex
+            .input
+            .header("CamelRedis.Values")
+            .and_then(|v| v.as_object());
         assert!(values.is_some());
         let obj = values.unwrap();
         assert_eq!(obj.len(), 2);

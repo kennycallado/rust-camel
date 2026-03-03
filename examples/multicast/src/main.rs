@@ -3,9 +3,9 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::MulticastStrategy;
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_core::context::CamelContext;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
+use camel_core::context::CamelContext;
 use uuid::Uuid;
 
 /// Multicast EIP example — fan-out to multiple endpoints.

@@ -6,9 +6,9 @@ use camel_api::aggregator::AggregatorConfig;
 use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_core::context::CamelContext;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
+use camel_core::context::CamelContext;
 
 /// Aggregator EIP example — order batching by correlation key.
 ///

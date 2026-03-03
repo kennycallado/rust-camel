@@ -1,6 +1,6 @@
-use redis::aio::MultiplexedConnection;
-use camel_api::{CamelError, Exchange, body::Body};
 use crate::config::RedisCommand;
+use camel_api::{CamelError, Exchange, body::Body};
+use redis::aio::MultiplexedConnection;
 
 pub async fn dispatch(
     cmd: &RedisCommand,
@@ -13,24 +13,23 @@ pub async fn dispatch(
                 .query_async(conn)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis PING failed: {}", e)))?;
-            
+
             serde_json::Value::String(response)
         }
         RedisCommand::Echo => {
-            let message = exchange.input.body.as_text()
-                .unwrap_or("");
-            
+            let message = exchange.input.body.as_text().unwrap_or("");
+
             let response: String = redis::cmd("ECHO")
                 .arg(message)
                 .query_async(conn)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis ECHO failed: {}", e)))?;
-            
+
             serde_json::Value::String(response)
         }
         _ => return Err(CamelError::ProcessorError("Not an other command".into())),
     };
-    
+
     exchange.input.body = Body::Json(result);
     Ok(())
 }

@@ -2,15 +2,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use camel_api::CamelError;
 use camel_api::body::Body;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_core::context::CamelContext;
 use camel_component_direct::DirectComponent;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
+use camel_core::context::CamelContext;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {

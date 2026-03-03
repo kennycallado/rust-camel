@@ -4,8 +4,8 @@ use camel_api::CamelError;
 use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_core::context::CamelContext;
 use camel_component_http::HttpComponent;
+use camel_core::context::CamelContext;
 
 fn now_ms() -> u64 {
     SystemTime::now()

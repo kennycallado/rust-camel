@@ -1,11 +1,11 @@
-pub mod string;
+pub mod hash;
 pub mod key;
 pub mod list;
-pub mod hash;
-pub mod set;
-pub mod zset;
-pub mod pubsub;
 pub mod other;
+pub mod pubsub;
+pub mod set;
+pub mod string;
+pub mod zset;
 
 use camel_api::{CamelError, Exchange};
 
@@ -46,9 +46,8 @@ pub fn get_value_header(exchange: &Exchange, key: &str) -> Option<serde_json::Va
 }
 
 pub fn require_str_header<'a>(exchange: &'a Exchange, key: &str) -> Result<&'a str, CamelError> {
-    get_str_header(exchange, key).ok_or_else(|| {
-        CamelError::ProcessorError(format!("Missing required header: {}", key))
-    })
+    get_str_header(exchange, key)
+        .ok_or_else(|| CamelError::ProcessorError(format!("Missing required header: {}", key)))
 }
 
 pub fn require_key(exchange: &Exchange) -> Result<String, CamelError> {
@@ -56,8 +55,9 @@ pub fn require_key(exchange: &Exchange) -> Result<String, CamelError> {
 }
 
 pub fn require_value(exchange: &Exchange) -> Result<serde_json::Value, CamelError> {
-    get_value_header(exchange, "CamelRedis.Value")
-        .ok_or_else(|| CamelError::ProcessorError("Missing required header: CamelRedis.Value".into()))
+    get_value_header(exchange, "CamelRedis.Value").ok_or_else(|| {
+        CamelError::ProcessorError("Missing required header: CamelRedis.Value".into())
+    })
 }
 
 #[cfg(test)]
@@ -73,7 +73,8 @@ mod tests {
 
     #[test]
     fn test_get_str_header_found() {
-        let ex = make_exchange_with_header("CamelRedis.Key", serde_json::Value::String("mykey".into()));
+        let ex =
+            make_exchange_with_header("CamelRedis.Key", serde_json::Value::String("mykey".into()));
         assert_eq!(get_str_header(&ex, "CamelRedis.Key"), Some("mykey"));
     }
 

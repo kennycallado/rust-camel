@@ -1,17 +1,17 @@
-use camel_api::{CamelError, Exchange};
-use tower::Service;
-use std::task::{Context, Poll};
-use std::pin::Pin;
-use std::future::Future;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use redis::aio::MultiplexedConnection;
-use crate::config::{RedisConfig, RedisCommand};
 use crate::commands;
+use crate::config::{RedisCommand, RedisConfig};
+use camel_api::{CamelError, Exchange};
+use redis::aio::MultiplexedConnection;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::sync::Mutex;
+use tower::Service;
 
 /// Redis producer that implements Tower `Service<Exchange>` for integration
 /// with rust-camel pipelines.
-/// 
+///
 /// Manages a shared `MultiplexedConnection` to Redis that is created lazily
 /// on first use and reused across multiple calls.
 #[derive(Clone)]
@@ -23,7 +23,7 @@ pub struct RedisProducer {
 
 impl RedisProducer {
     /// Creates a new RedisProducer with the given configuration.
-    /// 
+    ///
     /// The connection is not established until the first call to `call()`.
     pub fn new(config: RedisConfig) -> Self {
         Self {
@@ -52,9 +52,7 @@ impl RedisProducer {
             | RedisCommand::Decr
             | RedisCommand::Decrby
             | RedisCommand::Append
-            | RedisCommand::Strlen => {
-                commands::string::dispatch(cmd, conn, exchange).await
-            }
+            | RedisCommand::Strlen => commands::string::dispatch(cmd, conn, exchange).await,
 
             // Key commands
             RedisCommand::Exists
@@ -70,9 +68,7 @@ impl RedisProducer {
             | RedisCommand::Type
             | RedisCommand::Persist
             | RedisCommand::Move
-            | RedisCommand::Sort => {
-                commands::key::dispatch(cmd, conn, exchange).await
-            }
+            | RedisCommand::Sort => commands::key::dispatch(cmd, conn, exchange).await,
 
             // List commands
             RedisCommand::Lpush
@@ -90,9 +86,7 @@ impl RedisProducer {
             | RedisCommand::Lset
             | RedisCommand::Lrem
             | RedisCommand::Ltrim
-            | RedisCommand::Rpoplpush => {
-                commands::list::dispatch(cmd, conn, exchange).await
-            }
+            | RedisCommand::Rpoplpush => commands::list::dispatch(cmd, conn, exchange).await,
 
             // Hash commands
             RedisCommand::Hset
@@ -106,9 +100,7 @@ impl RedisProducer {
             | RedisCommand::Hkeys
             | RedisCommand::Hvals
             | RedisCommand::Hgetall
-            | RedisCommand::Hincrby => {
-                commands::hash::dispatch(cmd, conn, exchange).await
-            }
+            | RedisCommand::Hincrby => commands::hash::dispatch(cmd, conn, exchange).await,
 
             // Set commands
             RedisCommand::Sadd
@@ -124,9 +116,7 @@ impl RedisProducer {
             | RedisCommand::Sinterstore
             | RedisCommand::Sunionstore
             | RedisCommand::Sdiffstore
-            | RedisCommand::Srandmember => {
-                commands::set::dispatch(cmd, conn, exchange).await
-            }
+            | RedisCommand::Srandmember => commands::set::dispatch(cmd, conn, exchange).await,
 
             // Sorted set commands
             RedisCommand::Zadd
@@ -144,27 +134,22 @@ impl RedisProducer {
             | RedisCommand::Zremrangebyrank
             | RedisCommand::Zremrangebyscore
             | RedisCommand::Zunionstore
-            | RedisCommand::Zinterstore => {
-                commands::zset::dispatch(cmd, conn, exchange).await
-            }
+            | RedisCommand::Zinterstore => commands::zset::dispatch(cmd, conn, exchange).await,
 
             // Pub/Sub commands
-            RedisCommand::Publish
-            | RedisCommand::Subscribe
-            | RedisCommand::Psubscribe => {
+            RedisCommand::Publish | RedisCommand::Subscribe | RedisCommand::Psubscribe => {
                 commands::pubsub::dispatch(cmd, conn, exchange).await
             }
 
             // Other commands
-            RedisCommand::Ping
-            | RedisCommand::Echo => {
+            RedisCommand::Ping | RedisCommand::Echo => {
                 commands::other::dispatch(cmd, conn, exchange).await
             }
         }
     }
 
     /// Resolves the command to execute.
-    /// 
+    ///
     /// Priority:
     /// 1. Header `CamelRedis.Command` if present
     /// 2. Configuration default command
@@ -201,21 +186,29 @@ impl Service<Exchange> for RedisProducer {
                 } else {
                     // Need to create connection - drop guard first
                     drop(guard);
-                    
+
                     let mut guard = conn.lock().await;
                     if let Some(c) = guard.as_ref() {
                         c.clone()
                     } else {
-                        let client = redis::Client::open(config.redis_url())
-                            .map_err(|e| CamelError::ProcessorError(
-                                format!("Failed to create Redis client: {}", e)
-                            ))?;
-                        
-                        let new_conn = client.get_multiplexed_async_connection().await
-                            .map_err(|e| CamelError::ProcessorError(
-                                format!("Failed to connect to Redis: {}", e)
-                            ))?;
-                        
+                        let client = redis::Client::open(config.redis_url()).map_err(|e| {
+                            CamelError::ProcessorError(format!(
+                                "Failed to create Redis client: {}",
+                                e
+                            ))
+                        })?;
+
+                        let new_conn =
+                            client
+                                .get_multiplexed_async_connection()
+                                .await
+                                .map_err(|e| {
+                                    CamelError::ProcessorError(format!(
+                                        "Failed to connect to Redis: {}",
+                                        e
+                                    ))
+                                })?;
+
                         *guard = Some(new_conn.clone());
                         new_conn
                     }
@@ -229,20 +222,22 @@ impl Service<Exchange> for RedisProducer {
             if exchange.input.header("CamelRedis.Key").is_none()
                 && let Some(ref key) = config.key
             {
-                exchange.input.set_header(
-                    "CamelRedis.Key",
-                    serde_json::Value::String(key.clone()),
-                );
+                exchange
+                    .input
+                    .set_header("CamelRedis.Key", serde_json::Value::String(key.clone()));
             }
 
             // 4. Set default channels from config for pub/sub commands
-            if exchange.input.header("CamelRedis.Channels").is_none() && !config.channels.is_empty() {
+            if exchange.input.header("CamelRedis.Channels").is_none() && !config.channels.is_empty()
+            {
                 exchange.input.set_header(
                     "CamelRedis.Channels",
                     serde_json::Value::Array(
-                        config.channels.iter()
+                        config
+                            .channels
+                            .iter()
                             .map(|c| serde_json::Value::String(c.clone()))
-                            .collect()
+                            .collect(),
                     ),
                 );
             }
@@ -272,7 +267,7 @@ mod tests {
         let config = RedisConfig::from_uri("redis://localhost:6379").unwrap();
         let producer = RedisProducer::new(config);
         let producer2 = producer.clone();
-        
+
         // Both producers share the same connection Arc
         assert!(Arc::ptr_eq(&producer.conn, &producer2.conn));
     }
@@ -281,7 +276,7 @@ mod tests {
     fn test_resolve_command_from_config() {
         let config = RedisConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
         let exchange = Exchange::new(Message::default());
-        
+
         let cmd = RedisProducer::resolve_command(&exchange, &config);
         assert_eq!(cmd, RedisCommand::Get);
     }
@@ -292,7 +287,7 @@ mod tests {
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Command", serde_json::json!("GET"));
         let exchange = Exchange::new(msg);
-        
+
         let cmd = RedisProducer::resolve_command(&exchange, &config);
         assert_eq!(cmd, RedisCommand::Get);
     }
@@ -303,7 +298,7 @@ mod tests {
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Command", serde_json::json!("INCR"));
         let exchange = Exchange::new(msg);
-        
+
         let cmd = RedisProducer::resolve_command(&exchange, &config);
         assert_eq!(cmd, RedisCommand::Incr);
     }
@@ -314,13 +309,13 @@ mod tests {
         // In CI, this would be skipped unless Redis is available
         let config = RedisConfig::from_uri("redis://localhost:6379").unwrap();
         let producer = RedisProducer::new(config);
-        
+
         // Connection should be None initially
         {
             let guard = producer.conn.lock().await;
             assert!(guard.is_none());
         }
-        
+
         // Note: We can't actually test the connection creation without a real Redis
         // This is documented for integration testing
     }

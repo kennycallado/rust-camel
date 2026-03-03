@@ -1,8 +1,8 @@
+use super::{get_i64_header, get_str_header, get_u64_header, require_key, require_value};
+use crate::config::RedisCommand;
+use camel_api::{CamelError, Exchange, body::Body};
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
-use camel_api::{CamelError, Exchange, body::Body};
-use crate::config::RedisCommand;
-use super::{get_str_header, get_u64_header, get_i64_header, require_key, require_value};
 
 pub async fn dispatch(
     cmd: &RedisCommand,
@@ -13,60 +13,82 @@ pub async fn dispatch(
         RedisCommand::Lpush => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
-            let n: i64 = conn.lpush(&key, value.to_string()).await
+            let n: i64 = conn
+                .lpush(&key, value.to_string())
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LPUSH failed: {e}")))?;
             serde_json::json!(n)
         }
         RedisCommand::Rpush => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
-            let n: i64 = conn.rpush(&key, value.to_string()).await
+            let n: i64 = conn
+                .rpush(&key, value.to_string())
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis RPUSH failed: {e}")))?;
             serde_json::json!(n)
         }
         RedisCommand::Lpushx => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
-            let n: i64 = conn.lpush_exists(&key, value.to_string()).await
+            let n: i64 = conn
+                .lpush_exists(&key, value.to_string())
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LPUSHX failed: {e}")))?;
             serde_json::json!(n)
         }
         RedisCommand::Rpushx => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
-            let n: i64 = conn.rpush_exists(&key, value.to_string()).await
+            let n: i64 = conn
+                .rpush_exists(&key, value.to_string())
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis RPUSHX failed: {e}")))?;
             serde_json::json!(n)
         }
         RedisCommand::Lpop => {
             let key = require_key(exchange)?;
-            let val: Option<String> = conn.lpop(&key, None).await
+            let val: Option<String> = conn
+                .lpop(&key, None)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LPOP failed: {e}")))?;
-            val.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+            val.map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null)
         }
         RedisCommand::Rpop => {
             let key = require_key(exchange)?;
-            let val: Option<String> = conn.rpop(&key, None).await
+            let val: Option<String> = conn
+                .rpop(&key, None)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis RPOP failed: {e}")))?;
-            val.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+            val.map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null)
         }
         RedisCommand::Blpop => {
             let key = require_key(exchange)?;
             let timeout = get_u64_header(exchange, "CamelRedis.Timeout").unwrap_or(0) as f64;
-            let val: Option<(String, String)> = conn.blpop(&key, timeout).await
+            let val: Option<(String, String)> = conn
+                .blpop(&key, timeout)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis BLPOP failed: {e}")))?;
-            val.map(|(_, v)| serde_json::Value::String(v)).unwrap_or(serde_json::Value::Null)
+            val.map(|(_, v)| serde_json::Value::String(v))
+                .unwrap_or(serde_json::Value::Null)
         }
         RedisCommand::Brpop => {
             let key = require_key(exchange)?;
             let timeout = get_u64_header(exchange, "CamelRedis.Timeout").unwrap_or(0) as f64;
-            let val: Option<(String, String)> = conn.brpop(&key, timeout).await
+            let val: Option<(String, String)> = conn
+                .brpop(&key, timeout)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis BRPOP failed: {e}")))?;
-            val.map(|(_, v)| serde_json::Value::String(v)).unwrap_or(serde_json::Value::Null)
+            val.map(|(_, v)| serde_json::Value::String(v))
+                .unwrap_or(serde_json::Value::Null)
         }
         RedisCommand::Llen => {
             let key = require_key(exchange)?;
-            let n: i64 = conn.llen(&key).await
+            let n: i64 = conn
+                .llen(&key)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LLEN failed: {e}")))?;
             serde_json::json!(n)
         }
@@ -74,16 +96,21 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let start = get_i64_header(exchange, "CamelRedis.Start").unwrap_or(0) as isize;
             let end = get_i64_header(exchange, "CamelRedis.End").unwrap_or(-1) as isize;
-            let vals: Vec<String> = conn.lrange(&key, start, end).await
+            let vals: Vec<String> = conn
+                .lrange(&key, start, end)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LRANGE failed: {e}")))?;
             serde_json::json!(vals)
         }
         RedisCommand::Lindex => {
             let key = require_key(exchange)?;
             let idx = get_i64_header(exchange, "CamelRedis.Index").unwrap_or(0) as isize;
-            let val: Option<String> = conn.lindex(&key, idx).await
+            let val: Option<String> = conn
+                .lindex(&key, idx)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LINDEX failed: {e}")))?;
-            val.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+            val.map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null)
         }
         RedisCommand::Linsert => {
             let key = require_key(exchange)?;
@@ -108,14 +135,16 @@ pub async fn dispatch(
                     .arg(value.to_string())
                     .query_async(conn)
                     .await
-            }.map_err(|e| CamelError::ProcessorError(format!("Redis LINSERT failed: {e}")))?;
+            }
+            .map_err(|e| CamelError::ProcessorError(format!("Redis LINSERT failed: {e}")))?;
             serde_json::json!(n)
         }
         RedisCommand::Lset => {
             let key = require_key(exchange)?;
             let idx = get_i64_header(exchange, "CamelRedis.Index").unwrap_or(0) as isize;
             let value = require_value(exchange)?;
-            conn.lset::<_, _, ()>(&key, idx, value.to_string()).await
+            conn.lset::<_, _, ()>(&key, idx, value.to_string())
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LSET failed: {e}")))?;
             serde_json::Value::Null
         }
@@ -123,7 +152,9 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let count = get_i64_header(exchange, "CamelRedis.Count").unwrap_or(0) as isize;
             let value = require_value(exchange)?;
-            let n: usize = conn.lrem(&key, count, value.to_string()).await
+            let n: usize = conn
+                .lrem(&key, count, value.to_string())
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LREM failed: {e}")))?;
             serde_json::json!(n as i64)
         }
@@ -131,17 +162,22 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let start = get_i64_header(exchange, "CamelRedis.Start").unwrap_or(0) as isize;
             let end = get_i64_header(exchange, "CamelRedis.End").unwrap_or(-1) as isize;
-            conn.ltrim::<_, ()>(&key, start, end).await
+            conn.ltrim::<_, ()>(&key, start, end)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LTRIM failed: {e}")))?;
             serde_json::Value::Null
         }
         RedisCommand::Rpoplpush => {
             let key = require_key(exchange)?;
-            let dest = get_str_header(exchange, "CamelRedis.Destination")
-                .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Destination".into()))?;
-            let val: Option<String> = conn.rpoplpush(&key, dest).await
+            let dest = get_str_header(exchange, "CamelRedis.Destination").ok_or_else(|| {
+                CamelError::ProcessorError("Missing CamelRedis.Destination".into())
+            })?;
+            let val: Option<String> = conn
+                .rpoplpush(&key, dest)
+                .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis RPOPLPUSH failed: {e}")))?;
-            val.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+            val.map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null)
         }
         _ => return Err(CamelError::ProcessorError("Not a list command".into())),
     };
@@ -167,7 +203,10 @@ mod tests {
         msg.set_header("CamelRedis.Value", serde_json::json!("hello"));
         let ex = Exchange::new(msg);
         assert_eq!(crate::commands::require_key(&ex).unwrap(), "mykey");
-        assert_eq!(crate::commands::require_value(&ex).unwrap(), serde_json::json!("hello"));
+        assert_eq!(
+            crate::commands::require_value(&ex).unwrap(),
+            serde_json::json!("hello")
+        );
     }
 
     #[test]
