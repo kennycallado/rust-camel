@@ -56,6 +56,27 @@ let route = RouteBuilder::from("direct:input")
     .unwrap();
 ```
 
+### Content-Based Router (Choice)
+
+```rust
+use camel_api::Value;
+
+let route = RouteBuilder::from("direct:input")
+    .choice()
+    .when(|ex| ex.input.header("priority").map(|v| v == &Value::String("high".into())).unwrap_or(false))
+        .to("direct:high-priority")
+    .end_when()
+    .when(|ex| ex.input.header("priority").map(|v| v == &Value::String("medium".into())).unwrap_or(false))
+        .to("direct:medium-priority")
+    .end_when()
+    .otherwise()
+        .to("direct:low-priority")
+    .end_otherwise()
+    .end_choice()
+    .build()
+    .unwrap();
+```
+
 ### Message Transformation
 
 ```rust
@@ -174,6 +195,12 @@ let route = RouteBuilder::from("timer:tick")
 | `set_body_fn(fn)` | Set dynamic body |
 | `map_body(fn)` | Transform body |
 | `filter(pred)` | Conditional routing |
+| `choice()` | Open content-based router block |
+| `when(pred)` | Open when-clause (inside `choice`) |
+| `end_when()` | Close when-clause |
+| `otherwise()` | Open fallback branch (inside `choice`) |
+| `end_otherwise()` | Close fallback branch |
+| `end_choice()` | Close content-based router block |
 | `split(config)` | Split messages |
 | `multicast()` | Parallel routing |
 | `wire_tap(uri)` | Side-channel copy |

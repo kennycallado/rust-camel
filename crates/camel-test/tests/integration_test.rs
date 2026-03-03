@@ -2256,3 +2256,159 @@ async fn test_http_concurrent_error_propagation() {
     let endpoint = mock.get_endpoint("error-result").unwrap();
     endpoint.assert_exchange_count(2).await;
 }
+
+// ---------------------------------------------------------------------------
+// Choice EIP tests
+// ---------------------------------------------------------------------------
+
+// Test A: when clause routes matching exchange
+#[tokio::test]
+async fn test_choice_when_routes_matching_exchange() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    // 4 ticks: counters 1,2,3,4. Even → mock:even, odd → mock:odd.
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .choice()
+        .when(|ex| {
+            ex.input
+                .header("CamelTimerCounter")
+                .and_then(|v| v.as_u64())
+                .map(|n| n % 2 == 0)
+                .unwrap_or(false)
+        })
+        .to("mock:even")
+        .end_when()
+        .when(|ex| {
+            ex.input
+                .header("CamelTimerCounter")
+                .and_then(|v| v.as_u64())
+                .map(|n| n % 2 != 0)
+                .unwrap_or(false)
+        })
+        .to("mock:odd")
+        .end_when()
+        .end_choice()
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    ctx.stop().await.unwrap();
+
+    let even = mock.get_endpoint("even").unwrap();
+    let odd = mock.get_endpoint("odd").unwrap();
+    even.assert_exchange_count(2).await; // counters 2, 4
+    odd.assert_exchange_count(2).await;  // counters 1, 3
+}
+
+// Test B: otherwise fires when no when matches
+#[tokio::test]
+async fn test_choice_otherwise_fires_when_no_when_matches() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    // Counter is always set — when predicate never true (impossible header).
+    // All 3 ticks go to mock:fallback via otherwise.
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
+        .choice()
+        .when(|ex| ex.input.header("nonexistent").is_some())
+        .to("mock:never")
+        .end_when()
+        .otherwise()
+        .to("mock:fallback")
+        .end_otherwise()
+        .end_choice()
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ctx.stop().await.unwrap();
+
+    let fallback = mock.get_endpoint("fallback").unwrap();
+    fallback.assert_exchange_count(3).await;
+
+    // The "never" endpoint must not have received anything.
+    // Note: MockComponent registers endpoints during route resolution, so
+    // get_endpoint("never") returns Some, but with 0 exchanges.
+    if let Some(never) = mock.get_endpoint("never") {
+        never.assert_exchange_count(0).await;
+    }
+}
+
+// Test C: no match and no otherwise → exchange continues past choice
+#[tokio::test]
+async fn test_choice_no_match_no_otherwise_continues() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    // when predicate never true. No otherwise. Exchange continues to mock:after.
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
+        .choice()
+        .when(|ex| ex.input.header("nonexistent").is_some())
+        .to("mock:never")
+        .end_when()
+        .end_choice()
+        .to("mock:after") // all 3 exchanges reach here
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ctx.stop().await.unwrap();
+
+    let after = mock.get_endpoint("after").unwrap();
+    after.assert_exchange_count(3).await;
+
+    // Verify the "never" endpoint (registered during route resolution) received nothing.
+    if let Some(never) = mock.get_endpoint("never") {
+        never.assert_exchange_count(0).await;
+    }
+}
+
+// Test D: short-circuit — only first matching when fires
+#[tokio::test]
+async fn test_choice_short_circuits_first_match() {
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    // Both whens always match (|_| true). First should always win.
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .choice()
+        .when(|_ex| true)
+        .to("mock:first")
+        .end_when()
+        .when(|_ex| true)
+        .to("mock:second")
+        .end_when()
+        .end_choice()
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    ctx.stop().await.unwrap();
+
+    let first = mock.get_endpoint("first").unwrap();
+    first.assert_exchange_count(4).await; // all 4 go to first
+
+    // "second" must not have received anything.
+    // Note: MockComponent registers endpoints during route resolution, so
+    // get_endpoint("second") returns Some, but with 0 exchanges.
+    if let Some(second) = mock.get_endpoint("second") {
+        second.assert_exchange_count(0).await;
+    }
+}

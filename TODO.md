@@ -48,6 +48,7 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | Más components (kafka, etc.)                                         | Core design Future Extensions          | Baja — Redis implementado; Kafka y otros dependen de casos de uso              |        |
 | Management API (health, metrics)                                     | Core design Future Extensions          | Baja — camel-health ya existe vacío                                            |        |
 | Tracer (message flow tracing)                                        | Apache Camel Tracer                    | Media — tracing automático del flujo de mensajes                              |        |
+| Choice/When/Otherwise EIP (Content-Based Router)                    | Apache Camel docs / Core design        | Media — dedicated CBR EIP, replaces Filter composition workaround             | DONE   |
 | Log EIP (.log() DSL method)                                          | Apache Camel Log EIP                   | Alta — logging simple para mensajes humanos                                   | DONE   |
 | RouteController / autoStartup / ControlBus                          | AutoStart plan                         | Alta — lifecycle management de rutas                                           | DONE   |
 | SupervisingRouteController                                           | AutoStart postmortem + Future Work     | Media — reintentos automáticos cuando consumer crasha; `route_controller.rs:450` tiene TODO: status no se actualiza a `Failed` |        |

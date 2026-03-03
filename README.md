@@ -57,7 +57,7 @@ cargo run -p hello-world
 | `camel-core` | Runtime: `CamelContext`, `Route`, `RouteDefinition`, `SequentialPipeline` |
 | `camel-builder` | Fluent `RouteBuilder` API |
 | `camel-component` | `Component`, `Endpoint`, `Consumer` traits |
-| `camel-processor` | EIP processors: `Filter`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody` + Tower `Layer` types |
+| `camel-processor` | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody` + Tower `Layer` types |
 | `camel-endpoint` | Endpoint URI parsing utilities |
 | `camel-timer` | Timer source component |
 | `camel-log` | Log sink component |

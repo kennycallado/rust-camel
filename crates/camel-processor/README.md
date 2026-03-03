@@ -9,6 +9,7 @@
 ## Features
 
 - **Filter**: Conditional message routing based on predicates
+- **Choice**: Content-based routing with `when`/`otherwise` branches
 - **Log**: Logging processor for debugging and monitoring
 - **SetHeader / DynamicSetHeader**: Set message headers
 - **SetBody / MapBody**: Transform message bodies
@@ -79,6 +80,7 @@ let route = RouteBuilder::from("timer:tick")
 | Processor | Purpose |
 |-----------|---------|
 | `FilterService` | Route based on conditions |
+| `ChoiceService` | Content-based routing (when/otherwise) |
 | `LogProcessor` | Log exchange information |
 | `SetHeader` | Set static header values |
 | `DynamicSetHeader` | Set headers from expressions |

@@ -18,6 +18,7 @@ use camel_component::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvel
 use camel_endpoint::parse_uri;
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::error_handler::ErrorHandlerLayer;
+use camel_processor::{ChoiceService, WhenClause};
 
 use crate::registry::Registry;
 use crate::route::{BuilderStep, RouteDefinition, RouteDefinitionInfo, compose_pipeline};
@@ -193,6 +194,29 @@ impl DefaultRouteController {
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::Choice { whens, otherwise } => {
+                    // Resolve each when clause's sub-steps into a pipeline.
+                    let mut when_clauses = Vec::new();
+                    for when_step in whens {
+                        let sub_processors =
+                            self.resolve_steps(when_step.steps, producer_ctx, registry)?;
+                        let pipeline = compose_pipeline(sub_processors);
+                        when_clauses.push(WhenClause {
+                            predicate: when_step.predicate,
+                            pipeline,
+                        });
+                    }
+                    // Resolve otherwise branch (if present).
+                    let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
+                        let sub_processors =
+                            self.resolve_steps(otherwise_steps, producer_ctx, registry)?;
+                        Some(compose_pipeline(sub_processors))
+                    } else {
+                        None
+                    };
+                    let svc = ChoiceService::new(when_clauses, otherwise_pipeline);
                     processors.push(BoxProcessor::new(svc));
                 }
                 BuilderStep::WireTap { uri } => {

@@ -62,6 +62,12 @@ impl Route {
     }
 }
 
+/// An unresolved when-clause: predicate + nested steps for the sub-pipeline.
+pub struct WhenStep {
+    pub predicate: FilterPredicate,
+    pub steps: Vec<BuilderStep>,
+}
+
 /// A step in an unresolved route definition.
 pub enum BuilderStep {
     /// A pre-built Tower processor service.
@@ -79,6 +85,12 @@ pub enum BuilderStep {
     Filter {
         predicate: FilterPredicate,
         steps: Vec<BuilderStep>,
+    },
+    /// A Choice step: evaluates when-clauses in order, routes to the first match.
+    /// If no when matches, the optional otherwise branch is used.
+    Choice {
+        whens: Vec<WhenStep>,
+        otherwise: Option<Vec<BuilderStep>>,
     },
     /// A WireTap step: sends a clone of the exchange to a tap endpoint (fire-and-forget).
     WireTap { uri: String },
@@ -100,6 +112,14 @@ impl std::fmt::Debug for BuilderStep {
             BuilderStep::Aggregate { .. } => write!(f, "BuilderStep::Aggregate {{ .. }}"),
             BuilderStep::Filter { steps, .. } => {
                 write!(f, "BuilderStep::Filter {{ steps: {steps:?}, .. }}")
+            }
+            BuilderStep::Choice { whens, otherwise } => {
+                write!(
+                    f,
+                    "BuilderStep::Choice {{ whens: {} clause(s), otherwise: {} }}",
+                    whens.len(),
+                    if otherwise.is_some() { "Some" } else { "None" }
+                )
             }
             BuilderStep::WireTap { uri } => write!(f, "BuilderStep::WireTap {{ uri: {uri:?} }}"),
             BuilderStep::Multicast { steps, .. } => {
@@ -428,5 +448,25 @@ mod tests {
         assert_eq!(def.route_id(), Some("my-route"));
         assert!(!def.auto_startup());
         assert_eq!(def.startup_order(), 50);
+    }
+
+    #[test]
+    fn test_choice_builder_step_debug() {
+        use camel_api::{Exchange, FilterPredicate};
+        use std::sync::Arc;
+
+        fn always_true(_: &Exchange) -> bool {
+            true
+        }
+
+        let step = BuilderStep::Choice {
+            whens: vec![crate::route::WhenStep {
+                predicate: Arc::new(always_true) as FilterPredicate,
+                steps: vec![BuilderStep::To("mock:a".into())],
+            }],
+            otherwise: None,
+        };
+        let debug = format!("{step:?}");
+        assert!(debug.contains("Choice"));
     }
 }

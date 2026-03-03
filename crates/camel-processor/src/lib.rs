@@ -1,4 +1,5 @@
 pub mod aggregator;
+pub mod choice;
 pub mod circuit_breaker;
 pub mod dynamic_set_header;
 pub mod error_handler;
@@ -16,6 +17,7 @@ pub use aggregator::AggregatorService;
 pub use circuit_breaker::{CircuitBreakerLayer, CircuitBreakerService};
 pub use dynamic_set_header::{DynamicSetHeader, DynamicSetHeaderLayer};
 pub use error_handler::{ErrorHandlerLayer, ErrorHandlerService};
+pub use choice::{ChoiceService, WhenClause};
 pub use filter::FilterService;
 pub use log::{LogLevel, LogProcessor};
 pub use map_body::{MapBody, MapBodyLayer};

@@ -8,7 +8,7 @@ use camel_api::{
     BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProcessorFn, Value,
 };
 use camel_component::ConcurrencyModel;
-use camel_core::route::{BuilderStep, RouteDefinition};
+use camel_core::route::{BuilderStep, RouteDefinition, WhenStep};
 use camel_processor::{DynamicSetHeader, LogLevel, MapBody, SetBody, SetHeader, StopService};
 
 /// Shared step-accumulation methods for all builder types.
@@ -164,6 +164,19 @@ impl RouteBuilder {
             parent: self,
             predicate: std::sync::Arc::new(predicate),
             steps: vec![],
+        }
+    }
+
+    /// Open a choice scope for content-based routing.
+    ///
+    /// Within the choice, you can define multiple `.when()` clauses and an
+    /// optional `.otherwise()` clause. The first matching `when` predicate
+    /// determines which sub-pipeline executes.
+    pub fn choice(self) -> ChoiceBuilder {
+        ChoiceBuilder {
+            parent: self,
+            whens: vec![],
+            _otherwise: None,
         }
     }
 
@@ -405,6 +418,101 @@ impl FilterInSplitBuilder {
 }
 
 impl StepAccumulator for FilterInSplitBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
+    }
+}
+
+// ── Choice/When/Otherwise builders ─────────────────────────────────────────
+
+/// Builder for a `.choice()` ... `.end_choice()` block.
+///
+/// Accumulates `when` clauses and an optional `otherwise` clause.
+/// Cannot call `.build()` until `.end_choice()` is called.
+pub struct ChoiceBuilder {
+    parent: RouteBuilder,
+    whens: Vec<WhenStep>,
+    _otherwise: Option<Vec<BuilderStep>>,
+}
+
+impl ChoiceBuilder {
+    /// Open a `when` clause. Only exchanges matching `predicate` will be
+    /// processed by the steps inside the `.when()` ... `.end_when()` scope.
+    pub fn when<F>(self, predicate: F) -> WhenBuilder
+    where
+        F: Fn(&Exchange) -> bool + Send + Sync + 'static,
+    {
+        WhenBuilder {
+            parent: self,
+            predicate: std::sync::Arc::new(predicate),
+            steps: vec![],
+        }
+    }
+
+    /// Open an `otherwise` clause. Executed when no `when` predicate matched.
+    ///
+    /// Only one `otherwise` is allowed per `choice`. Call this after all `.when()` clauses.
+    pub fn otherwise(self) -> OtherwiseBuilder {
+        OtherwiseBuilder {
+            parent: self,
+            steps: vec![],
+        }
+    }
+
+    /// Close the choice scope. Packages all accumulated `when` clauses and
+    /// optional `otherwise` into a `BuilderStep::Choice` and returns the
+    /// parent `RouteBuilder`.
+    pub fn end_choice(mut self) -> RouteBuilder {
+        let step = BuilderStep::Choice {
+            whens: self.whens,
+            otherwise: self._otherwise,
+        };
+        self.parent.steps.push(step);
+        self.parent
+    }
+}
+
+/// Builder for the sub-pipeline within a `.when()` ... `.end_when()` block.
+pub struct WhenBuilder {
+    parent: ChoiceBuilder,
+    predicate: camel_api::FilterPredicate,
+    steps: Vec<BuilderStep>,
+}
+
+impl WhenBuilder {
+    /// Close the when scope. Packages the accumulated sub-steps into a
+    /// `WhenStep` and returns the parent `ChoiceBuilder`.
+    pub fn end_when(mut self) -> ChoiceBuilder {
+        self.parent.whens.push(WhenStep {
+            predicate: self.predicate,
+            steps: self.steps,
+        });
+        self.parent
+    }
+}
+
+impl StepAccumulator for WhenBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
+    }
+}
+
+/// Builder for the sub-pipeline within an `.otherwise()` ... `.end_otherwise()` block.
+pub struct OtherwiseBuilder {
+    parent: ChoiceBuilder,
+    steps: Vec<BuilderStep>,
+}
+
+impl OtherwiseBuilder {
+    /// Close the otherwise scope and return the parent `ChoiceBuilder`.
+    pub fn end_otherwise(self) -> ChoiceBuilder {
+        let OtherwiseBuilder { mut parent, steps } = self;
+        parent._otherwise = Some(steps);
+        parent
+    }
+}
+
+impl StepAccumulator for OtherwiseBuilder {
     fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
         &mut self.steps
     }
@@ -1115,5 +1223,72 @@ mod tests {
         assert_eq!(definition.route_id(), None);
         assert!(definition.auto_startup());
         assert_eq!(definition.startup_order(), 1000);
+    }
+
+    // ── Choice typestate tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_choice_builder_single_when() {
+        let definition = RouteBuilder::from("timer:tick")
+            .choice()
+            .when(|ex: &Exchange| ex.input.header("type").is_some())
+            .to("mock:typed")
+            .end_when()
+            .end_choice()
+            .build()
+            .unwrap();
+        assert_eq!(definition.steps().len(), 1);
+        assert!(matches!(&definition.steps()[0], BuilderStep::Choice { whens, otherwise }
+            if whens.len() == 1 && otherwise.is_none()));
+    }
+
+    #[test]
+    fn test_choice_builder_when_otherwise() {
+        let definition = RouteBuilder::from("timer:tick")
+            .choice()
+            .when(|ex: &Exchange| ex.input.header("a").is_some())
+            .to("mock:a")
+            .end_when()
+            .otherwise()
+            .to("mock:fallback")
+            .end_otherwise()
+            .end_choice()
+            .build()
+            .unwrap();
+        assert!(matches!(&definition.steps()[0], BuilderStep::Choice { whens, otherwise }
+            if whens.len() == 1 && otherwise.is_some()));
+    }
+
+    #[test]
+    fn test_choice_builder_multiple_whens() {
+        let definition = RouteBuilder::from("timer:tick")
+            .choice()
+            .when(|ex: &Exchange| ex.input.header("a").is_some())
+            .to("mock:a")
+            .end_when()
+            .when(|ex: &Exchange| ex.input.header("b").is_some())
+            .to("mock:b")
+            .end_when()
+            .end_choice()
+            .build()
+            .unwrap();
+        assert!(matches!(&definition.steps()[0], BuilderStep::Choice { whens, .. }
+            if whens.len() == 2));
+    }
+
+    #[test]
+    fn test_choice_step_after_choice() {
+        // Steps after end_choice() are added to the outer pipeline, not inside choice.
+        let definition = RouteBuilder::from("timer:tick")
+            .choice()
+            .when(|_ex: &Exchange| true)
+            .to("mock:inner")
+            .end_when()
+            .end_choice()
+            .to("mock:outer") // must be step[1], not inside choice
+            .build()
+            .unwrap();
+        assert_eq!(definition.steps().len(), 2);
+        assert!(matches!(&definition.steps()[1], BuilderStep::To(uri) if uri == "mock:outer"));
     }
 }
