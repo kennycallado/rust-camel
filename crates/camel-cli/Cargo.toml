@@ -1,0 +1,17 @@
+[package]
+name = "camel-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line interface for Apache Camel in Rust"
+repository.workspace = true
+readme.workspace = true
+keywords = ["camel", "cli", "integration", "messaging"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "camel"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
