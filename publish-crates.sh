@@ -6,8 +6,8 @@ set -e
 
 DRY_RUN=""
 if [ "$1" == "--dry-run" ]; then
-    DRY_RUN="--dry-run"
-    echo "🔍 DRY RUN MODE - No actual publishing"
+  DRY_RUN="--dry-run"
+  echo "🔍 DRY RUN MODE - No actual publishing"
 fi
 
 echo "📦 Publishing rust-camel crates to crates.io"
@@ -15,26 +15,26 @@ echo "============================================="
 
 # Function to publish a crate
 publish_crate() {
-    local crate=$1
-    local path=$2
-    echo ""
-    echo "📦 Publishing $crate..."
-    cd "$path"
-    
-    # Check if crate already exists
-    if cargo search "$crate" 2>&1 | grep -q "^$crate = "; then
-        local existing_version=$(cargo search "$crate" | grep "^$crate = " | grep -oP '\d+\.\d+\.\d+')
-        echo "⚠️  $crate@$existing_version already exists on crates.io, skipping..."
-        cd - > /dev/null
-        return 0
-    fi
-    
-    cargo publish $DRY_RUN
-    cd - > /dev/null
-    if [ -z "$DRY_RUN" ]; then
-        echo "⏳ Waiting 10s for crates.io to index..."
-        sleep 10
-    fi
+  local crate=$1
+  local path=$2
+  echo ""
+  echo "📦 Publishing $crate..."
+  cd "$path"
+
+  # Check if crate already exists
+  if cargo search "$crate" 2>&1 | grep -q "^$crate = "; then
+    local existing_version=$(cargo search "$crate" | grep "^$crate = " | grep -oP '\d+\.\d+\.\d+')
+    echo "⚠️  $crate@$existing_version already exists on crates.io, skipping..."
+    cd - >/dev/null
+    return 0
+  fi
+
+  cargo publish $DRY_RUN
+  cd - >/dev/null
+  if [ -z "$DRY_RUN" ]; then
+    echo "⏳ Waiting 10s for crates.io to index..."
+    sleep 10
+  fi
 }
 
 # Core crates (in dependency order)
@@ -62,6 +62,9 @@ publish_crate "camel-component-file" "crates/components/camel-file"
 publish_crate "camel-component-http" "crates/components/camel-http"
 publish_crate "camel-component-redis" "crates/components/camel-redis"
 publish_crate "camel-component-controlbus" "crates/components/camel-controlbus"
+
+# Cli
+publish_crate "camel-cli" "crates/camel-cli"
 
 echo ""
 echo "✅ All crates published successfully!"
