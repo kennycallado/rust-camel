@@ -250,7 +250,9 @@ mod tests {
     #[test]
     fn test_context_resolves_simple_language() {
         let ctx = CamelContext::new();
-        let lang = ctx.resolve_language("simple").expect("simple language not found");
+        let lang = ctx
+            .resolve_language("simple")
+            .expect("simple language not found");
         assert_eq!(lang.name(), "simple");
     }
 
@@ -276,11 +278,19 @@ mod tests {
         use camel_language_api::LanguageError;
         struct DummyLang;
         impl camel_language_api::Language for DummyLang {
-            fn name(&self) -> &'static str { "dummy" }
-            fn create_expression(&self, _: &str) -> Result<Box<dyn camel_language_api::Expression>, LanguageError> {
+            fn name(&self) -> &'static str {
+                "dummy"
+            }
+            fn create_expression(
+                &self,
+                _: &str,
+            ) -> Result<Box<dyn camel_language_api::Expression>, LanguageError> {
                 Err(LanguageError::EvalError("not implemented".into()))
             }
-            fn create_predicate(&self, _: &str) -> Result<Box<dyn camel_language_api::Predicate>, LanguageError> {
+            fn create_predicate(
+                &self,
+                _: &str,
+            ) -> Result<Box<dyn camel_language_api::Predicate>, LanguageError> {
                 Err(LanguageError::EvalError("not implemented".into()))
             }
         }
@@ -290,7 +300,10 @@ mod tests {
         let result = ctx.register_language("dummy", Box::new(DummyLang));
         assert!(result.is_err(), "duplicate registration should fail");
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("dummy"), "error should mention the language name");
+        assert!(
+            err_msg.contains("dummy"),
+            "error should mention the language name"
+        );
     }
 
     #[test]
@@ -298,11 +311,19 @@ mod tests {
         use camel_language_api::LanguageError;
         struct DummyLang;
         impl camel_language_api::Language for DummyLang {
-            fn name(&self) -> &'static str { "dummy" }
-            fn create_expression(&self, _: &str) -> Result<Box<dyn camel_language_api::Expression>, LanguageError> {
+            fn name(&self) -> &'static str {
+                "dummy"
+            }
+            fn create_expression(
+                &self,
+                _: &str,
+            ) -> Result<Box<dyn camel_language_api::Expression>, LanguageError> {
                 Err(LanguageError::EvalError("not implemented".into()))
             }
-            fn create_predicate(&self, _: &str) -> Result<Box<dyn camel_language_api::Predicate>, LanguageError> {
+            fn create_predicate(
+                &self,
+                _: &str,
+            ) -> Result<Box<dyn camel_language_api::Predicate>, LanguageError> {
                 Err(LanguageError::EvalError("not implemented".into()))
             }
         }

@@ -1,5 +1,5 @@
-use camel_api::exchange::Exchange;
 use camel_api::Value;
+use camel_api::exchange::Exchange;
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use rhai::{Engine, Scope};
 use std::sync::{Arc, RwLock};
@@ -248,7 +248,7 @@ impl Default for RhaiLanguage {
 
 #[cfg(test)]
 mod tests {
-    use camel_api::{exchange::Exchange, message::Message, Value};
+    use camel_api::{Value, exchange::Exchange, message::Message};
     use camel_language_api::Language;
 
     use super::RhaiLanguage;
@@ -295,9 +295,7 @@ mod tests {
     #[test]
     fn test_rhai_expression_concat() {
         let lang = RhaiLanguage::new();
-        let expr = lang
-            .create_expression(r#"body + " world""#)
-            .unwrap();
+        let expr = lang.create_expression(r#"body + " world""#).unwrap();
         let ex = exchange_with_body("hello");
         let val = expr.evaluate(&ex).unwrap();
         assert_eq!(val, Value::String("hello world".to_string()));
@@ -322,14 +320,9 @@ mod tests {
     #[test]
     fn test_rhai_property_access() {
         let lang = RhaiLanguage::new();
-        let expr = lang
-            .create_expression(r#"property("myProp")"#)
-            .unwrap();
+        let expr = lang.create_expression(r#"property("myProp")"#).unwrap();
         let mut ex = exchange_with_body("test");
-        ex.set_property(
-            "myProp".to_string(),
-            Value::String("propVal".to_string()),
-        );
+        ex.set_property("myProp".to_string(), Value::String("propVal".to_string()));
         let val = expr.evaluate(&ex).unwrap();
         assert_eq!(val, Value::String("propVal".to_string()));
     }
@@ -353,9 +346,7 @@ mod tests {
     #[test]
     fn test_rhai_missing_header_returns_null() {
         let lang = RhaiLanguage::new();
-        let expr = lang
-            .create_expression(r#"header("nonexistent")"#)
-            .unwrap();
+        let expr = lang.create_expression(r#"header("nonexistent")"#).unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).unwrap();
         assert_eq!(val, Value::Null);
@@ -407,9 +398,7 @@ mod tests {
     #[test]
     fn test_rhai_numeric_header() {
         let lang = RhaiLanguage::new();
-        let expr = lang
-            .create_expression(r#"header("count") + 1"#)
-            .unwrap();
+        let expr = lang.create_expression(r#"header("count") + 1"#).unwrap();
         let mut msg = Message::default();
         msg.set_header("count", Value::Number(41.into()));
         let ex = Exchange::new(msg);
@@ -422,9 +411,7 @@ mod tests {
         // json_to_dynamic should convert JSON arrays to native Rhai arrays,
         // not to their string representation.
         let lang = RhaiLanguage::new();
-        let expr = lang
-            .create_expression(r#"header("items").len()"#)
-            .unwrap();
+        let expr = lang.create_expression(r#"header("items").len()"#).unwrap();
         let mut msg = Message::default();
         msg.set_header(
             "items",
@@ -436,16 +423,18 @@ mod tests {
         );
         let ex = Exchange::new(msg);
         let val = expr.evaluate(&ex).unwrap();
-        assert_eq!(val, Value::from(3_i64), "array len should be 3, not a stringified value");
+        assert_eq!(
+            val,
+            Value::from(3_i64),
+            "array len should be 3, not a stringified value"
+        );
     }
 
     #[test]
     fn test_rhai_json_object_header_is_native_map() {
         // json_to_dynamic should convert JSON objects to native Rhai maps.
         let lang = RhaiLanguage::new();
-        let expr = lang
-            .create_expression(r#"header("obj")["key"]"#)
-            .unwrap();
+        let expr = lang.create_expression(r#"header("obj")["key"]"#).unwrap();
         let mut msg = Message::default();
         // Build a JSON object via Value's FromStr impl (serde_json::Value)
         let obj: Value = r#"{"key": "value"}"#.parse().unwrap();

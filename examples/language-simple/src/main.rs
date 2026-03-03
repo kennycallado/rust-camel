@@ -79,12 +79,7 @@ async fn main() -> Result<(), CamelError> {
                 let expr = Arc::clone(&type_expr);
                 Box::pin(async move {
                     if let Ok(camel_api::Value::String(t)) = expr.evaluate(&exchange) {
-                        let current = exchange
-                            .input
-                            .body
-                            .as_text()
-                            .unwrap_or("")
-                            .to_string();
+                        let current = exchange.input.body.as_text().unwrap_or("").to_string();
                         exchange.input.body = Body::Text(format!("{current} [type={t}]"));
                     }
                     Ok(exchange)

@@ -1,15 +1,11 @@
-use camel_api::exchange::Exchange;
-use camel_api::Value;
-use camel_language_api::LanguageError;
 use crate::parser::{Expr, Op};
+use camel_api::Value;
+use camel_api::exchange::Exchange;
+use camel_language_api::LanguageError;
 
 pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError> {
     match expr {
-        Expr::Header(key) => Ok(exchange
-            .input
-            .header(key)
-            .cloned()
-            .unwrap_or(Value::Null)),
+        Expr::Header(key) => Ok(exchange.input.header(key).cloned().unwrap_or(Value::Null)),
 
         Expr::Body => Ok(Value::String(
             exchange.input.body.as_text().unwrap_or("").to_string(),
@@ -18,11 +14,9 @@ pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError
         Expr::ExchangeProperty(key) => Ok(exchange.property(key).cloned().unwrap_or(Value::Null)),
 
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
-        Expr::NumberLit(n) => {
-            serde_json::Number::from_f64(*n)
-                .map(Value::Number)
-                .ok_or_else(|| LanguageError::EvalError(format!("non-finite number: {n}")))
-        }
+        Expr::NumberLit(n) => serde_json::Number::from_f64(*n)
+            .map(Value::Number)
+            .ok_or_else(|| LanguageError::EvalError(format!("non-finite number: {n}"))),
         Expr::Null => Ok(Value::Null),
 
         Expr::BinOp { left, op, right } => {

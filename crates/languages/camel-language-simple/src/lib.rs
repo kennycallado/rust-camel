@@ -1,5 +1,5 @@
-mod parser;
 mod evaluator;
+mod parser;
 
 use camel_api::exchange::Exchange;
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
@@ -44,9 +44,9 @@ impl Language for SimpleLanguage {
 
 #[cfg(test)]
 mod tests {
-    use camel_api::{exchange::Exchange, message::Message, Value};
-    use camel_language_api::Language;
     use super::SimpleLanguage;
+    use camel_api::{Value, exchange::Exchange, message::Message};
+    use camel_language_api::Language;
 
     fn exchange_with_header(key: &str, val: &str) -> Exchange {
         let mut msg = Message::default();
@@ -149,7 +149,10 @@ mod tests {
         let result = lang.create_expression("${header.}");
         let err = result.err().expect("should be a parse error");
         let err = format!("{err}");
-        assert!(err.contains("empty"), "error should mention empty key, got: {err}");
+        assert!(
+            err.contains("empty"),
+            "error should mention empty key, got: {err}"
+        );
     }
 
     #[test]
@@ -158,7 +161,10 @@ mod tests {
         let result = lang.create_expression("${exchangeProperty.}");
         let err = result.err().expect("should be a parse error");
         let err = format!("{err}");
-        assert!(err.contains("empty"), "error should mention empty key, got: {err}");
+        assert!(
+            err.contains("empty"),
+            "error should mention empty key, got: {err}"
+        );
     }
 
     #[test]
@@ -173,7 +179,9 @@ mod tests {
     #[test]
     fn test_exchange_property_expression() {
         let lang = SimpleLanguage;
-        let expr = lang.create_expression("${exchangeProperty.myProp}").unwrap();
+        let expr = lang
+            .create_expression("${exchangeProperty.myProp}")
+            .unwrap();
         let mut ex = exchange_with_body("test");
         ex.set_property("myProp".to_string(), Value::String("propVal".to_string()));
         let val = expr.evaluate(&ex).unwrap();
@@ -183,7 +191,9 @@ mod tests {
     #[test]
     fn test_missing_property_returns_null() {
         let lang = SimpleLanguage;
-        let expr = lang.create_expression("${exchangeProperty.missing}").unwrap();
+        let expr = lang
+            .create_expression("${exchangeProperty.missing}")
+            .unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).unwrap();
         assert_eq!(val, Value::Null);
@@ -246,9 +256,15 @@ mod tests {
         // BinOp split — the whole thing is a StringLit atom.
         let lang = SimpleLanguage;
         let result = lang.create_expression("'a>=b'");
-        let val = result.unwrap().evaluate(&Exchange::new(Message::default())).unwrap();
-        assert_eq!(val, Value::String("a>=b".to_string()),
-            "string literal 'a>=b' should be parsed as a plain string, not split on >=");
+        let val = result
+            .unwrap()
+            .evaluate(&Exchange::new(Message::default()))
+            .unwrap();
+        assert_eq!(
+            val,
+            Value::String("a>=b".to_string()),
+            "string literal 'a>=b' should be parsed as a plain string, not split on >="
+        );
     }
 
     #[test]
@@ -256,11 +272,11 @@ mod tests {
         // ${header.x} == 'a>=b' — the operator inside the RHS string must not
         // cause the parser to split the LHS at the wrong position.
         let lang = SimpleLanguage;
-        let pred = lang
-            .create_predicate("${header.x} == 'a>=b'")
-            .unwrap();
+        let pred = lang.create_predicate("${header.x} == 'a>=b'").unwrap();
         let ex = exchange_with_header("x", "a>=b");
-        assert!(pred.matches(&ex).unwrap(),
-            "predicate should match when header equals 'a>=b'");
+        assert!(
+            pred.matches(&ex).unwrap(),
+            "predicate should match when header equals 'a>=b'"
+        );
     }
 }

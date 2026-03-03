@@ -14,6 +14,8 @@ pub enum LanguageError {
     #[error("language `{0}` not found in registry")]
     NotFound(String),
 
-    #[error("language `{0}` is already registered; use a different name or remove the existing registration first")]
+    #[error(
+        "language `{0}` is already registered; use a different name or remove the existing registration first"
+    )]
     AlreadyRegistered(String),
 }
