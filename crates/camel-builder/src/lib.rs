@@ -1238,8 +1238,10 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(definition.steps().len(), 1);
-        assert!(matches!(&definition.steps()[0], BuilderStep::Choice { whens, otherwise }
-            if whens.len() == 1 && otherwise.is_none()));
+        assert!(
+            matches!(&definition.steps()[0], BuilderStep::Choice { whens, otherwise }
+            if whens.len() == 1 && otherwise.is_none())
+        );
     }
 
     #[test]
@@ -1255,8 +1257,10 @@ mod tests {
             .end_choice()
             .build()
             .unwrap();
-        assert!(matches!(&definition.steps()[0], BuilderStep::Choice { whens, otherwise }
-            if whens.len() == 1 && otherwise.is_some()));
+        assert!(
+            matches!(&definition.steps()[0], BuilderStep::Choice { whens, otherwise }
+            if whens.len() == 1 && otherwise.is_some())
+        );
     }
 
     #[test]
@@ -1272,8 +1276,10 @@ mod tests {
             .end_choice()
             .build()
             .unwrap();
-        assert!(matches!(&definition.steps()[0], BuilderStep::Choice { whens, .. }
-            if whens.len() == 2));
+        assert!(
+            matches!(&definition.steps()[0], BuilderStep::Choice { whens, .. }
+            if whens.len() == 2)
+        );
     }
 
     #[test]

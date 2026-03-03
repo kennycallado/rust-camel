@@ -14,10 +14,10 @@ pub mod stop;
 pub mod wire_tap;
 
 pub use aggregator::AggregatorService;
+pub use choice::{ChoiceService, WhenClause};
 pub use circuit_breaker::{CircuitBreakerLayer, CircuitBreakerService};
 pub use dynamic_set_header::{DynamicSetHeader, DynamicSetHeaderLayer};
 pub use error_handler::{ErrorHandlerLayer, ErrorHandlerService};
-pub use choice::{ChoiceService, WhenClause};
 pub use filter::FilterService;
 pub use log::{LogLevel, LogProcessor};
 pub use map_body::{MapBody, MapBodyLayer};

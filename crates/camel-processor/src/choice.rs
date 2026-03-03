@@ -98,8 +98,14 @@ mod tests {
     #[tokio::test]
     async fn test_choice_first_when_matches() {
         let whens = vec![
-            WhenClause { predicate: pred_header("a"), pipeline: append_body("-A") },
-            WhenClause { predicate: pred_header("b"), pipeline: append_body("-B") },
+            WhenClause {
+                predicate: pred_header("a"),
+                pipeline: append_body("-A"),
+            },
+            WhenClause {
+                predicate: pred_header("b"),
+                pipeline: append_body("-B"),
+            },
         ];
         let mut svc = ChoiceService::new(whens, None);
         let mut ex = Exchange::new(Message::new("x"));
@@ -112,8 +118,14 @@ mod tests {
     #[tokio::test]
     async fn test_choice_second_when_matches() {
         let whens = vec![
-            WhenClause { predicate: pred_header("a"), pipeline: append_body("-A") },
-            WhenClause { predicate: pred_header("b"), pipeline: append_body("-B") },
+            WhenClause {
+                predicate: pred_header("a"),
+                pipeline: append_body("-A"),
+            },
+            WhenClause {
+                predicate: pred_header("b"),
+                pipeline: append_body("-B"),
+            },
         ];
         let mut svc = ChoiceService::new(whens, None);
         let mut ex = Exchange::new(Message::new("x"));
@@ -126,8 +138,14 @@ mod tests {
     #[tokio::test]
     async fn test_choice_short_circuits_at_first_match() {
         let whens = vec![
-            WhenClause { predicate: pred_header("a"), pipeline: append_body("-A") },
-            WhenClause { predicate: pred_header("b"), pipeline: append_body("-B") },
+            WhenClause {
+                predicate: pred_header("a"),
+                pipeline: append_body("-A"),
+            },
+            WhenClause {
+                predicate: pred_header("b"),
+                pipeline: append_body("-B"),
+            },
         ];
         let mut svc = ChoiceService::new(whens, None);
         let mut ex = Exchange::new(Message::new("x"));
@@ -140,9 +158,10 @@ mod tests {
     // 4. Otherwise executes when no when matches.
     #[tokio::test]
     async fn test_choice_otherwise_fires_when_no_when_matches() {
-        let whens = vec![
-            WhenClause { predicate: pred_header("a"), pipeline: append_body("-A") },
-        ];
+        let whens = vec![WhenClause {
+            predicate: pred_header("a"),
+            pipeline: append_body("-A"),
+        }];
         let mut svc = ChoiceService::new(whens, Some(append_body("-else")));
         let ex = Exchange::new(Message::new("x"));
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
@@ -152,9 +171,10 @@ mod tests {
     // 5. No match and no otherwise → exchange passes unchanged.
     #[tokio::test]
     async fn test_choice_no_match_no_otherwise_passthrough() {
-        let whens = vec![
-            WhenClause { predicate: pred_header("a"), pipeline: append_body("-A") },
-        ];
+        let whens = vec![WhenClause {
+            predicate: pred_header("a"),
+            pipeline: append_body("-A"),
+        }];
         let mut svc = ChoiceService::new(whens, None);
         let ex = Exchange::new(Message::new("untouched"));
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
@@ -164,9 +184,10 @@ mod tests {
     // 6. Errors in a matching when's pipeline propagate.
     #[tokio::test]
     async fn test_choice_error_in_when_propagates() {
-        let whens = vec![
-            WhenClause { predicate: pred_header("a"), pipeline: failing() },
-        ];
+        let whens = vec![WhenClause {
+            predicate: pred_header("a"),
+            pipeline: failing(),
+        }];
         let mut svc = ChoiceService::new(whens, None);
         let mut ex = Exchange::new(Message::new("x"));
         ex.input.set_header("a", Value::Bool(true));

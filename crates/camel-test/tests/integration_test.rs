@@ -2302,7 +2302,7 @@ async fn test_choice_when_routes_matching_exchange() {
     let even = mock.get_endpoint("even").unwrap();
     let odd = mock.get_endpoint("odd").unwrap();
     even.assert_exchange_count(2).await; // counters 2, 4
-    odd.assert_exchange_count(2).await;  // counters 1, 3
+    odd.assert_exchange_count(2).await; // counters 1, 3
 }
 
 // Test B: otherwise fires when no when matches
