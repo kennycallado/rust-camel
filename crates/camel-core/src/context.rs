@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
@@ -7,6 +8,8 @@ use tracing::info;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{CamelError, MetricsCollector, NoOpMetrics, RouteController, RouteStatus};
 use camel_component::Component;
+use camel_language_api::Language;
+use camel_language_api::LanguageError;
 
 use crate::registry::Registry;
 use crate::route::RouteDefinition;
@@ -32,6 +35,7 @@ pub struct CamelContext {
     route_controller: Arc<Mutex<DefaultRouteController>>,
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsCollector>,
+    languages: HashMap<String, Box<dyn Language>>,
 }
 
 impl CamelContext {
@@ -54,11 +58,19 @@ impl CamelContext {
             .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
             .set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
 
+        // Pre-register built-in languages
+        let mut languages: HashMap<String, Box<dyn Language>> = HashMap::new();
+        languages.insert(
+            "simple".to_string(),
+            Box::new(camel_language_simple::SimpleLanguage),
+        );
+
         Self {
             registry,
             route_controller: controller,
             cancel_token: CancellationToken::new(),
             metrics,
+            languages,
         }
     }
 
@@ -77,6 +89,29 @@ impl CamelContext {
             .lock()
             .expect("mutex poisoned: another thread panicked while holding this lock")
             .register(component);
+    }
+
+    /// Register a language with this context, keyed by name.
+    ///
+    /// Returns `Err(LanguageError::AlreadyRegistered)` if a language with the
+    /// same name is already registered. Use [`resolve_language`](Self::resolve_language)
+    /// to check before registering, or choose a distinct name.
+    pub fn register_language(
+        &mut self,
+        name: impl Into<String>,
+        lang: Box<dyn Language>,
+    ) -> Result<(), LanguageError> {
+        let name = name.into();
+        if self.languages.contains_key(&name) {
+            return Err(LanguageError::AlreadyRegistered(name));
+        }
+        self.languages.insert(name, lang);
+        Ok(())
+    }
+
+    /// Resolve a language by name. Returns `None` if not registered.
+    pub fn resolve_language(&self, name: &str) -> Option<&dyn Language> {
+        self.languages.get(name).map(|l| l.as_ref())
     }
 
     /// Add a route definition to this context.
@@ -210,5 +245,70 @@ mod tests {
             result.is_ok(),
             "Registry access should handle mutex poisoning"
         );
+    }
+
+    #[test]
+    fn test_context_resolves_simple_language() {
+        let ctx = CamelContext::new();
+        let lang = ctx.resolve_language("simple").expect("simple language not found");
+        assert_eq!(lang.name(), "simple");
+    }
+
+    #[test]
+    fn test_simple_language_via_context() {
+        let ctx = CamelContext::new();
+        let lang = ctx.resolve_language("simple").unwrap();
+        let pred = lang.create_predicate("${header.x} == 'hello'").unwrap();
+        let mut msg = camel_api::message::Message::default();
+        msg.set_header("x", camel_api::Value::String("hello".into()));
+        let ex = camel_api::exchange::Exchange::new(msg);
+        assert!(pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_resolve_unknown_language_returns_none() {
+        let ctx = CamelContext::new();
+        assert!(ctx.resolve_language("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_register_language_duplicate_returns_error() {
+        use camel_language_api::LanguageError;
+        struct DummyLang;
+        impl camel_language_api::Language for DummyLang {
+            fn name(&self) -> &'static str { "dummy" }
+            fn create_expression(&self, _: &str) -> Result<Box<dyn camel_language_api::Expression>, LanguageError> {
+                Err(LanguageError::EvalError("not implemented".into()))
+            }
+            fn create_predicate(&self, _: &str) -> Result<Box<dyn camel_language_api::Predicate>, LanguageError> {
+                Err(LanguageError::EvalError("not implemented".into()))
+            }
+        }
+
+        let mut ctx = CamelContext::new();
+        ctx.register_language("dummy", Box::new(DummyLang)).unwrap();
+        let result = ctx.register_language("dummy", Box::new(DummyLang));
+        assert!(result.is_err(), "duplicate registration should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("dummy"), "error should mention the language name");
+    }
+
+    #[test]
+    fn test_register_language_new_key_succeeds() {
+        use camel_language_api::LanguageError;
+        struct DummyLang;
+        impl camel_language_api::Language for DummyLang {
+            fn name(&self) -> &'static str { "dummy" }
+            fn create_expression(&self, _: &str) -> Result<Box<dyn camel_language_api::Expression>, LanguageError> {
+                Err(LanguageError::EvalError("not implemented".into()))
+            }
+            fn create_predicate(&self, _: &str) -> Result<Box<dyn camel_language_api::Predicate>, LanguageError> {
+                Err(LanguageError::EvalError("not implemented".into()))
+            }
+        }
+
+        let mut ctx = CamelContext::new();
+        let result = ctx.register_language("dummy", Box::new(DummyLang));
+        assert!(result.is_ok(), "first registration should succeed");
     }
 }

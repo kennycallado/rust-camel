@@ -21,6 +21,9 @@ members = [
     "crates/components/camel-http",
     "crates/components/camel-redis",
     "crates/components/camel-controlbus",
+    "crates/languages/camel-language-api",
+    "crates/languages/camel-language-rhai",
+    "crates/languages/camel-language-simple",
     "examples/hello-world",
     "examples/content-based-routing",
     "examples/multi-route-direct",
@@ -41,6 +44,8 @@ members = [
     "examples/circuit-breaker",
     "examples/metrics-demo",
     "examples/controlbus",
+    "examples/language-simple",
+    "examples/language-rhai",
 ]
 
 [workspace.package]
@@ -74,6 +79,9 @@ camel-component-mock = { path = "crates/components/camel-mock", version = "0.2.0
 camel-component-http = { path = "crates/components/camel-http", version = "0.2.0" }
 camel-component-redis = { path = "crates/components/camel-redis", version = "0.2.0" }
 camel-component-controlbus = { path = "crates/components/camel-controlbus", version = "0.2.0" }
+camel-language-api = { path = "crates/languages/camel-language-api", version = "0.2.1" }
+camel-language-rhai = { path = "crates/languages/camel-language-rhai", version = "0.2.1" }
+camel-language-simple = { path = "crates/languages/camel-language-simple", version = "0.2.1" }
 
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
@@ -92,3 +100,4 @@ axum = { version = "0.8" }
 http = "1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+rhai = { version = "1", features = ["sync"] }

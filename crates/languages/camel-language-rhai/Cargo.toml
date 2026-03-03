@@ -1,0 +1,11 @@
+[package]
+name = "camel-language-rhai"
+description = "Rhai scripting language for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-language-api.workspace = true
+rhai.workspace = true

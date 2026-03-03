@@ -65,6 +65,9 @@ cargo run -p hello-world
 | `camel-mock` | Test component with assertions on received exchanges |
 | `camel-test` | Integration test harness |
 | `camel-controlbus` | Control routes dynamically from within routes |
+| `camel-language-api` | Language trait API: `Language`, `Expression`, `Predicate` |
+| `camel-language-simple` | Simple Language: `${header.x}`, `${body}`, operators |
+| `camel-language-rhai` | Rhai scripting language for full expression power |
 
 ## Building & Testing
 

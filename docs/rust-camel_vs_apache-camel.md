@@ -7,7 +7,7 @@
 
 ## Resumen Ejecutivo
 
-**rust-camel cubre ~10-15% de Apache Camel** pero con **arquitectura sólida y calidad de producción** en lo implementado.
+**rust-camel cubre ~12-18% de Apache Camel** pero con **arquitectura sólida y calidad de producción** en lo implementado.
 
 **Production Readiness:** ~50% (mejorado desde 30% con features de seguridad y observabilidad añadidas)
 
@@ -24,6 +24,7 @@
 | **Error Handling** | 80% | ✅ Fuerte |
 | **Testing** | 50% | ⚠️ Básico |
 | **Security** | 60% | ✅ Producción |
+| **Languages** | 30% (2/10+) | ⚠️ Básico |
 | **Observability** | 40% | ⚠️ En progreso |
 
 ---
@@ -190,6 +191,23 @@ RouteBuilder::from("timer:tick?period=1000")
 - [ ] Prometheus metrics exporter
 - [ ] Health check endpoints
 
+### Languages (30%)
+
+Apache Camel tiene 10+ expression languages. rust-camel implementa:
+
+| Language | Status | Features |
+|----------|--------|----------|
+| **Simple** | ✅ | `${body}`, `${header.name}`, operators (`==`, `!=`, `contains`, `starts_with`, `ends_with`, `regex`, `>`, `<`, `>=`, `<=`, `&&`, `\|\|`) |
+| **Rhai** | ✅ | Full scripting via Rhai engine, `header("name")`, `set_header("name", value)`, body access, return values as expressions or booleans as predicates |
+
+**Missing:**
+- [ ] Constant language
+- [ ] XPath
+- [ ] JSONPath
+- [ ] Groovy / JavaScript (N/A in Rust, but could be via rhai or other embedded engines)
+- [ ] OGNL / SpEL (Java-specific, N/A)
+- [ ] Tokenize language
+
 ### Testing (50%)
 
 | Feature | Status |
@@ -259,6 +277,9 @@ RouteBuilder::from("timer:tick?period=1000")
 ├─────────────────────────────────────────────────────────┤
 │                   camel-processor                       │
 │  Filter, Splitter, Aggregator, Multicast, WireTap, etc. │
+├─────────────────────────────────────────────────────────┤
+│                    languages/                           │
+│  camel-language-api (traits), simple, rhai              │
 ├─────────────────────────────────────────────────────────┤
 │                     camel-api                           │
 │  Exchange, Message, Processor trait, Body, Value,       │
@@ -339,6 +360,7 @@ RouteBuilder::from("timer:tick?period=1000")
 | Core Architecture | 70% | 100% | 30% |
 | EIPs | 15% (11/60+) | 100% | 85% |
 | Components | 2% (7/300+) | 100% | 98% |
+| Languages | 30% (2/10+) | 100% | 70% |
 | DSL | 80% | 100% | 20% |
 | Error Handling | 80% | 100% | 20% |
 | Testing | 50% | 100% | 50% |
