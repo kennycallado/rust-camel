@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Script to publish rust-camel crates to crates.io
 # Usage: ./publish-crates.sh [--dry-run]
 
@@ -13,6 +13,10 @@ fi
 echo "📦 Publishing rust-camel crates to crates.io"
 echo "============================================="
 
+# Get workspace root version
+WORKSPACE_ROOT=$(pwd)
+WORKSPACE_VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
+
 # Function to publish a crate
 publish_crate() {
   local crate=$1
@@ -21,16 +25,34 @@ publish_crate() {
   echo "📦 Publishing $crate..."
   cd "$path"
 
-  # Check if crate already exists
-  if cargo search "$crate" 2>&1 | grep -q "^$crate = "; then
-    local existing_version=$(cargo search "$crate" | grep "^$crate = " | grep -oP '\d+\.\d+\.\d+')
-    echo "⚠️  $crate@$existing_version already exists on crates.io, skipping..."
-    cd - >/dev/null
+  # Get current version (check if workspace version)
+  local version_line=$(grep '^version' Cargo.toml | head -1)
+  local current_version
+  
+  if echo "$version_line" | grep -q "workspace"; then
+    current_version=$WORKSPACE_VERSION
+  else
+    current_version=$(echo "$version_line" | cut -d'"' -f2)
+  fi
+
+  # Check if this specific version already exists
+  local existing_version=$(cargo search "$crate" 2>&1 | grep "^$crate = " | sed -n 's/.*"\([^"]*\)".*/\1/p')
+  
+  if [ "$existing_version" = "$current_version" ]; then
+    echo "⚠️  $crate@$current_version already exists on crates.io, skipping..."
+    cd "$WORKSPACE_ROOT" >/dev/null
     return 0
   fi
 
+  # Check if older version exists
+  if [ -n "$existing_version" ]; then
+    echo "📦 Updating $crate from $existing_version to $current_version..."
+  else
+    echo "📦 Publishing new crate $crate@$current_version..."
+  fi
+
   cargo publish $DRY_RUN
-  cd - >/dev/null
+  cd "$WORKSPACE_ROOT" >/dev/null
   if [ -z "$DRY_RUN" ]; then
     echo "⏳ Waiting 10s for crates.io to index..."
     sleep 10
@@ -44,6 +66,12 @@ publish_crate "camel-support" "crates/camel-support"
 publish_crate "camel-endpoint" "crates/camel-endpoint"
 publish_crate "camel-component" "crates/camel-component"
 publish_crate "camel-processor" "crates/camel-processor"
+
+# Language crates (needed by camel-core)
+publish_crate "camel-language-api" "crates/languages/camel-language-api"
+publish_crate "camel-language-simple" "crates/languages/camel-language-simple"
+
+# Core engine
 publish_crate "camel-core" "crates/camel-core"
 
 # Component crates needed for tests (publish before camel-builder)
@@ -54,6 +82,7 @@ publish_crate "camel-component-mock" "crates/components/camel-mock"
 # Remaining core crates
 publish_crate "camel-health" "crates/camel-health"
 publish_crate "camel-dsl" "crates/camel-dsl"
+publish_crate "camel-config" "crates/camel-config" # Fixed path
 publish_crate "camel-builder" "crates/camel-builder"
 
 # Remaining component crates
