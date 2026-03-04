@@ -1,0 +1,9 @@
+[default]
+routes = ["routes/**/*.yaml"]
+log_level = "INFO"
+
+[development]
+log_level = "DEBUG"
+
+[production]
+log_level = "ERROR"

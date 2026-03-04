@@ -6,7 +6,8 @@ edition = "2021"
 [dependencies]
 camel-core = { path = "../../crates/camel-core" }
 camel-config = { path = "../../crates/camel-config" }
-camel-timer = { path = "../../crates/components/camel-timer" }
-camel-log = { path = "../../crates/components/camel-log" }
+camel-component-timer = { path = "../../crates/components/camel-timer" }
+camel-component-log = { path = "../../crates/components/camel-log" }
+camel-api = { path = "../../crates/camel-api" }
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = "0.3"

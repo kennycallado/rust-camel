@@ -26,6 +26,10 @@ tower.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 arc-swap.workspace = true
+serde = { workspace = true }
 
 [dev-dependencies]
 futures = "0.3"
+tempfile = "3"
+camel-component-timer = { path = "../components/camel-timer" }
+camel-component-log = { path = "../components/camel-log" }

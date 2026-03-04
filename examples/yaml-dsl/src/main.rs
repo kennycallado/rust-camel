@@ -194,10 +194,7 @@ routes:
 
     match parse_yaml(yaml_string) {
         Ok(dynamic_routes) => {
-            println!(
-                "    ✓ Parsed {} route(s) from string",
-                dynamic_routes.len()
-            );
+            println!("    ✓ Parsed {} route(s) from string", dynamic_routes.len());
             for route in &dynamic_routes {
                 println!("      - {}", route.route_id());
             }

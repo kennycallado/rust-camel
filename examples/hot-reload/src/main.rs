@@ -40,7 +40,7 @@
 
 use std::time::Duration;
 
-use camel_api::{body::Body, BoxProcessor, BoxProcessorExt, CamelError, Exchange, Value};
+use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange, Value, body::Body};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
@@ -80,13 +80,11 @@ fn create_versioned_processor(version: &'static str) -> BoxProcessor {
             exchange.input.body = Body::Text(new_body.clone());
 
             // Set a version property so we can verify which pipeline processed it
-            exchange.set_property(
-                "pipeline-version",
-                Value::String(version.to_string()),
-            );
+            exchange.set_property("pipeline-version", Value::String(version.to_string()));
 
             // Log directly to stdout (since swap_pipeline replaces the entire pipeline)
-            println!("  {} {}", 
+            println!(
+                "  {} {}",
                 chrono::Local::now().format("%H:%M:%S%.3f"),
                 new_body
             );
@@ -155,7 +153,7 @@ async fn main() -> Result<(), CamelError> {
 
             for swap_num in 1..=total_swaps {
                 let new_version = (swap_num + 1).to_string();
-                
+
                 println!();
                 println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 println!(">>> SWAP #{swap_num}: Switching to V{new_version} processor");

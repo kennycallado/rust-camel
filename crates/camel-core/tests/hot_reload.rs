@@ -5,13 +5,13 @@
 //! - New requests immediately see the NEW pipeline
 //! - No requests are dropped or corrupted during the swap
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use camel_api::RouteController;
 use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, IdentityProcessor, Value};
+use camel_core::registry::Registry;
 use camel_core::route::RouteDefinition;
 use camel_core::route_controller::DefaultRouteController;
-use camel_core::registry::Registry;
-use camel_api::RouteController;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
@@ -55,8 +55,7 @@ async fn test_hot_reload_in_flight_requests_use_old_pipeline() {
     controller.set_self_ref(controller_arc);
 
     // Create route
-    let def = RouteDefinition::new("direct:test", vec![])
-        .with_route_id("hot-reload-test");
+    let def = RouteDefinition::new("direct:test", vec![]).with_route_id("hot-reload-test");
     controller.add_route(def).unwrap();
 
     // Create v1 pipeline that adds a "v1" marker property
@@ -66,15 +65,22 @@ async fn test_hot_reload_in_flight_requests_use_old_pipeline() {
     });
 
     // Swap to v1 pipeline
-    controller.swap_pipeline("hot-reload-test", v1_pipeline).unwrap();
+    controller
+        .swap_pipeline("hot-reload-test", v1_pipeline)
+        .unwrap();
 
     // Get v1 pipeline reference (simulates an "in-flight" request that grabbed the pipeline)
-    let in_flight_v1_pipeline = controller.get_pipeline("hot-reload-test")
+    let in_flight_v1_pipeline = controller
+        .get_pipeline("hot-reload-test")
         .expect("route should exist");
 
     // Verify v1 pipeline works
     let exchange = Exchange::default();
-    let result = in_flight_v1_pipeline.clone().oneshot(exchange).await.unwrap();
+    let result = in_flight_v1_pipeline
+        .clone()
+        .oneshot(exchange)
+        .await
+        .unwrap();
     assert_eq!(
         result.property("pipeline-version"),
         Some(&Value::String("v1".to_string())),
@@ -86,13 +92,20 @@ async fn test_hot_reload_in_flight_requests_use_old_pipeline() {
         ex.set_property("pipeline-version", Value::String("v2".to_string()));
         Ok(ex)
     });
-    controller.swap_pipeline("hot-reload-test", v2_pipeline).unwrap();
+    controller
+        .swap_pipeline("hot-reload-test", v2_pipeline)
+        .unwrap();
 
     // New requests should use v2 (get fresh pipeline reference after swap)
-    let new_request_pipeline = controller.get_pipeline("hot-reload-test")
+    let new_request_pipeline = controller
+        .get_pipeline("hot-reload-test")
         .expect("route should exist");
     let exchange2 = Exchange::default();
-    let result2 = new_request_pipeline.clone().oneshot(exchange2).await.unwrap();
+    let result2 = new_request_pipeline
+        .clone()
+        .oneshot(exchange2)
+        .await
+        .unwrap();
     assert_eq!(
         result2.property("pipeline-version"),
         Some(&Value::String("v2".to_string())),
@@ -102,7 +115,11 @@ async fn test_hot_reload_in_flight_requests_use_old_pipeline() {
     // In-flight request (holding old v1 reference) should still complete with v1
     // This verifies ArcSwap's contract: old Arc references remain valid
     let exchange3 = Exchange::default();
-    let result3 = in_flight_v1_pipeline.clone().oneshot(exchange3).await.unwrap();
+    let result3 = in_flight_v1_pipeline
+        .clone()
+        .oneshot(exchange3)
+        .await
+        .unwrap();
     assert_eq!(
         result3.property("pipeline-version"),
         Some(&Value::String("v1".to_string())),
@@ -121,8 +138,7 @@ async fn test_hot_reload_multiple_swaps_preserve_correctness() {
     ));
     controller.set_self_ref(controller_arc);
 
-    let def = RouteDefinition::new("direct:multi-swap", vec![])
-        .with_route_id("multi-swap-test");
+    let def = RouteDefinition::new("direct:multi-swap", vec![]).with_route_id("multi-swap-test");
     controller.add_route(def).unwrap();
 
     // Perform multiple swaps
@@ -135,7 +151,9 @@ async fn test_hot_reload_multiple_swaps_preserve_correctness() {
                 Ok(ex)
             }
         });
-        controller.swap_pipeline("multi-swap-test", pipeline).unwrap();
+        controller
+            .swap_pipeline("multi-swap-test", pipeline)
+            .unwrap();
 
         // Verify current pipeline has correct marker
         let current = controller.get_pipeline("multi-swap-test").unwrap();
@@ -145,7 +163,8 @@ async fn test_hot_reload_multiple_swaps_preserve_correctness() {
             result.property("pipeline-version"),
             Some(&Value::String(format!("v{}", version))),
             "after swap #{}, pipeline should be v{}",
-            version, version
+            version,
+            version
         );
     }
 }
@@ -161,8 +180,7 @@ async fn test_hot_reload_concurrent_access_no_panic() {
     ));
     controller.set_self_ref(controller_arc);
 
-    let def = RouteDefinition::new("direct:concurrent", vec![])
-        .with_route_id("concurrent-test");
+    let def = RouteDefinition::new("direct:concurrent", vec![]).with_route_id("concurrent-test");
     controller.add_route(def).unwrap();
 
     let counter = Arc::new(AtomicUsize::new(0));
@@ -173,7 +191,9 @@ async fn test_hot_reload_concurrent_access_no_panic() {
         counter_clone.fetch_add(1, Ordering::SeqCst);
         async move { Ok(ex) }
     });
-    controller.swap_pipeline("concurrent-test", initial_pipeline).unwrap();
+    controller
+        .swap_pipeline("concurrent-test", initial_pipeline)
+        .unwrap();
 
     // Spawn multiple concurrent readers
     let mut handles = vec![];
@@ -187,7 +207,9 @@ async fn test_hot_reload_concurrent_access_no_panic() {
 
     // Swap while reads are in progress
     let new_pipeline = BoxProcessor::from_fn(|ex: Exchange| async move { Ok(ex) });
-    controller.swap_pipeline("concurrent-test", new_pipeline).unwrap();
+    controller
+        .swap_pipeline("concurrent-test", new_pipeline)
+        .unwrap();
 
     // All reads should complete without panic
     for handle in handles {

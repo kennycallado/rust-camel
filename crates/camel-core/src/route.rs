@@ -433,8 +433,7 @@ mod tests {
 
     #[test]
     fn test_route_definition_defaults() {
-        let def = RouteDefinition::new("direct:test", vec![])
-            .with_route_id("test-route");
+        let def = RouteDefinition::new("direct:test", vec![]).with_route_id("test-route");
         assert_eq!(def.route_id(), "test-route");
         assert!(def.auto_startup());
         assert_eq!(def.startup_order(), 1000);

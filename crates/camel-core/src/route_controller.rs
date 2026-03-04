@@ -351,13 +351,19 @@ impl DefaultRouteController {
     ///
     /// In-flight requests finish with the old pipeline (kept alive by Arc).
     /// New requests immediately use the new pipeline.
-    pub fn swap_pipeline(&self, route_id: &str, new_pipeline: BoxProcessor) -> Result<(), CamelError> {
+    pub fn swap_pipeline(
+        &self,
+        route_id: &str,
+        new_pipeline: BoxProcessor,
+    ) -> Result<(), CamelError> {
         let managed = self
             .routes
             .get(route_id)
             .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
 
-        managed.pipeline.store(Arc::new(SyncBoxProcessor(new_pipeline)));
+        managed
+            .pipeline
+            .store(Arc::new(SyncBoxProcessor(new_pipeline)));
         info!(route_id = %route_id, "Pipeline swapped atomically");
         Ok(())
     }
@@ -372,7 +378,9 @@ impl DefaultRouteController {
     /// This is useful for testing and introspection.
     /// Returns `None` if the route doesn't exist.
     pub fn get_pipeline(&self, route_id: &str) -> Option<BoxProcessor> {
-        self.routes.get(route_id).map(|r| r.pipeline.load().0.clone())
+        self.routes
+            .get(route_id)
+            .map(|r| r.pipeline.load().0.clone())
     }
 
     /// Internal stop implementation that can set custom status.
@@ -717,8 +725,8 @@ mod tests {
         ));
         controller.set_self_ref(controller_arc);
 
-        let definition = crate::route::RouteDefinition::new("timer:tick", vec![])
-            .with_route_id("swap-test");
+        let definition =
+            crate::route::RouteDefinition::new("timer:tick", vec![]).with_route_id("swap-test");
         controller.add_route(definition).unwrap();
 
         // Swap pipeline should succeed
@@ -743,17 +751,21 @@ mod tests {
         ));
         controller.set_self_ref(controller_arc);
 
-        let definition =
-            crate::route::RouteDefinition::new("timer:tick", vec![]).with_route_id("duplicate-route");
+        let definition = crate::route::RouteDefinition::new("timer:tick", vec![])
+            .with_route_id("duplicate-route");
         assert!(controller.add_route(definition).is_ok());
 
         // Adding a route with the same ID should fail
-        let definition2 =
-            crate::route::RouteDefinition::new("timer:tock", vec![]).with_route_id("duplicate-route");
+        let definition2 = crate::route::RouteDefinition::new("timer:tock", vec![])
+            .with_route_id("duplicate-route");
         let result = controller.add_route(definition2);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("already exists"), "error should mention 'already exists', got: {}", err);
+        assert!(
+            err.contains("already exists"),
+            "error should mention 'already exists', got: {}",
+            err
+        );
     }
 
     #[tokio::test]

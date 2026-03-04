@@ -108,10 +108,7 @@ impl CamelContext {
     /// Add a route definition to this context.
     ///
     /// The route must have an ID. Steps are resolved immediately using registered components.
-    pub fn add_route_definition(
-        &mut self,
-        definition: RouteDefinition,
-    ) -> Result<(), CamelError> {
+    pub fn add_route_definition(&mut self, definition: RouteDefinition) -> Result<(), CamelError> {
         info!(from = definition.from_uri(), route_id = %definition.route_id(), "Adding route definition");
 
         self.route_controller
@@ -151,6 +148,7 @@ impl CamelContext {
     /// `startup_order` (lower values start first).
     pub async fn start(&mut self) -> Result<(), CamelError> {
         info!("Starting CamelContext");
+
         self.route_controller
             .lock()
             .await

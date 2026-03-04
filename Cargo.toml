@@ -8,6 +8,7 @@ members = [
     "crates/camel-support",
     "crates/camel-processor",
     "crates/camel-health",
+    "crates/camel-config",
     "crates/camel-dsl",
     "crates/camel-builder",
     "crates/camel-component",
@@ -48,6 +49,7 @@ members = [
     "examples/language-rhai",
     "examples/hot-reload",
     "examples/yaml-dsl",
+    "examples/config-basic",
     "examples/config-profiles",
 ]
 
@@ -106,3 +108,7 @@ uuid = { version = "1", features = ["v4"] }
 rhai = { version = "1", features = ["sync"] }
 arc-swap = "1"
 serde_yaml = "0.9"
+config = "0.14"
+glob = "0.3"
+
+camel-config = { path = "crates/camel-config", version = "0.2.0" }

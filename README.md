@@ -55,6 +55,7 @@ cargo run -p hello-world
 |-------|-------------|
 | `camel-api` | Core types: `Exchange`, `Message`, `CamelError`, `BoxProcessor`, `ProcessorFn` |
 | `camel-core` | Runtime: `CamelContext`, `Route`, `RouteDefinition`, `SequentialPipeline` |
+| `camel-config` | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns |
 | `camel-builder` | Fluent `RouteBuilder` API |
 | `camel-component` | `Component`, `Endpoint`, `Consumer` traits |
 | `camel-processor` | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody` + Tower `Layer` types |
@@ -205,6 +206,83 @@ RouteBuilder::from("timer:monitor")
 ```
 
 See `examples/lazy-route` for a complete example.
+
+## Configuration
+
+rust-camel supports external configuration via `Camel.toml` files using the `camel-config` crate:
+
+### Configuration File
+
+Create a `Camel.toml` file:
+
+```toml
+[default]
+routes = ["routes/**/*.yaml"]
+log_level = "INFO"
+
+[production]
+log_level = "ERROR"
+```
+
+### Loading Configuration
+
+```rust
+use camel_config::CamelConfig;
+use camel_core::CamelContext;
+use camel_timer::TimerComponent;
+use camel_log::LogComponent;
+
+// Load configuration
+let config = CamelConfig::from_file("Camel.toml")?;
+
+// Create context and register components
+let mut ctx = CamelContext::new();
+ctx.register_component(TimerComponent::new());
+ctx.register_component(LogComponent::new());
+
+// Load routes from discovered files
+let routes = config.load_routes()?;
+for route in routes {
+    ctx.add_route_definition(route)?;
+}
+
+ctx.start().await?;
+```
+
+### Route Files
+
+Create YAML route files:
+
+```yaml
+# routes/hello.yaml
+routes:
+  - id: "hello-timer"
+    from: "timer:tick?period=1000"
+    steps:
+      - to: "log:info"
+```
+
+### Environment Variables
+
+Override configuration with environment variables:
+
+```bash
+# Select profile
+export CAMEL_PROFILE=production
+
+# Override specific values
+export CAMEL_LOG_LEVEL=DEBUG
+export CAMEL_ROUTES_0="custom/*.yaml"
+```
+
+### Features
+
+- **Profile support**: Multiple environments in one file
+- **Route discovery**: Auto-load routes from glob patterns
+- **Environment overrides**: Override any value with `CAMEL_*` prefix
+- **Deep merging**: Nested configs merge properly
+
+See `docs/configuration.md` for full details.
 
 ## License
 

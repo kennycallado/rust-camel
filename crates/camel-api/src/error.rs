@@ -43,6 +43,9 @@ pub enum CamelError {
 
     #[error("Exchange stopped by Stop EIP")]
     Stopped,
+
+    #[error("Configuration error: {0}")]
+    Config(String),
 }
 
 impl From<std::io::Error> for CamelError {

@@ -289,7 +289,8 @@ impl RouteBuilder {
         }
         let route_id = self.route_id.ok_or_else(|| {
             CamelError::RouteError(
-                "route must have a 'route_id' — call .route_id(\"name\") on the builder".to_string(),
+                "route must have a 'route_id' — call .route_id(\"name\") on the builder"
+                    .to_string(),
             )
         })?;
         let definition = RouteDefinition::new(self.from_uri, self.steps);
@@ -1237,7 +1238,11 @@ mod tests {
             Err(e) => e.to_string(),
             Ok(_) => panic!("build() should fail without route_id"),
         };
-        assert!(err.contains("route_id"), "error should mention route_id, got: {}", err);
+        assert!(
+            err.contains("route_id"),
+            "error should mention route_id, got: {}",
+            err
+        );
     }
 
     #[test]

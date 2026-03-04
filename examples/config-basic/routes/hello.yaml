@@ -1,0 +1,6 @@
+routes:
+  - id: "hello-timer"
+    from: "timer:tick?period=2000&repeatCount=3"
+    steps:
+      - log: "Hello from config-loaded route!"
+      - to: "log:info"

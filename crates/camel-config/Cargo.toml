@@ -1,0 +1,30 @@
+[package]
+name = "camel-config"
+description = "Configuration and route discovery for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/camel-config"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-dsl.workspace = true
+camel-processor.workspace = true
+config = { workspace = true }
+glob = { workspace = true }
+serde = { workspace = true }
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml = "0.8"
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile = "3"
+camel-component-timer = { path = "../components/camel-timer" }
+camel-component-log = { path = "../components/camel-log" }
