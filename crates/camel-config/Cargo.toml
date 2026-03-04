@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 documentation = "https://docs.rs/camel-config"
-readme.workspace = true
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 
