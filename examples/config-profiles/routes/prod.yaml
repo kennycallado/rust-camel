@@ -1,0 +1,5 @@
+routes:
+  - id: "prod-route"
+    from: "timer:prod?period=5000&repeatCount=2"
+    steps:
+      - log: "PROD mode: less frequent polling"

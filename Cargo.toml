@@ -48,6 +48,7 @@ members = [
     "examples/language-rhai",
     "examples/hot-reload",
     "examples/yaml-dsl",
+    "examples/config-profiles",
 ]
 
 [workspace.package]

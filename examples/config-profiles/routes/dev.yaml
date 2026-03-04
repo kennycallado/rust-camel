@@ -1,0 +1,5 @@
+routes:
+  - id: "dev-route"
+    from: "timer:dev?period=1000&repeatCount=3"
+    steps:
+      - log: "DEV mode: frequent polling"
