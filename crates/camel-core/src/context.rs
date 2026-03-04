@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -14,14 +13,6 @@ use camel_language_api::LanguageError;
 use crate::registry::Registry;
 use crate::route::RouteDefinition;
 use crate::route_controller::DefaultRouteController;
-
-/// Counter for generating unique route IDs.
-static ROUTE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-/// Generate a unique route ID.
-fn generate_route_id() -> String {
-    format!("route-{}", ROUTE_ID_COUNTER.fetch_add(1, Ordering::SeqCst))
-}
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
 ///
@@ -116,18 +107,12 @@ impl CamelContext {
 
     /// Add a route definition to this context.
     ///
-    /// The route must have an ID. If None, one will be generated automatically.
-    /// Steps are resolved immediately using registered components.
+    /// The route must have an ID. Steps are resolved immediately using registered components.
     pub fn add_route_definition(
         &mut self,
-        mut definition: RouteDefinition,
+        definition: RouteDefinition,
     ) -> Result<(), CamelError> {
-        // Auto-generate route ID if not set
-        if definition.route_id().is_none() {
-            definition = definition.with_route_id(generate_route_id());
-        }
-
-        info!(from = definition.from_uri(), route_id = ?definition.route_id(), "Adding route definition");
+        info!(from = definition.from_uri(), route_id = %definition.route_id(), "Adding route definition");
 
         self.route_controller
             .try_lock()

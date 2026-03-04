@@ -140,8 +140,8 @@ pub struct RouteDefinition {
     /// User override for the consumer's concurrency model. `None` means
     /// "use whatever the consumer declares".
     pub(crate) concurrency: Option<ConcurrencyModel>,
-    /// Optional unique identifier for this route. If not set, one will be generated.
-    pub(crate) route_id: Option<String>,
+    /// Unique identifier for this route. Required.
+    pub(crate) route_id: String,
     /// Whether this route should start automatically when the context starts.
     pub(crate) auto_startup: bool,
     /// Order in which routes are started. Lower values start first.
@@ -149,7 +149,7 @@ pub struct RouteDefinition {
 }
 
 impl RouteDefinition {
-    /// Create a new route definition.
+    /// Create a new route definition with the required route ID.
     pub fn new(from_uri: impl Into<String>, steps: Vec<BuilderStep>) -> Self {
         Self {
             from_uri: from_uri.into(),
@@ -157,7 +157,7 @@ impl RouteDefinition {
             error_handler: None,
             circuit_breaker: None,
             concurrency: None,
-            route_id: None,
+            route_id: String::new(), // Will be set by with_route_id()
             auto_startup: true,
             startup_order: 1000,
         }
@@ -201,9 +201,9 @@ impl RouteDefinition {
         self
     }
 
-    /// Get the route ID, if explicitly set.
-    pub fn route_id(&self) -> Option<&str> {
-        self.route_id.as_deref()
+    /// Get the route ID.
+    pub fn route_id(&self) -> &str {
+        &self.route_id
     }
 
     /// Whether this route should start automatically when the context starts.
@@ -218,7 +218,7 @@ impl RouteDefinition {
 
     /// Set a unique identifier for this route.
     pub fn with_route_id(mut self, id: impl Into<String>) -> Self {
-        self.route_id = Some(id.into());
+        self.route_id = id.into();
         self
     }
 
@@ -252,15 +252,15 @@ impl RouteDefinition {
 /// (which contains non-Sync types and cannot be stored in a Sync struct).
 #[derive(Clone)]
 pub struct RouteDefinitionInfo {
-    route_id: Option<String>,
+    route_id: String,
     auto_startup: bool,
     startup_order: i32,
 }
 
 impl RouteDefinitionInfo {
-    /// Get the route ID, if explicitly set.
-    pub fn route_id(&self) -> Option<&str> {
-        self.route_id.as_deref()
+    /// Get the route ID.
+    pub fn route_id(&self) -> &str {
+        &self.route_id
     }
 
     /// Whether this route should start automatically when the context starts.
@@ -433,8 +433,9 @@ mod tests {
 
     #[test]
     fn test_route_definition_defaults() {
-        let def = RouteDefinition::new("direct:test", vec![]);
-        assert_eq!(def.route_id(), None);
+        let def = RouteDefinition::new("direct:test", vec![])
+            .with_route_id("test-route");
+        assert_eq!(def.route_id(), "test-route");
         assert!(def.auto_startup());
         assert_eq!(def.startup_order(), 1000);
     }
@@ -445,7 +446,7 @@ mod tests {
             .with_route_id("my-route")
             .with_auto_startup(false)
             .with_startup_order(50);
-        assert_eq!(def.route_id(), Some("my-route"));
+        assert_eq!(def.route_id(), "my-route");
         assert!(!def.auto_startup());
         assert_eq!(def.startup_order(), 50);
     }

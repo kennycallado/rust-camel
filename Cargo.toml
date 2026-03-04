@@ -46,6 +46,8 @@ members = [
     "examples/controlbus",
     "examples/language-simple",
     "examples/language-rhai",
+    "examples/hot-reload",
+    "examples/yaml-dsl",
 ]
 
 [workspace.package]
@@ -101,3 +103,5 @@ http = "1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 rhai = { version = "1", features = ["sync"] }
+arc-swap = "1"
+serde_yaml = "0.9"

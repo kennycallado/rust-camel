@@ -287,6 +287,11 @@ impl RouteBuilder {
                 "route must have a 'from' URI".to_string(),
             ));
         }
+        let route_id = self.route_id.ok_or_else(|| {
+            CamelError::RouteError(
+                "route must have a 'route_id' — call .route_id(\"name\") on the builder".to_string(),
+            )
+        })?;
         let definition = RouteDefinition::new(self.from_uri, self.steps);
         let definition = if let Some(eh) = self.error_handler {
             definition.with_error_handler(eh)
@@ -303,11 +308,7 @@ impl RouteBuilder {
         } else {
             definition
         };
-        let definition = if let Some(id) = self.route_id {
-            definition.with_route_id(id)
-        } else {
-            definition
-        };
+        let definition = definition.with_route_id(route_id);
         let definition = if let Some(auto) = self.auto_startup {
             definition.with_auto_startup(auto)
         } else {
@@ -586,19 +587,23 @@ mod tests {
 
     #[test]
     fn test_builder_from_creates_definition() {
-        let definition = RouteBuilder::from("timer:tick").build().unwrap();
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .build()
+            .unwrap();
         assert_eq!(definition.from_uri(), "timer:tick");
     }
 
     #[test]
     fn test_builder_empty_from_uri_errors() {
-        let result = RouteBuilder::from("").build();
+        let result = RouteBuilder::from("").route_id("test-route").build();
         assert!(result.is_err());
     }
 
     #[test]
     fn test_builder_to_adds_step() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .to("log:info")
             .build()
             .unwrap();
@@ -611,6 +616,7 @@ mod tests {
     #[test]
     fn test_builder_filter_adds_filter_step() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .filter(|_ex| true)
             .to("mock:result")
             .end_filter()
@@ -623,6 +629,7 @@ mod tests {
     #[test]
     fn test_builder_set_header_adds_processor_step() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .set_header("key", Value::String("value".into()))
             .build()
             .unwrap();
@@ -633,6 +640,7 @@ mod tests {
     #[test]
     fn test_builder_map_body_adds_processor_step() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .map_body(|body| body)
             .build()
             .unwrap();
@@ -643,6 +651,7 @@ mod tests {
     #[test]
     fn test_builder_process_adds_processor_step() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .process(|ex| async move { Ok(ex) })
             .build()
             .unwrap();
@@ -653,6 +662,7 @@ mod tests {
     #[test]
     fn test_builder_chain_multiple_steps() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .set_header("source", Value::String("timer".into()))
             .filter(|ex| ex.input.header("source").is_some())
             .to("log:info")
@@ -789,6 +799,7 @@ mod tests {
 
         let config = CircuitBreakerConfig::new().failure_threshold(5);
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .circuit_breaker(config)
             .build()
             .unwrap();
@@ -808,6 +819,7 @@ mod tests {
         let eh_config = ErrorHandlerConfig::log_only();
 
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .to("log:info")
             .circuit_breaker(cb_config)
             .error_handler(eh_config)
@@ -829,6 +841,7 @@ mod tests {
 
         // .split() returns SplitBuilder, .end_split() returns RouteBuilder
         let definition = RouteBuilder::from("timer:test?period=1000")
+            .route_id("test-route")
             .split(SplitterConfig::new(split_body_lines()))
             .to("mock:per-fragment")
             .end_split()
@@ -845,6 +858,7 @@ mod tests {
         use camel_api::splitter::{SplitterConfig, split_body_lines};
 
         let definition = RouteBuilder::from("timer:test?period=1000")
+            .route_id("test-route")
             .split(SplitterConfig::new(split_body_lines()))
             .set_header("fragment", Value::String("yes".into()))
             .to("mock:per-fragment")
@@ -867,6 +881,7 @@ mod tests {
         use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 
         let definition = RouteBuilder::from("timer:test?period=1000")
+            .route_id("test-route")
             .split(
                 SplitterConfig::new(split_body_lines())
                     .parallel(true)
@@ -897,6 +912,7 @@ mod tests {
         use camel_core::route::BuilderStep;
 
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .aggregate(
                 AggregatorConfig::correlate_by("key")
                     .complete_when_size(2)
@@ -919,6 +935,7 @@ mod tests {
         use camel_core::route::BuilderStep;
 
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .split(SplitterConfig::new(split_body_lines()))
             .aggregate(
                 AggregatorConfig::correlate_by("key")
@@ -942,6 +959,7 @@ mod tests {
     #[test]
     fn test_builder_set_body_static_adds_processor() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .set_body("fixed")
             .build()
             .unwrap();
@@ -951,6 +969,7 @@ mod tests {
     #[test]
     fn test_builder_set_body_fn_adds_processor() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .set_body_fn(|_ex: &Exchange| Body::Text("dynamic".into()))
             .build()
             .unwrap();
@@ -960,6 +979,7 @@ mod tests {
     #[test]
     fn test_builder_set_header_fn_adds_processor() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .set_header_fn("k", |_ex: &Exchange| Value::String("v".into()))
             .build()
             .unwrap();
@@ -970,6 +990,7 @@ mod tests {
     async fn test_set_body_static_processor_works() {
         use camel_core::route::compose_pipeline;
         let def = RouteBuilder::from("t:t")
+            .route_id("test-route")
             .set_body("replaced")
             .build()
             .unwrap();
@@ -994,6 +1015,7 @@ mod tests {
     async fn test_set_body_fn_processor_works() {
         use camel_core::route::compose_pipeline;
         let def = RouteBuilder::from("t:t")
+            .route_id("test-route")
             .set_body_fn(|ex: &Exchange| {
                 Body::Text(ex.input.body.as_text().unwrap_or("").to_uppercase())
             })
@@ -1020,6 +1042,7 @@ mod tests {
     async fn test_set_header_fn_processor_works() {
         use camel_core::route::compose_pipeline;
         let def = RouteBuilder::from("t:t")
+            .route_id("test-route")
             .set_header_fn("echo", |ex: &Exchange| {
                 ex.input
                     .body
@@ -1054,6 +1077,7 @@ mod tests {
     #[test]
     fn test_filter_builder_typestate() {
         let result = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+            .route_id("test-route")
             .filter(|_ex| true)
             .to("mock:inner")
             .end_filter()
@@ -1065,6 +1089,7 @@ mod tests {
     #[test]
     fn test_filter_builder_steps_collected() {
         let definition = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+            .route_id("test-route")
             .filter(|_ex| true)
             .to("mock:inner")
             .end_filter()
@@ -1078,6 +1103,7 @@ mod tests {
     #[test]
     fn test_wire_tap_builder_adds_step() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .wire_tap("mock:tap")
             .to("mock:result")
             .build()
@@ -1095,6 +1121,7 @@ mod tests {
     #[test]
     fn test_multicast_builder_typestate() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .multicast()
             .to("direct:a")
             .to("direct:b")
@@ -1109,6 +1136,7 @@ mod tests {
     #[test]
     fn test_multicast_builder_steps_collected() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .multicast()
             .to("direct:a")
             .to("direct:b")
@@ -1131,6 +1159,7 @@ mod tests {
         use camel_component::ConcurrencyModel;
 
         let definition = RouteBuilder::from("http://0.0.0.0:8080/test")
+            .route_id("test-route")
             .concurrent(16)
             .to("log:info")
             .build()
@@ -1147,6 +1176,7 @@ mod tests {
         use camel_component::ConcurrencyModel;
 
         let definition = RouteBuilder::from("http://0.0.0.0:8080/test")
+            .route_id("test-route")
             .concurrent(0)
             .to("log:info")
             .build()
@@ -1163,6 +1193,7 @@ mod tests {
         use camel_component::ConcurrencyModel;
 
         let definition = RouteBuilder::from("http://0.0.0.0:8080/test")
+            .route_id("test-route")
             .sequential()
             .to("log:info")
             .build()
@@ -1177,6 +1208,7 @@ mod tests {
     #[test]
     fn test_builder_default_concurrency_is_none() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .to("log:info")
             .build()
             .unwrap();
@@ -1193,12 +1225,25 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(definition.route_id(), Some("my-route"));
+        assert_eq!(definition.route_id(), "my-route");
+    }
+
+    #[test]
+    fn test_build_without_route_id_fails() {
+        let result = RouteBuilder::from("timer:tick?period=1000")
+            .to("log:info")
+            .build();
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("build() should fail without route_id"),
+        };
+        assert!(err.contains("route_id"), "error should mention route_id, got: {}", err);
     }
 
     #[test]
     fn test_builder_auto_startup_false() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .auto_startup(false)
             .build()
             .unwrap();
@@ -1209,6 +1254,7 @@ mod tests {
     #[test]
     fn test_builder_startup_order_custom() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .startup_order(50)
             .build()
             .unwrap();
@@ -1218,9 +1264,12 @@ mod tests {
 
     #[test]
     fn test_builder_defaults() {
-        let definition = RouteBuilder::from("timer:tick").build().unwrap();
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .build()
+            .unwrap();
 
-        assert_eq!(definition.route_id(), None);
+        assert_eq!(definition.route_id(), "test-route");
         assert!(definition.auto_startup());
         assert_eq!(definition.startup_order(), 1000);
     }
@@ -1230,6 +1279,7 @@ mod tests {
     #[test]
     fn test_choice_builder_single_when() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .choice()
             .when(|ex: &Exchange| ex.input.header("type").is_some())
             .to("mock:typed")
@@ -1247,6 +1297,7 @@ mod tests {
     #[test]
     fn test_choice_builder_when_otherwise() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .choice()
             .when(|ex: &Exchange| ex.input.header("a").is_some())
             .to("mock:a")
@@ -1266,6 +1317,7 @@ mod tests {
     #[test]
     fn test_choice_builder_multiple_whens() {
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .choice()
             .when(|ex: &Exchange| ex.input.header("a").is_some())
             .to("mock:a")
@@ -1286,6 +1338,7 @@ mod tests {
     fn test_choice_step_after_choice() {
         // Steps after end_choice() are added to the outer pipeline, not inside choice.
         let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
             .choice()
             .when(|_ex: &Exchange| true)
             .to("mock:inner")

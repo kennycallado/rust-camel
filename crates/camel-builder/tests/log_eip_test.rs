@@ -24,6 +24,7 @@ async fn test_log_eip_with_timer() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:log-test?period=50&repeatCount=1")
+        .route_id("log-eip-timer-route")
         .log("Starting processing", LogLevel::Info)
         .log("Debug message", LogLevel::Debug)
         .process(|mut ex: camel_api::Exchange| async move {
@@ -63,6 +64,7 @@ async fn test_log_eip_with_direct() {
 
     // Route 1: Timer triggers and sends to direct:process
     let trigger_route = RouteBuilder::from("timer:trigger?period=50&repeatCount=1")
+        .route_id("trigger-route")
         .set_header("source", Value::String("timer".into()))
         .to("direct:process")
         .build()
@@ -70,6 +72,7 @@ async fn test_log_eip_with_direct() {
 
     // Route 2: Direct endpoint processes with logging
     let process_route = RouteBuilder::from("direct:process")
+        .route_id("process-route")
         .log("Starting processing in direct route", LogLevel::Info)
         .log("Processing exchange", LogLevel::Debug)
         .process(|mut ex: camel_api::Exchange| async move {
@@ -115,6 +118,7 @@ async fn test_log_eip_in_filter_scope() {
     let counter_clone = std::sync::Arc::clone(&counter);
 
     let route = RouteBuilder::from("timer:filter-log?period=50&repeatCount=2")
+        .route_id("filter-log-route")
         .process(move |mut ex: camel_api::Exchange| {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
@@ -172,6 +176,7 @@ async fn test_log_eip_in_split_scope() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:split-log?period=50&repeatCount=1")
+        .route_id("split-log-route")
         .process(|mut ex: camel_api::Exchange| async move {
             ex.input.body = Body::Text("line1\nline2\nline3".to_string());
             Ok(ex)
@@ -215,6 +220,7 @@ async fn test_log_eip_multiple_levels() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:levels?period=50&repeatCount=1")
+        .route_id("levels-route")
         .log("Trace level message", LogLevel::Trace)
         .log("Debug level message", LogLevel::Debug)
         .log("Info level message", LogLevel::Info)

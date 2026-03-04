@@ -60,6 +60,7 @@ fn create_health_route(
     request_count: Arc<AtomicU64>,
 ) -> Result<RouteDefinition, CamelError> {
     RouteBuilder::from("http://0.0.0.0:8080/health")
+        .route_id("health-check")
         .to("log:health?showHeaders=true&showBody=true&showCorrelationId=true")
         .process(move |mut exchange| {
             let storage = Arc::clone(&storage);
@@ -92,6 +93,7 @@ fn create_list_users_route(
     request_count: Arc<AtomicU64>,
 ) -> Result<RouteDefinition, CamelError> {
     RouteBuilder::from("http://0.0.0.0:8080/api/users")
+        .route_id("list-users")
         .process(move |mut exchange| {
             let storage = Arc::clone(&storage);
             let rc = Arc::clone(&request_count);
@@ -119,6 +121,7 @@ fn create_user_route(
     request_count: Arc<AtomicU64>,
 ) -> Result<RouteDefinition, CamelError> {
     RouteBuilder::from("http://0.0.0.0:8080/api/users/create")
+        .route_id("create-user")
         .log("Received create user request", LogLevel::Info)
         .process(move |mut exchange| {
             let storage = Arc::clone(&storage);
@@ -176,6 +179,7 @@ fn get_user_route(
     request_count: Arc<AtomicU64>,
 ) -> Result<RouteDefinition, CamelError> {
     RouteBuilder::from("http://0.0.0.0:8080/api/users/id")
+        .route_id("get-user")
         .process(move |mut exchange| {
             let storage = Arc::clone(&storage);
             let rc = Arc::clone(&request_count);
@@ -214,6 +218,7 @@ fn update_user_route(
     request_count: Arc<AtomicU64>,
 ) -> Result<RouteDefinition, CamelError> {
     RouteBuilder::from("http://0.0.0.0:8080/api/users/update")
+        .route_id("update-user")
         .process(move |mut exchange| {
             let storage = Arc::clone(&storage);
             let rc = Arc::clone(&request_count);
@@ -293,6 +298,7 @@ fn delete_user_route(
     request_count: Arc<AtomicU64>,
 ) -> Result<RouteDefinition, CamelError> {
     RouteBuilder::from("http://0.0.0.0:8080/api/users/delete")
+        .route_id("delete-user")
         .process(move |mut exchange| {
             let storage = Arc::clone(&storage);
             let rc = Arc::clone(&request_count);

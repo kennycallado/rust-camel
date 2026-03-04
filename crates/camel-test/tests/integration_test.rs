@@ -29,6 +29,7 @@ async fn test_timer_to_mock() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
+        .route_id("test-route-1")
         .to("mock:result")
         .build()
         .unwrap();
@@ -71,6 +72,7 @@ async fn test_timer_filter_mock() {
     // Timer fires 4 times (counters 1, 2, 3, 4), but only even counters
     // (2, 4) pass the filter, so only 2 exchanges reach mock:result.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .route_id("test-route-2")
         .filter(|ex| {
             ex.input
                 .header("CamelTimerCounter")
@@ -127,6 +129,7 @@ async fn test_filter_matching_exchanges_reach_inner_mock() {
     let counter_clone = std::sync::Arc::clone(&counter);
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .route_id("test-route-3")
         .process(move |mut ex: camel_api::Exchange| {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
@@ -167,6 +170,7 @@ async fn test_filter_non_matching_continue_outer_pipeline() {
     let counter_clone = std::sync::Arc::clone(&counter);
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .route_id("test-route-4")
         .process(move |mut ex: camel_api::Exchange| {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
@@ -208,6 +212,7 @@ async fn test_timer_set_header_mock() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
+        .route_id("test-route-5")
         .set_header("environment", Value::String("test".into()))
         .set_header("version", Value::Number(1.into()))
         .to("mock:result")
@@ -254,6 +259,7 @@ async fn test_timer_to_log() {
     ctx.register_component(LogComponent::new());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=2")
+        .route_id("test-route-6")
         .set_header("source", Value::String("integration-test".into()))
         .to("log:test?showHeaders=true")
         .build()
@@ -279,12 +285,14 @@ async fn test_multiple_routes() {
     ctx.register_component(mock.clone());
 
     let route_a = RouteBuilder::from("timer:routeA?period=50&repeatCount=2")
+        .route_id("test-route-7")
         .set_header("route", Value::String("A".into()))
         .to("mock:resultA")
         .build()
         .unwrap();
 
     let route_b = RouteBuilder::from("timer:routeB?period=50&repeatCount=3")
+        .route_id("test-route-8")
         .set_header("route", Value::String("B".into()))
         .to("mock:resultB")
         .build()
@@ -348,6 +356,7 @@ async fn test_dlc_receives_failed_exchange() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-9")
         .process_fn(failing_step("intentional"))
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:dlc"))
         .build()
@@ -398,6 +407,7 @@ async fn test_retry_recovers_before_dlc() {
         .build();
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-10")
         .process_fn(processor)
         .error_handler(eh)
         .build()
@@ -433,6 +443,7 @@ async fn test_on_exception_handled_by_specific_endpoint() {
         .build();
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-11")
         .process_fn(failing_step("processor error"))
         .error_handler(eh)
         .build()
@@ -469,6 +480,7 @@ async fn test_global_error_handler_fallback() {
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-12")
         .process_fn(failing_step("global test"))
         .build()
         .unwrap();
@@ -498,6 +510,7 @@ async fn test_per_route_overrides_global() {
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-13")
         .process_fn(failing_step("per-route test"))
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:route-dlc"))
         .build()
@@ -535,6 +548,7 @@ async fn test_direct_error_bubbles_to_caller() {
 
     // Subroute: direct:sub → failing processor (no error handler).
     let sub_route = RouteBuilder::from("direct:sub")
+        .route_id("test-route-14")
         .process_fn(failing_step("subroute failure"))
         .build()
         .unwrap();
@@ -542,6 +556,7 @@ async fn test_direct_error_bubbles_to_caller() {
 
     // Calling route: timer → direct:sub → DLC catches the bubble.
     let main_route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-15")
         .to("direct:sub")
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:caller-dlc"))
         .build()
@@ -575,6 +590,7 @@ async fn test_direct_error_contained_in_subroute() {
 
     // Subroute has its own DLC → absorbs the error.
     let sub_route = RouteBuilder::from("direct:sub2")
+        .route_id("test-route-16")
         .process_fn(failing_step("contained failure"))
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:sub-dlc"))
         .build()
@@ -583,6 +599,7 @@ async fn test_direct_error_contained_in_subroute() {
 
     // Calling route continues after subroute (error was absorbed).
     let main_route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-17")
         .to("direct:sub2")
         .to("mock:caller-received")
         .build()
@@ -612,6 +629,7 @@ async fn test_no_error_handler_logs_and_continues() {
     ctx.register_component(TimerComponent::new());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
+        .route_id("test-route-18")
         .process_fn(failing_step("no handler"))
         .build()
         .unwrap();
@@ -650,6 +668,7 @@ async fn test_circuit_breaker_with_error_handler() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=5")
+        .route_id("test-route-19")
         .process_fn(failing_step("cb test failure"))
         .circuit_breaker(
             CircuitBreakerConfig::new()
@@ -713,6 +732,7 @@ async fn test_split_with_timer_and_mock() {
     // Split by lines, each fragment goes to mock:per-line
     // After split, aggregated result goes to mock:final
     let route = RouteBuilder::from("timer:split-test?period=100&repeatCount=1")
+        .route_id("test-route-20")
         .process(|mut ex: camel_api::Exchange| async move {
             ex.input.body = camel_api::body::Body::Text("line1\nline2\nline3".to_string());
             Ok(ex)
@@ -773,6 +793,7 @@ async fn test_split_with_error_handler() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:split-err?period=100&repeatCount=1")
+        .route_id("test-route-21")
         .process(|mut ex: camel_api::Exchange| async move {
             ex.input.body = camel_api::body::Body::Text("a\nb".to_string());
             Ok(ex)
@@ -829,6 +850,7 @@ async fn test_file_consumer_to_mock() {
     let route = RouteBuilder::from(&format!(
         "file:{dir_path}?noop=true&initialDelay=0&delay=100"
     ))
+    .route_id("test-file-consumer")
     .to("mock:result")
     .build()
     .unwrap();
@@ -867,6 +889,7 @@ async fn test_timer_to_file_producer() {
     ctx.register_component(FileComponent::new());
 
     let route = RouteBuilder::from("timer:write-test?period=50&repeatCount=2")
+        .route_id("test-route-22")
         .set_header("CamelFileName", Value::String("output.txt".into()))
         .to(format!("file:{dir_path}?fileExist=Append"))
         .build()
@@ -903,6 +926,7 @@ async fn test_file_to_file_pipeline() {
     let route = RouteBuilder::from(&format!(
         "file:{input_path}?noop=true&initialDelay=0&delay=100"
     ))
+    .route_id("test-file-pipeline")
     .to(format!("file:{output_path}"))
     .build()
     .unwrap();
@@ -1021,6 +1045,7 @@ async fn test_http_get_e2e() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-23")
         .to(&http_uri)
         .to("mock:result")
         .build()
@@ -1084,6 +1109,7 @@ async fn test_http_post_with_body_e2e() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-24")
         .map_body(|_body| camel_api::body::Body::Text("payload-from-camel".into()))
         .to(&http_uri)
         .to("mock:result")
@@ -1150,6 +1176,7 @@ async fn test_http_response_headers_mapped_e2e() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-25")
         .to(&http_uri)
         .to("mock:result")
         .build()
@@ -1208,6 +1235,7 @@ async fn test_http_error_handling_e2e() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-26")
         .to(&http_uri)
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:dlc"))
         .to("mock:result")
@@ -1262,6 +1290,7 @@ async fn test_aggregator_collect_all() {
     let counter_clone = std::sync::Arc::clone(&counter);
 
     let route = RouteBuilder::from("timer:agg-test?period=1&repeatCount=9")
+        .route_id("test-route-27")
         .process(move |mut ex: camel_api::Exchange| {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
@@ -1338,6 +1367,7 @@ async fn test_aggregator_custom_strategy() {
         });
 
     let route = RouteBuilder::from("timer:agg-custom?period=1&repeatCount=4")
+        .route_id("test-route-28")
         .process(move |mut ex: camel_api::Exchange| {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
@@ -1398,6 +1428,7 @@ async fn test_aggregator_scatter_gather() {
     // The aggregator groups by CamelTimerName (all 3 share key "scatter")
     // and emits when completionSize=3 is reached.
     let route = RouteBuilder::from("timer:scatter?period=10&repeatCount=3")
+        .route_id("test-route-29")
         .aggregate(
             AggregatorConfig::correlate_by("CamelTimerName")
                 .complete_when_size(3)
@@ -1444,6 +1475,7 @@ async fn test_route_set_body_static() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:set-body-static?period=50&repeatCount=1")
+        .route_id("test-route-30")
         .set_body("enriched")
         .to("mock:set-body-static")
         .build()
@@ -1480,6 +1512,7 @@ async fn test_route_set_body_fn() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:set-body-fn?period=50&repeatCount=1")
+        .route_id("test-route-31")
         // First set a known body so set_body_fn has something to read.
         .set_body("hello")
         .set_body_fn(|ex: &camel_api::Exchange| {
@@ -1519,6 +1552,7 @@ async fn test_route_set_header_fn() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:set-header-fn?period=50&repeatCount=1")
+        .route_id("test-route-32")
         // Set a known body first so set_header_fn can echo it.
         .set_body("ping")
         .set_header_fn("echo", |ex: &camel_api::Exchange| {
@@ -1577,6 +1611,7 @@ async fn test_http_query_params_forwarded_e2e() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("test-route-33")
         .to(&http_uri)
         .to("mock:result")
         .build()
@@ -1627,6 +1662,7 @@ async fn test_stop_inside_filter_prevents_outer_pipeline() {
     let counter_clone = std::sync::Arc::clone(&counter);
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .route_id("test-route-34")
         .process(move |mut ex: camel_api::Exchange| {
             let c = std::sync::Arc::clone(&counter_clone);
             async move {
@@ -1676,6 +1712,7 @@ async fn test_multicast_sends_to_multiple_endpoints() {
     // Multicast: timer → [mock:a, mock:b, mock:c] → mock:final
     // Each endpoint in the multicast should receive the exchange.
     let route = RouteBuilder::from("timer:multicast-test?period=50&repeatCount=1")
+        .route_id("test-route-35")
         .multicast()
         .to("mock:a")
         .to("mock:b")
@@ -1720,6 +1757,7 @@ async fn test_multicast_metadata_properties() {
 
     // Multicast with 3 endpoints - each should receive exchange with correct index
     let route = RouteBuilder::from("timer:multicast-meta?period=50&repeatCount=1")
+        .route_id("test-route-36")
         .multicast()
         .to("mock:meta-a")
         .to("mock:meta-b")
@@ -1789,6 +1827,7 @@ async fn test_multicast_parallel_collect_all() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:multicast-parallel?period=50&repeatCount=1")
+        .route_id("test-route-37")
         .multicast()
         .parallel(true)
         .aggregation(MulticastStrategy::CollectAll)
@@ -1836,6 +1875,7 @@ async fn test_http_concurrent_pipeline() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("http://0.0.0.0:18080/concurrent-test")
+        .route_id("test-route-38")
         .process(|ex| async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             Ok(ex)
@@ -1900,6 +1940,7 @@ async fn test_http_sequential_override() {
 
     // Same slow processor, but forced sequential via .sequential()
     let route = RouteBuilder::from("http://0.0.0.0:18081/sequential-test")
+        .route_id("test-route-39")
         .sequential()
         .process(|ex| async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1970,6 +2011,7 @@ async fn test_http_concurrent_with_semaphore_limit() {
 
     // Limit to 2 concurrent pipeline executions
     let route = RouteBuilder::from("http://0.0.0.0:18082/semaphore-test")
+        .route_id("test-route-40")
         .concurrent(2)
         .process(move |ex| {
             let peak = peak_clone.clone();
@@ -2040,6 +2082,7 @@ async fn test_http_concurrent_with_circuit_breaker() {
 
     // Use short open_duration (1s) so circuit closes quickly and requests can complete
     let route = RouteBuilder::from("http://0.0.0.0:18083/cb-test")
+        .route_id("test-route-41")
         .process_fn(failing_step("concurrent cb failure"))
         .circuit_breaker(
             CircuitBreakerConfig::new()
@@ -2128,6 +2171,7 @@ async fn test_http_concurrent_shutdown_drains_inflight() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("http://0.0.0.0:18084/shutdown-test")
+        .route_id("test-route-42")
         .process(|ex| async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
             Ok(ex)
@@ -2185,6 +2229,7 @@ async fn test_http_concurrent_error_propagation() {
     ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("http://0.0.0.0:18085/error-test")
+        .route_id("test-route-43")
         .process(|ex| async move {
             // Check query param "fail"
             let should_fail = ex
@@ -2271,6 +2316,7 @@ async fn test_choice_when_routes_matching_exchange() {
 
     // 4 ticks: counters 1,2,3,4. Even → mock:even, odd → mock:odd.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .route_id("test-route-44")
         .choice()
         .when(|ex| {
             ex.input
@@ -2316,6 +2362,7 @@ async fn test_choice_otherwise_fires_when_no_when_matches() {
     // Counter is always set — when predicate never true (impossible header).
     // All 3 ticks go to mock:fallback via otherwise.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
+        .route_id("test-route-45")
         .choice()
         .when(|ex| ex.input.header("nonexistent").is_some())
         .to("mock:never")
@@ -2353,6 +2400,7 @@ async fn test_choice_no_match_no_otherwise_continues() {
 
     // when predicate never true. No otherwise. Exchange continues to mock:after.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
+        .route_id("test-route-46")
         .choice()
         .when(|ex| ex.input.header("nonexistent").is_some())
         .to("mock:never")
@@ -2386,6 +2434,7 @@ async fn test_choice_short_circuits_first_match() {
 
     // Both whens always match (|_| true). First should always win.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
+        .route_id("test-route-47")
         .choice()
         .when(|_ex| true)
         .to("mock:first")

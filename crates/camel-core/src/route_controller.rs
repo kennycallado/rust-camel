@@ -22,12 +22,26 @@ use camel_processor::{ChoiceService, WhenClause};
 
 use crate::registry::Registry;
 use crate::route::{BuilderStep, RouteDefinition, RouteDefinitionInfo, compose_pipeline};
+use arc_swap::ArcSwap;
 
-/// A Sync-safe wrapper around BoxProcessor.
+/// Newtype to make BoxProcessor Sync-safe for ArcSwap.
 ///
-/// BoxProcessor (BoxCloneService) is Send but not Sync. By wrapping in Arc<Mutex>,
-/// we get both Send and Sync for storage in DefaultRouteController.
-type SyncPipeline = Arc<std::sync::Mutex<BoxProcessor>>;
+/// # Safety
+///
+/// BoxProcessor (BoxCloneService) is Send but not Sync because the inner
+/// Box<dyn CloneServiceInner> lacks a Sync bound. However:
+///
+/// 1. We ONLY access BoxProcessor via clone(), which is a read-only operation
+///    (creates a new boxed service from the inner clone).
+/// 2. The clone is owned by the calling thread and never shared.
+/// 3. ArcSwap guarantees we only get & references (no &mut).
+///
+/// Therefore, concurrent access to &BoxProcessor for cloning is safe because
+/// clone() does not mutate shared state and each thread gets an independent copy.
+pub(crate) struct SyncBoxProcessor(pub(crate) BoxProcessor);
+unsafe impl Sync for SyncBoxProcessor {}
+
+type SharedPipeline = Arc<ArcSwap<SyncBoxProcessor>>;
 
 /// Internal state for a managed route.
 struct ManagedRoute {
@@ -35,8 +49,8 @@ struct ManagedRoute {
     definition: RouteDefinitionInfo,
     /// Source endpoint URI.
     from_uri: String,
-    /// Resolved processor pipeline (wrapped for Sync).
-    pipeline: SyncPipeline,
+    /// Resolved processor pipeline (wrapped for atomic swap).
+    pipeline: SharedPipeline,
     /// Concurrency model override (if any).
     concurrency: Option<ConcurrencyModel>,
     /// Current lifecycle status.
@@ -251,14 +265,10 @@ impl DefaultRouteController {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The route doesn't have an ID
     /// - A route with the same ID already exists
     /// - Step resolution fails
     pub fn add_route(&mut self, definition: RouteDefinition) -> Result<(), CamelError> {
-        let route_id = definition
-            .route_id()
-            .ok_or_else(|| CamelError::RouteError("Route must have an ID".into()))?
-            .to_string();
+        let route_id = definition.route_id().to_string();
 
         if self.routes.contains_key(&route_id) {
             return Err(CamelError::RouteError(format!(
@@ -315,7 +325,7 @@ impl DefaultRouteController {
             ManagedRoute {
                 definition: definition_info,
                 from_uri,
-                pipeline: Arc::new(std::sync::Mutex::new(pipeline)),
+                pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(pipeline))),
                 concurrency,
                 status: RouteStatus::Stopped,
                 consumer_handle: None,
@@ -335,6 +345,34 @@ impl DefaultRouteController {
     /// Returns all route IDs.
     pub fn route_ids(&self) -> Vec<String> {
         self.routes.keys().cloned().collect()
+    }
+
+    /// Atomically swap the pipeline of a route.
+    ///
+    /// In-flight requests finish with the old pipeline (kept alive by Arc).
+    /// New requests immediately use the new pipeline.
+    pub fn swap_pipeline(&self, route_id: &str, new_pipeline: BoxProcessor) -> Result<(), CamelError> {
+        let managed = self
+            .routes
+            .get(route_id)
+            .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
+
+        managed.pipeline.store(Arc::new(SyncBoxProcessor(new_pipeline)));
+        info!(route_id = %route_id, "Pipeline swapped atomically");
+        Ok(())
+    }
+
+    /// Returns the from_uri of a route, if it exists.
+    pub fn route_from_uri(&self, route_id: &str) -> Option<&str> {
+        self.routes.get(route_id).map(|r| r.from_uri.as_str())
+    }
+
+    /// Get a clone of the current pipeline for a route.
+    ///
+    /// This is useful for testing and introspection.
+    /// Returns `None` if the route doesn't exist.
+    pub fn get_pipeline(&self, route_id: &str) -> Option<BoxProcessor> {
+        self.routes.get(route_id).map(|r| r.pipeline.load().0.clone())
     }
 
     /// Internal stop implementation that can set custom status.
@@ -484,13 +522,11 @@ impl RouteController for DefaultRouteController {
         let pipeline_handle = match effective_concurrency {
             ConcurrencyModel::Sequential => {
                 tokio::spawn(async move {
-                    // Clone pipeline from the Sync wrapper
-                    let mut pipeline = pipeline
-                        .lock()
-                        .expect("mutex poisoned: another thread panicked while holding this lock")
-                        .clone();
                     while let Some(envelope) = rx.recv().await {
                         let ExchangeEnvelope { exchange, reply_tx } = envelope;
+
+                        // Load current pipeline from ArcSwap (picks up hot-reloaded pipelines)
+                        let mut pipeline = pipeline.load().0.clone();
 
                         if let Err(e) = ready_with_backoff(&mut pipeline, &pipeline_cancel).await {
                             if let Some(tx) = reply_tx {
@@ -515,7 +551,7 @@ impl RouteController for DefaultRouteController {
                 tokio::spawn(async move {
                     while let Some(envelope) = rx.recv().await {
                         let ExchangeEnvelope { exchange, reply_tx } = envelope;
-                        let pipe_clone = Arc::clone(&pipeline);
+                        let pipe_ref = Arc::clone(&pipeline);
                         let sem = sem.clone();
                         let cancel = pipeline_cancel.clone();
                         tokio::spawn(async move {
@@ -525,8 +561,8 @@ impl RouteController for DefaultRouteController {
                                 None => None,
                             };
 
-                            // Clone pipeline from the Sync wrapper
-                            let mut pipe = pipe_clone.lock().expect("mutex poisoned: another thread panicked while holding this lock").clone();
+                            // Load current pipeline from ArcSwap
+                            let mut pipe = pipe_ref.load().0.clone();
 
                             // Wait for service ready with circuit breaker backoff
                             if let Err(e) = ready_with_backoff(&mut pipe, &cancel).await {
@@ -670,7 +706,34 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn test_add_route_requires_id() {
+    async fn test_swap_pipeline_updates_stored_pipeline() {
+        use camel_api::IdentityProcessor;
+
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let mut controller = DefaultRouteController::new(registry);
+
+        let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
+            DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
+        ));
+        controller.set_self_ref(controller_arc);
+
+        let definition = crate::route::RouteDefinition::new("timer:tick", vec![])
+            .with_route_id("swap-test");
+        controller.add_route(definition).unwrap();
+
+        // Swap pipeline should succeed
+        let new_pipeline = BoxProcessor::new(IdentityProcessor);
+        let result = controller.swap_pipeline("swap-test", new_pipeline);
+        assert!(result.is_ok());
+
+        // Swap on non-existent route should fail
+        let new_pipeline = BoxProcessor::new(IdentityProcessor);
+        let result = controller.swap_pipeline("nonexistent", new_pipeline);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_add_route_duplicate_id_fails() {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let mut controller = DefaultRouteController::new(registry);
 
@@ -680,9 +743,17 @@ mod tests {
         ));
         controller.set_self_ref(controller_arc);
 
-        let definition = crate::route::RouteDefinition::new("timer:tick", vec![]);
-        // RouteDefinition with no route_id should fail
-        assert!(controller.add_route(definition).is_err());
+        let definition =
+            crate::route::RouteDefinition::new("timer:tick", vec![]).with_route_id("duplicate-route");
+        assert!(controller.add_route(definition).is_ok());
+
+        // Adding a route with the same ID should fail
+        let definition2 =
+            crate::route::RouteDefinition::new("timer:tock", vec![]).with_route_id("duplicate-route");
+        let result = controller.add_route(definition2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("already exists"), "error should mention 'already exists', got: {}", err);
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 pub mod context;
 pub mod registry;
+pub mod reload;
 pub mod route;
 pub mod route_controller;
 
