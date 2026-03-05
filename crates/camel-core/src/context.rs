@@ -31,6 +31,7 @@ pub struct CamelContext {
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsCollector>,
     languages: HashMap<String, Box<dyn Language>>,
+    shutdown_timeout: std::time::Duration,
 }
 
 impl CamelContext {
@@ -66,6 +67,7 @@ impl CamelContext {
             cancel_token: CancellationToken::new(),
             metrics,
             languages,
+            shutdown_timeout: std::time::Duration::from_secs(30),
         }
     }
 
@@ -109,6 +111,7 @@ impl CamelContext {
             cancel_token: CancellationToken::new(),
             metrics,
             languages,
+            shutdown_timeout: std::time::Duration::from_secs(30),
         }
     }
 
@@ -240,7 +243,7 @@ impl CamelContext {
 
     /// Graceful shutdown with default 30-second timeout.
     pub async fn stop(&mut self) -> Result<(), CamelError> {
-        self.stop_timeout(std::time::Duration::from_secs(30)).await
+        self.stop_timeout(self.shutdown_timeout).await
     }
 
     /// Graceful shutdown with custom timeout.
@@ -258,6 +261,16 @@ impl CamelContext {
 
         info!("CamelContext stopped");
         Ok(())
+    }
+
+    /// Get the graceful shutdown timeout used by [`stop()`](Self::stop).
+    pub fn shutdown_timeout(&self) -> std::time::Duration {
+        self.shutdown_timeout
+    }
+
+    /// Set the graceful shutdown timeout used by [`stop()`](Self::stop).
+    pub fn set_shutdown_timeout(&mut self, timeout: std::time::Duration) {
+        self.shutdown_timeout = timeout;
     }
 
     /// Immediate abort — kills all tasks without draining.

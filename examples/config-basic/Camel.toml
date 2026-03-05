@@ -2,6 +2,22 @@
 routes = ["routes/**/*.yaml"]
 log_level = "INFO"
 
+# Optional supervision configuration
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000
+
+# Optional tracing configuration
+[default.observability.tracer]
+enabled = true
+detail_level = "minimal"
+
+[default.observability.tracer.outputs.stdout]
+enabled = true
+format = "json"
+
 [development]
 log_level = "DEBUG"
 

@@ -1,5 +1,4 @@
 use camel_config::CamelConfig;
-use camel_core::RouteController;
 use std::fs;
 use tempfile::tempdir;
 
@@ -73,4 +72,71 @@ routes:
     assert!(status.is_some(), "Route should be loaded from config");
 
     ctx.stop().await.unwrap();
+}
+
+#[test]
+fn test_configure_context_with_supervision() {
+    let config = CamelConfig {
+        routes: vec![],
+        log_level: "INFO".to_string(),
+        timeout_ms: 5000,
+        components: Default::default(),
+        observability: Default::default(),
+        supervision: Some(camel_config::SupervisionCamelConfig {
+            max_attempts: Some(5),
+            initial_delay_ms: 1000,
+            backoff_multiplier: 2.0,
+            max_delay_ms: 60000,
+        }),
+    };
+
+    let result = CamelConfig::configure_context(&config);
+    assert!(result.is_ok(), "configure_context should succeed with supervision config");
+}
+
+#[test]
+fn test_configure_context_sets_shutdown_timeout() {
+    let config = CamelConfig {
+        routes: vec![],
+        log_level: "INFO".to_string(),
+        timeout_ms: 5000,
+        components: Default::default(),
+        observability: Default::default(),
+        supervision: None,
+    };
+
+    let ctx = CamelConfig::configure_context(&config).expect("configure_context should succeed");
+    
+    // Verify that the shutdown timeout is set correctly from timeout_ms
+    assert_eq!(ctx.shutdown_timeout(), std::time::Duration::from_millis(5000));
+}
+
+#[test]
+fn test_configure_context_with_valid_log_level() {
+    let config = CamelConfig {
+        routes: vec![],
+        log_level: "debug".to_string(),
+        timeout_ms: 5000,
+        components: Default::default(),
+        observability: Default::default(),
+        supervision: None,
+    };
+
+    let result = CamelConfig::configure_context(&config);
+    assert!(result.is_ok(), "configure_context should succeed with valid log level 'debug'");
+}
+
+#[test]
+fn test_configure_context_with_invalid_log_level() {
+    let config = CamelConfig {
+        routes: vec![],
+        log_level: "invalid_level".to_string(),
+        timeout_ms: 5000,
+        components: Default::default(),
+        observability: Default::default(),
+        supervision: None,
+    };
+
+    let result = CamelConfig::configure_context(&config);
+    assert!(result.is_ok(), "configure_context should succeed even with invalid log level (should default to INFO)");
 }

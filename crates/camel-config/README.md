@@ -111,12 +111,33 @@ connect_timeout_ms = 5000
 max_connections = 100
 
 [default.observability]
+# Metrics are reserved for future use - parsed but not implemented yet
 metrics_enabled = true
-tracing_enabled = false
+metrics_port = 9090
+
+[default.observability.tracer]
+enabled = true
+detail_level = "minimal"  # "minimal" | "medium" | "full"
+
+[default.observability.tracer.outputs.stdout]
+enabled = true
+format = "json"  # "json" | "plain"
+
+# Optional supervision configuration
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000
 
 [production]
 log_level = "ERROR"
 ```
+
+### Notes
+
+- **Metrics**: `metrics_enabled` and `metrics_port` under `[observability]` are reserved for future use. They are parsed but have no backing implementation yet.
+- **Components**: Configuration in `[components]` (timer/http settings) is parsed from config but NOT automatically applied to the context. Users must register components manually and can read component config via the `CamelConfig` struct if needed.
 
 ## Examples
 

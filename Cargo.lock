@@ -2940,8 +2940,10 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 name = "showcase"
 version = "0.2.1"
 dependencies = [
+ "async-trait",
  "camel-api",
  "camel-builder",
+ "camel-component",
  "camel-component-controlbus",
  "camel-component-direct",
  "camel-component-file",
