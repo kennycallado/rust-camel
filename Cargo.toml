@@ -51,6 +51,7 @@ members = [
     "examples/yaml-dsl",
     "examples/config-basic",
     "examples/config-profiles",
+    "examples/auto-restart",
 ]
 
 [workspace.package]

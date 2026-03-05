@@ -24,6 +24,18 @@ use crate::registry::Registry;
 use crate::route::{BuilderStep, RouteDefinition, RouteDefinitionInfo, compose_pipeline};
 use arc_swap::ArcSwap;
 
+/// Notification sent when a route crashes.
+///
+/// Used by [`SupervisingRouteController`](crate::supervising_route_controller::SupervisingRouteController)
+/// to monitor and restart failed routes.
+#[derive(Debug, Clone)]
+pub struct CrashNotification {
+    /// The ID of the crashed route.
+    pub route_id: String,
+    /// The error that caused the crash.
+    pub error: String,
+}
+
 /// Newtype to make BoxProcessor Sync-safe for ArcSwap.
 ///
 /// # Safety
@@ -43,6 +55,34 @@ unsafe impl Sync for SyncBoxProcessor {}
 
 type SharedPipeline = Arc<ArcSwap<SyncBoxProcessor>>;
 
+/// Internal trait extending [`RouteController`] with methods needed by [`CamelContext`]
+/// that are not part of the public lifecycle API.
+///
+/// Both [`DefaultRouteController`] and the future `SupervisingRouteController` implement
+/// this trait, allowing `CamelContext` to hold either as `Arc<Mutex<dyn RouteControllerInternal>>`.
+pub trait RouteControllerInternal: RouteController + Send {
+    /// Add a route definition to the controller.
+    fn add_route(&mut self, def: RouteDefinition) -> Result<(), CamelError>;
+
+    /// Atomically swap the pipeline of a running route (for hot-reload).
+    fn swap_pipeline(&self, route_id: &str, pipeline: BoxProcessor) -> Result<(), CamelError>;
+
+    /// Returns the `from_uri` of a route by ID.
+    fn route_from_uri(&self, route_id: &str) -> Option<String>;
+
+    /// Set a global error handler applied to all routes.
+    fn set_error_handler(&mut self, config: ErrorHandlerConfig);
+
+    /// Set the self-reference needed to create `ProducerContext`.
+    fn set_self_ref(&mut self, self_ref: Arc<Mutex<dyn RouteController>>);
+
+    /// Returns the number of routes in the controller.
+    fn route_count(&self) -> usize;
+
+    /// Returns all route IDs.
+    fn route_ids(&self) -> Vec<String>;
+}
+
 /// Internal state for a managed route.
 struct ManagedRoute {
     /// The route definition metadata (for introspection).
@@ -53,8 +93,8 @@ struct ManagedRoute {
     pipeline: SharedPipeline,
     /// Concurrency model override (if any).
     concurrency: Option<ConcurrencyModel>,
-    /// Current lifecycle status.
-    status: RouteStatus,
+    /// Shared lifecycle status — written by both the controller and spawned consumer tasks.
+    status: Arc<std::sync::Mutex<RouteStatus>>,
     /// Handle for the consumer task (if running).
     consumer_handle: Option<JoinHandle<()>>,
     /// Handle for the pipeline task (if running).
@@ -113,6 +153,8 @@ pub struct DefaultRouteController {
     self_ref: Option<Arc<Mutex<dyn RouteController>>>,
     /// Optional global error handler applied to all routes without a per-route handler.
     global_error_handler: Option<ErrorHandlerConfig>,
+    /// Optional crash notifier for supervision.
+    crash_notifier: Option<mpsc::Sender<CrashNotification>>,
 }
 
 impl DefaultRouteController {
@@ -123,6 +165,7 @@ impl DefaultRouteController {
             registry,
             self_ref: None,
             global_error_handler: None,
+            crash_notifier: None,
         }
     }
 
@@ -131,6 +174,22 @@ impl DefaultRouteController {
     /// This must be called after wrapping the controller in `Arc<Mutex<>>`.
     pub fn set_self_ref(&mut self, self_ref: Arc<Mutex<dyn RouteController>>) {
         self.self_ref = Some(self_ref);
+    }
+
+    /// Get the self-reference, if set.
+    ///
+    /// Used by [`SupervisingRouteController`](crate::supervising_route_controller::SupervisingRouteController)
+    /// to spawn the supervision loop.
+    pub fn self_ref_for_supervision(&self) -> Option<Arc<Mutex<dyn RouteController>>> {
+        self.self_ref.clone()
+    }
+
+    /// Set the crash notifier for supervision.
+    ///
+    /// When set, the controller will send a [`CrashNotification`] whenever
+    /// a consumer crashes.
+    pub fn set_crash_notifier(&mut self, tx: mpsc::Sender<CrashNotification>) {
+        self.crash_notifier = Some(tx);
     }
 
     /// Set a global error handler applied to all routes without a per-route handler.
@@ -327,7 +386,7 @@ impl DefaultRouteController {
                 from_uri,
                 pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(pipeline))),
                 concurrency,
-                status: RouteStatus::Stopped,
+                status: Arc::new(std::sync::Mutex::new(RouteStatus::Stopped)),
                 consumer_handle: None,
                 pipeline_handle: None,
                 cancel_token: CancellationToken::new(),
@@ -369,8 +428,8 @@ impl DefaultRouteController {
     }
 
     /// Returns the from_uri of a route, if it exists.
-    pub fn route_from_uri(&self, route_id: &str) -> Option<&str> {
-        self.routes.get(route_id).map(|r| r.from_uri.as_str())
+    pub fn route_from_uri(&self, route_id: &str) -> Option<String> {
+        self.routes.get(route_id).map(|r| r.from_uri.clone())
     }
 
     /// Get a clone of the current pipeline for a route.
@@ -390,13 +449,17 @@ impl DefaultRouteController {
             .get_mut(route_id)
             .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
 
-        let current_status = managed.status.clone();
+        let current_status = managed
+            .status
+            .lock()
+            .expect("status mutex poisoned")
+            .clone();
         if current_status != RouteStatus::Started && current_status != RouteStatus::Suspended {
             return Ok(()); // Already stopped or stopping
         }
 
         info!(route_id = %route_id, "Stopping route");
-        managed.status = RouteStatus::Stopping;
+        *managed.status.lock().expect("status mutex poisoned") = RouteStatus::Stopping;
 
         // Cancel the token to signal shutdown
         managed.cancel_token.cancel();
@@ -437,7 +500,7 @@ impl DefaultRouteController {
 
         // Create a fresh cancellation token for next start
         managed.cancel_token = CancellationToken::new();
-        managed.status = RouteStatus::Stopped;
+        *managed.status.lock().expect("status mutex poisoned") = RouteStatus::Stopped;
 
         info!(route_id = %route_id, "Route stopped");
         Ok(())
@@ -454,7 +517,12 @@ impl RouteController for DefaultRouteController {
                 .get_mut(route_id)
                 .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
 
-            match managed.status {
+            let current_status = managed
+                .status
+                .lock()
+                .expect("status mutex poisoned")
+                .clone();
+            match current_status {
                 RouteStatus::Started => return Ok(()), // Already running
                 RouteStatus::Starting => {
                     return Err(CamelError::RouteError(format!(
@@ -471,13 +539,13 @@ impl RouteController for DefaultRouteController {
                 }
                 RouteStatus::Suspended => {} // OK to resume
             }
-            managed.status = RouteStatus::Starting;
+            *managed.status.lock().expect("status mutex poisoned") = RouteStatus::Starting;
         }
 
         info!(route_id = %route_id, "Starting route");
 
         // Get the resolved route info
-        let (from_uri, pipeline, concurrency) = {
+        let (from_uri, pipeline, concurrency, status_for_consumer) = {
             let managed = self
                 .routes
                 .get(route_id)
@@ -486,8 +554,12 @@ impl RouteController for DefaultRouteController {
                 managed.from_uri.clone(),
                 Arc::clone(&managed.pipeline),
                 managed.concurrency.clone(),
+                Arc::clone(&managed.status),
             )
         };
+
+        // Clone crash notifier for consumer task
+        let crash_notifier = self.crash_notifier.clone();
 
         // Parse from URI and create consumer (lock registry for lookup)
         let parsed = parse_uri(&from_uri)?;
@@ -516,12 +588,25 @@ impl RouteController for DefaultRouteController {
         let child_token = managed.cancel_token.child_token();
         let consumer_ctx = ConsumerContext::new(tx, child_token.clone());
 
-        // Start consumer in background task
-        // TODO: Update route status to Failed when consumer crashes (requires Arc<Mutex<RouteStatus>> or channel)
+        // Start consumer in background task.
+        // Status is shared via Arc<Mutex<>> so the task can update it on crash.
         let route_id_for_consumer = route_id.to_string();
         let consumer_handle = tokio::spawn(async move {
             if let Err(e) = consumer.start(consumer_ctx).await {
                 error!(route_id = %route_id_for_consumer, "Consumer error: {e}");
+                let error_msg = e.to_string();
+                *status_for_consumer.lock().expect("status mutex poisoned") =
+                    RouteStatus::Failed(error_msg.clone());
+
+                // Send crash notification if notifier is configured
+                if let Some(tx) = crash_notifier {
+                    let _ = tx
+                        .send(CrashNotification {
+                            route_id: route_id_for_consumer.clone(),
+                            error: error_msg,
+                        })
+                        .await;
+                }
             }
         });
 
@@ -601,7 +686,12 @@ impl RouteController for DefaultRouteController {
             .expect("invariant: route must exist after prior existence check");
         managed.consumer_handle = Some(consumer_handle);
         managed.pipeline_handle = Some(pipeline_handle);
-        managed.status = RouteStatus::Started;
+        // Only mark as Started if consumer hasn't already crashed
+        let mut status_guard = managed.status.lock().expect("status mutex poisoned");
+        if !matches!(*status_guard, RouteStatus::Failed(_)) {
+            *status_guard = RouteStatus::Started;
+        }
+        drop(status_guard);
 
         info!(route_id = %route_id, "Route started");
         Ok(())
@@ -623,7 +713,7 @@ impl RouteController for DefaultRouteController {
             .routes
             .get_mut(route_id)
             .expect("invariant: route must exist after prior existence check");
-        managed.status = RouteStatus::Suspended;
+        *managed.status.lock().expect("status mutex poisoned") = RouteStatus::Suspended;
         info!(route_id = %route_id, "Route suspended");
         Ok(())
     }
@@ -633,7 +723,7 @@ impl RouteController for DefaultRouteController {
         let is_suspended = self
             .routes
             .get(route_id)
-            .map(|r| r.status == RouteStatus::Suspended)
+            .map(|r| *r.status.lock().expect("status mutex poisoned") == RouteStatus::Suspended)
             .unwrap_or(false);
 
         if !is_suspended {
@@ -647,7 +737,9 @@ impl RouteController for DefaultRouteController {
     }
 
     fn route_status(&self, route_id: &str) -> Option<RouteStatus> {
-        self.routes.get(route_id).map(|r| r.status.clone())
+        self.routes
+            .get(route_id)
+            .map(|r| r.status.lock().expect("status mutex poisoned").clone())
     }
 
     async fn start_all_routes(&mut self) -> Result<(), CamelError> {
@@ -708,10 +800,48 @@ impl RouteController for DefaultRouteController {
     }
 }
 
+impl RouteControllerInternal for DefaultRouteController {
+    fn add_route(&mut self, def: RouteDefinition) -> Result<(), CamelError> {
+        DefaultRouteController::add_route(self, def)
+    }
+
+    fn swap_pipeline(&self, route_id: &str, pipeline: BoxProcessor) -> Result<(), CamelError> {
+        DefaultRouteController::swap_pipeline(self, route_id, pipeline)
+    }
+
+    fn route_from_uri(&self, route_id: &str) -> Option<String> {
+        // Call the inherent method which now returns Option<String>
+        DefaultRouteController::route_from_uri(self, route_id)
+    }
+
+    fn set_error_handler(&mut self, config: ErrorHandlerConfig) {
+        DefaultRouteController::set_error_handler(self, config)
+    }
+
+    fn set_self_ref(&mut self, self_ref: Arc<Mutex<dyn RouteController>>) {
+        DefaultRouteController::set_self_ref(self, self_ref)
+    }
+
+    fn route_count(&self) -> usize {
+        DefaultRouteController::route_count(self)
+    }
+
+    fn route_ids(&self) -> Vec<String> {
+        DefaultRouteController::route_ids(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn test_route_controller_internal_is_object_safe() {
+        // Verifies the trait compiles as a trait object.
+        // If RouteControllerInternal is not object-safe, this test fails to compile.
+        let _: Option<Box<dyn RouteControllerInternal>> = None;
+    }
 
     #[tokio::test]
     async fn test_swap_pipeline_updates_stored_pipeline() {
@@ -783,5 +913,74 @@ mod tests {
             crate::route::RouteDefinition::new("timer:tick", vec![]).with_route_id("test-route");
         assert!(controller.add_route(definition).is_ok());
         assert_eq!(controller.route_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_crashed_consumer_sets_failed_status() {
+        use async_trait::async_trait;
+        use camel_api::{CamelError, RouteStatus};
+        use camel_component::{ConcurrencyModel, ConsumerContext, Endpoint};
+
+        struct CrashingConsumer;
+        #[async_trait]
+        impl camel_component::Consumer for CrashingConsumer {
+            async fn start(&mut self, _ctx: ConsumerContext) -> Result<(), CamelError> {
+                Err(CamelError::RouteError("boom".into()))
+            }
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                Ok(())
+            }
+            fn concurrency_model(&self) -> ConcurrencyModel {
+                ConcurrencyModel::Sequential
+            }
+        }
+        struct CrashingEndpoint;
+        impl Endpoint for CrashingEndpoint {
+            fn uri(&self) -> &str {
+                "crash:test"
+            }
+            fn create_consumer(&self) -> Result<Box<dyn camel_component::Consumer>, CamelError> {
+                Ok(Box::new(CrashingConsumer))
+            }
+            fn create_producer(
+                &self,
+                _ctx: &camel_api::ProducerContext,
+            ) -> Result<camel_api::BoxProcessor, CamelError> {
+                Err(CamelError::RouteError("no producer".into()))
+            }
+        }
+        struct CrashingComponent;
+        impl camel_component::Component for CrashingComponent {
+            fn scheme(&self) -> &str {
+                "crash"
+            }
+            fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+                let _ = uri; // satisfy unused variable warning
+                Ok(Box::new(CrashingEndpoint))
+            }
+        }
+
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        registry.lock().unwrap().register(CrashingComponent);
+        let mut controller = DefaultRouteController::new(Arc::clone(&registry));
+        let self_ref: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
+            DefaultRouteController::new(Arc::clone(&registry)),
+        ));
+        controller.set_self_ref(self_ref);
+
+        let def =
+            crate::route::RouteDefinition::new("crash:test", vec![]).with_route_id("crash-route");
+        controller.add_route(def).unwrap();
+        controller.start_route("crash-route").await.unwrap();
+
+        // Give consumer task time to crash and update status
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let status = controller.route_status("crash-route").unwrap();
+        assert!(
+            matches!(status, RouteStatus::Failed(_)),
+            "expected Failed, got {:?}",
+            status
+        );
     }
 }

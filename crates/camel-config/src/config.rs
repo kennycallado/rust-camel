@@ -1,6 +1,7 @@
 use config::{Config, ConfigError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::env;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CamelConfig {
@@ -18,6 +19,9 @@ pub struct CamelConfig {
 
     #[serde(default)]
     pub observability: ObservabilityConfig,
+
+    #[serde(default)]
+    pub supervision: Option<SupervisionCamelConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -59,6 +63,47 @@ pub struct ObservabilityConfig {
     pub tracing_endpoint: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SupervisionCamelConfig {
+    /// Maximum number of restart attempts. `None` means retry forever.
+    pub max_attempts: Option<u32>,
+
+    /// Delay before the first restart attempt in milliseconds.
+    #[serde(default = "default_initial_delay_ms")]
+    pub initial_delay_ms: u64,
+
+    /// Multiplier applied to the delay after each failed attempt.
+    #[serde(default = "default_backoff_multiplier")]
+    pub backoff_multiplier: f64,
+
+    /// Maximum delay cap between restart attempts in milliseconds.
+    #[serde(default = "default_max_delay_ms")]
+    pub max_delay_ms: u64,
+}
+
+impl Default for SupervisionCamelConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: Some(5),
+            initial_delay_ms: 1000,
+            backoff_multiplier: 2.0,
+            max_delay_ms: 60000,
+        }
+    }
+}
+
+impl SupervisionCamelConfig {
+    /// Convert to camel_api::SupervisionConfig
+    pub fn into_supervision_config(self) -> camel_api::SupervisionConfig {
+        camel_api::SupervisionConfig {
+            max_attempts: self.max_attempts,
+            initial_delay: Duration::from_millis(self.initial_delay_ms),
+            backoff_multiplier: self.backoff_multiplier,
+            max_delay: Duration::from_millis(self.max_delay_ms),
+        }
+    }
+}
+
 fn default_log_level() -> String {
     "INFO".to_string()
 }
@@ -79,6 +124,18 @@ fn default_metrics_port() -> u16 {
 }
 fn default_tracing_endpoint() -> String {
     "http://localhost:4317".to_string()
+}
+
+fn default_initial_delay_ms() -> u64 {
+    1000
+}
+
+fn default_backoff_multiplier() -> f64 {
+    2.0
+}
+
+fn default_max_delay_ms() -> u64 {
+    60000
 }
 
 /// Deep merge two TOML values

@@ -12,6 +12,7 @@ pub mod processor;
 pub mod producer;
 pub mod route_controller;
 pub mod splitter;
+pub mod supervision;
 pub mod value;
 
 // Re-export core types at crate root for convenience.
@@ -34,4 +35,5 @@ pub use splitter::{
     AggregationStrategy, SplitExpression, SplitterConfig, split_body, split_body_json_array,
     split_body_lines,
 };
+pub use supervision::SupervisionConfig;
 pub use value::{Headers, Value};

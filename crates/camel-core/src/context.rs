@@ -5,14 +5,17 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{CamelError, MetricsCollector, NoOpMetrics, RouteController, RouteStatus};
+use camel_api::{
+    CamelError, MetricsCollector, NoOpMetrics, RouteController, RouteStatus, SupervisionConfig,
+};
 use camel_component::Component;
 use camel_language_api::Language;
 use camel_language_api::LanguageError;
 
 use crate::registry::Registry;
 use crate::route::RouteDefinition;
-use crate::route_controller::DefaultRouteController;
+use crate::route_controller::{DefaultRouteController, RouteControllerInternal};
+use crate::supervising_route_controller::SupervisingRouteController;
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
 ///
@@ -23,7 +26,7 @@ use crate::route_controller::DefaultRouteController;
 /// stopped context is not supported — create a new instance instead.
 pub struct CamelContext {
     registry: Arc<std::sync::Mutex<Registry>>,
-    route_controller: Arc<Mutex<DefaultRouteController>>,
+    route_controller: Arc<Mutex<dyn RouteControllerInternal>>,
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsCollector>,
     languages: HashMap<String, Box<dyn Language>>,
@@ -38,11 +41,54 @@ impl CamelContext {
     /// Create a new CamelContext with a custom metrics collector.
     pub fn with_metrics(metrics: Arc<dyn MetricsCollector>) -> Self {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        let controller = Arc::new(Mutex::new(DefaultRouteController::new(Arc::clone(
-            &registry,
-        ))));
+        let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
+            DefaultRouteController::new(Arc::clone(&registry)),
+        ));
 
         // Set self-ref so DefaultRouteController can create ProducerContext
+        // Use try_lock since we just created it and nobody else has access yet
+        controller
+            .try_lock()
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
+            .set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
+
+        // Pre-register built-in languages
+        let mut languages: HashMap<String, Box<dyn Language>> = HashMap::new();
+        languages.insert(
+            "simple".to_string(),
+            Box::new(camel_language_simple::SimpleLanguage),
+        );
+
+        Self {
+            registry,
+            route_controller: controller,
+            cancel_token: CancellationToken::new(),
+            metrics,
+            languages,
+        }
+    }
+
+    /// Create a new CamelContext with route supervision enabled.
+    ///
+    /// The supervision config controls automatic restart behavior for crashed routes.
+    pub fn with_supervision(config: SupervisionConfig) -> Self {
+        Self::with_supervision_and_metrics(config, Arc::new(NoOpMetrics))
+    }
+
+    /// Create a new CamelContext with route supervision and custom metrics.
+    ///
+    /// The supervision config controls automatic restart behavior for crashed routes.
+    pub fn with_supervision_and_metrics(
+        config: SupervisionConfig,
+        metrics: Arc<dyn MetricsCollector>,
+    ) -> Self {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
+            SupervisingRouteController::new(Arc::clone(&registry), config)
+                .with_metrics(Arc::clone(&metrics)),
+        ));
+
+        // Set self-ref so SupervisingRouteController can create ProducerContext
         // Use try_lock since we just created it and nobody else has access yet
         controller
             .try_lock()
@@ -125,7 +171,7 @@ impl CamelContext {
     }
 
     /// Access the route controller.
-    pub fn route_controller(&self) -> &Arc<Mutex<DefaultRouteController>> {
+    pub fn route_controller(&self) -> &Arc<Mutex<dyn RouteControllerInternal>> {
         &self.route_controller
     }
 
