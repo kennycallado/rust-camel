@@ -1,3 +1,4 @@
+use camel_core::config::TracerConfig;
 use config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -48,7 +49,7 @@ pub struct HttpConfig {
     pub max_connections: usize,
 }
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ObservabilityConfig {
     #[serde(default)]
     pub metrics_enabled: bool,
@@ -57,10 +58,7 @@ pub struct ObservabilityConfig {
     pub metrics_port: u16,
 
     #[serde(default)]
-    pub tracing_enabled: bool,
-
-    #[serde(default = "default_tracing_endpoint")]
-    pub tracing_endpoint: String,
+    pub tracer: TracerConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -121,9 +119,6 @@ fn default_http_max_connections() -> usize {
 }
 fn default_metrics_port() -> u16 {
     9090
-}
-fn default_tracing_endpoint() -> String {
-    "http://localhost:4317".to_string()
 }
 
 fn default_initial_delay_ms() -> u64 {

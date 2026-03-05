@@ -141,6 +141,10 @@ impl RouteControllerInternal for SupervisingRouteController {
     fn route_ids(&self) -> Vec<String> {
         self.inner.route_ids()
     }
+
+    fn set_tracer_config(&mut self, config: &crate::config::TracerConfig) {
+        self.inner.set_tracer_config(config)
+    }
 }
 
 /// Supervision loop that restarts crashed routes.

@@ -20,8 +20,11 @@ use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::error_handler::ErrorHandlerLayer;
 use camel_processor::{ChoiceService, WhenClause};
 
+use crate::config::{DetailLevel, TracerConfig};
 use crate::registry::Registry;
-use crate::route::{BuilderStep, RouteDefinition, RouteDefinitionInfo, compose_pipeline};
+use crate::route::{
+    BuilderStep, RouteDefinition, RouteDefinitionInfo, compose_pipeline, compose_traced_pipeline,
+};
 use arc_swap::ArcSwap;
 
 /// Notification sent when a route crashes.
@@ -81,6 +84,9 @@ pub trait RouteControllerInternal: RouteController + Send {
 
     /// Returns all route IDs.
     fn route_ids(&self) -> Vec<String>;
+
+    /// Configure tracing from a [`TracerConfig`].
+    fn set_tracer_config(&mut self, config: &TracerConfig);
 }
 
 /// Internal state for a managed route.
@@ -155,6 +161,10 @@ pub struct DefaultRouteController {
     global_error_handler: Option<ErrorHandlerConfig>,
     /// Optional crash notifier for supervision.
     crash_notifier: Option<mpsc::Sender<CrashNotification>>,
+    /// Whether tracing is enabled for route pipelines.
+    tracing_enabled: bool,
+    /// Detail level for tracing when enabled.
+    tracer_detail_level: DetailLevel,
 }
 
 impl DefaultRouteController {
@@ -166,6 +176,8 @@ impl DefaultRouteController {
             self_ref: None,
             global_error_handler: None,
             crash_notifier: None,
+            tracing_enabled: false,
+            tracer_detail_level: DetailLevel::Minimal,
         }
     }
 
@@ -195,6 +207,12 @@ impl DefaultRouteController {
     /// Set a global error handler applied to all routes without a per-route handler.
     pub fn set_error_handler(&mut self, config: ErrorHandlerConfig) {
         self.global_error_handler = Some(config);
+    }
+
+    /// Configure tracing for this route controller.
+    pub fn set_tracer_config(&mut self, config: &TracerConfig) {
+        self.tracing_enabled = config.enabled;
+        self.tracer_detail_level = config.detail_level.clone();
     }
 
     /// Resolve an `ErrorHandlerConfig` into an `ErrorHandlerLayer`.
@@ -358,7 +376,13 @@ impl DefaultRouteController {
 
         // Resolve steps into processors (takes ownership of steps)
         let processors = self.resolve_steps(definition.steps, &producer_ctx, &registry)?;
-        let mut pipeline = compose_pipeline(processors);
+        let route_id_for_tracing = route_id.clone();
+        let mut pipeline = compose_traced_pipeline(
+            processors,
+            &route_id_for_tracing,
+            self.tracing_enabled,
+            self.tracer_detail_level.clone(),
+        );
 
         // Apply circuit breaker if configured
         if let Some(cb_config) = definition.circuit_breaker {
@@ -828,6 +852,10 @@ impl RouteControllerInternal for DefaultRouteController {
 
     fn route_ids(&self) -> Vec<String> {
         DefaultRouteController::route_ids(self)
+    }
+
+    fn set_tracer_config(&mut self, config: &TracerConfig) {
+        DefaultRouteController::set_tracer_config(self, config)
     }
 }
 

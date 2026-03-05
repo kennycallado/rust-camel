@@ -13,6 +13,9 @@ use camel_api::{
 };
 use camel_component::ConcurrencyModel;
 
+use crate::config::DetailLevel;
+use crate::tracer::TracingProcessor;
+
 /// A Route defines a message flow: from a source endpoint, through a composed
 /// Tower Service pipeline.
 pub struct Route {
@@ -282,6 +285,41 @@ pub fn compose_pipeline(processors: Vec<BoxProcessor>) -> BoxProcessor {
     BoxProcessor::new(SequentialPipeline { steps: processors })
 }
 
+/// Compose a list of BoxProcessors into a traced pipeline.
+///
+/// Each processor is wrapped with TracingProcessor to emit spans for observability.
+/// When tracing is disabled, falls back to plain compose_pipeline with zero overhead.
+pub fn compose_traced_pipeline(
+    processors: Vec<BoxProcessor>,
+    route_id: &str,
+    trace_enabled: bool,
+    detail_level: DetailLevel,
+) -> BoxProcessor {
+    if !trace_enabled {
+        return compose_pipeline(processors);
+    }
+
+    if processors.is_empty() {
+        return BoxProcessor::new(IdentityProcessor);
+    }
+
+    // Wrap each processor with TracingProcessor
+    let wrapped: Vec<BoxProcessor> = processors
+        .into_iter()
+        .enumerate()
+        .map(|(idx, processor)| {
+            BoxProcessor::new(TracingProcessor::new(
+                processor,
+                route_id.to_string(),
+                idx,
+                detail_level.clone(),
+            ))
+        })
+        .collect();
+
+    BoxProcessor::new(SequentialPipeline { steps: wrapped })
+}
+
 /// A service that executes a sequence of BoxProcessors in order.
 #[derive(Clone)]
 struct SequentialPipeline {
@@ -468,5 +506,26 @@ mod tests {
         };
         let debug = format!("{step:?}");
         assert!(debug.contains("Choice"));
+    }
+
+    #[tokio::test]
+    async fn test_compose_traced_pipeline_disabled() {
+        let pipeline = compose_traced_pipeline(vec![], "test-route", false, DetailLevel::Minimal);
+        // Should behave like identity
+        let ex = Exchange::new(camel_api::Message::new("hello"));
+        let result = tower::ServiceExt::oneshot(pipeline, ex).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_compose_traced_pipeline_enabled() {
+        use camel_api::BoxProcessorExt;
+
+        let step = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
+        let pipeline =
+            compose_traced_pipeline(vec![step], "test-route", true, DetailLevel::Minimal);
+        let ex = Exchange::new(camel_api::Message::new("hello"));
+        let result = tower::ServiceExt::oneshot(pipeline, ex).await;
+        assert!(result.is_ok());
     }
 }

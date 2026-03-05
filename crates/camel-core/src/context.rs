@@ -12,6 +12,7 @@ use camel_component::Component;
 use camel_language_api::Language;
 use camel_language_api::LanguageError;
 
+use crate::config::TracerConfig;
 use crate::registry::Registry;
 use crate::route::RouteDefinition;
 use crate::route_controller::{DefaultRouteController, RouteControllerInternal};
@@ -117,6 +118,39 @@ impl CamelContext {
             .try_lock()
             .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
             .set_error_handler(config);
+    }
+
+    /// Enable or disable tracing globally.
+    pub fn set_tracing(&mut self, enabled: bool) {
+        self.route_controller
+            .try_lock()
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
+            .set_tracer_config(&TracerConfig {
+                enabled,
+                ..Default::default()
+            });
+    }
+
+    /// Configure tracing with full config.
+    pub fn set_tracer_config(&mut self, config: TracerConfig) {
+        self.route_controller
+            .try_lock()
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
+            .set_tracer_config(&config);
+    }
+
+    /// Builder-style: enable tracing with default config.
+    pub fn with_tracing(mut self) -> Self {
+        self.set_tracing(true);
+        self
+    }
+
+    /// Builder-style: configure tracing with custom config.
+    /// Note: tracing subscriber initialization (stdout/file output) is handled
+    /// separately via init_tracing_subscriber (called in camel-config bridge).
+    pub fn with_tracer_config(mut self, config: TracerConfig) -> Self {
+        self.set_tracer_config(config);
+        self
     }
 
     /// Register a component with this context.
