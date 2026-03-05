@@ -34,6 +34,10 @@ use camel_component_log::LogComponent;
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
+use tracing_subscriber::Layer;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use camel_processor::LogLevel;
 
 // =============================================================================
@@ -100,14 +104,42 @@ impl MetricsCollector for ShowcaseMetrics {
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt().with_target(false).init();
+    // General layer: all non-tracer logs → stdout
+    let general_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+            meta.target() != "camel_tracer"
+        }))
+        .boxed();
+
+    // Tracer layer: camel_tracer spans → showcase-trace.log (JSON)
+    let trace_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("showcase-trace.log")
+        .expect("failed to open showcase-trace.log");
+    let tracer_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_span_events(FmtSpan::CLOSE)
+        .with_writer(std::sync::Mutex::new(trace_file))
+        .with_target(true)
+        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+            meta.target() == "camel_tracer"
+        }))
+        .boxed();
+
+    tracing_subscriber::registry()
+        .with(general_layer)
+        .with(tracer_layer)
+        .init();
 
     // Setup metrics
     let metrics = Arc::new(ShowcaseMetrics::new());
     let metrics_for_print = Arc::clone(&metrics);
 
-    // Create context with metrics
+    // Create context with metrics and enable tracing
     let mut ctx = CamelContext::with_metrics(metrics);
+    ctx.set_tracing(true); // spans for all 22 routes → showcase-trace.log
 
     // Register all components
     ctx.register_component(TimerComponent::new());
@@ -764,8 +796,7 @@ fn print_banner(file_path: &str) {
     println!();
     println!("╔══════════════════════════════════════════════════════════════════════╗");
     println!("║           rust-camel COMPREHENSIVE SHOWCASE (22 routes)              ║");
-    println!("╚══════════════════════════════════════════════════════════════════════╝");
-    println!();
+    println!("╚══════════════════════════════════════════════════════════════════════╝");    println!();
     println!("CATEGORY 1: EIP BASICS");
     println!("  1. eip-filter           - Filter EIP (important vs normal)");
     println!("  2. eip-splitter         - Splitter EIP (parallel JSON array)");
@@ -800,9 +831,10 @@ fn print_banner(file_path: &str) {
     println!();
     println!("COMPONENTS: timer, log, direct, mock, file, http, https, controlbus");
     println!("EIPS: filter, splitter, aggregator, wiretap, multicast, cbr, stop");
-    println!("FEATURES: correlation-ids, error-handlers, timeouts, sequential, metrics");
+    println!("FEATURES: correlation-ids, error-handlers, timeouts, sequential, metrics, tracer");
     println!();
-    println!("File output: {}/showcase.log", file_path);
+    println!("File output:  {}/showcase.log", file_path);
+    println!("Trace output: showcase-trace.log (JSON spans for all 22 routes)");
     println!("HTTP endpoint: http://0.0.0.0:8081/showcase/counter");
     println!();
     println!("────────────────────────────────────────────────────────────────────────");

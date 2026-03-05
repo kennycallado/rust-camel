@@ -4,6 +4,7 @@ use camel_api::CamelError;
 use camel_core::CamelContext;
 use camel_core::route::RouteDefinition;
 use tracing_subscriber::Layer;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -46,6 +47,7 @@ impl CamelConfig {
         if config.outputs.stdout.enabled {
             let layer = tracing_subscriber::fmt::layer()
                 .json()
+                .with_span_events(FmtSpan::CLOSE)
                 .with_target(true)
                 .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
                     meta.target() == "camel_tracer"
@@ -70,6 +72,7 @@ impl CamelConfig {
                 })?;
             let layer = tracing_subscriber::fmt::layer()
                 .json()
+                .with_span_events(FmtSpan::CLOSE)
                 .with_writer(std::sync::Mutex::new(file))
                 .with_target(true)
                 .with_filter(tracing_subscriber::filter::filter_fn(|meta| {

@@ -72,6 +72,9 @@ impl Service<Exchange> for TracingProcessor {
             body_type = tracing::field::Empty,
             has_error = tracing::field::Empty,
             output_body_type = tracing::field::Empty,
+            header_0 = tracing::field::Empty,
+            header_1 = tracing::field::Empty,
+            header_2 = tracing::field::Empty,
             error = tracing::field::Empty,
             error_type = tracing::field::Empty,
         );
