@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use camel_api::aggregator::AggregatorConfig;
 use camel_api::body::Body;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
@@ -24,8 +25,9 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
 use camel_api::multicast::MulticastStrategy;
 use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_json_array};
-use camel_api::{CamelError, Value};
+use camel_api::{BoxProcessor, CamelError, Exchange, SupervisionConfig, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
 use camel_component_controlbus::ControlBusComponent;
 use camel_component_direct::DirectComponent;
 use camel_component_file::FileComponent;
@@ -34,11 +36,121 @@ use camel_component_log::LogComponent;
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
+use camel_processor::LogLevel;
 use tracing_subscriber::Layer;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use camel_processor::LogLevel;
+
+// =============================================================================
+// Crash Simulator Component (for supervision demo)
+// =============================================================================
+
+/// A component that crashes after a configurable number of successful runs,
+/// allowing the SupervisingRouteController to demonstrate automatic restarts.
+struct CrashSimulatorComponent {
+    crash_counter: Arc<std::sync::atomic::AtomicU32>,
+    runs_before_crash: u32,
+}
+
+impl CrashSimulatorComponent {
+    fn new(runs_before_crash: u32) -> Self {
+        Self {
+            crash_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            runs_before_crash,
+        }
+    }
+}
+
+impl Component for CrashSimulatorComponent {
+    fn scheme(&self) -> &str {
+        "crash-simulator"
+    }
+
+    fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+        Ok(Box::new(CrashSimulatorEndpoint {
+            crash_counter: Arc::clone(&self.crash_counter),
+            runs_before_crash: self.runs_before_crash,
+        }))
+    }
+}
+
+struct CrashSimulatorEndpoint {
+    crash_counter: Arc<std::sync::atomic::AtomicU32>,
+    runs_before_crash: u32,
+}
+
+impl Endpoint for CrashSimulatorEndpoint {
+    fn uri(&self) -> &str {
+        "crash-simulator:showcase"
+    }
+
+    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+        Ok(Box::new(CrashSimulatorConsumer {
+            crash_counter: Arc::clone(&self.crash_counter),
+            runs_before_crash: self.runs_before_crash,
+        }))
+    }
+
+    fn create_producer(
+        &self,
+        _ctx: &camel_api::ProducerContext,
+    ) -> Result<BoxProcessor, CamelError> {
+        Err(CamelError::EndpointCreationFailed(
+            "crash-simulator does not support producers".to_string(),
+        ))
+    }
+}
+
+struct CrashSimulatorConsumer {
+    crash_counter: Arc<std::sync::atomic::AtomicU32>,
+    runs_before_crash: u32,
+}
+
+#[async_trait]
+impl Consumer for CrashSimulatorConsumer {
+    async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        let run_count = self.crash_counter.fetch_add(1, Ordering::SeqCst);
+        println!("[SUPERVISION] Crash-simulator run #{}", run_count + 1);
+
+        let exchange = Exchange::new(camel_api::message::Message::new(format!(
+            "supervision demo run #{}",
+            run_count + 1
+        )));
+        if ctx.send(exchange).await.is_err() {
+            return Ok(());
+        }
+
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(1500)) => {}
+            _ = ctx.cancelled() => {
+                println!("[SUPERVISION] Cancelled cleanly");
+                return Ok(());
+            }
+        }
+
+        if run_count >= self.runs_before_crash {
+            println!(
+                "[SUPERVISION] Simulating crash after {} successful run(s) - supervisor will restart",
+                self.runs_before_crash
+            );
+            return Err(CamelError::RouteError(
+                "simulated crash for supervision demo".to_string(),
+            ));
+        }
+
+        ctx.cancelled().await;
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<(), CamelError> {
+        Ok(())
+    }
+
+    fn concurrency_model(&self) -> ConcurrencyModel {
+        ConcurrencyModel::Sequential
+    }
+}
 
 // =============================================================================
 // Custom Metrics Collector
@@ -137,9 +249,17 @@ async fn main() -> Result<(), CamelError> {
     let metrics = Arc::new(ShowcaseMetrics::new());
     let metrics_for_print = Arc::clone(&metrics);
 
-    // Create context with metrics and enable tracing
-    let mut ctx = CamelContext::with_metrics(metrics);
-    ctx.set_tracing(true); // spans for all 22 routes → showcase-trace.log
+    // Supervision: auto-restart crashed routes with exponential backoff
+    let supervision_config = SupervisionConfig {
+        max_attempts: Some(5),
+        initial_delay: Duration::from_millis(500),
+        backoff_multiplier: 2.0,
+        max_delay: Duration::from_secs(8),
+    };
+
+    // Create context with supervision + metrics and enable tracing
+    let mut ctx = CamelContext::with_supervision_and_metrics(supervision_config, metrics);
+    ctx.set_tracing(true); // spans for all 23 routes → showcase-trace.log
 
     // Register all components
     ctx.register_component(TimerComponent::new());
@@ -150,6 +270,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(HttpComponent::new());
     ctx.register_component(HttpsComponent::new());
     ctx.register_component(ControlBusComponent::new());
+    ctx.register_component(CrashSimulatorComponent::new(2));
 
     // Global error handler (fallback for routes without their own)
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel(
@@ -478,6 +599,14 @@ async fn main() -> Result<(), CamelError> {
         ))
         .build()?;
 
+    // --- Route 12: Supervision (auto-restart with exponential backoff) ---
+    // The CrashSimulatorComponent crashes after 2 runs; SupervisingRouteController
+    // restarts it automatically: 500ms → 1s → 2s → 4s → 8s (max 5 attempts).
+    let route12_supervision = RouteBuilder::from("crash-simulator:showcase")
+        .route_id("resilience-supervision")
+        .to("log:resilience-supervision-msg?showBody=true&showCorrelationId=true")
+        .build()?;
+
     // =========================================================================
     // CATEGORY 4: COMPONENTS
     // =========================================================================
@@ -749,6 +878,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(route9)?;
     ctx.add_route_definition(route10)?;
     ctx.add_route_definition(route11)?;
+    ctx.add_route_definition(route12_supervision)?;
 
     // Category 4: Components
     ctx.add_route_definition(route12)?;
@@ -795,8 +925,9 @@ async fn main() -> Result<(), CamelError> {
 fn print_banner(file_path: &str) {
     println!();
     println!("╔══════════════════════════════════════════════════════════════════════╗");
-    println!("║           rust-camel COMPREHENSIVE SHOWCASE (22 routes)              ║");
-    println!("╚══════════════════════════════════════════════════════════════════════╝");    println!();
+    println!("║           rust-camel COMPREHENSIVE SHOWCASE (23 routes)              ║");
+    println!("╚══════════════════════════════════════════════════════════════════════╝");
+    println!();
     println!("CATEGORY 1: EIP BASICS");
     println!("  1. eip-filter           - Filter EIP (important vs normal)");
     println!("  2. eip-splitter         - Splitter EIP (parallel JSON array)");
@@ -813,28 +944,29 @@ fn print_banner(file_path: &str) {
     println!("  9. resilience-circuit-breaker - Circuit Breaker (fail-fast)");
     println!(" 10. resilience-retry     - Retry with exponential backoff");
     println!(" 11. resilience-dlc       - Dead Letter Channel");
+    println!(" 12. resilience-supervision - SupervisingRouteController (auto-restart)");
     println!();
     println!("CATEGORY 4: COMPONENTS");
-    println!(" 12. comp-timer-log       - Timer + Log (basic)");
-    println!(" 13. comp-direct          - Direct (route linking)");
-    println!(" 14. comp-file-write      - File (append to log)");
-    println!(" 15. comp-http-client     - HTTP Client (https://httpbin.org)");
-    println!(" 16. comp-mock            - Mock Component (testing)");
-    println!(" 17. comp-cbus-*          - ControlBus (suspend/resume routes)");
+    println!(" 13. comp-timer-log       - Timer + Log (basic)");
+    println!(" 14. comp-direct          - Direct (route linking)");
+    println!(" 15. comp-file-write      - File (append to log)");
+    println!(" 16. comp-http-client     - HTTP Client (https://httpbin.org)");
+    println!(" 17. comp-mock            - Mock Component (testing)");
+    println!(" 18. comp-cbus-*          - ControlBus (suspend/resume routes)");
     println!();
     println!("CATEGORY 5: ADVANCED");
-    println!(" 18. adv-sequential       - Sequential Processing (HTTP counter)");
-    println!(" 19. adv-correlation-ids  - Correlation ID Tracing");
-    println!(" 20. adv-metrics          - Metrics Collection");
-    println!(" 21. adv-timeout          - Timeout Handling");
-    println!(" 22. adv-log-eip          - Log EIP (inline logging)");
+    println!(" 19. adv-sequential       - Sequential Processing (HTTP counter)");
+    println!(" 20. adv-correlation-ids  - Correlation ID Tracing");
+    println!(" 21. adv-metrics          - Metrics Collection");
+    println!(" 22. adv-timeout          - Timeout Handling");
+    println!(" 23. adv-log-eip          - Log EIP (inline logging)");
     println!();
     println!("COMPONENTS: timer, log, direct, mock, file, http, https, controlbus");
     println!("EIPS: filter, splitter, aggregator, wiretap, multicast, cbr, stop");
     println!("FEATURES: correlation-ids, error-handlers, timeouts, sequential, metrics, tracer");
     println!();
     println!("File output:  {}/showcase.log", file_path);
-    println!("Trace output: showcase-trace.log (JSON spans for all 22 routes)");
+    println!("Trace output: showcase-trace.log (JSON spans for all 23 routes)");
     println!("HTTP endpoint: http://0.0.0.0:8081/showcase/counter");
     println!();
     println!("────────────────────────────────────────────────────────────────────────");
