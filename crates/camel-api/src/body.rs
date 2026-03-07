@@ -352,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn test_materialize_exceeds_default_limit() {
         use futures::stream;
-        
+
         // 15MB stream - should fail with default 10MB limit
         let large_data = vec![0u8; 15 * 1024 * 1024];
         let chunks = vec![Ok(Bytes::from(large_data))];
@@ -364,5 +364,19 @@ mod tests {
 
         let result = body.materialize().await;
         assert!(matches!(result, Err(CamelError::StreamLimitExceeded(10_485_760))));
+    }
+
+    #[test]
+    fn stream_variants_are_never_equal() {
+        use futures::stream;
+
+        let make_stream = || {
+            let s = stream::iter(vec![Ok(Bytes::from_static(b"data"))]);
+            Body::Stream(StreamBody {
+                stream: Arc::new(Mutex::new(Some(Box::pin(s)))),
+                metadata: StreamMetadata::default(),
+            })
+        };
+        assert_ne!(make_stream(), make_stream());
     }
 }

@@ -194,4 +194,34 @@ mod tests {
         let result = convert(body, BodyType::Text);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
     }
+
+    #[test]
+    fn bytes_to_json_valid() {
+        let body = Body::Bytes(Bytes::from_static(b"{\"k\":1}"));
+        let result = convert(body, BodyType::Json).unwrap();
+        assert!(matches!(result, Body::Json(_)));
+    }
+
+    #[test]
+    fn bytes_to_json_invalid_utf8() {
+        let body = Body::Bytes(Bytes::from_static(&[0xFF, 0xFE]));
+        let result = convert(body, BodyType::Json);
+        assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    }
+
+    #[test]
+    fn to_empty_always_fails() {
+        assert!(matches!(
+            convert(Body::Text("x".into()), BodyType::Empty),
+            Err(CamelError::TypeConversionFailed(_))
+        ));
+        assert!(matches!(
+            convert(Body::Json(serde_json::json!(1)), BodyType::Empty),
+            Err(CamelError::TypeConversionFailed(_))
+        ));
+        assert!(matches!(
+            convert(Body::Bytes(Bytes::from_static(b"x")), BodyType::Empty),
+            Err(CamelError::TypeConversionFailed(_))
+        ));
+    }
 }
