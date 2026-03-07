@@ -17,7 +17,11 @@ pub async fn dispatch(
             serde_json::Value::String(response)
         }
         RedisCommand::Echo => {
-            let message = exchange.input.body.as_text().unwrap_or("");
+            let message = std::mem::replace(&mut exchange.input.body, Body::Empty)
+                .try_into_text()
+                .ok()
+                .and_then(|b| b.as_text().map(|s| s.to_string()))
+                .unwrap_or_default();
 
             let response: String = redis::cmd("ECHO")
                 .arg(message)
