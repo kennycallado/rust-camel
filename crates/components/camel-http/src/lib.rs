@@ -30,6 +30,8 @@ pub struct HttpConfig {
     // Security settings
     pub allow_private_ips: bool,
     pub blocked_hosts: Vec<String>,
+    // Memory limit for body materialization (in bytes)
+    pub max_body_size: usize,
 }
 
 impl HttpConfig {
@@ -93,6 +95,12 @@ impl HttpConfig {
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();
 
+        let max_body_size = parts
+            .params
+            .get("maxBodySize")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10 * 1024 * 1024); // Default: 10MB
+
         // CAMEL_OPTIONS: params that are consumed by Camel,        // Any remaining params should be forwarded as HTTP query params
         let camel_options = [
             "httpMethod",
@@ -103,6 +111,7 @@ impl HttpConfig {
             "responseTimeout",
             "allowPrivateIps",
             "blockedHosts",
+            "maxBodySize",
         ];
 
         let query_params: HashMap<String, String> = parts
@@ -123,6 +132,7 @@ impl HttpConfig {
             query_params,
             allow_private_ips,
             blocked_hosts,
+            max_body_size,
         })
     }
 }
@@ -140,6 +150,10 @@ pub struct HttpServerConfig {
     pub port: u16,
     /// URL path this consumer handles, e.g. "/orders".
     pub path: String,
+    /// Maximum request body size in bytes.
+    pub max_request_body: usize,
+    /// Maximum response body size for materializing streams in bytes.
+    pub max_response_body: usize,
 }
 
 impl HttpServerConfig {
@@ -186,7 +200,25 @@ impl HttpServerConfig {
             (authority.to_string(), 80)
         };
 
-        Ok(Self { host, port, path })
+        let max_request_body = parts
+            .params
+            .get("maxRequestBody")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2 * 1024 * 1024); // Default: 2MB
+
+        let max_response_body = parts
+            .params
+            .get("maxResponseBody")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10 * 1024 * 1024); // Default: 10MB
+
+        Ok(Self {
+            host,
+            port,
+            path,
+            max_request_body,
+            max_response_body,
+        })
     }
 }
 
@@ -247,6 +279,7 @@ impl ServerRegistry {
         &'static self,
         host: &str,
         port: u16,
+        max_request_body: usize,
     ) -> Result<DispatchTable, CamelError> {
         // Fast path: check without spawning.
         {
@@ -266,7 +299,7 @@ impl ServerRegistry {
 
         let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
         let dispatch_for_server = Arc::clone(&dispatch);
-        let task = tokio::spawn(run_axum_server(listener, dispatch_for_server));
+        let task = tokio::spawn(run_axum_server(listener, dispatch_for_server, max_request_body));
 
         // Re-acquire lock to insert — handle the race where another task won.
         let mut guard = self.inner.lock().map_err(|_| {
@@ -301,10 +334,20 @@ use axum::{
     response::IntoResponse,
 };
 
-async fn run_axum_server(listener: tokio::net::TcpListener, dispatch: DispatchTable) {
+#[derive(Clone)]
+struct AppState {
+    dispatch: DispatchTable,
+    max_request_body: usize,
+}
+
+async fn run_axum_server(listener: tokio::net::TcpListener, dispatch: DispatchTable, max_request_body: usize) {
+    let state = AppState {
+        dispatch,
+        max_request_body,
+    };
     let app = Router::new()
         .fallback(dispatch_handler)
-        .with_state(dispatch);
+        .with_state(state);
 
     axum::serve(listener, app).await.unwrap_or_else(|e| {
         tracing::error!(error = %e, "Axum server error");
@@ -312,17 +355,16 @@ async fn run_axum_server(listener: tokio::net::TcpListener, dispatch: DispatchTa
 }
 
 async fn dispatch_handler(
-    State(dispatch): State<DispatchTable>,
+    State(state): State<AppState>,
     req: Request,
 ) -> impl IntoResponse {
-    const MAX_REQUEST_BODY: usize = 2 * 1024 * 1024; // 2 MB
 
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
     let headers = req.headers().clone();
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_REQUEST_BODY).await {
+    let body_bytes = match axum::body::to_bytes(req.into_body(), state.max_request_body).await {
         Ok(b) => b,
         Err(_) => {
             return Response::builder()
@@ -336,7 +378,7 @@ async fn dispatch_handler(
 
     // Look up handler for this path
     let sender = {
-        let table = dispatch.read().await;
+        let table = state.dispatch.read().await;
         table.get(&path).cloned()
     };
 
@@ -408,7 +450,7 @@ impl Consumer for HttpConsumer {
         use camel_api::{Exchange, Message, body::Body};
 
         let dispatch = ServerRegistry::global()
-            .get_or_spawn(&self.config.host, self.config.port)
+            .get_or_spawn(&self.config.host, self.config.port, self.config.max_request_body)
             .await?;
 
         // Create a channel for this path and register it
@@ -420,6 +462,7 @@ impl Consumer for HttpConsumer {
 
         let path = self.config.path.clone();
         let cancel_token = ctx.cancel_token();
+        let max_response_body = self.config.max_response_body;
 
         loop {
             tokio::select! {
@@ -522,11 +565,21 @@ impl Consumer for HttpConsumer {
                                     .map(|s| s as u16)
                                     .unwrap_or(200);
 
-                                let body_bytes = match &out.input.body {
+                                let body_bytes = match out.input.body {
                                     Body::Empty => bytes::Bytes::new(),
-                                    Body::Bytes(b) => b.clone(),
-                                    Body::Text(s) => bytes::Bytes::from(s.clone().into_bytes()),
+                                    Body::Bytes(b) => b,
+                                    Body::Text(s) => bytes::Bytes::from(s.into_bytes()),
                                     Body::Json(v) => bytes::Bytes::from(v.to_string().into_bytes()),
+                                    Body::Stream(_) => {
+                                        // Materialize stream for HTTP response
+                                        match out.input.body.into_bytes(max_response_body).await {
+                                            Ok(b) => b,
+                                            Err(e) => {
+                                                debug!(error = %e, "Failed to materialize stream body for HTTP reply");
+                                                return;
+                                            }
+                                        }
+                                    }
                                 };
 
                                 let resp_headers: Vec<(String, String)> = out
@@ -876,15 +929,6 @@ impl HttpProducer {
         url
     }
 
-    fn body_to_bytes(body: &Body) -> Option<Vec<u8>> {
-        match body {
-            Body::Empty => None,
-            Body::Bytes(b) => Some(b.to_vec()),
-            Body::Text(s) => Some(s.as_bytes().to_vec()),
-            Body::Json(v) => Some(v.to_string().into_bytes()),
-        }
-    }
-
     fn is_ok_status(status: u16, range: (u16, u16)) -> bool {
         status >= range.0 && status <= range.1
     }
@@ -939,8 +983,23 @@ impl Service<Exchange> for HttpProducer {
                 }
             }
 
-            if let Some(body_bytes) = HttpProducer::body_to_bytes(&exchange.input.body) {
-                request = request.body(body_bytes);
+            match exchange.input.body {
+                Body::Stream(ref s) => {
+                    let mut stream_lock = s.stream.lock().await;
+                    if let Some(stream) = stream_lock.take() {
+                        request = request.body(reqwest::Body::wrap_stream(stream));
+                    } else {
+                        return Err(CamelError::AlreadyConsumed);
+                    }
+                }
+                _ => {
+                    // For other types, materialize with configured limit
+                    let body = std::mem::take(&mut exchange.input.body);
+                    let bytes = body.into_bytes(config.max_body_size).await?;
+                    if !bytes.is_empty() {
+                        request = request.body(bytes);
+                    }
+                }
             }
 
             let response = request
@@ -1734,7 +1793,7 @@ mod tests {
         // Nothing registered in the dispatch table
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(run_axum_server(listener, dispatch));
+        tokio::spawn(run_axum_server(listener, dispatch, 2 * 1024 * 1024));
 
         // Wait for server to start
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1762,6 +1821,8 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port,
             path: "/ping".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg);
 
@@ -1970,6 +2031,8 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 19999,
             path: "/test".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
         };
         let consumer = HttpConsumer::new(config);
         assert_eq!(

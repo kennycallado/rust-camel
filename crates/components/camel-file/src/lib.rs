@@ -4,13 +4,15 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use regex::Regex;
 use tokio::fs;
 use tokio::time;
+use tokio_util::io::ReaderStream;
 use tower::Service;
 use tracing::{debug, warn};
 
-use camel_api::{BoxProcessor, CamelError, Exchange, Message, body::Body};
+use camel_api::{BoxProcessor, CamelError, Exchange, Message, body::Body, body::StreamBody, body::StreamMetadata};
 use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 use camel_endpoint::parse_uri;
 
@@ -57,6 +59,8 @@ pub struct FileConfig {
     // Timeout fields for preventing hanging on slow filesystems
     pub read_timeout: Duration,
     pub write_timeout: Duration,
+    // Memory limit for body materialization (in bytes)
+    pub max_body_size: usize,
 }
 
 impl FileConfig {
@@ -143,6 +147,12 @@ impl FileConfig {
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_secs(30));
 
+        let max_body_size = parts
+            .params
+            .get("maxBodySize")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100 * 1024 * 1024); // Default: 100MB
+
         Ok(Self {
             directory: parts.path,
             delay: Duration::from_millis(delay),
@@ -159,6 +169,7 @@ impl FileConfig {
             auto_create,
             read_timeout,
             write_timeout,
+            max_body_size,
         })
     }
 }
@@ -328,13 +339,19 @@ async fn poll_directory(
             continue;
         }
 
-        let content = match tokio::time::timeout(config.read_timeout, fs::read(&file_path)).await {
-            Ok(Ok(c)) => c,
+        let (file, metadata) = match tokio::time::timeout(config.read_timeout, async {
+            let f = fs::File::open(&file_path).await?;
+            let m = f.metadata().await?;
+            Ok::<_, std::io::Error>((f, m))
+        })
+        .await
+        {
+            Ok(Ok((f, m))) => (f, Some(m)),
             Ok(Err(e)) => {
                 warn!(
                     file = %file_path.display(),
                     error = %e,
-                    "Failed to read file"
+                    "Failed to open file"
                 );
                 continue;
             }
@@ -342,14 +359,15 @@ async fn poll_directory(
                 warn!(
                     file = %file_path.display(),
                     timeout_ms = config.read_timeout.as_millis(),
-                    "Timeout reading file"
+                    "Timeout opening file"
                 );
                 continue;
             }
         };
 
-        let metadata = fs::metadata(&file_path).await.ok();
         let file_len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let stream = ReaderStream::new(file).map(|res| res.map_err(CamelError::from));
+
         let last_modified = metadata
             .as_ref()
             .and_then(|m| m.modified().ok())
@@ -369,7 +387,16 @@ async fn poll_directory(
             .to_string_lossy()
             .to_string();
 
-        let mut exchange = Exchange::new(Message::new(Body::Bytes(bytes::Bytes::from(content))));
+        let body = Body::Stream(StreamBody {
+            stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream)))),
+            metadata: StreamMetadata {
+                size_hint: Some(file_len),
+                content_type: None,
+                origin: Some(absolute_path.clone()),
+            },
+        });
+
+        let mut exchange = Exchange::new(Message::new(body));
         exchange
             .input
             .set_header("CamelFileName", serde_json::Value::String(relative_path));
@@ -511,15 +538,9 @@ struct FileProducer {
 }
 
 impl FileProducer {
-    fn body_to_bytes(body: &Body) -> Result<Vec<u8>, CamelError> {
-        match body {
-            Body::Empty => Err(CamelError::ProcessorError(
-                "Cannot write empty body to file".to_string(),
-            )),
-            Body::Bytes(b) => Ok(b.to_vec()),
-            Body::Text(s) => Ok(s.as_bytes().to_vec()),
-            Body::Json(v) => Ok(v.to_string().into_bytes()),
-        }
+    async fn body_to_bytes(body: Body, max_size: usize) -> Result<Vec<u8>, CamelError> {
+        let bytes = body.into_bytes(max_size).await?;
+        Ok(bytes.to_vec())
     }
 
     fn resolve_filename(exchange: &Exchange, config: &FileConfig) -> Result<String, CamelError> {
@@ -553,7 +574,7 @@ impl Service<Exchange> for FileProducer {
 
         Box::pin(async move {
             let file_name = FileProducer::resolve_filename(&exchange, &config)?;
-            let data = FileProducer::body_to_bytes(&exchange.input.body)?;
+            let data = FileProducer::body_to_bytes(exchange.input.body.clone(), config.max_body_size).await?;
 
             let dir_path = std::path::Path::new(&config.directory);
             let target_path = dir_path.join(&file_name);

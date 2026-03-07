@@ -46,6 +46,12 @@ pub enum CamelError {
 
     #[error("Configuration error: {0}")]
     Config(String),
+
+    #[error("Body stream has already been consumed")]
+    AlreadyConsumed,
+
+    #[error("Stream size exceeded limit: {0}")]
+    StreamLimitExceeded(usize),
 }
 
 impl From<std::io::Error> for CamelError {

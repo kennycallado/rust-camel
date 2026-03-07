@@ -1,7 +1,55 @@
-use bytes::Bytes;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use futures::stream::{BoxStream, self};
+use futures::StreamExt;
+use bytes::{Bytes, BytesMut};
+use crate::error::CamelError;
+
+/// Metadata associated with a stream body.
+#[derive(Debug, Clone, Default)]
+pub struct StreamMetadata {
+    /// Expected size of the stream if known.
+    pub size_hint: Option<u64>,
+    /// Content type of the stream content.
+    pub content_type: Option<String>,
+    /// Origin of the stream (e.g. "file:///path/to/file").
+    pub origin: Option<String>,
+}
+
+/// A body that wraps a lazy-evaluated stream of bytes.
+pub struct StreamBody {
+    /// The actual byte stream, wrapped in an Arc and Mutex to allow Clone for Body.
+    /// 
+    /// ### Clone Semantics
+    /// The stream is **single-consumption**. When cloning a `Body::Stream`, 
+    /// all clones share the same underlying stream handle. Only the first 
+    /// clone to consume the stream will succeed; subsequent attempts will 
+    /// return `CamelError::AlreadyConsumed`.
+    pub stream: Arc<Mutex<Option<BoxStream<'static, Result<Bytes, CamelError>>>>>,
+    /// Metadata associated with the stream.
+    pub metadata: StreamMetadata,
+}
+
+impl std::fmt::Debug for StreamBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamBody")
+            .field("metadata", &self.metadata)
+            .field("stream", &"<BoxStream>")
+            .finish()
+    }
+}
+
+impl Clone for StreamBody {
+    fn clone(&self) -> Self {
+        Self {
+            stream: Arc::clone(&self.stream),
+            metadata: self.metadata.clone(),
+        }
+    }
+}
 
 /// The body of a message, supporting common payload types.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub enum Body {
     /// No body content.
     #[default]
@@ -12,12 +60,68 @@ pub enum Body {
     Text(String),
     /// JSON payload.
     Json(serde_json::Value),
+    /// Streaming payload.
+    Stream(StreamBody),
+}
+
+impl Clone for Body {
+    fn clone(&self) -> Self {
+        match self {
+            Body::Empty => Body::Empty,
+            Body::Bytes(b) => Body::Bytes(b.clone()),
+            Body::Text(s) => Body::Text(s.clone()),
+            Body::Json(v) => Body::Json(v.clone()),
+            Body::Stream(s) => Body::Stream(s.clone()),
+        }
+    }
 }
 
 impl Body {
     /// Returns `true` if the body is empty.
     pub fn is_empty(&self) -> bool {
         matches!(self, Body::Empty)
+    }
+
+    /// Convert the body into `Bytes`, consuming it if it is a stream.
+    /// This is an async operation because it may need to read from an underlying stream.
+    /// A `max_size` limit is enforced to prevent OOM errors.
+    pub async fn into_bytes(self, max_size: usize) -> Result<Bytes, CamelError> {
+        match self {
+            Body::Empty => Ok(Bytes::new()),
+            Body::Bytes(b) => {
+                if b.len() > max_size {
+                    return Err(CamelError::StreamLimitExceeded(max_size));
+                }
+                Ok(b)
+            }
+            Body::Text(s) => {
+                if s.len() > max_size {
+                    return Err(CamelError::StreamLimitExceeded(max_size));
+                }
+                Ok(Bytes::from(s))
+            }
+            Body::Json(v) => {
+                let b = serde_json::to_vec(&v).map_err(|e| CamelError::TypeConversionFailed(e.to_string()))?;
+                if b.len() > max_size {
+                    return Err(CamelError::StreamLimitExceeded(max_size));
+                }
+                Ok(Bytes::from(b))
+            }
+            Body::Stream(s) => {
+                let mut stream_lock = s.stream.lock().await;
+                let mut stream = stream_lock.take().ok_or(CamelError::AlreadyConsumed)?;
+
+                let mut buffer = BytesMut::new();
+                while let Some(chunk_res) = stream.next().await {
+                    let chunk = chunk_res?;
+                    if buffer.len() + chunk.len() > max_size {
+                        return Err(CamelError::StreamLimitExceeded(max_size));
+                    }
+                    buffer.extend_from_slice(&chunk);
+                }
+                Ok(buffer.freeze())
+            }
+        }
     }
 
     /// Try to get the body as a string, converting from bytes if needed.
@@ -94,5 +198,52 @@ mod tests {
         let val = serde_json::json!({"key": "value"});
         let body = Body::from(val.clone());
         assert!(matches!(body, Body::Json(_)));
+    }
+
+    #[tokio::test]
+    async fn test_into_bytes_from_stream() {
+        let chunks = vec![
+            Ok(Bytes::from("hello ")),
+            Ok(Bytes::from("world")),
+        ];
+        let stream = stream::iter(chunks);
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
+            metadata: StreamMetadata::default(),
+        });
+
+        let result = body.into_bytes(100).await.unwrap();
+        assert_eq!(result, Bytes::from("hello world"));
+    }
+
+    #[tokio::test]
+    async fn test_into_bytes_limit_exceeded() {
+        let chunks = vec![
+            Ok(Bytes::from("this is too long")),
+        ];
+        let stream = stream::iter(chunks);
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
+            metadata: StreamMetadata::default(),
+        });
+
+        let result = body.into_bytes(5).await;
+        assert!(matches!(result, Err(CamelError::StreamLimitExceeded(5))));
+    }
+
+    #[tokio::test]
+    async fn test_into_bytes_already_consumed() {
+        let chunks = vec![Ok(Bytes::from("data"))];
+        let stream = stream::iter(chunks);
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
+            metadata: StreamMetadata::default(),
+        });
+
+        let cloned = body.clone();
+        let _ = body.into_bytes(100).await.unwrap();
+
+        let result = cloned.into_bytes(100).await;
+        assert!(matches!(result, Err(CamelError::AlreadyConsumed)));
     }
 }

@@ -172,6 +172,7 @@ impl LogProducer {
                 camel_api::Body::Text(s) => s.clone(),
                 camel_api::Body::Json(v) => v.to_string(),
                 camel_api::Body::Bytes(b) => format!("[{} bytes]", b.len()),
+                camel_api::Body::Stream(s) => format!("[Stream: origin={:?}]", s.metadata.origin),
             };
             parts.push(format!("Body: {body_str}"));
         }

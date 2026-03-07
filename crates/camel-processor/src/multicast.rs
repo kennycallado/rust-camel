@@ -191,6 +191,7 @@ fn aggregate(
                     Body::Json(v) => v.clone(),
                     Body::Bytes(b) => Value::String(String::from_utf8_lossy(b).into_owned()),
                     Body::Empty => Value::Null,
+                    Body::Stream(s) => Value::String(format!("[Stream: origin={:?}]", s.metadata.origin)),
                 };
                 bodies.push(value);
             }
