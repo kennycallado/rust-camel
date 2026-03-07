@@ -1,9 +1,9 @@
+use crate::error::CamelError;
+use bytes::{Bytes, BytesMut};
+use futures::StreamExt;
+use futures::stream::BoxStream;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use futures::stream::{BoxStream, self};
-use futures::StreamExt;
-use bytes::{Bytes, BytesMut};
-use crate::error::CamelError;
 
 /// Metadata associated with a stream body.
 #[derive(Debug, Clone, Default)]
@@ -19,12 +19,13 @@ pub struct StreamMetadata {
 /// A body that wraps a lazy-evaluated stream of bytes.
 pub struct StreamBody {
     /// The actual byte stream, wrapped in an Arc and Mutex to allow Clone for Body.
-    /// 
+    ///
     /// ### Clone Semantics
-    /// The stream is **single-consumption**. When cloning a `Body::Stream`, 
-    /// all clones share the same underlying stream handle. Only the first 
-    /// clone to consume the stream will succeed; subsequent attempts will 
+    /// The stream is **single-consumption**. When cloning a `Body::Stream`,
+    /// all clones share the same underlying stream handle. Only the first
+    /// clone to consume the stream will succeed; subsequent attempts will
     /// return `CamelError::AlreadyConsumed`.
+    #[allow(clippy::type_complexity)]
     pub stream: Arc<Mutex<Option<BoxStream<'static, Result<Bytes, CamelError>>>>>,
     /// Metadata associated with the stream.
     pub metadata: StreamMetadata,
@@ -101,7 +102,8 @@ impl Body {
                 Ok(Bytes::from(s))
             }
             Body::Json(v) => {
-                let b = serde_json::to_vec(&v).map_err(|e| CamelError::TypeConversionFailed(e.to_string()))?;
+                let b = serde_json::to_vec(&v)
+                    .map_err(|e| CamelError::TypeConversionFailed(e.to_string()))?;
                 if b.len() > max_size {
                     return Err(CamelError::StreamLimitExceeded(max_size));
                 }
@@ -202,10 +204,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_into_bytes_from_stream() {
-        let chunks = vec![
-            Ok(Bytes::from("hello ")),
-            Ok(Bytes::from("world")),
-        ];
+        use futures::stream;
+        let chunks = vec![Ok(Bytes::from("hello ")), Ok(Bytes::from("world"))];
         let stream = stream::iter(chunks);
         let body = Body::Stream(StreamBody {
             stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
@@ -218,9 +218,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_into_bytes_limit_exceeded() {
-        let chunks = vec![
-            Ok(Bytes::from("this is too long")),
-        ];
+        use futures::stream;
+        let chunks = vec![Ok(Bytes::from("this is too long"))];
         let stream = stream::iter(chunks);
         let body = Body::Stream(StreamBody {
             stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
@@ -233,6 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_into_bytes_already_consumed() {
+        use futures::stream;
         let chunks = vec![Ok(Bytes::from("data"))];
         let stream = stream::iter(chunks);
         let body = Body::Stream(StreamBody {
