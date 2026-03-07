@@ -558,18 +558,21 @@ impl DefaultRouteController {
                     let ValueSourceDef::Expression(expression) = message else {
                         // Literal case is already converted to a Processor in compile.rs;
                         // this arm should never be reached for literals.
-                        unreachable!("DeclarativeLog with Literal should have been compiled to a Processor");
+                        unreachable!(
+                            "DeclarativeLog with Literal should have been compiled to a Processor"
+                        );
                     };
                     let expression = self.compile_language_expression(&expression)?;
-                    let svc = camel_processor::log::DynamicLog::new(
-                        level,
-                        move |exchange: &Exchange| {
-                            expression.evaluate(exchange).unwrap_or_else(|e| {
-                                warn!(error = %e, "log expression evaluation failed");
-                                Value::Null
-                            }).to_string()
-                        },
-                    );
+                    let svc =
+                        camel_processor::log::DynamicLog::new(level, move |exchange: &Exchange| {
+                            expression
+                                .evaluate(exchange)
+                                .unwrap_or_else(|e| {
+                                    warn!(error = %e, "log expression evaluation failed");
+                                    Value::Null
+                                })
+                                .to_string()
+                        });
                     processors.push(BoxProcessor::new(svc));
                 }
             }

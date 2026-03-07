@@ -1,6 +1,7 @@
-use crate::parser::{Expr, InterpolatedPart, Op};
-use camel_api::exchange::Exchange;
+use crate::parser::{Expr, InterpolatedPart, Op, PathSegment};
 use camel_api::Value;
+use camel_api::body::Body;
+use camel_api::exchange::Exchange;
 use camel_language_api::LanguageError;
 
 pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError> {
@@ -10,6 +11,25 @@ pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError
         Expr::Body => Ok(Value::String(
             exchange.input.body.as_text().unwrap_or("").to_string(),
         )),
+
+        Expr::BodyField(segments) => {
+            if let Body::Json(root) = &exchange.input.body {
+                let mut current: &serde_json::Value = root;
+                for seg in segments {
+                    let next = match seg {
+                        PathSegment::Key(k) => current.get(k.as_str()),
+                        PathSegment::Index(i) => current.get(*i),
+                    };
+                    match next {
+                        Some(v) => current = v,
+                        None => return Ok(Value::Null),
+                    }
+                }
+                Ok(current.clone())
+            } else {
+                Ok(Value::Null)
+            }
+        }
 
         Expr::ExchangeProperty(key) => Ok(exchange.property(key).cloned().unwrap_or(Value::Null)),
 

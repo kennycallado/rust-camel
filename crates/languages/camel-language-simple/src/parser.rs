@@ -4,6 +4,10 @@ use camel_language_api::LanguageError;
 pub enum Expr {
     Header(String),
     Body,
+    /// Access a field (or nested path) of a JSON body.
+    /// Example: `${body.user.address.city}` → `BodyField([Key("user"), Key("address"), Key("city")])`
+    /// Array indexing: `${body.items.0}` → `BodyField([Key("items"), Index(0)])`
+    BodyField(Vec<PathSegment>),
     ExchangeProperty(String),
     StringLit(String),
     NumberLit(f64),
@@ -26,6 +30,15 @@ pub enum InterpolatedPart {
     Literal(String),
     /// An evaluated sub-expression (`${...}`).
     Expr(Box<Expr>),
+}
+
+/// A single segment in a body JSON path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathSegment {
+    /// Named object field: `"name"`, `"user"`.
+    Key(String),
+    /// Array index: `0`, `1`.
+    Index(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,7 +131,7 @@ fn parse_interpolated(input: &str) -> Result<Expr, LanguageError> {
                 parts.push(InterpolatedPart::Literal(remaining[..start].to_string()));
             }
             let after_dollar = &remaining[start..]; // starts with "${"
-                                                    // Find the matching `}`
+            // Find the matching `}`
             if let Some(end) = after_dollar.find('}') {
                 let token = &after_dollar[..=end]; // e.g. "${header.x}"
                 let expr = parse_atom(token)?;
@@ -174,6 +187,12 @@ fn parse_atom(s: &str) -> Result<Expr, LanguageError> {
         return Ok(Expr::Body);
     }
 
+    if s.starts_with("${body.") && s.ends_with('}') {
+        let path_str = &s[7..s.len() - 1]; // strip "${body." prefix and "}" suffix
+        let segments = parse_body_path(path_str)?;
+        return Ok(Expr::BodyField(segments));
+    }
+
     if s.starts_with("${exchangeProperty.") && s.ends_with('}') {
         let key = &s[19..s.len() - 1];
         if key.is_empty() {
@@ -201,4 +220,27 @@ fn parse_atom(s: &str) -> Result<Expr, LanguageError> {
         expr: s.to_string(),
         reason: "unrecognized token".to_string(),
     })
+}
+
+/// Parse `"user.address.city"` or `"items.0.name"` into `Vec<PathSegment>`.
+/// Returns `ParseError` if any segment is empty.
+fn parse_body_path(path: &str) -> Result<Vec<PathSegment>, LanguageError> {
+    let mut segments = Vec::new();
+    for seg in path.split('.') {
+        if seg.is_empty() {
+            return Err(LanguageError::ParseError {
+                expr: format!("${{body.{path}}}"),
+                reason: "body path segment must not be empty".to_string(),
+            });
+        }
+        // Only treat as array index if: parses as usize AND has no leading zero
+        // (except "0" itself). This way "01" is treated as Key("01").
+        let is_index = seg.parse::<usize>().is_ok() && (seg == "0" || !seg.starts_with('0'));
+        if is_index {
+            segments.push(PathSegment::Index(seg.parse::<usize>().unwrap()));
+        } else {
+            segments.push(PathSegment::Key(seg.to_string()));
+        }
+    }
+    Ok(segments)
 }
