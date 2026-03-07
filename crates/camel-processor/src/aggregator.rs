@@ -576,23 +576,59 @@ mod tests {
         let exchanges = vec![ex1];
         let result = aggregate(exchanges, &AggregationStrategy::CollectAll);
         
-        if let Ok(Exchange { input, .. }) = result {
-            if let Body::Json(value) = input.body {
-                // Should be valid JSON that can be parsed
-                let json_str = serde_json::to_string(&value).unwrap();
-                let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-                
-                // Should contain _stream object
-                assert!(parsed.is_array());
-                let arr = parsed.as_array().unwrap();
-                assert!(arr[0].is_object());
-                assert!(arr[0]["_stream"].is_object());
-                assert_eq!(arr[0]["_stream"]["origin"], "file:///test.txt");
-            } else {
-                panic!("Expected Json body");
-            }
-        } else {
-            panic!("Expected Ok result");
+        let exchange = result.expect("Expected Ok result");
+        assert!(matches!(exchange.input.body, Body::Json(_)), "Expected Json body");
+        
+        if let Body::Json(value) = exchange.input.body {
+            let json_str = serde_json::to_string(&value).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+            
+            assert!(parsed.is_array(), "Result should be an array");
+            let arr = parsed.as_array().unwrap();
+            assert!(arr[0].is_object(), "First element should be an object");
+            assert!(arr[0]["_stream"].is_object(), "Should contain _stream object");
+            assert_eq!(arr[0]["_stream"]["origin"], "file:///test.txt");
+            assert_eq!(arr[0]["_stream"]["consumed"], true, "consumed flag should be true");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_stream_bodies_with_none_origin() {
+        use camel_api::{Body, StreamBody, StreamMetadata};
+        use futures::stream;
+        use bytes::Bytes;
+        use tokio::sync::Mutex;
+
+        let chunks = vec![Ok(Bytes::from("test"))];
+        let stream_body = StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream::iter(chunks))))),
+            metadata: StreamMetadata {
+                origin: None,
+                ..Default::default()
+            },
+        };
+
+        let ex1 = Exchange::new(Message {
+            headers: Default::default(),
+            body: Body::Stream(stream_body),
+        });
+
+        let exchanges = vec![ex1];
+        let result = aggregate(exchanges, &AggregationStrategy::CollectAll);
+        
+        let exchange = result.expect("Expected Ok result");
+        assert!(matches!(exchange.input.body, Body::Json(_)), "Expected Json body");
+        
+        if let Body::Json(value) = exchange.input.body {
+            let json_str = serde_json::to_string(&value).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+            
+            assert!(parsed.is_array(), "Result should be an array");
+            let arr = parsed.as_array().unwrap();
+            assert!(arr[0].is_object(), "First element should be an object");
+            assert!(arr[0]["_stream"].is_object(), "Should contain _stream object");
+            assert_eq!(arr[0]["_stream"]["origin"], serde_json::Value::Null, "origin should be null when None");
+            assert_eq!(arr[0]["_stream"]["consumed"], true, "consumed flag should be true");
         }
     }
 }

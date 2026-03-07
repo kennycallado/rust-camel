@@ -643,6 +643,7 @@ name = "camel-processor"
 version = "0.2.1"
 dependencies = [
  "async-trait",
+ "bytes",
  "camel-api",
  "camel-support",
  "camel-util",
