@@ -68,6 +68,7 @@ fn test_tracer_file_output_invalid_path_returns_error() {
     // Build a CamelConfig that enables file tracing with an invalid path
     let config = CamelConfig {
         routes: vec![],
+        watch: false,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: ComponentsConfig::default(),

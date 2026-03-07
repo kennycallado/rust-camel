@@ -9,6 +9,11 @@ pub struct CamelConfig {
     #[serde(default)]
     pub routes: Vec<String>,
 
+    /// Enable file-watcher hot-reload. Defaults to false.
+    /// Can be overridden per profile in Camel.toml or via `--watch` / `--no-watch` CLI flags.
+    #[serde(default)]
+    pub watch: bool,
+
     #[serde(default = "default_log_level")]
     pub log_level: String,
 

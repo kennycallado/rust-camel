@@ -1,0 +1,10 @@
+routes:
+  - id: "transform"
+    from: "timer:transform?period=5000"
+    steps:
+      - set_body:
+          value: "raw payload"
+      - set_header:
+          key: "source"
+          value: "camel-cli"
+      - log: "message=Transformed: ${body} (source=${header.source})"

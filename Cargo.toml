@@ -48,6 +48,7 @@ members = [
     "examples/language-simple",
     "examples/language-rhai",
     "examples/hot-reload",
+    "examples/hot-reload-yaml",
     "examples/yaml-dsl",
     "examples/config-basic",
     "examples/config-profiles",
@@ -113,5 +114,6 @@ arc-swap = "1"
 serde_yaml = "0.9"
 config = "0.14"
 glob = "0.3"
+notify = { version = "6", features = ["macos_fsevent"] }
 
 camel-config = { path = "crates/camel-config", version = "0.2.0" }

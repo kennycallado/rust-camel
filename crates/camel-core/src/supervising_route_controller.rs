@@ -124,6 +124,7 @@ impl RouteController for SupervisingRouteController {
     }
 }
 
+#[async_trait::async_trait]
 impl RouteControllerInternal for SupervisingRouteController {
     fn add_route(&mut self, def: RouteDefinition) -> Result<(), CamelError> {
         self.inner.add_route(def)
@@ -159,6 +160,25 @@ impl RouteControllerInternal for SupervisingRouteController {
 
     fn set_tracer_config(&mut self, config: &crate::config::TracerConfig) {
         self.inner.set_tracer_config(config)
+    }
+
+    fn compile_route_definition(
+        &self,
+        def: crate::route::RouteDefinition,
+    ) -> Result<camel_api::BoxProcessor, camel_api::CamelError> {
+        self.inner.compile_route_definition(def)
+    }
+
+    fn remove_route(&mut self, route_id: &str) -> Result<(), camel_api::CamelError> {
+        self.inner.remove_route(route_id)
+    }
+
+    async fn start_route_reload(&mut self, route_id: &str) -> Result<(), camel_api::CamelError> {
+        self.inner.start_route(route_id).await
+    }
+
+    async fn stop_route_reload(&mut self, route_id: &str) -> Result<(), camel_api::CamelError> {
+        self.inner.stop_route(route_id).await
     }
 }
 

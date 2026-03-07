@@ -1,0 +1,16 @@
+[package]
+name = "hot-reload-yaml"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-dsl.workspace = true
+camel-component-log.workspace = true
+camel-component-timer.workspace = true
+camel-component-mock.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

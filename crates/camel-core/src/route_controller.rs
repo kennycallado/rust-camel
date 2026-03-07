@@ -69,6 +69,7 @@ pub type SharedLanguageRegistry = Arc<std::sync::Mutex<HashMap<String, Arc<dyn L
 ///
 /// Both [`DefaultRouteController`] and the future `SupervisingRouteController` implement
 /// this trait, allowing `CamelContext` to hold either as `Arc<Mutex<dyn RouteControllerInternal>>`.
+#[async_trait::async_trait]
 pub trait RouteControllerInternal: RouteController + Send {
     /// Add a route definition to the controller.
     fn add_route(&mut self, def: RouteDefinition) -> Result<(), CamelError>;
@@ -93,6 +94,19 @@ pub trait RouteControllerInternal: RouteController + Send {
 
     /// Configure tracing from a [`TracerConfig`].
     fn set_tracer_config(&mut self, config: &TracerConfig);
+
+    /// Compile a `RouteDefinition` into a `BoxProcessor` without inserting it into the route map.
+    /// Used by hot-reload to prepare a new pipeline for atomic swap.
+    fn compile_route_definition(&self, def: RouteDefinition) -> Result<BoxProcessor, CamelError>;
+
+    /// Remove a route from the controller map (route must be stopped first).
+    fn remove_route(&mut self, route_id: &str) -> Result<(), CamelError>;
+
+    /// Start a route by ID (for use by hot-reload, where async_trait is required).
+    async fn start_route_reload(&mut self, route_id: &str) -> Result<(), CamelError>;
+
+    /// Stop a route by ID (for use by hot-reload, where async_trait is required).
+    async fn stop_route_reload(&mut self, route_id: &str) -> Result<(), CamelError>;
 }
 
 /// Internal state for a managed route.
@@ -334,7 +348,7 @@ impl DefaultRouteController {
     }
 
     /// Resolve BuilderSteps into BoxProcessors.
-    fn resolve_steps(
+    pub(crate) fn resolve_steps(
         &self,
         steps: Vec<BuilderStep>,
         producer_ctx: &ProducerContext,
@@ -632,9 +646,91 @@ impl DefaultRouteController {
         Ok(())
     }
 
+    /// Compile a `RouteDefinition` into a `BoxProcessor` without inserting into the route map.
+    ///
+    /// Used by hot-reload to prepare a new pipeline for atomic swap without disrupting
+    /// the running route. The caller is responsible for swapping via `swap_pipeline`.
+    pub fn compile_route_definition(
+        &self,
+        def: RouteDefinition,
+    ) -> Result<BoxProcessor, CamelError> {
+        let route_id = def.route_id().to_string();
+
+        let producer_ctx = self
+            .self_ref
+            .clone()
+            .map(ProducerContext::new)
+            .ok_or_else(|| CamelError::RouteError("RouteController self_ref not set".into()))?;
+
+        let registry = self
+            .registry
+            .lock()
+            .expect("mutex poisoned: registry lock in compile_route_definition");
+
+        let processors = self.resolve_steps(def.steps, &producer_ctx, &registry)?;
+        let mut pipeline = compose_traced_pipeline(
+            processors,
+            &route_id,
+            self.tracing_enabled,
+            self.tracer_detail_level.clone(),
+        );
+
+        if let Some(cb_config) = def.circuit_breaker {
+            let cb_layer = CircuitBreakerLayer::new(cb_config);
+            pipeline = BoxProcessor::new(cb_layer.layer(pipeline));
+        }
+
+        let eh_config = def
+            .error_handler
+            .or_else(|| self.global_error_handler.clone());
+        if let Some(config) = eh_config {
+            let layer = self.resolve_error_handler(config, &producer_ctx, &registry)?;
+            pipeline = BoxProcessor::new(layer.layer(pipeline));
+        }
+
+        drop(registry);
+        Ok(pipeline)
+    }
+
+    /// Remove a route from the controller map.
+    ///
+    /// The route **must** be stopped before removal (status `Stopped` or `Failed`).
+    /// Returns an error if the route is still running or does not exist.
+    /// Does not cancel any running tasks — call `stop_route` first.
+    pub fn remove_route(&mut self, route_id: &str) -> Result<(), CamelError> {
+        let managed = self.routes.get(route_id).ok_or_else(|| {
+            CamelError::RouteError(format!("Route '{}' not found for removal", route_id))
+        })?;
+        let status = managed
+            .status
+            .lock()
+            .expect("status mutex poisoned")
+            .clone();
+        match status {
+            RouteStatus::Stopped | RouteStatus::Failed(_) => {}
+            other => {
+                return Err(CamelError::RouteError(format!(
+                    "Route '{}' must be stopped before removal (current status: {:?})",
+                    route_id, other
+                )));
+            }
+        }
+        self.routes.remove(route_id);
+        info!(route_id = %route_id, "Route removed from controller");
+        Ok(())
+    }
+
     /// Returns the number of routes in the controller.
     pub fn route_count(&self) -> usize {
         self.routes.len()
+    }
+
+    /// Force-set the status of a route. Only for use in tests.
+    #[doc(hidden)]
+    pub fn force_route_status(&mut self, route_id: &str, status: RouteStatus) {
+        if let Some(managed) = self.routes.get(route_id) {
+            *managed.status.lock().expect("status mutex poisoned") = status;
+        }
     }
 
     /// Returns all route IDs.
@@ -1228,6 +1324,7 @@ impl RouteController for DefaultRouteController {
     }
 }
 
+#[async_trait::async_trait]
 impl RouteControllerInternal for DefaultRouteController {
     fn add_route(&mut self, def: RouteDefinition) -> Result<(), CamelError> {
         DefaultRouteController::add_route(self, def)
@@ -1260,6 +1357,22 @@ impl RouteControllerInternal for DefaultRouteController {
 
     fn set_tracer_config(&mut self, config: &TracerConfig) {
         DefaultRouteController::set_tracer_config(self, config)
+    }
+
+    fn compile_route_definition(&self, def: RouteDefinition) -> Result<BoxProcessor, CamelError> {
+        DefaultRouteController::compile_route_definition(self, def)
+    }
+
+    fn remove_route(&mut self, route_id: &str) -> Result<(), CamelError> {
+        DefaultRouteController::remove_route(self, route_id)
+    }
+
+    async fn start_route_reload(&mut self, route_id: &str) -> Result<(), CamelError> {
+        DefaultRouteController::start_route(self, route_id).await
+    }
+
+    async fn stop_route_reload(&mut self, route_id: &str) -> Result<(), CamelError> {
+        DefaultRouteController::stop_route(self, route_id).await
     }
 }
 

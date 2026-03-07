@@ -1,0 +1,18 @@
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+watch = false
+
+[default.supervision]
+max_attempts = 5
+initial_delay_ms = 1000
+backoff_multiplier = 2.0
+max_delay_ms = 60000
+
+[development]
+log_level = "DEBUG"
+watch = true
+
+[production]
+log_level = "WARN"
+watch = false

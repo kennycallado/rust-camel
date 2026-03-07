@@ -3,7 +3,7 @@
 //! Demonstrates a route with `auto_startup(false)` that doesn't start automatically.
 //! The route is manually started after a delay using the RouteController API.
 
-use camel_api::{CamelError, RouteController};
+use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;

@@ -78,6 +78,7 @@ routes:
 fn test_configure_context_with_supervision() {
     let config = CamelConfig {
         routes: vec![],
+        watch: false,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -101,6 +102,7 @@ fn test_configure_context_with_supervision() {
 fn test_configure_context_sets_shutdown_timeout() {
     let config = CamelConfig {
         routes: vec![],
+        watch: false,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -121,6 +123,7 @@ fn test_configure_context_sets_shutdown_timeout() {
 fn test_configure_context_with_valid_log_level() {
     let config = CamelConfig {
         routes: vec![],
+        watch: false,
         log_level: "debug".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -139,6 +142,7 @@ fn test_configure_context_with_valid_log_level() {
 fn test_configure_context_with_invalid_log_level() {
     let config = CamelConfig {
         routes: vec![],
+        watch: false,
         log_level: "invalid_level".to_string(),
         timeout_ms: 5000,
         components: Default::default(),

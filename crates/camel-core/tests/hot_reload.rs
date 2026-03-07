@@ -6,7 +6,7 @@
 //! - No requests are dropped or corrupted during the swap
 
 use camel_api::RouteController;
-use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, IdentityProcessor, Value};
+use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, IdentityProcessor, RouteStatus, Value};
 use camel_core::registry::Registry;
 use camel_core::route::RouteDefinition;
 use camel_core::route_controller::DefaultRouteController;
@@ -218,4 +218,66 @@ async fn test_hot_reload_concurrent_access_no_panic() {
 
     // Counter should reflect all initial pipeline invocations
     assert_eq!(counter.load(Ordering::SeqCst), 10);
+}
+
+fn make_controller() -> DefaultRouteController {
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let mut controller = DefaultRouteController::new(registry);
+    let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
+        DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
+    ));
+    controller.set_self_ref(controller_arc);
+    controller
+}
+
+#[tokio::test]
+async fn test_compile_route_definition_does_not_insert() {
+    let controller = make_controller();
+
+    let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("compile-only-test");
+
+    // compile_route_definition should compile without inserting the route
+    let _pipeline = controller.compile_route_definition(def).unwrap();
+
+    // route count must still be 0 (no insertion happened)
+    assert_eq!(controller.route_count(), 0);
+}
+
+#[tokio::test]
+async fn test_remove_route() {
+    let mut controller = make_controller();
+
+    let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("remove-test");
+
+    controller.add_route(def).unwrap();
+    assert_eq!(controller.route_count(), 1);
+
+    controller.remove_route("remove-test").unwrap();
+    assert_eq!(controller.route_count(), 0);
+}
+
+#[tokio::test]
+async fn test_remove_route_rejects_running_route() {
+    // Verifies the stopped-first invariant: remove_route must return an error
+    // when the route is in Started state, preventing resource leaks.
+    let mut controller = make_controller();
+
+    let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("running-remove-test");
+
+    controller.add_route(def).unwrap();
+    // Simulate a running route by forcing the status to Started
+    controller.force_route_status("running-remove-test", RouteStatus::Started);
+
+    let result = controller.remove_route("running-remove-test");
+    assert!(
+        result.is_err(),
+        "remove_route should return an error when route is in Started state"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("must be stopped"),
+        "Error message should indicate route must be stopped: {err_msg}"
+    );
+    // Route should still be present
+    assert_eq!(controller.route_count(), 1);
 }

@@ -67,6 +67,7 @@ pub mod config;
 pub mod context;
 pub mod registry;
 pub mod reload;
+pub mod reload_watcher;
 pub mod route;
 pub mod route_controller;
 pub mod supervising_route_controller;

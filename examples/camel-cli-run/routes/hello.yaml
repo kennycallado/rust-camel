@@ -1,0 +1,5 @@
+routes:
+  - id: "hello"
+    from: "timer:tick?period=2000"
+    steps:
+      - log: "message=Hello from camel-cli! Exchange #${header.CamelTimerCounter}"

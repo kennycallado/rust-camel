@@ -15,3 +15,18 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+camel-core.workspace = true
+camel-api.workspace = true
+camel-dsl.workspace = true
+camel-config.workspace = true
+config.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+camel-component-direct.workspace = true
+camel-component-file.workspace = true
+camel-component-http.workspace = true
+camel-component-mock.workspace = true
