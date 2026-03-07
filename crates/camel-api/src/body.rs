@@ -19,23 +19,23 @@ pub struct StreamMetadata {
 }
 
 /// A body that wraps a lazy-evaluated stream of bytes.
-/// 
+///
 /// # Clone Semantics
-/// 
+///
 /// The stream is **single-consumption**. When cloning a `Body::Stream`,
 /// all clones share the same underlying stream handle. Only the first
 /// clone to consume the stream will succeed; subsequent attempts will
 /// return `CamelError::AlreadyConsumed`.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust
 /// use camel_api::{Body, StreamBody, error::CamelError};
 /// use futures::stream;
 /// use bytes::Bytes;
 /// use std::sync::Arc;
 /// use tokio::sync::Mutex;
-/// 
+///
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), CamelError> {
 /// let chunks = vec![Ok(Bytes::from("data"))];
@@ -44,12 +44,12 @@ pub struct StreamMetadata {
 ///     stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
 ///     metadata: Default::default(),
 /// });
-/// 
+///
 /// let clone = body.clone();
-/// 
+///
 /// // First consumption succeeds
 /// let _ = body.into_bytes(1024).await?;
-/// 
+///
 /// // Second consumption fails
 /// let result = clone.into_bytes(1024).await;
 /// assert!(matches!(result, Err(CamelError::AlreadyConsumed)));
@@ -173,10 +173,10 @@ impl Body {
     }
 
     /// Materialize stream with sensible default limit (10MB).
-    /// 
+    ///
     /// Convenience method for common cases where you need the stream content
     /// but don't want to specify a custom limit.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let body = Body::Stream(stream);
@@ -331,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn test_materialize_with_default_limit() {
         use futures::stream;
-        
+
         // Small stream under limit - should succeed with default 10MB limit
         let chunks = vec![Ok(Bytes::from("test data"))];
         let stream = stream::iter(chunks);
@@ -348,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn test_materialize_non_stream_body_types() {
         // Verify materialize() works with all body types, not just streams
-        
+
         // Body::Empty
         let body = Body::Empty;
         let result = body.materialize().await.unwrap();
@@ -384,7 +384,10 @@ mod tests {
         });
 
         let result = body.materialize().await;
-        assert!(matches!(result, Err(CamelError::StreamLimitExceeded(10_485_760))));
+        assert!(matches!(
+            result,
+            Err(CamelError::StreamLimitExceeded(10_485_760))
+        ));
     }
 
     #[test]

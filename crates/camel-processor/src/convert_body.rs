@@ -54,9 +54,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use camel_api::body::Body;
     use camel_api::{IdentityProcessor, Message};
-    use bytes::Bytes;
     use serde_json::json;
     use tower::ServiceExt;
 

@@ -141,6 +141,8 @@ pub enum BuilderStep {
         level: camel_processor::LogLevel,
         message: ValueSourceDef,
     },
+    /// Bean invocation step — resolved at route-add time.
+    Bean { name: String, method: String },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -203,6 +205,12 @@ impl std::fmt::Debug for BuilderStep {
             }
             BuilderStep::DeclarativeLog { level, .. } => {
                 write!(f, "BuilderStep::DeclarativeLog {{ level: {level:?}, .. }}")
+            }
+            BuilderStep::Bean { name, method } => {
+                write!(
+                    f,
+                    "BuilderStep::Bean {{ name: {name:?}, method: {method:?} }}"
+                )
             }
         }
     }

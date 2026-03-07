@@ -786,9 +786,9 @@ mod tests {
     // ── 17. Stream body creates valid JSON placeholder ────────────────────
 
     async fn setup_multicast_stream_test(origin: Option<String>) -> Exchange {
+        use bytes::Bytes;
         use camel_api::{Body, StreamBody, StreamMetadata};
         use futures::stream;
-        use bytes::Bytes;
         use std::sync::Arc;
         use tokio::sync::Mutex;
 

@@ -1311,7 +1311,13 @@ mod tests {
 
         let dir = temp_file.path().parent().unwrap();
         let dir_path = dir.to_str().unwrap();
-        let file_name = temp_file.path().file_name().unwrap().to_str().unwrap().to_string();
+        let file_name = temp_file
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
 
         // Read file as stream (should succeed with lazy evaluation)
         let component = FileComponent::new();
@@ -1386,7 +1392,7 @@ mod tests {
             // Read first chunk (size varies based on ReaderStream's buffer)
             if let Some(chunk_result) = stream.next().await {
                 let chunk = chunk_result.unwrap();
-                assert!(chunk.len() > 0);
+                assert!(!chunk.is_empty());
                 assert!(chunk.len() < file_size);
                 // Memory usage is constant - we only have this chunk in memory, not 150MB
             }

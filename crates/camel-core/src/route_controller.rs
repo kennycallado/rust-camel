@@ -31,6 +31,7 @@ use crate::route::{
     compose_pipeline, compose_traced_pipeline,
 };
 use arc_swap::ArcSwap;
+use camel_bean::BeanRegistry;
 
 /// Notification sent when a route crashes.
 ///
@@ -183,6 +184,8 @@ pub struct DefaultRouteController {
     registry: Arc<std::sync::Mutex<Registry>>,
     /// Shared language registry for resolving declarative language expressions.
     languages: SharedLanguageRegistry,
+    /// Bean registry for bean method invocation.
+    beans: Arc<std::sync::Mutex<BeanRegistry>>,
     /// Self-reference for creating ProducerContext.
     /// Set after construction via `set_self_ref()`.
     self_ref: Option<Arc<Mutex<dyn RouteController>>>,
@@ -199,7 +202,28 @@ pub struct DefaultRouteController {
 impl DefaultRouteController {
     /// Create a new `DefaultRouteController` with the given registry.
     pub fn new(registry: Arc<std::sync::Mutex<Registry>>) -> Self {
-        Self::with_languages(registry, Arc::new(std::sync::Mutex::new(HashMap::new())))
+        Self::with_beans(
+            registry,
+            Arc::new(std::sync::Mutex::new(BeanRegistry::new())),
+        )
+    }
+
+    /// Create a new `DefaultRouteController` with shared bean registry.
+    pub fn with_beans(
+        registry: Arc<std::sync::Mutex<Registry>>,
+        beans: Arc<std::sync::Mutex<BeanRegistry>>,
+    ) -> Self {
+        Self {
+            routes: HashMap::new(),
+            registry,
+            languages: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            beans,
+            self_ref: None,
+            global_error_handler: None,
+            crash_notifier: None,
+            tracing_enabled: false,
+            tracer_detail_level: DetailLevel::Minimal,
+        }
     }
 
     /// Create a new `DefaultRouteController` with shared language registry.
@@ -211,6 +235,7 @@ impl DefaultRouteController {
             routes: HashMap::new(),
             registry,
             languages,
+            beans: Arc::new(std::sync::Mutex::new(BeanRegistry::new())),
             self_ref: None,
             global_error_handler: None,
             crash_notifier: None,
@@ -574,6 +599,34 @@ impl DefaultRouteController {
                                 .to_string()
                         });
                     processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::Bean { name, method } => {
+                    // Lock beans registry to lookup bean
+                    let beans = self.beans.lock().expect(
+                        "beans mutex poisoned: another thread panicked while holding this lock",
+                    );
+
+                    // Lookup bean by name
+                    let bean = beans.get(&name).ok_or_else(|| {
+                        CamelError::ProcessorError(format!("Bean not found: {}", name))
+                    })?;
+
+                    // Clone Arc for async closure (release lock before async)
+                    let bean_clone = Arc::clone(&bean);
+                    let method = method.clone();
+
+                    // Create processor that invokes bean method
+                    let processor = tower::service_fn(move |mut exchange: Exchange| {
+                        let bean = Arc::clone(&bean_clone);
+                        let method = method.clone();
+
+                        async move {
+                            bean.call(&method, &mut exchange).await?;
+                            Ok(exchange)
+                        }
+                    });
+
+                    processors.push(BoxProcessor::new(processor));
                 }
             }
         }

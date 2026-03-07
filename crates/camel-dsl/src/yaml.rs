@@ -6,7 +6,7 @@ use camel_api::CamelError;
 use camel_core::route::RouteDefinition;
 
 use crate::compile::compile_declarative_route;
-use crate::contract::{assert_contract_coverage, DeclarativeStepKind};
+use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
     DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRetryPolicy, DeclarativeRoute,
@@ -361,7 +361,7 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     return Err(CamelError::RouteError(format!(
                         "unknown convert_body_to target: '{}'. Expected: text, json, bytes, empty",
                         other
-                    )))
+                    )));
                 }
             };
             Ok(DeclarativeStep::ConvertBodyTo(def))

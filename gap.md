@@ -9,11 +9,15 @@ Este documento detalla los gaps arquitectónicos confirmados tras la revisión t
 *   **Gap:** Cada componente reinventa la lógica de conversión. Si un componente nuevo espera `Json` pero recibe `Text` (que es un JSON válido), fallará porque no hay un motor de conversión centralizado que medie entre los pasos del pipeline.
 *   **Impacto:** Redundancia de código y fragilidad en la interoperabilidad entre componentes de terceros.
 
-## 2. Integración con "Beans" / Registry limitado (CONFIRMADO)
-*   **Evidencia en código:** 
-    *   `camel-core/src/registry.rs` define `Registry` estrictamente como un `HashMap<String, Box<dyn Component>>`.
-*   **Gap:** No existe un mecanismo para registrar objetos arbitrarios (`Send + Sync + Any`) que puedan ser recuperados por nombre.
-*   **Impacto:** Imposibilidad de inyectar lógica de negocio o configuraciones complejas desde el DSL de YAML. Las rutas están limitadas a lo que el framework proporciona "out-of-the-box" o requiere closures pesados en el Builder de Rust.
+## 2. Integración con "Beans" / Registry (RESUELTO)
+*   **Estado:** Implementado en v0.2.2.
+*   **Solución:**
+    *   Nuevo crate `camel-bean` con `BeanRegistry` y `BeanProcessor` trait.
+    *   Proc-macro `#[bean_impl]` + `#[handler]` para definición ergonómica.
+    *   Parameter binding automático (body, headers, exchange).
+    *   Integración con YAML DSL via `DeclarativeStep::Bean`.
+    *   Type-safe con validación en compile-time.
+*   **Impacto:** Permite inyectar lógica de negocio desde DSL YAML. Foundation para patrones avanzados (DI, @Consume).
 
 ## 3. Streaming de Datos - Body as Stream (RESUELTO)
 *   **Estado:** Implementado en v0.2.1, code review completado.

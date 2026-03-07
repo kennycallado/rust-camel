@@ -11,7 +11,7 @@
 
 use camel_core::route::BuilderStep;
 use camel_dsl::{
-    compile_declarative_route, parse_yaml, BodyTypeDef, DeclarativeRoute, DeclarativeStep,
+    BodyTypeDef, DeclarativeRoute, DeclarativeStep, compile_declarative_route, parse_yaml,
 };
 
 // =============================================================================

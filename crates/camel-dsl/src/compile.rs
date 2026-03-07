@@ -5,8 +5,8 @@ use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::{
-    split_body_json_array, split_body_lines, AggregationStrategy as SplitAggregation,
-    SplitterConfig,
+    AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
+    split_body_lines,
 };
 use camel_api::{CamelError, CircuitBreakerConfig, IdentityProcessor};
 use camel_component::ConcurrencyModel;
@@ -14,11 +14,11 @@ use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{ConvertBodyTo, LogLevel, StopService};
 
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
-    DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute, DeclarativeStep,
-    LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
-    ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef,
-    SplitStepDef, ToStepDef, ValueSourceDef, WireTapStepDef,
+    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef,
+    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
+    DeclarativeStep, LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef,
+    MulticastStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
+    SplitExpressionDef, SplitStepDef, ToStepDef, ValueSourceDef, WireTapStepDef,
 };
 
 pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinition, CamelError> {
@@ -148,6 +148,9 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
             Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
                 ConvertBodyTo::new(IdentityProcessor, target),
             )))
+        }
+        DeclarativeStep::Bean(BeanStepDef { name, method }) => {
+            Ok(BuilderStep::Bean { name, method })
         }
     }
 }

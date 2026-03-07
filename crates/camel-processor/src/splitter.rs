@@ -608,8 +608,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_splitter_stream_bodies_creates_valid_json() {
-        use camel_api::{StreamBody, StreamMetadata};
         use bytes::Bytes;
+        use camel_api::{StreamBody, StreamMetadata};
         use futures::stream;
         use tokio::sync::Mutex;
 
@@ -655,8 +655,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_splitter_stream_with_none_origin_creates_valid_json() {
-        use camel_api::{StreamBody, StreamMetadata};
         use bytes::Bytes;
+        use camel_api::{StreamBody, StreamMetadata};
         use futures::stream;
         use tokio::sync::Mutex;
 

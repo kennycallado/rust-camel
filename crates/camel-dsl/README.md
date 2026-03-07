@@ -20,7 +20,7 @@
 - **Language expressions**: Use `simple:` and `rhai:` syntax for dynamic values
 - **Route-level configuration**: Auto-startup, startup ordering, concurrency, error handling, circuit breaker
 
-- **All step types**: to, log, set_header, set_body, filter, choice, split, aggregate, wire_tap, multicast, stop, script
+- **All step types**: to, log, set_header, set_body, filter, choice, split, aggregate, wire_tap, multicast, stop, script, bean
 
 ## Installation
 Add to your `Cargo.toml`:
@@ -98,6 +98,40 @@ routes:
 | `multicast` | Fan-out to multiple | `- multicast: { steps: [...] }` |
 | `stop` | Stop pipeline | `- stop: true` |
 | `script` | Execute script | `- script: { language: "simple", source: "${body}" }` |
+| `bean` | Invoke bean method | `- bean: { name: "orderService", method: "process" }` |
+
+### Bean Step
+
+The `bean` step allows you to invoke business logic registered in the BeanRegistry:
+
+```yaml
+routes:
+  - id: "process-order"
+    from: "direct:orders"
+    steps:
+      - bean:
+          name: "orderService"
+          method: "validate"
+      - bean:
+          name: "orderService"
+          method: "process"
+```
+
+**Prerequisites:**
+- Register beans in your Rust code using `BeanRegistry`
+- Pass the registry to `DefaultRouteController::with_beans()`
+
+```rust
+use camel_bean::BeanRegistry;
+use camel_core::DefaultRouteController;
+
+let mut bean_registry = BeanRegistry::new();
+bean_registry.register("orderService", OrderService);
+
+let controller = DefaultRouteController::with_beans(bean_registry);
+```
+
+See `examples/bean-demo` for a complete example.
 
 ## Language Expressions
 Many steps support language expressions for dynamic values:

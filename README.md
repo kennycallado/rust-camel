@@ -69,6 +69,7 @@ cargo run -p hello-world
 | `camel-language-api` | Language trait API: `Language`, `Expression`, `Predicate` |
 | `camel-language-simple` | Simple Language: `${header.x}`, `${body}`, operators |
 | `camel-language-rhai` | Rhai scripting language for full expression power |
+| `camel-bean` | Bean/Registry system for dependency injection and business logic integration |
 
 ## Building & Testing
 
@@ -91,8 +92,9 @@ cargo test --workspace
 Run an example:
 
 ```sh
-cargo run -p aggregator
-cargo run -p circuit-breaker
+ cargo run -p aggregator
+ cargo run -p bean-demo
+ cargo run -p circuit-breaker
 cargo run -p content-based-routing
 cargo run -p controlbus
 cargo run -p error-handling

@@ -8,10 +8,10 @@
 //! The conversion chain flows through multiple routes, each demonstrating
 //! a specific conversion type and how errors are handled gracefully.
 
+use camel_api::CamelError;
 use camel_api::body::Body;
 use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
@@ -38,9 +38,15 @@ async fn main() -> Result<(), CamelError> {
     let route_text_to_json = RouteBuilder::from("timer:text-to-json?period=2000&repeatCount=3")
         .route_id("text-to-json")
         .set_body(r#"{"message": "hello from text", "count": 42}"#)
-        .log("Route 1: Starting with Text body containing JSON string", LogLevel::Info)
+        .log(
+            "Route 1: Starting with Text body containing JSON string",
+            LogLevel::Info,
+        )
         .convert_body_to(BodyType::Json)
-        .log("Route 1: Converted Text → Json successfully!", LogLevel::Info)
+        .log(
+            "Route 1: Converted Text → Json successfully!",
+            LogLevel::Info,
+        )
         .to("log:info?showBody=true")
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
@@ -65,7 +71,10 @@ async fn main() -> Result<(), CamelError> {
         })
         .log("Route 2: Starting with Json body", LogLevel::Info)
         .convert_body_to(BodyType::Bytes)
-        .log("Route 2: Converted Json → Bytes successfully!", LogLevel::Info)
+        .log(
+            "Route 2: Converted Json → Bytes successfully!",
+            LogLevel::Info,
+        )
         .to("log:info?showBody=true")
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
@@ -87,7 +96,10 @@ async fn main() -> Result<(), CamelError> {
         })
         .log("Route 3: Starting with Bytes body (UTF-8)", LogLevel::Info)
         .convert_body_to(BodyType::Text)
-        .log("Route 3: Converted Bytes → Text successfully!", LogLevel::Info)
+        .log(
+            "Route 3: Converted Bytes → Text successfully!",
+            LogLevel::Info,
+        )
         .to("log:info?showBody=true")
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
@@ -107,9 +119,15 @@ async fn main() -> Result<(), CamelError> {
             exchange.input.body = Body::Empty;
             Ok(exchange)
         })
-        .log("Route 4: Starting with Empty body (will fail conversion)", LogLevel::Info)
+        .log(
+            "Route 4: Starting with Empty body (will fail conversion)",
+            LogLevel::Info,
+        )
         .convert_body_to(BodyType::Text) // This will fail!
-        .log("Route 4: This log should NOT appear (conversion failed)", LogLevel::Info)
+        .log(
+            "Route 4: This log should NOT appear (conversion failed)",
+            LogLevel::Info,
+        )
         .to("log:info?showBody=true")
         .error_handler(
             ErrorHandlerConfig::log_only()

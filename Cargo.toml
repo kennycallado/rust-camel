@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/camel-api",
+    "crates/camel-bean",
+    "crates/camel-bean-macros",
     "crates/camel-core",
     "crates/camel-cli",
     "crates/camel-util",
@@ -55,6 +57,7 @@ members = [
     "examples/auto-restart",
     "examples/tracer-demo",
     "examples/convert-body-to",
+    "examples/bean-demo",
 ]
 
 [workspace.package]
@@ -69,6 +72,8 @@ categories = ["network-programming", "asynchronous", "development-tools"]
 
 [workspace.dependencies]
 camel-api = { path = "crates/camel-api", version = "0.2.0" }
+camel-bean = { path = "crates/camel-bean", version = "0.2.0" }
+camel-bean-macros = { path = "crates/camel-bean-macros", version = "0.2.0" }
 camel-cli = { path = "crates/camel-cli", version = "0.2.0" }
 camel-core = { path = "crates/camel-core", version = "0.2.0" }
 camel-util = { path = "crates/camel-util", version = "0.2.0" }

@@ -18,6 +18,7 @@ This is the main crate you'll use when building a rust-camel application. It bri
 - **Hot-reload**: Live route updates with ArcSwap (no downtime)
 - **Supervision**: Auto-recovery with configurable exponential backoff
 - **Tracer Integration**: Automatic message flow tracing support
+- **Bean Integration**: BeanRegistry support for YAML DSL bean step resolution
 
 ## Installation
 
@@ -95,6 +96,7 @@ let status = ctx.route_status("my-route");
 | `RouteDefinition` | Route builder output |
 | `RouteController` | Lifecycle management trait |
 | `SupervisingRouteController` | Auto-recovery with exponential backoff for crashed consumers |
+| `DefaultRouteController` | Default implementation with optional BeanRegistry (`with_beans()`) |
 
 ## Architecture
 
@@ -128,6 +130,23 @@ Live route updates without service restart using `ArcSwap` and `ReloadCoordinato
 ### ControlBus Integration
 
 Dynamic route lifecycle management via the control bus pattern. Start, stop, suspend, and resume routes programmatically.
+
+### Bean Integration
+
+Use `DefaultRouteController::with_beans()` to enable bean step resolution in YAML DSL routes:
+
+```rust
+use camel_core::DefaultRouteController;
+use camel_bean::BeanRegistry;
+
+let mut bean_registry = BeanRegistry::new();
+bean_registry.register("orderService", OrderService);
+
+let controller = DefaultRouteController::with_beans(bean_registry);
+// Pass controller to CamelContext::with_controller()
+```
+
+See `examples/bean-demo` for a complete example.
 
 ## Documentation
 

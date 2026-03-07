@@ -19,6 +19,7 @@ camel-component.workspace = true
 camel-endpoint.workspace = true
 camel-language-api.workspace = true
 camel-language-simple.workspace = true
+camel-bean = { path = "../camel-bean" }
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -34,7 +35,9 @@ notify.workspace = true
 [dev-dependencies]
 futures = "0.3"
 tempfile = "3"
+serde_json = "1"
 camel-component-timer = { path = "../components/camel-timer" }
 camel-component-log = { path = "../components/camel-log" }
 camel-component-mock = { path = "../components/camel-mock" }
 camel-dsl = { path = "../camel-dsl" }
+camel-bean = { path = "../camel-bean" }

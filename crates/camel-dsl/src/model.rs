@@ -160,6 +160,21 @@ pub struct WireTapStepDef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeanStepDef {
+    pub name: String,
+    pub method: String,
+}
+
+impl BeanStepDef {
+    pub fn new(name: impl Into<String>, method: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            method: method.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MulticastAggregationDef {
     LastWins,
     CollectAll,
@@ -204,4 +219,5 @@ pub enum DeclarativeStep {
     Stop,
     Script(ScriptStepDef),
     ConvertBodyTo(BodyTypeDef),
+    Bean(BeanStepDef),
 }
