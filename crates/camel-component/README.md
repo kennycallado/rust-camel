@@ -60,20 +60,29 @@ impl Endpoint for MyEndpoint {
     }
 
     fn create_producer(&self, ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
-        // Create and return a producer
-        todo!()
+        // Create and return a producer that processes exchanges
+        // See camel-service crate for processor implementation details
+        Err(CamelError::NotImplemented("producer not implemented".into()))
     }
 }
 ```
 
 ## Core Types
 
-| Trait | Description |
-|-------|-------------|
+| Type | Description |
+|------|-------------|
 | `Component` | Factory for creating endpoints |
 | `Endpoint` | Communication endpoint (consumer/producer) |
-| `Consumer` | Receives messages from external systems |
+| `Consumer` | Trait for consuming messages from endpoints |
+| `ConsumerContext` | Context provided to Consumer implementations |
 | `ProducerContext` | Context for creating producers |
+| `ExchangeEnvelope` | Message envelope with optional reply channel |
+| `ConcurrencyModel` | Sequential or Concurrent message processing |
+
+## ConcurrencyModel
+
+- **Sequential**: Process messages one at a time in order. Use for simpler consumers where ordering matters.
+- **Concurrent**: Process multiple messages simultaneously. Use for higher throughput when order doesn't matter.
 
 ## Documentation
 

@@ -15,6 +15,9 @@ This is the main crate you'll use when building a rust-camel application. It bri
 - **Route**: Route definitions and lifecycle management
 - **RouteController**: Start, stop, suspend, and resume routes
 - **Pipeline composition**: Tower-based middleware composition
+- **Hot-reload**: Live route updates with ArcSwap (no downtime)
+- **Supervision**: Auto-recovery with configurable exponential backoff
+- **Tracer Integration**: Automatic message flow tracing support
 
 ## Installation
 
@@ -91,6 +94,7 @@ let status = ctx.route_status("my-route");
 | `Route` | A configured route |
 | `RouteDefinition` | Route builder output |
 | `RouteController` | Lifecycle management trait |
+| `SupervisingRouteController` | Auto-recovery with exponential backoff for crashed consumers |
 
 ## Architecture
 
@@ -110,6 +114,20 @@ let status = ctx.route_status("my-route");
 │  └─────────────────────────────┘   │
 └─────────────────────────────────────┘
 ```
+
+## Advanced Features
+
+### SupervisingRouteController
+
+Wraps any route controller with automatic recovery using configurable exponential backoff. When a consumer crashes, it automatically restarts after a delay that increases with each failure.
+
+### Hot-reload System
+
+Live route updates without service restart using `ArcSwap` and `ReloadCoordinator`. Update route definitions at runtime with zero downtime.
+
+### ControlBus Integration
+
+Dynamic route lifecycle management via the control bus pattern. Start, stop, suspend, and resume routes programmatically.
 
 ## Documentation
 

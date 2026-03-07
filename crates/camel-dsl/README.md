@@ -149,6 +149,6 @@ routes:
 
 ## Documentation
 - [API Documentation](https://docs.rs/camel-dsl)
-- [Examples](../://github.com/kennycallado/rust-camel/tree/examples)
+- [Examples](https://github.com/kennycallado/rust-camel/tree/main/examples)
 - [Repository](https://github.com/kennycallado/rust-camel)
 

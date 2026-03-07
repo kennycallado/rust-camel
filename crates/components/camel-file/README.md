@@ -14,6 +14,7 @@ The File component provides file system integration for rust-camel. It can read 
 - **Post-processing**: Delete, move, or no-op after processing
 - **Recursive directory scanning**
 - **Atomic writes**: Temp file prefix support
+- **Streaming**: Zero-copy file reading via ReaderStream (lazy evaluation)
 - **Security**: Path traversal protection
 
 ## Installation
@@ -185,9 +186,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Streaming & Memory Management
+
+The File component uses lazy evaluation—files are not loaded into memory until the body is accessed. A default 10MB materialization limit prevents out-of-memory conditions when processing large files. This design allows handling files of any size (tested with 150MB+). Users can explicitly materialize with custom limits if needed.
+
 ## Security
 
 The File component includes protection against path traversal attacks. Attempts to write files outside the configured directory (e.g., using `../` in the filename) will be rejected with an error.
+
+- **Memory limits**: Default 10MB limit prevents unbounded memory consumption
 
 ## Documentation
 

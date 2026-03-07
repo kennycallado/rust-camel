@@ -20,6 +20,7 @@
 - **Circuit Breaker**: Resilience pattern implementation
 - **Error Handler**: Centralized error handling
 - **Stop**: Stop processing immediately
+- **Stream Handling**: Processors that consume streams replace the body with a JSON placeholder `{"placeholder": true}`
 
 ## Installation
 

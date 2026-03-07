@@ -8,6 +8,8 @@
 
 This is the primary way to define routes in rust-camel applications.
 
+Routes can also be defined via YAML using camel-dsl. See the camel-dsl crate for details.
+
 ## Features
 
 - **Fluent API**: Intuitive method chaining for route definition

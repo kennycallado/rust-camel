@@ -18,6 +18,7 @@ If you're building custom components or processors for rust-camel, you'll need t
 - **Multicast**: Parallel message processing support
 - **Metrics**: Metrics collection interfaces
 - **Route control**: Route controller traits for lifecycle management
+- **Streaming**: Lazy Body::Stream variant with materialize() helper and configurable memory limits
 
 ## Installation
 
@@ -51,6 +52,10 @@ let processor = ProcessorFn::new(|ex: Exchange| async move {
     ex.input.body = Body::Text(body);
     Ok(ex)
 });
+
+// Streams are lazily evaluated and require explicit materialization
+let bytes = body.materialize().await?; // Uses 10MB default limit
+let bytes = body.into_bytes(100 * 1024 * 1024).await?; // Custom limit
 ```
 
 ## Core Types
@@ -59,7 +64,7 @@ let processor = ProcessorFn::new(|ex: Exchange| async move {
 |------|-------------|
 | `Exchange` | The message container flowing through routes |
 | `Message` | Holds body, headers, and properties |
-| `Body` | Message body (Empty, Text, Json, Bytes) |
+| `Body` | Message body (Empty, Text, Json, Bytes, Stream) |
 | `Processor` | Trait for processing exchanges |
 | `CamelError` | Comprehensive error type |
 

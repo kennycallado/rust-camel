@@ -12,7 +12,12 @@
 |--------|-------------|
 | `${header.name}` | Access a message header by name |
 | `${body}` | Access the message body as text |
+| `${body.field}` | Access JSON body field (dot-notation) |
+| `${body.nested.field}` | Access nested JSON fields |
+| `${body.array.0}` | Access array element by index |
 | `${exchangeProperty.name}` | Access an exchange property |
+
+> **Note:** Body field access (`${body.field}`) only works on `Body::Json` and returns `Value::Null` for other body types or missing fields.
 
 ## Supported Operators
 

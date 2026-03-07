@@ -13,6 +13,7 @@ The HTTP component provides HTTP client (producer) and HTTP server (consumer) ca
 - **HTTPS Support**: Secure connections with `https` scheme
 - **Configurable Timeouts**: Connect and response timeouts
 - **SSRF Protection**: Optional private IP blocking
+- **Streaming**: Direct stream-to-HTTP piping without materialization
 - **Header Mapping**: Automatic header forwarding
 - **Status Code Handling**: Configurable success ranges
 
@@ -226,6 +227,12 @@ To block specific hosts:
 ```rust
 .to("http://api.example.com?blockedHosts=localhost,127.0.0.1,internal.local")
 ```
+
+## Streaming & Memory Management
+
+The HTTP producer supports streaming request bodies directly without materializing them in memory. Stream bodies are piped to reqwest using `wrap_stream()`.
+
+Memory limits apply when materialization is required (default: 10MB).
 
 ## Documentation
 
