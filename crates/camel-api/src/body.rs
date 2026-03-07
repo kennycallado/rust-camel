@@ -126,6 +126,20 @@ impl Body {
         }
     }
 
+    /// Materialize stream with sensible default limit (10MB).
+    /// 
+    /// Convenience method for common cases where you need the stream content
+    /// but don't want to specify a custom limit.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let body = Body::Stream(stream);
+    /// let bytes = body.materialize().await?;
+    /// ```
+    pub async fn materialize(self) -> Result<Bytes, CamelError> {
+        self.into_bytes(10 * 1024 * 1024).await
+    }
+
     /// Try to get the body as a string, converting from bytes if needed.
     pub fn as_text(&self) -> Option<&str> {
         match self {
@@ -245,5 +259,39 @@ mod tests {
 
         let result = cloned.into_bytes(100).await;
         assert!(matches!(result, Err(CamelError::AlreadyConsumed)));
+    }
+
+    #[tokio::test]
+    async fn test_materialize_with_default_limit() {
+        use futures::stream;
+        
+        // 5MB stream - should succeed with default 10MB limit
+        let chunks = vec![Ok(Bytes::from("test data"))];
+        let stream = stream::iter(chunks);
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
+            metadata: StreamMetadata::default(),
+        });
+
+        let result = body.materialize().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Bytes::from("test data"));
+    }
+
+    #[tokio::test]
+    async fn test_materialize_exceeds_default_limit() {
+        use futures::stream;
+        
+        // 15MB stream - should fail with default 10MB limit
+        let large_data = vec![0u8; 15 * 1024 * 1024];
+        let chunks = vec![Ok(Bytes::from(large_data))];
+        let stream = stream::iter(chunks);
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
+            metadata: StreamMetadata::default(),
+        });
+
+        let result = body.materialize().await;
+        assert!(matches!(result, Err(CamelError::StreamLimitExceeded(10_485_760))));
     }
 }
