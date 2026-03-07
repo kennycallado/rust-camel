@@ -95,6 +95,13 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | Streaming Body: intelligent clone (re-open file)                     | Gap 3 postmortem                       | Media-baja — permitir que Body::clone() reabra archivos si \`origin\` es conocido para evitar single-consumption limit         |        |
 | Streaming Body: EIP error propagation                                | Gap 3 postmortem                       | Baja — refinar cómo Multicast/Splitter manejan errores de stream en vez de usar placeholders de texto                          |        |
 | Streaming Body: Direct streaming to File                             | Gap 3 review                           | Media — usar tokio::io::copy para volcar stream a disco directamente en FileProducer sin pasar por Vec<u8>                     |        |
+| Beans/Registry system                                                 | Gap 2 Architectural Analysis           | Alta — DONE: BeanRegistry + BeanProcessor trait + #[bean_impl] macro + YAML DSL integration                                   | DONE   |
+| Beans: Constructor dependency injection                               | Bean README Future Enhancements        | Baja — inyección de dependencias en constructores de beans                                                                    |        |
+| Beans: Lifecycle callbacks (init/destroy)                             | Bean README Future Enhancements        | Baja — hooks para inicialización y limpieza de beans                                                                          |        |
+| Beans: Scopes (singleton/prototype)                                   | Bean README Future Enhancements        | Baja — soporte para beans con diferentes ciclos de vida                                                                       |        |
+| Beans: Conditional registration                                       | Bean README Future Enhancements        | Baja — registro de beans basado en condiciones de configuración                                                               |        |
+| Beans: Service discovery integration                                  | Bean README Future Enhancements        | Baja — integración con sistemas de service discovery                                                                          |        |
+| Beans: Bean composition (beans depending on beans)                    | Bean README Advanced Usage             | Baja — permitir que beans dependan de otros beans via Arc<dyn Trait>                                                          |        |
 
 ## Log EIP — Behavior Change
 `log:` steps in YAML DSL now evaluate their message as Simple Language (consistent with Apache Camel).
