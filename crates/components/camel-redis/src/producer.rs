@@ -191,10 +191,12 @@ impl Service<Exchange> for RedisProducer {
                     if let Some(c) = guard.as_ref() {
                         c.clone()
                     } else {
-                        let client = redis::Client::open(config.redis_url()).map_err(|e| {
+                        let redis_url = config.redis_url();
+                        tracing::debug!("Creating Redis client with URL: {}", redis_url);
+                        let client = redis::Client::open(redis_url.as_str()).map_err(|e| {
                             CamelError::ProcessorError(format!(
-                                "Failed to create Redis client: {}",
-                                e
+                                "Failed to create Redis client for URL '{}': {}",
+                                redis_url, e
                             ))
                         })?;
 

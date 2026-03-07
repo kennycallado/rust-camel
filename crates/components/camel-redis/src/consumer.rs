@@ -260,7 +260,7 @@ async fn run_queue_consumer(
             result = async {
                 let cmd = redis::cmd("BLPOP")
                     .arg(&key)
-                    .arg(timeout as f64)
+                    .arg(timeout)
                     .to_owned();
                 cmd.query_async::<Option<(String, String)>>(&mut conn).await
             } =>
