@@ -299,7 +299,11 @@ impl ServerRegistry {
 
         let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
         let dispatch_for_server = Arc::clone(&dispatch);
-        let task = tokio::spawn(run_axum_server(listener, dispatch_for_server, max_request_body));
+        let task = tokio::spawn(run_axum_server(
+            listener,
+            dispatch_for_server,
+            max_request_body,
+        ));
 
         // Re-acquire lock to insert — handle the race where another task won.
         let mut guard = self.inner.lock().map_err(|_| {
@@ -340,25 +344,23 @@ struct AppState {
     max_request_body: usize,
 }
 
-async fn run_axum_server(listener: tokio::net::TcpListener, dispatch: DispatchTable, max_request_body: usize) {
+async fn run_axum_server(
+    listener: tokio::net::TcpListener,
+    dispatch: DispatchTable,
+    max_request_body: usize,
+) {
     let state = AppState {
         dispatch,
         max_request_body,
     };
-    let app = Router::new()
-        .fallback(dispatch_handler)
-        .with_state(state);
+    let app = Router::new().fallback(dispatch_handler).with_state(state);
 
     axum::serve(listener, app).await.unwrap_or_else(|e| {
         tracing::error!(error = %e, "Axum server error");
     });
 }
 
-async fn dispatch_handler(
-    State(state): State<AppState>,
-    req: Request,
-) -> impl IntoResponse {
-
+async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl IntoResponse {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
@@ -450,7 +452,11 @@ impl Consumer for HttpConsumer {
         use camel_api::{Exchange, Message, body::Body};
 
         let dispatch = ServerRegistry::global()
-            .get_or_spawn(&self.config.host, self.config.port, self.config.max_request_body)
+            .get_or_spawn(
+                &self.config.host,
+                self.config.port,
+                self.config.max_request_body,
+            )
             .await?;
 
         // Create a channel for this path and register it

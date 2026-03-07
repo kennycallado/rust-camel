@@ -174,9 +174,10 @@ fn aggregate(
                         serde_json::Value::String(String::from_utf8_lossy(&b).into_owned())
                     }
                     Body::Empty => serde_json::Value::Null,
-                    Body::Stream(s) => {
-                        serde_json::Value::String(format!("[Stream: origin={:?}]", s.metadata.origin))
-                    }
+                    Body::Stream(s) => serde_json::Value::String(format!(
+                        "[Stream: origin={:?}]",
+                        s.metadata.origin
+                    )),
                 })
                 .collect();
             Ok(Exchange::new(Message {

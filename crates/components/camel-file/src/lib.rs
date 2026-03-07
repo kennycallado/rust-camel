@@ -12,7 +12,9 @@ use tokio_util::io::ReaderStream;
 use tower::Service;
 use tracing::{debug, warn};
 
-use camel_api::{BoxProcessor, CamelError, Exchange, Message, body::Body, body::StreamBody, body::StreamMetadata};
+use camel_api::{
+    BoxProcessor, CamelError, Exchange, Message, body::Body, body::StreamBody, body::StreamMetadata,
+};
 use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 use camel_endpoint::parse_uri;
 
@@ -574,7 +576,9 @@ impl Service<Exchange> for FileProducer {
 
         Box::pin(async move {
             let file_name = FileProducer::resolve_filename(&exchange, &config)?;
-            let data = FileProducer::body_to_bytes(exchange.input.body.clone(), config.max_body_size).await?;
+            let data =
+                FileProducer::body_to_bytes(exchange.input.body.clone(), config.max_body_size)
+                    .await?;
 
             let dir_path = std::path::Path::new(&config.directory);
             let target_path = dir_path.join(&file_name);
