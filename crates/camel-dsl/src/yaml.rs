@@ -6,9 +6,9 @@ use camel_api::CamelError;
 use camel_core::route::RouteDefinition;
 
 use crate::compile::compile_declarative_route;
-use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
+use crate::contract::{assert_contract_coverage, DeclarativeStepKind};
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, ChoiceStepDef, DeclarativeCircuitBreaker,
+    AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
     DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRetryPolicy, DeclarativeRoute,
     DeclarativeStep, LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef,
     MulticastStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
@@ -22,7 +22,7 @@ pub use crate::yaml_ast::{
     YamlRoute, YamlRoutes, YamlStep,
 };
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 12] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 13] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -35,6 +35,7 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 12] = [
     DeclarativeStepKind::Multicast,
     DeclarativeStepKind::Stop,
     DeclarativeStepKind::Script,
+    DeclarativeStepKind::ConvertBodyTo,
 ];
 
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
@@ -349,6 +350,21 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 timeout_ms: multicast.timeout_ms,
                 aggregation,
             }))
+        }
+        YamlStep::ConvertBodyTo(step) => {
+            let def = match step.convert_body_to.to_lowercase().as_str() {
+                "text" => BodyTypeDef::Text,
+                "json" => BodyTypeDef::Json,
+                "bytes" => BodyTypeDef::Bytes,
+                "empty" => BodyTypeDef::Empty,
+                other => {
+                    return Err(CamelError::RouteError(format!(
+                        "unknown convert_body_to target: '{}'. Expected: text, json, bytes, empty",
+                        other
+                    )))
+                }
+            };
+            Ok(DeclarativeStep::ConvertBodyTo(def))
         }
     }
 }

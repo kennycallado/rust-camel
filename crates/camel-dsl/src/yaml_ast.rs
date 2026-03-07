@@ -97,6 +97,7 @@ pub enum YamlStep {
     Multicast(MulticastStep),
     Stop(StopStep),
     Script(ScriptStep),
+    ConvertBodyTo(ConvertBodyToStep),
 }
 
 #[derive(Deserialize, Debug)]
@@ -343,6 +344,11 @@ pub struct StopStep {
 #[derive(Deserialize, Debug)]
 pub struct ScriptStep {
     pub script: ScriptData,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ConvertBodyToStep {
+    pub convert_body_to: String,
 }
 
 #[derive(Deserialize, Debug)]

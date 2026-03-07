@@ -181,6 +181,14 @@ pub struct ScriptStepDef {
     pub expression: LanguageExpressionDef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyTypeDef {
+    Text,
+    Json,
+    Bytes,
+    Empty,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclarativeStep {
     To(ToStepDef),
@@ -195,4 +203,5 @@ pub enum DeclarativeStep {
     Multicast(MulticastStepDef),
     Stop,
     Script(ScriptStepDef),
+    ConvertBodyTo(BodyTypeDef),
 }
