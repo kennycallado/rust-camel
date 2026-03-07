@@ -17,8 +17,8 @@ use crate::model::{
 pub use crate::yaml_ast::{
     AggregateData, AggregateStep, ChoiceData, ChoiceStep, FilterStep, LogConfig, LogStep,
     MulticastData, MulticastStep, PredicateBlock, ScriptData, ScriptStep, SetBodyConfig,
-    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitStep, StopStep, ToStep,
-    WireTapStep, YamlRoute, YamlRoutes, YamlStep,
+    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitExpressionConfig,
+    SplitExpressionYaml, SplitStep, StopStep, ToStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
 };
 
 const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 12] = [
@@ -223,13 +223,31 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
             Ok(DeclarativeStep::Choice(ChoiceStepDef { whens, otherwise }))
         }
         YamlStep::Split(SplitStep { split }) => {
-            let expression = match split.expression.as_str() {
-                "body_lines" | "lines" => SplitExpressionDef::BodyLines,
-                "body_json_array" | "json_array" => SplitExpressionDef::BodyJsonArray,
-                other => {
-                    return Err(CamelError::RouteError(format!(
-                        "unsupported split.expression `{other}`"
-                    )));
+            let expression = match split.expression {
+                None => SplitExpressionDef::BodyLines,
+                Some(SplitExpressionYaml::Simple(s)) => match s.as_str() {
+                    "body_lines" | "lines" => SplitExpressionDef::BodyLines,
+                    "body_json_array" | "json_array" => SplitExpressionDef::BodyJsonArray,
+                    other => {
+                        return Err(CamelError::RouteError(format!(
+                            "unsupported split.expression `{other}`"
+                        )));
+                    }
+                },
+                Some(SplitExpressionYaml::Config(SplitExpressionConfig {
+                    language,
+                    source,
+                    simple,
+                    rhai,
+                })) => {
+                    let expr = parse_language_expression(
+                        language,
+                        source,
+                        simple,
+                        rhai,
+                        "split.expression",
+                    )?;
+                    SplitExpressionDef::Language(expr)
                 }
             };
 
@@ -269,9 +287,16 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 }
             };
 
+            let completion_predicate = aggregate
+                .completion_predicate
+                .map(|block| parse_predicate_block(&block, "aggregate.completion_predicate"))
+                .transpose()?;
+
             Ok(DeclarativeStep::Aggregate(AggregateStepDef {
                 header: aggregate.header,
                 completion_size: aggregate.completion_size,
+                completion_timeout_ms: aggregate.completion_timeout_ms,
+                completion_predicate,
                 strategy,
                 max_buckets: aggregate.max_buckets,
                 bucket_ttl_ms: aggregate.bucket_ttl_ms,
@@ -396,6 +421,57 @@ fn parse_value_source(
 
     Err(CamelError::RouteError(format!(
         "{context}: missing value source"
+    )))
+}
+
+fn parse_language_expression(
+    language: Option<String>,
+    source: Option<String>,
+    simple: Option<String>,
+    rhai: Option<String>,
+    context: &str,
+) -> Result<LanguageExpressionDef, CamelError> {
+    let mut count = 0;
+    if language.is_some() || source.is_some() {
+        if language.is_some() && source.is_some() {
+            count += 1;
+        } else {
+            return Err(CamelError::RouteError(format!(
+                "{context}: `language` and `source` must be set together"
+            )));
+        }
+    }
+    if simple.is_some() {
+        count += 1;
+    }
+    if rhai.is_some() {
+        count += 1;
+    }
+
+    if count != 1 {
+        return Err(CamelError::RouteError(format!(
+            "{context} must define exactly one language source: `language+source`, `simple`, or `rhai`"
+        )));
+    }
+
+    if let (Some(language), Some(source)) = (language, source) {
+        return Ok(LanguageExpressionDef { language, source });
+    }
+    if let Some(source) = simple {
+        return Ok(LanguageExpressionDef {
+            language: "simple".to_string(),
+            source,
+        });
+    }
+    if let Some(source) = rhai {
+        return Ok(LanguageExpressionDef {
+            language: "rhai".to_string(),
+            source,
+        });
+    }
+
+    Err(CamelError::RouteError(format!(
+        "{context}: missing language source"
     )))
 }
 

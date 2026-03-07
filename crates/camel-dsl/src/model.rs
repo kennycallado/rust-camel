@@ -112,10 +112,11 @@ pub struct ChoiceStepDef {
     pub otherwise: Option<Vec<DeclarativeStep>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SplitExpressionDef {
     BodyLines,
     BodyJsonArray,
+    Language(LanguageExpressionDef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,10 +141,12 @@ pub enum AggregateStrategyDef {
     CollectAll,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AggregateStepDef {
     pub header: String,
-    pub completion_size: usize,
+    pub completion_size: Option<usize>,
+    pub completion_timeout_ms: Option<u64>,
+    pub completion_predicate: Option<LanguageExpressionDef>,
     pub strategy: AggregateStrategyDef,
     pub max_buckets: Option<usize>,
     pub bucket_ttl_ms: Option<u64>,

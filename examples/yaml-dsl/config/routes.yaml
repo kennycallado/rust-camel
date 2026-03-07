@@ -1,136 +1,233 @@
 # =============================================================================
-# YAML Route Definitions for rust-camel
+# YAML Route Definitions for rust-camel - DSL Contract Showcase
 # =============================================================================
 #
-# This file demonstrates how to define Camel routes using YAML configuration.
-# Routes are loaded at runtime and can be modified without recompiling.
-#
-# YAML Structure:
-#   routes:         # Top-level array of route definitions
-#     - id:         # Unique route identifier (required)
-#       from:       # Source endpoint URI (required)
-#       steps:      # Array of processing steps (optional)
-#       auto_startup:  # Start route automatically (default: true)
-#       startup_order: # Order for startup (default: 1000, lower = earlier)
-#
-# Available Step Types:
-#   - to:           # Send to endpoint (e.g., "log:info", "direct:route")
-#   - set_header:   # Set a message header
-#   - log:          # Log a message
+# This file demonstrates all available DSL features including:
+# - Basic steps: to, log, set_header, set_body
+# - Control flow: filter, choice, stop
+# - EIPs: split, multicast, wire_tap
+# - Route-level: error_handler, circuit_breaker
+# - Language expressions: simple:, rhai:
 #
 # =============================================================================
 
 routes:
   # ===========================================================================
-  # Route 1: Timer to Log
+  # Route 1: Basic Pipeline with Headers
   # ===========================================================================
-  # A simple route that fires every 2 seconds and logs a message.
-  # This demonstrates the basic timer component and log step.
-  #
   - id: "timer-to-log"
-    from: "timer:tick?period=2000&repeatCount=5"
+    from: "timer:tick?period=5000&repeatCount=3"
     auto_startup: true
     startup_order: 100
     steps:
-      # Log a message at the start of processing
-      - log: "Timer fired - processing exchange"
-
-      # Set a header to identify the source
+      - log: "Timer fired - basic pipeline"
       - set_header:
           key: "source"
           value: "yaml-timer"
-
-      # Send to log component with detailed output
-      - to: "log:info?showHeaders=true&showCorrelationId=true"
+      - to: "log:info?showHeaders=true"
 
   # ===========================================================================
-  # Route 2: Header Manipulation Pipeline
+  # Route 2: Filter with Simple Language Expression
   # ===========================================================================
-  # Demonstrates setting multiple headers and using the direct component
-  # for route linking. Shows how startup_order affects initialization.
+  # Demonstrates filtering messages based on a Simple language predicate.
+  # Only messages where header 'type' equals 'allowed' will be processed.
   #
-  - id: "header-pipeline"
-    from: "timer:header-demo?period=3000&repeatCount=4"
-    auto_startup: true
-    startup_order: 200  # Starts after timer-to-log
-    steps:
-      # Set first header
-      - set_header:
-          key: "X-Request-Id"
-          value: "req-001"
-
-      # Set second header
-      - set_header:
-          key: "X-Source-System"
-          value: "yaml-dsl-example"
-
-      # Log the headers we set
-      - log: "Headers configured, forwarding to direct:processor"
-
-      # Forward to another route via direct component
-      - to: "direct:processor"
-
-  # ===========================================================================
-  # Route 3: Direct Consumer (Sub-route)
-  # ===========================================================================
-  # This route receives messages from the direct:processor endpoint.
-  # It demonstrates route linking and the direct component.
-  #
-  - id: "direct-processor"
-    from: "direct:processor"
-    auto_startup: true
-    startup_order: 50  # Start early so it's ready when route 2 sends to it
-    steps:
-      - log: "Received message in direct:processor"
-
-      - set_header:
-          key: "processed-by"
-          value: "direct-processor"
-
-      - to: "log:processed?showHeaders=true&showBody=true&showCorrelationId=true"
-
-  # ===========================================================================
-  # Route 4: Disabled Route (auto_startup: false)
-  # ===========================================================================
-  # This route is defined but won't start automatically.
-  # It can be started programmatically via the ControlBus component.
-  #
-  - id: "disabled-route"
-    from: "timer:disabled?period=1000"
-    auto_startup: false  # Won't start automatically
-    startup_order: 300
-    steps:
-      - log: "This should not appear - route is disabled"
-      - to: "log:disabled-output"
-
-  # ===========================================================================
-  # Route 5: Chained Processing Pipeline
-  # ===========================================================================
-  # A more complex route showing multiple steps in sequence.
-  #
-  - id: "chained-pipeline"
-    from: "timer:chain?period=4000&repeatCount=3"
-    auto_startup: true
+  - id: "filter-demo"
+    from: "timer:filter?period=3000&repeatCount=5"
     startup_order: 150
     steps:
-      # Step 1: Log start
-      - log: "=== Starting chained pipeline ==="
-
-      # Step 2: Set correlation header
       - set_header:
-          key: "pipeline"
-          value: "chain-1"
+          key: "type"
+          value: "allowed"
+      - log: "Before filter - checking type header"
+      - filter:
+          simple: "${header.type} == 'allowed'"
+          steps:
+            - log: "PASSED FILTER - processing message"
+            - to: "log:filtered"
 
-      # Step 3: Intermediate processing log
-      - log: "Step 1 complete, continuing..."
-
-      # Step 4: Add another header
+  # ===========================================================================
+  # Route 3: Content-Based Router (Choice/When/Otherwise)
+  # ===========================================================================
+  # Demonstrates routing messages based on header values using choice.
+  #
+  - id: "choice-demo"
+    from: "timer:choice?period=4000&repeatCount=3"
+    startup_order: 200
+    steps:
       - set_header:
-          key: "stage"
-          value: "processing"
+          key: "type"
+          value: "order"
+      - choice:
+          when:
+            - simple: "${header.type} == 'order'"
+              steps:
+                - log: "Processing ORDER"
+                - to: "log:orders"
+            - simple: "${header.type} == 'invoice'"
+              steps:
+                - log: "Processing INVOICE"
+                - to: "log:invoices"
+          otherwise:
+            - log: "Processing UNKNOWN type"
+            - to: "log:unknown"
 
-      # Step 5: Log with all headers
-      - to: "log:chain-step?showHeaders=true&showCorrelationId=true"
+  # ===========================================================================
+  # Route 4: Split EIP
+  # ===========================================================================
+  # Demonstrates splitting a message body (one line per item).
+  #
+  - id: "split-demo"
+    from: "timer:split?period=6000&repeatCount=2"
+    startup_order: 250
+    steps:
+      - set_body:
+          value: "apple\nbanana\ncherry"
+      - log: "Before split - body has multiple lines"
+      - split:
+          expression: "body_lines"
+          aggregation: "last_wins"
+          steps:
+            - log: "Split item: ${body}"
+            - to: "log:split-item"
 
-      # Step 6: Final log
-      - log: "=== Pipeline complete ==="
+  # ===========================================================================
+  # Route 4b: Split with Language Expression
+  # ===========================================================================
+  # Demonstrates splitting using a Simple language expression.
+  # The expression is evaluated and the result determines how to split.
+  #
+  - id: "split-language-demo"
+    from: "timer:split-lang?period=8000&repeatCount=1"
+    startup_order: 255
+    steps:
+      - set_header:
+          key: "items"
+          value: "one,two,three,four"
+      - log: "Split via language expression (comma-separated)"
+      - split:
+          expression:
+            simple: "${header.items}"
+          aggregation: "collect_all"
+          steps:
+            - log: "Language split item: ${body}"
+            - to: "log:split-lang-item"
+
+  # ===========================================================================
+  # Route 5: WireTap EIP (Fire-and-Forget)
+  # ===========================================================================
+  # Demonstrates tapping a copy of the message to another endpoint.
+  #
+  - id: "wiretap-demo"
+    from: "timer:wiretap?period=5000&repeatCount=2"
+    startup_order: 300
+    steps:
+      - log: "Main pipeline - before wiretap"
+      - wire_tap: "direct:audit"
+      - log: "Main pipeline - after wiretap"
+      - to: "log:main-output"
+
+  # Receiver for wiretap
+  - id: "wiretap-audit-receiver"
+    from: "direct:audit"
+    startup_order: 50
+    steps:
+      - log: "WIRETAP AUDIT - received copy of message"
+      - to: "log:audit"
+
+  # ===========================================================================
+  # Route 6: Multicast EIP (Fan-out)
+  # ===========================================================================
+  # Demonstrates sending the same message to multiple endpoints.
+  #
+  - id: "multicast-demo"
+    from: "timer:multicast?period=7000&repeatCount=2"
+    startup_order: 350
+    steps:
+      - log: "Before multicast"
+      - multicast:
+          aggregation: "last_wins"
+          steps:
+            - to: "direct:endpoint-a"
+            - to: "direct:endpoint-b"
+      - log: "After multicast"
+
+  - id: "multicast-receiver-a"
+    from: "direct:endpoint-a"
+    startup_order: 50
+    steps:
+      - log: "MULTICAST ENDPOINT A received message"
+      - to: "log:endpoint-a"
+
+  - id: "multicast-receiver-b"
+    from: "direct:endpoint-b"
+    startup_order: 50
+    steps:
+      - log: "MULTICAST ENDPOINT B received message"
+      - to: "log:endpoint-b"
+
+  # ===========================================================================
+  # Route 7: Error Handler with Retry
+  # ===========================================================================
+  # Demonstrates route-level error handling with retry policy.
+  #
+  - id: "error-handler-demo"
+    from: "timer:error?period=10000&repeatCount=1"
+    startup_order: 400
+    error_handler:
+      dead_letter_channel: "log:dead-letter"
+      retry:
+        max_attempts: 3
+        initial_delay_ms: 100
+        multiplier: 2.0
+        max_delay_ms: 5000
+    steps:
+      - log: "Processing with error handler configured"
+      - to: "log:processed-with-retry"
+
+  # ===========================================================================
+  # Route 8: Circuit Breaker
+  # ===========================================================================
+  # Demonstrates route-level circuit breaker for resilience.
+  #
+  - id: "circuit-breaker-demo"
+    from: "timer:cb?period=8000&repeatCount=2"
+    startup_order: 450
+    circuit_breaker:
+      failure_threshold: 3
+      open_duration_ms: 10000
+    steps:
+      - log: "Processing with circuit breaker protection"
+      - to: "log:cb-protected"
+
+  # ===========================================================================
+  # Route 9: Set Body (Literal)
+  # ===========================================================================
+  # Demonstrates setting body to a literal value.
+  # Note: Language expressions in set_body are supported but require explicit
+  # value: field to avoid YAML parsing ambiguity.
+  #
+  - id: "set-body-demo"
+    from: "timer:setbody?period=5000&repeatCount=2"
+    startup_order: 500
+    steps:
+      - set_header:
+          key: "greeting"
+          value: "Hello"
+      - set_body:
+          value: "Hello World!"
+      - log: "Body set to literal value"
+      - to: "log:body-set"
+
+  # ===========================================================================
+  # Route 10: Stop EIP
+  # ===========================================================================
+  # Demonstrates stopping the pipeline early.
+  #
+  - id: "stop-demo"
+    from: "timer:stop?period=10000&repeatCount=1"
+    startup_order: 550
+    steps:
+      - log: "Before stop - this will appear"
+      - stop: true
+      - log: "After stop - this will NOT appear"

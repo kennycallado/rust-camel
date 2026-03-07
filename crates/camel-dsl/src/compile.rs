@@ -128,34 +128,71 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
 }
 
 fn compile_split_step(def: SplitStepDef) -> Result<BuilderStep, CamelError> {
-    let expression = match def.expression {
-        SplitExpressionDef::BodyLines => split_body_lines(),
-        SplitExpressionDef::BodyJsonArray => split_body_json_array(),
-    };
-
     let aggregation = match def.aggregation {
         SplitAggregationDef::LastWins => SplitAggregation::LastWins,
         SplitAggregationDef::CollectAll => SplitAggregation::CollectAll,
         SplitAggregationDef::Original => SplitAggregation::Original,
     };
 
-    let mut config = SplitterConfig::new(expression)
-        .aggregation(aggregation)
-        .parallel(def.parallel)
-        .stop_on_exception(def.stop_on_exception);
-    if let Some(limit) = def.parallel_limit {
-        config = config.parallel_limit(limit);
+    match def.expression {
+        SplitExpressionDef::BodyLines => {
+            let config = SplitterConfig::new(split_body_lines())
+                .aggregation(aggregation)
+                .parallel(def.parallel)
+                .stop_on_exception(def.stop_on_exception);
+            let config = if let Some(limit) = def.parallel_limit {
+                config.parallel_limit(limit)
+            } else {
+                config
+            };
+            Ok(BuilderStep::Split {
+                config,
+                steps: compile_declarative_steps(def.steps)?,
+            })
+        }
+        SplitExpressionDef::BodyJsonArray => {
+            let config = SplitterConfig::new(split_body_json_array())
+                .aggregation(aggregation)
+                .parallel(def.parallel)
+                .stop_on_exception(def.stop_on_exception);
+            let config = if let Some(limit) = def.parallel_limit {
+                config.parallel_limit(limit)
+            } else {
+                config
+            };
+            Ok(BuilderStep::Split {
+                config,
+                steps: compile_declarative_steps(def.steps)?,
+            })
+        }
+        SplitExpressionDef::Language(expression) => Ok(BuilderStep::DeclarativeSplit {
+            expression,
+            aggregation,
+            parallel: def.parallel,
+            parallel_limit: def.parallel_limit,
+            stop_on_exception: def.stop_on_exception,
+            steps: compile_declarative_steps(def.steps)?,
+        }),
     }
-
-    Ok(BuilderStep::Split {
-        config,
-        steps: compile_declarative_steps(def.steps)?,
-    })
 }
 
 fn compile_aggregate_step(def: AggregateStepDef) -> Result<BuilderStep, CamelError> {
+    let completion_size = def.completion_size.unwrap_or(1);
+
+    if def.completion_timeout_ms.is_some() {
+        return Err(CamelError::RouteError(
+            "aggregate.completion_timeout_ms is not yet implemented".to_string(),
+        ));
+    }
+
+    if def.completion_predicate.is_some() {
+        return Err(CamelError::RouteError(
+            "aggregate.completion_predicate is not yet implemented".to_string(),
+        ));
+    }
+
     let mut builder =
-        AggregatorConfig::correlate_by(def.header).complete_when_size(def.completion_size);
+        AggregatorConfig::correlate_by(def.header).complete_when_size(completion_size);
     builder = match def.strategy {
         AggregateStrategyDef::CollectAll => builder.strategy(AggregatorStrategy::CollectAll),
     };

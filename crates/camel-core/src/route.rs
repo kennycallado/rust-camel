@@ -102,6 +102,15 @@ pub enum BuilderStep {
     },
     /// Declarative script step evaluated by language and written to body.
     DeclarativeScript { expression: LanguageExpressionDef },
+    /// Declarative split using a language expression, resolved at route-add time.
+    DeclarativeSplit {
+        expression: LanguageExpressionDef,
+        aggregation: camel_api::splitter::AggregationStrategy,
+        parallel: bool,
+        parallel_limit: Option<usize>,
+        stop_on_exception: bool,
+        steps: Vec<BuilderStep>,
+    },
     /// A Splitter sub-pipeline: config + nested steps to execute per fragment.
     Split {
         config: SplitterConfig,
@@ -162,6 +171,12 @@ impl std::fmt::Debug for BuilderStep {
                 "BuilderStep::DeclarativeScript {{ language: {:?}, .. }}",
                 expression.language
             ),
+            BuilderStep::DeclarativeSplit { steps, .. } => {
+                write!(
+                    f,
+                    "BuilderStep::DeclarativeSplit {{ steps: {steps:?}, .. }}"
+                )
+            }
             BuilderStep::Split { steps, .. } => {
                 write!(f, "BuilderStep::Split {{ steps: {steps:?}, .. }}")
             }

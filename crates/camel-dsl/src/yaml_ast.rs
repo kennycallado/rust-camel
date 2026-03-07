@@ -214,8 +214,8 @@ pub struct SplitStep {
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct SplitData {
-    #[serde(default = "default_split_expression")]
-    pub expression: String,
+    #[serde(default)]
+    pub expression: Option<SplitExpressionYaml>,
     #[serde(default = "default_split_aggregation")]
     pub aggregation: String,
     #[serde(default)]
@@ -228,8 +228,24 @@ pub struct SplitData {
     pub steps: Vec<YamlStep>,
 }
 
-fn default_split_expression() -> String {
-    "body_lines".to_string()
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum SplitExpressionYaml {
+    Simple(String),
+    Config(SplitExpressionConfig),
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SplitExpressionConfig {
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub simple: Option<String>,
+    #[serde(default)]
+    pub rhai: Option<String>,
 }
 
 fn default_split_aggregation() -> String {
@@ -245,7 +261,12 @@ pub struct AggregateStep {
 #[serde(deny_unknown_fields)]
 pub struct AggregateData {
     pub header: String,
-    pub completion_size: usize,
+    #[serde(default)]
+    pub completion_size: Option<usize>,
+    #[serde(default)]
+    pub completion_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub completion_predicate: Option<PredicateBlock>,
     #[serde(default = "default_aggregate_strategy")]
     pub strategy: String,
     #[serde(default)]

@@ -439,6 +439,53 @@ impl DefaultRouteController {
                         camel_processor::splitter::SplitterService::new(config, sub_pipeline);
                     processors.push(BoxProcessor::new(splitter));
                 }
+                BuilderStep::DeclarativeSplit {
+                    expression,
+                    aggregation,
+                    parallel,
+                    parallel_limit,
+                    stop_on_exception,
+                    steps,
+                } => {
+                    let lang_expr = self.compile_language_expression(&expression)?;
+                    let split_fn = move |exchange: &Exchange| {
+                        let value = lang_expr.evaluate(exchange).unwrap_or(Value::Null);
+                        match value {
+                            Value::String(s) => s
+                                .lines()
+                                .filter(|line| !line.is_empty())
+                                .map(|line| {
+                                    let mut fragment = exchange.clone();
+                                    fragment.input.body = Body::from(line.to_string());
+                                    fragment
+                                })
+                                .collect(),
+                            Value::Array(arr) => arr
+                                .into_iter()
+                                .map(|v| {
+                                    let mut fragment = exchange.clone();
+                                    fragment.input.body = Body::from(v);
+                                    fragment
+                                })
+                                .collect(),
+                            _ => vec![exchange.clone()],
+                        }
+                    };
+
+                    let mut config = camel_api::splitter::SplitterConfig::new(Arc::new(split_fn))
+                        .aggregation(aggregation)
+                        .parallel(parallel)
+                        .stop_on_exception(stop_on_exception);
+                    if let Some(limit) = parallel_limit {
+                        config = config.parallel_limit(limit);
+                    }
+
+                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_pipeline = compose_pipeline(sub_processors);
+                    let splitter =
+                        camel_processor::splitter::SplitterService::new(config, sub_pipeline);
+                    processors.push(BoxProcessor::new(splitter));
+                }
                 BuilderStep::Aggregate { config } => {
                     let svc = camel_processor::AggregatorService::new(config);
                     processors.push(BoxProcessor::new(svc));
