@@ -6,10 +6,10 @@ pub mod yaml;
 pub mod yaml_ast;
 
 pub use compile::{compile_declarative_route, compile_declarative_step};
-pub use contract::{DeclarativeStepKind, is_rust_only_kind, mandatory_declarative_step_kinds};
-pub use discovery::{DiscoveryError, discover_routes};
+pub use contract::{is_rust_only_kind, mandatory_declarative_step_kinds, DeclarativeStepKind};
+pub use discovery::{discover_routes, DiscoveryError};
 pub use model::{
-    AggregateStepDef, AggregateStrategyDef, ChoiceStepDef, DeclarativeCircuitBreaker,
+    AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
     DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRetryPolicy, DeclarativeRoute,
     DeclarativeStep, FilterStepDef, LanguageExpressionDef, LogLevelDef, LogStepDef,
     MulticastAggregationDef, MulticastStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef,
@@ -17,5 +17,5 @@ pub use model::{
     WireTapStepDef,
 };
 pub use yaml::{
-    YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_declarative,
+    load_from_file, parse_yaml, parse_yaml_to_declarative, YamlRoute, YamlRoutes, YamlStep,
 };

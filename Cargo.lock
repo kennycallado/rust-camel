@@ -906,6 +906,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "convert-body-to"
+version = "0.2.1"
+dependencies = [
+ "bytes",
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

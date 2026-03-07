@@ -1,19 +1,20 @@
 use std::time::Duration;
 
 use camel_api::aggregator::{AggregationStrategy as AggregatorStrategy, AggregatorConfig};
+use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::{
-    AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
-    split_body_lines,
+    split_body_json_array, split_body_lines, AggregationStrategy as SplitAggregation,
+    SplitterConfig,
 };
-use camel_api::{CamelError, CircuitBreakerConfig};
+use camel_api::{CamelError, CircuitBreakerConfig, IdentityProcessor};
 use camel_component::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
-use camel_processor::{LogLevel, StopService};
+use camel_processor::{ConvertBodyTo, LogLevel, StopService};
 
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, ChoiceStepDef, DeclarativeCircuitBreaker,
+    AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
     DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute, DeclarativeStep,
     LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
     ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef,
@@ -137,6 +138,17 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
         DeclarativeStep::Split(def) => compile_split_step(def),
         DeclarativeStep::Aggregate(def) => compile_aggregate_step(def),
         DeclarativeStep::Multicast(def) => compile_multicast_step(def),
+        DeclarativeStep::ConvertBodyTo(def) => {
+            let target = match def {
+                BodyTypeDef::Text => BodyType::Text,
+                BodyTypeDef::Json => BodyType::Json,
+                BodyTypeDef::Bytes => BodyType::Bytes,
+                BodyTypeDef::Empty => BodyType::Empty,
+            };
+            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
+                ConvertBodyTo::new(IdentityProcessor, target),
+            )))
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 pub mod aggregator;
 pub mod body;
+pub mod body_converter;
 pub mod circuit_breaker;
 pub mod declarative;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod value;
 // Re-export core types at crate root for convenience.
 pub use aggregator::{AggregationFn, AggregatorConfig, CompletionCondition};
 pub use body::{Body, StreamBody, StreamMetadata};
+pub use body_converter::{BodyType, convert as convert_body};
 pub use circuit_breaker::CircuitBreakerConfig;
 pub use declarative::{LanguageExpressionDef, ValueSourceDef};
 pub use error::CamelError;

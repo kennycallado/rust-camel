@@ -54,6 +54,7 @@ members = [
     "examples/config-profiles",
     "examples/auto-restart",
     "examples/tracer-demo",
+    "examples/convert-body-to",
 ]
 
 [workspace.package]

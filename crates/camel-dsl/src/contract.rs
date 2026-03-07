@@ -12,6 +12,7 @@ pub enum DeclarativeStepKind {
     Multicast,
     Stop,
     Script,
+    ConvertBodyTo,
     Process,
     ProcessFn,
     MapBody,
@@ -19,7 +20,7 @@ pub enum DeclarativeStepKind {
     SetHeaderFn,
 }
 
-pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 12] = [
+pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 13] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -32,6 +33,7 @@ pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 12] = [
     DeclarativeStepKind::Multicast,
     DeclarativeStepKind::Stop,
     DeclarativeStepKind::Script,
+    DeclarativeStepKind::ConvertBodyTo,
 ];
 
 pub fn is_rust_only_kind(kind: DeclarativeStepKind) -> bool {

@@ -110,6 +110,19 @@ impl Clone for Body {
     }
 }
 
+impl PartialEq for Body {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Body::Empty, Body::Empty) => true,
+            (Body::Text(a), Body::Text(b)) => a == b,
+            (Body::Json(a), Body::Json(b)) => a == b,
+            (Body::Bytes(a), Body::Bytes(b)) => a == b,
+            // Stream: two streams are never equal (single-consumption)
+            _ => false,
+        }
+    }
+}
+
 impl Body {
     /// Returns `true` if the body is empty.
     pub fn is_empty(&self) -> bool {
@@ -179,6 +192,27 @@ impl Body {
             Body::Text(s) => Some(s.as_str()),
             _ => None,
         }
+    }
+
+    /// Convert this body to `Body::Text`, consuming it.
+    /// Returns `Err(TypeConversionFailed)` if the conversion is not possible.
+    /// `Body::Stream` always fails — materialize with `into_bytes()` first.
+    pub fn try_into_text(self) -> Result<Body, CamelError> {
+        crate::body_converter::convert(self, crate::body_converter::BodyType::Text)
+    }
+
+    /// Convert this body to `Body::Json`, consuming it.
+    /// Returns `Err(TypeConversionFailed)` if the conversion is not possible.
+    /// `Body::Stream` always fails — materialize with `into_bytes()` first.
+    pub fn try_into_json(self) -> Result<Body, CamelError> {
+        crate::body_converter::convert(self, crate::body_converter::BodyType::Json)
+    }
+
+    /// Convert this body to `Body::Bytes`, consuming it.
+    /// Returns `Err(TypeConversionFailed)` if the conversion is not possible.
+    /// `Body::Stream` always fails — materialize with `into_bytes()` first.
+    pub fn try_into_bytes_body(self) -> Result<Body, CamelError> {
+        crate::body_converter::convert(self, crate::body_converter::BodyType::Bytes)
     }
 }
 
@@ -339,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn test_materialize_exceeds_default_limit() {
         use futures::stream;
-        
+
         // 15MB stream - should fail with default 10MB limit
         let large_data = vec![0u8; 15 * 1024 * 1024];
         let chunks = vec![Ok(Bytes::from(large_data))];
@@ -351,5 +385,19 @@ mod tests {
 
         let result = body.materialize().await;
         assert!(matches!(result, Err(CamelError::StreamLimitExceeded(10_485_760))));
+    }
+
+    #[test]
+    fn stream_variants_are_never_equal() {
+        use futures::stream;
+
+        let make_stream = || {
+            let s = stream::iter(vec![Ok(Bytes::from_static(b"data"))]);
+            Body::Stream(StreamBody {
+                stream: Arc::new(Mutex::new(Some(Box::pin(s)))),
+                metadata: StreamMetadata::default(),
+            })
+        };
+        assert_ne!(make_stream(), make_stream());
     }
 }

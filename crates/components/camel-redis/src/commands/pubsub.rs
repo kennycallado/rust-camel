@@ -17,9 +17,15 @@ pub async fn dispatch(
                     CamelError::ProcessorError("Missing required header: CamelRedis.Channel".into())
                 })?;
 
-            let message = exchange.input.body.as_text().ok_or_else(|| {
-                CamelError::ProcessorError("Message body must be text for PUBLISH".into())
-            })?;
+            let body = std::mem::replace(&mut exchange.input.body, Body::Empty)
+                .try_into_text()
+                .map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "Message body must be convertible to Text for PUBLISH: {}",
+                        e
+                    ))
+                })?;
+            let message = body.as_text().expect("try_into_text guarantees Text");
 
             let receivers: i64 = conn
                 .publish(&channel, message)
