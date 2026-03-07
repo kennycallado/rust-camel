@@ -193,6 +193,27 @@ impl Body {
             _ => None,
         }
     }
+
+    /// Convert this body to `Body::Text`, consuming it.
+    /// Returns `Err(TypeConversionFailed)` if the conversion is not possible.
+    /// `Body::Stream` always fails — materialize with `into_bytes()` first.
+    pub fn try_into_text(self) -> Result<Body, CamelError> {
+        crate::body_converter::convert(self, crate::body_converter::BodyType::Text)
+    }
+
+    /// Convert this body to `Body::Json`, consuming it.
+    /// Returns `Err(TypeConversionFailed)` if the conversion is not possible.
+    /// `Body::Stream` always fails — materialize with `into_bytes()` first.
+    pub fn try_into_json(self) -> Result<Body, CamelError> {
+        crate::body_converter::convert(self, crate::body_converter::BodyType::Json)
+    }
+
+    /// Convert this body to `Body::Bytes`, consuming it.
+    /// Returns `Err(TypeConversionFailed)` if the conversion is not possible.
+    /// `Body::Stream` always fails — materialize with `into_bytes()` first.
+    pub fn try_into_bytes_body(self) -> Result<Body, CamelError> {
+        crate::body_converter::convert(self, crate::body_converter::BodyType::Bytes)
+    }
 }
 
 // Conversion impls
