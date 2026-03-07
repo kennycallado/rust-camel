@@ -19,14 +19,45 @@ pub struct StreamMetadata {
 }
 
 /// A body that wraps a lazy-evaluated stream of bytes.
+/// 
+/// # Clone Semantics
+/// 
+/// The stream is **single-consumption**. When cloning a `Body::Stream`,
+/// all clones share the same underlying stream handle. Only the first
+/// clone to consume the stream will succeed; subsequent attempts will
+/// return `CamelError::AlreadyConsumed`.
+/// 
+/// # Example
+/// 
+/// ```rust
+/// use camel_api::{Body, StreamBody, error::CamelError};
+/// use futures::stream;
+/// use bytes::Bytes;
+/// use std::sync::Arc;
+/// use tokio::sync::Mutex;
+/// 
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), CamelError> {
+/// let chunks = vec![Ok(Bytes::from("data"))];
+/// let stream = stream::iter(chunks);
+/// let body = Body::Stream(StreamBody {
+///     stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
+///     metadata: Default::default(),
+/// });
+/// 
+/// let clone = body.clone();
+/// 
+/// // First consumption succeeds
+/// let _ = body.into_bytes(1024).await?;
+/// 
+/// // Second consumption fails
+/// let result = clone.into_bytes(1024).await;
+/// assert!(matches!(result, Err(CamelError::AlreadyConsumed)));
+/// # Ok(())
+/// # }
+/// ```
 pub struct StreamBody {
     /// The actual byte stream, wrapped in an Arc and Mutex to allow Clone for Body.
-    ///
-    /// ### Clone Semantics
-    /// The stream is **single-consumption**. When cloning a `Body::Stream`,
-    /// all clones share the same underlying stream handle. Only the first
-    /// clone to consume the stream will succeed; subsequent attempts will
-    /// return `CamelError::AlreadyConsumed`.
     #[allow(clippy::type_complexity)]
     pub stream: Arc<Mutex<Option<BoxStream<'static, Result<Bytes, CamelError>>>>>,
     /// Metadata associated with the stream.
