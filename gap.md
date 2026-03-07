@@ -16,13 +16,20 @@ Este documento detalla los gaps arquitectónicos confirmados tras la revisión t
 *   **Impacto:** Imposibilidad de inyectar lógica de negocio o configuraciones complejas desde el DSL de YAML. Las rutas están limitadas a lo que el framework proporciona "out-of-the-box" o requiere closures pesados en el Builder de Rust.
 
 ## 3. Streaming de Datos - Body as Stream (RESUELTO)
-*   **Estado:** Implementado en v0.2.1.
+*   **Estado:** Implementado en v0.2.1, code review completado.
 *   **Solución:** 
-    *   `Body::Stream` introducido en `camel-api` usando `BoxStream`.
-    *   `camel-file` emite streams perezosos (lazy reading).
-    *   `camel-http` optimizado para piping de streams a `reqwest`.
-    *   Materialización segura con límites de memoria (100MB) para evitar OOM.
+    *   `Body::Stream` introducido en `camel-api` usando `Arc<Mutex<Option<BoxStream>>>` para mantener Clone.
+    *   `camel-file` emite streams perezosos via `ReaderStream` (zero-copy I/O).
+    *   `camel-http` optimizado para piping de streams a `reqwest` con `wrap_stream()`.
+    *   Materialización segura con límites de memoria (10MB default via `DEFAULT_MATERIALIZE_LIMIT`) para evitar OOM.
+    *   EIPs usan placeholders JSON válidos (`{"placeholder": true}`) cuando consumen streams.
+*   **Code Review Fixes:**
+    *   JSON placeholders cambiados de strings inválidos a objetos JSON válidos.
+    *   Documentación de memory limits en FileConfig y HttpConfig.
+    *   API surface completa con re-export de StreamMetadata.
+    *   Integration test de 150MB validando memoria constante.
 *   **Impacto:** Riesgo de **Out of Memory (OOM)** eliminado para flujos lineales de archivos grandes y tráfico de red. Soporte para archivos de varios GB.
+*   **Alineación con Apache Camel:** Lazy evaluation por defecto, opt-in explícito a materialización, Stream Caching como feature opcional (no por defecto).
 
 ## 4. Granularidad en el Manejo de Errores (MATIZADO)
 *   **Evidencia en código:** 
