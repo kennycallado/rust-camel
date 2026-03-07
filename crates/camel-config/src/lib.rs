@@ -5,4 +5,6 @@ pub mod yaml;
 
 pub use config::{CamelConfig, ComponentsConfig, ObservabilityConfig, SupervisionCamelConfig};
 pub use discovery::{DiscoveryError, discover_routes};
-pub use yaml::{YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml};
+pub use yaml::{
+    YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_declarative,
+};

@@ -71,12 +71,37 @@ pub struct WhenStep {
     pub steps: Vec<BuilderStep>,
 }
 
+pub use camel_api::declarative::{LanguageExpressionDef, ValueSourceDef};
+
+/// Declarative `when` clause resolved later by the runtime.
+#[derive(Debug)]
+pub struct DeclarativeWhenStep {
+    pub predicate: LanguageExpressionDef,
+    pub steps: Vec<BuilderStep>,
+}
+
 /// A step in an unresolved route definition.
 pub enum BuilderStep {
     /// A pre-built Tower processor service.
     Processor(BoxProcessor),
     /// A destination URI — resolved at start time by CamelContext.
     To(String),
+    /// Declarative set_header (literal or language-based value), resolved at route-add time.
+    DeclarativeSetHeader { key: String, value: ValueSourceDef },
+    /// Declarative set_body (literal or language-based value), resolved at route-add time.
+    DeclarativeSetBody { value: ValueSourceDef },
+    /// Declarative filter using a language predicate, resolved at route-add time.
+    DeclarativeFilter {
+        predicate: LanguageExpressionDef,
+        steps: Vec<BuilderStep>,
+    },
+    /// Declarative choice/when/otherwise using language predicates, resolved at route-add time.
+    DeclarativeChoice {
+        whens: Vec<DeclarativeWhenStep>,
+        otherwise: Option<Vec<BuilderStep>>,
+    },
+    /// Declarative script step evaluated by language and written to body.
+    DeclarativeScript { expression: LanguageExpressionDef },
     /// A Splitter sub-pipeline: config + nested steps to execute per fragment.
     Split {
         config: SplitterConfig,
@@ -109,6 +134,34 @@ impl std::fmt::Debug for BuilderStep {
         match self {
             BuilderStep::Processor(_) => write!(f, "BuilderStep::Processor(...)"),
             BuilderStep::To(uri) => write!(f, "BuilderStep::To({uri:?})"),
+            BuilderStep::DeclarativeSetHeader { key, .. } => {
+                write!(
+                    f,
+                    "BuilderStep::DeclarativeSetHeader {{ key: {key:?}, .. }}"
+                )
+            }
+            BuilderStep::DeclarativeSetBody { .. } => {
+                write!(f, "BuilderStep::DeclarativeSetBody {{ .. }}")
+            }
+            BuilderStep::DeclarativeFilter { steps, .. } => {
+                write!(
+                    f,
+                    "BuilderStep::DeclarativeFilter {{ steps: {steps:?}, .. }}"
+                )
+            }
+            BuilderStep::DeclarativeChoice { whens, otherwise } => {
+                write!(
+                    f,
+                    "BuilderStep::DeclarativeChoice {{ whens: {} clause(s), otherwise: {} }}",
+                    whens.len(),
+                    if otherwise.is_some() { "Some" } else { "None" }
+                )
+            }
+            BuilderStep::DeclarativeScript { expression } => write!(
+                f,
+                "BuilderStep::DeclarativeScript {{ language: {:?}, .. }}",
+                expression.language
+            ),
             BuilderStep::Split { steps, .. } => {
                 write!(f, "BuilderStep::Split {{ steps: {steps:?}, .. }}")
             }

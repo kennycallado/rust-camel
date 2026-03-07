@@ -1,0 +1,193 @@
+pub use camel_api::{LanguageExpressionDef, ValueSourceDef};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclarativeConcurrency {
+    Sequential,
+    Concurrent { max: Option<usize> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclarativeCircuitBreaker {
+    pub failure_threshold: u32,
+    pub open_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclarativeRetryPolicy {
+    pub max_attempts: u32,
+    pub initial_delay_ms: u64,
+    pub multiplier: f64,
+    pub max_delay_ms: u64,
+    pub handled_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclarativeErrorHandler {
+    pub dead_letter_channel: Option<String>,
+    pub retry: Option<DeclarativeRetryPolicy>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeclarativeRoute {
+    pub from: String,
+    pub route_id: String,
+    pub auto_startup: bool,
+    pub startup_order: i32,
+    pub concurrency: Option<DeclarativeConcurrency>,
+    pub error_handler: Option<DeclarativeErrorHandler>,
+    pub circuit_breaker: Option<DeclarativeCircuitBreaker>,
+    pub steps: Vec<DeclarativeStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToStepDef {
+    pub uri: String,
+}
+
+impl ToStepDef {
+    pub fn new(uri: impl Into<String>) -> Self {
+        Self { uri: uri.into() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogLevelDef {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogStepDef {
+    pub message: String,
+    pub level: LogLevelDef,
+}
+
+impl LogStepDef {
+    pub fn info(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            level: LogLevelDef::Info,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetHeaderStepDef {
+    pub key: String,
+    pub value: ValueSourceDef,
+}
+
+impl SetHeaderStepDef {
+    pub fn literal(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: ValueSourceDef::Literal(serde_json::Value::String(value.into())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetBodyStepDef {
+    pub value: ValueSourceDef,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilterStepDef {
+    pub predicate: LanguageExpressionDef,
+    pub steps: Vec<DeclarativeStep>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhenStepDef {
+    pub predicate: LanguageExpressionDef,
+    pub steps: Vec<DeclarativeStep>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChoiceStepDef {
+    pub whens: Vec<WhenStepDef>,
+    pub otherwise: Option<Vec<DeclarativeStep>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplitExpressionDef {
+    BodyLines,
+    BodyJsonArray,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplitAggregationDef {
+    LastWins,
+    CollectAll,
+    Original,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitStepDef {
+    pub expression: SplitExpressionDef,
+    pub aggregation: SplitAggregationDef,
+    pub parallel: bool,
+    pub parallel_limit: Option<usize>,
+    pub stop_on_exception: bool,
+    pub steps: Vec<DeclarativeStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateStrategyDef {
+    CollectAll,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateStepDef {
+    pub header: String,
+    pub completion_size: usize,
+    pub strategy: AggregateStrategyDef,
+    pub max_buckets: Option<usize>,
+    pub bucket_ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireTapStepDef {
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MulticastAggregationDef {
+    LastWins,
+    CollectAll,
+    Original,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MulticastStepDef {
+    pub steps: Vec<DeclarativeStep>,
+    pub parallel: bool,
+    pub parallel_limit: Option<usize>,
+    pub stop_on_exception: bool,
+    pub timeout_ms: Option<u64>,
+    pub aggregation: MulticastAggregationDef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptStepDef {
+    pub expression: LanguageExpressionDef,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeclarativeStep {
+    To(ToStepDef),
+    Log(LogStepDef),
+    SetHeader(SetHeaderStepDef),
+    SetBody(SetBodyStepDef),
+    Filter(FilterStepDef),
+    Choice(ChoiceStepDef),
+    Split(SplitStepDef),
+    Aggregate(AggregateStepDef),
+    WireTap(WireTapStepDef),
+    Multicast(MulticastStepDef),
+    Stop,
+    Script(ScriptStepDef),
+}

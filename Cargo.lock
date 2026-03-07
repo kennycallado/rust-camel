@@ -513,6 +513,7 @@ dependencies = [
  "camel-component-log",
  "camel-component-timer",
  "camel-core",
+ "camel-dsl",
  "camel-processor",
  "config",
  "glob",

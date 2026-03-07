@@ -15,7 +15,9 @@ use camel_language_api::LanguageError;
 use crate::config::TracerConfig;
 use crate::registry::Registry;
 use crate::route::RouteDefinition;
-use crate::route_controller::{DefaultRouteController, RouteControllerInternal};
+use crate::route_controller::{
+    DefaultRouteController, RouteControllerInternal, SharedLanguageRegistry,
+};
 use crate::supervising_route_controller::SupervisingRouteController;
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
@@ -30,11 +32,20 @@ pub struct CamelContext {
     route_controller: Arc<Mutex<dyn RouteControllerInternal>>,
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsCollector>,
-    languages: HashMap<String, Box<dyn Language>>,
+    languages: SharedLanguageRegistry,
     shutdown_timeout: std::time::Duration,
 }
 
 impl CamelContext {
+    fn built_in_languages() -> SharedLanguageRegistry {
+        let mut languages: HashMap<String, Arc<dyn Language>> = HashMap::new();
+        languages.insert(
+            "simple".to_string(),
+            Arc::new(camel_language_simple::SimpleLanguage),
+        );
+        Arc::new(std::sync::Mutex::new(languages))
+    }
+
     /// Create a new, empty CamelContext.
     pub fn new() -> Self {
         Self::with_metrics(Arc::new(NoOpMetrics))
@@ -43,8 +54,9 @@ impl CamelContext {
     /// Create a new CamelContext with a custom metrics collector.
     pub fn with_metrics(metrics: Arc<dyn MetricsCollector>) -> Self {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let languages = Self::built_in_languages();
         let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::clone(&registry)),
+            DefaultRouteController::with_languages(Arc::clone(&registry), Arc::clone(&languages)),
         ));
 
         // Set self-ref so DefaultRouteController can create ProducerContext
@@ -53,13 +65,6 @@ impl CamelContext {
             .try_lock()
             .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
             .set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
-
-        // Pre-register built-in languages
-        let mut languages: HashMap<String, Box<dyn Language>> = HashMap::new();
-        languages.insert(
-            "simple".to_string(),
-            Box::new(camel_language_simple::SimpleLanguage),
-        );
 
         Self {
             registry,
@@ -86,9 +91,14 @@ impl CamelContext {
         metrics: Arc<dyn MetricsCollector>,
     ) -> Self {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let languages = Self::built_in_languages();
         let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
-            SupervisingRouteController::new(Arc::clone(&registry), config)
-                .with_metrics(Arc::clone(&metrics)),
+            SupervisingRouteController::with_languages(
+                Arc::clone(&registry),
+                config,
+                Arc::clone(&languages),
+            )
+            .with_metrics(Arc::clone(&metrics)),
         ));
 
         // Set self-ref so SupervisingRouteController can create ProducerContext
@@ -97,13 +107,6 @@ impl CamelContext {
             .try_lock()
             .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
             .set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
-
-        // Pre-register built-in languages
-        let mut languages: HashMap<String, Box<dyn Language>> = HashMap::new();
-        languages.insert(
-            "simple".to_string(),
-            Box::new(camel_language_simple::SimpleLanguage),
-        );
 
         Self {
             registry,
@@ -176,16 +179,24 @@ impl CamelContext {
         lang: Box<dyn Language>,
     ) -> Result<(), LanguageError> {
         let name = name.into();
-        if self.languages.contains_key(&name) {
+        let mut languages = self
+            .languages
+            .lock()
+            .expect("mutex poisoned: another thread panicked while holding this lock");
+        if languages.contains_key(&name) {
             return Err(LanguageError::AlreadyRegistered(name));
         }
-        self.languages.insert(name, lang);
+        languages.insert(name, Arc::from(lang));
         Ok(())
     }
 
     /// Resolve a language by name. Returns `None` if not registered.
-    pub fn resolve_language(&self, name: &str) -> Option<&dyn Language> {
-        self.languages.get(name).map(|l| l.as_ref())
+    pub fn resolve_language(&self, name: &str) -> Option<Arc<dyn Language>> {
+        let languages = self
+            .languages
+            .lock()
+            .expect("mutex poisoned: another thread panicked while holding this lock");
+        languages.get(name).cloned()
     }
 
     /// Add a route definition to this context.
@@ -289,6 +300,7 @@ impl Default for CamelContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::route::{BuilderStep, LanguageExpressionDef, RouteDefinition};
     use camel_api::CamelError;
     use camel_component::Endpoint;
 
@@ -407,5 +419,92 @@ mod tests {
         let mut ctx = CamelContext::new();
         let result = ctx.register_language("dummy", Box::new(DummyLang));
         assert!(result.is_ok(), "first registration should succeed");
+    }
+
+    #[test]
+    fn test_add_route_definition_uses_runtime_registered_language() {
+        use camel_language_api::{Expression, LanguageError, Predicate};
+
+        struct DummyExpression;
+        impl Expression for DummyExpression {
+            fn evaluate(
+                &self,
+                _exchange: &camel_api::Exchange,
+            ) -> Result<camel_api::Value, LanguageError> {
+                Ok(camel_api::Value::String("ok".into()))
+            }
+        }
+
+        struct DummyPredicate;
+        impl Predicate for DummyPredicate {
+            fn matches(&self, _exchange: &camel_api::Exchange) -> Result<bool, LanguageError> {
+                Ok(true)
+            }
+        }
+
+        struct RuntimeLang;
+        impl camel_language_api::Language for RuntimeLang {
+            fn name(&self) -> &'static str {
+                "runtime"
+            }
+
+            fn create_expression(
+                &self,
+                _script: &str,
+            ) -> Result<Box<dyn Expression>, LanguageError> {
+                Ok(Box::new(DummyExpression))
+            }
+
+            fn create_predicate(&self, _script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
+                Ok(Box::new(DummyPredicate))
+            }
+        }
+
+        let mut ctx = CamelContext::new();
+        ctx.register_language("runtime", Box::new(RuntimeLang))
+            .unwrap();
+
+        let definition = RouteDefinition::new(
+            "timer:tick",
+            vec![BuilderStep::DeclarativeScript {
+                expression: LanguageExpressionDef {
+                    language: "runtime".into(),
+                    source: "${body}".into(),
+                },
+            }],
+        )
+        .with_route_id("runtime-lang-route");
+
+        let result = ctx.add_route_definition(definition);
+        assert!(
+            result.is_ok(),
+            "route should resolve runtime language: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_add_route_definition_fails_for_unregistered_runtime_language() {
+        let mut ctx = CamelContext::new();
+        let definition = RouteDefinition::new(
+            "timer:tick",
+            vec![BuilderStep::DeclarativeSetBody {
+                value: crate::route::ValueSourceDef::Expression(LanguageExpressionDef {
+                    language: "missing-lang".into(),
+                    source: "${body}".into(),
+                }),
+            }],
+        )
+        .with_route_id("missing-runtime-lang-route");
+
+        let result = ctx.add_route_definition(definition);
+        assert!(
+            result.is_err(),
+            "route should fail when language is missing"
+        );
+        let error_text = result.unwrap_err().to_string();
+        assert!(
+            error_text.contains("missing-lang"),
+            "error should mention missing language, got: {error_text}"
+        );
     }
 }

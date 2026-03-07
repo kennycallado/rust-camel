@@ -16,7 +16,9 @@ use camel_api::{CamelError, MetricsCollector, RouteController, RouteStatus, Supe
 
 use crate::registry::Registry;
 use crate::route::RouteDefinition;
-use crate::route_controller::{CrashNotification, DefaultRouteController, RouteControllerInternal};
+use crate::route_controller::{
+    CrashNotification, DefaultRouteController, RouteControllerInternal, SharedLanguageRegistry,
+};
 
 /// A route controller that automatically restarts crashed routes.
 ///
@@ -38,9 +40,22 @@ pub struct SupervisingRouteController {
 impl SupervisingRouteController {
     /// Create a new supervising controller.
     pub fn new(registry: Arc<std::sync::Mutex<Registry>>, config: SupervisionConfig) -> Self {
+        Self::with_languages(
+            registry,
+            config,
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
+        )
+    }
+
+    /// Create a new supervising controller with shared language registry.
+    pub fn with_languages(
+        registry: Arc<std::sync::Mutex<Registry>>,
+        config: SupervisionConfig,
+        languages: SharedLanguageRegistry,
+    ) -> Self {
         let (crash_tx, crash_rx) = tokio::sync::mpsc::channel(64);
         Self {
-            inner: DefaultRouteController::new(registry),
+            inner: DefaultRouteController::with_languages(registry, languages),
             config,
             crash_tx,
             crash_rx: Some(crash_rx),
@@ -180,10 +195,10 @@ async fn supervision_loop(
 
         // Reset attempt counter if route ran long enough before crashing
         // A route that runs for >= initial_delay is considered a "successful run"
-        if let Some(last_time) = last_restart_time.get(&route_id) {
-            if last_time.elapsed() >= config.initial_delay {
-                attempts.insert(route_id.clone(), 0);
-            }
+        if let Some(last_time) = last_restart_time.get(&route_id)
+            && last_time.elapsed() >= config.initial_delay
+        {
+            attempts.insert(route_id.clone(), 0);
         }
 
         // Increment attempt counter
@@ -622,7 +637,7 @@ mod tests {
             // Odd calls (count 0, 2, 4, ...) crash immediately
             // Even calls (count 1, 3, 5, ...) block for 100ms then crash
 
-            if count % 2 == 0 {
+            if count.is_multiple_of(2) {
                 // Odd-numbered call (1st, 3rd, 5th, ...): crash immediately
                 return Err(CamelError::RouteError("odd call crash".into()));
             }

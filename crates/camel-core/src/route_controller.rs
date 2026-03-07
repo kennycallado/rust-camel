@@ -13,9 +13,13 @@ use tower::{Layer, Service, ServiceExt};
 use tracing::{error, info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{BoxProcessor, CamelError, ProducerContext, RouteController, RouteStatus};
+use camel_api::{
+    BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProducerContext,
+    RouteController, RouteStatus, Value, body::Body,
+};
 use camel_component::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_endpoint::parse_uri;
+use camel_language_api::{Expression, Language, Predicate};
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::error_handler::ErrorHandlerLayer;
 use camel_processor::{ChoiceService, WhenClause};
@@ -23,7 +27,8 @@ use camel_processor::{ChoiceService, WhenClause};
 use crate::config::{DetailLevel, TracerConfig};
 use crate::registry::Registry;
 use crate::route::{
-    BuilderStep, RouteDefinition, RouteDefinitionInfo, compose_pipeline, compose_traced_pipeline,
+    BuilderStep, LanguageExpressionDef, RouteDefinition, RouteDefinitionInfo, ValueSourceDef,
+    compose_pipeline, compose_traced_pipeline,
 };
 use arc_swap::ArcSwap;
 
@@ -57,6 +62,7 @@ pub(crate) struct SyncBoxProcessor(pub(crate) BoxProcessor);
 unsafe impl Sync for SyncBoxProcessor {}
 
 type SharedPipeline = Arc<ArcSwap<SyncBoxProcessor>>;
+pub type SharedLanguageRegistry = Arc<std::sync::Mutex<HashMap<String, Arc<dyn Language>>>>;
 
 /// Internal trait extending [`RouteController`] with methods needed by [`CamelContext`]
 /// that are not part of the public lifecycle API.
@@ -161,6 +167,8 @@ pub struct DefaultRouteController {
     routes: HashMap<String, ManagedRoute>,
     /// Reference to the component registry for resolving endpoints.
     registry: Arc<std::sync::Mutex<Registry>>,
+    /// Shared language registry for resolving declarative language expressions.
+    languages: SharedLanguageRegistry,
     /// Self-reference for creating ProducerContext.
     /// Set after construction via `set_self_ref()`.
     self_ref: Option<Arc<Mutex<dyn RouteController>>>,
@@ -177,9 +185,18 @@ pub struct DefaultRouteController {
 impl DefaultRouteController {
     /// Create a new `DefaultRouteController` with the given registry.
     pub fn new(registry: Arc<std::sync::Mutex<Registry>>) -> Self {
+        Self::with_languages(registry, Arc::new(std::sync::Mutex::new(HashMap::new())))
+    }
+
+    /// Create a new `DefaultRouteController` with shared language registry.
+    pub fn with_languages(
+        registry: Arc<std::sync::Mutex<Registry>>,
+        languages: SharedLanguageRegistry,
+    ) -> Self {
         Self {
             routes: HashMap::new(),
             registry,
+            languages,
             self_ref: None,
             global_error_handler: None,
             crash_notifier: None,
@@ -256,6 +273,66 @@ impl DefaultRouteController {
         Ok(ErrorHandlerLayer::new(dlc_producer, resolved_policies))
     }
 
+    fn resolve_language(&self, language: &str) -> Result<Arc<dyn Language>, CamelError> {
+        let guard = self
+            .languages
+            .lock()
+            .expect("mutex poisoned: another thread panicked while holding this lock");
+        guard.get(language).cloned().ok_or_else(|| {
+            CamelError::RouteError(format!(
+                "language `{language}` is not registered in CamelContext"
+            ))
+        })
+    }
+
+    fn compile_language_expression(
+        &self,
+        expression: &LanguageExpressionDef,
+    ) -> Result<Arc<dyn Expression>, CamelError> {
+        let language = self.resolve_language(&expression.language)?;
+        let compiled = language
+            .create_expression(&expression.source)
+            .map_err(|e| {
+                CamelError::RouteError(format!(
+                    "failed to compile {} expression `{}`: {e}",
+                    expression.language, expression.source
+                ))
+            })?;
+        Ok(Arc::from(compiled))
+    }
+
+    fn compile_language_predicate(
+        &self,
+        expression: &LanguageExpressionDef,
+    ) -> Result<Arc<dyn Predicate>, CamelError> {
+        let language = self.resolve_language(&expression.language)?;
+        let compiled = language.create_predicate(&expression.source).map_err(|e| {
+            CamelError::RouteError(format!(
+                "failed to compile {} predicate `{}`: {e}",
+                expression.language, expression.source
+            ))
+        })?;
+        Ok(Arc::from(compiled))
+    }
+
+    fn compile_filter_predicate(
+        &self,
+        expression: &LanguageExpressionDef,
+    ) -> Result<FilterPredicate, CamelError> {
+        let predicate = self.compile_language_predicate(expression)?;
+        Ok(Arc::new(move |exchange: &Exchange| {
+            predicate.matches(exchange).unwrap_or(false)
+        }))
+    }
+
+    fn value_to_body(value: Value) -> Body {
+        match value {
+            Value::Null => Body::Empty,
+            Value::String(text) => Body::Text(text),
+            other => Body::Json(other),
+        }
+    }
+
     /// Resolve BuilderSteps into BoxProcessors.
     fn resolve_steps(
         &self,
@@ -275,6 +352,85 @@ impl DefaultRouteController {
                     let endpoint = component.create_endpoint(&uri)?;
                     let producer = endpoint.create_producer(producer_ctx)?;
                     processors.push(producer);
+                }
+                BuilderStep::DeclarativeSetHeader { key, value } => match value {
+                    ValueSourceDef::Literal(value) => {
+                        let svc = camel_processor::SetHeader::new(IdentityProcessor, key, value);
+                        processors.push(BoxProcessor::new(svc));
+                    }
+                    ValueSourceDef::Expression(expression) => {
+                        let expression = self.compile_language_expression(&expression)?;
+                        let svc = camel_processor::DynamicSetHeader::new(
+                            IdentityProcessor,
+                            key,
+                            move |exchange: &Exchange| {
+                                expression.evaluate(exchange).unwrap_or(Value::Null)
+                            },
+                        );
+                        processors.push(BoxProcessor::new(svc));
+                    }
+                },
+                BuilderStep::DeclarativeSetBody { value } => match value {
+                    ValueSourceDef::Literal(value) => {
+                        let body = Self::value_to_body(value);
+                        let svc = camel_processor::SetBody::new(
+                            IdentityProcessor,
+                            move |_exchange: &Exchange| body.clone(),
+                        );
+                        processors.push(BoxProcessor::new(svc));
+                    }
+                    ValueSourceDef::Expression(expression) => {
+                        let expression = self.compile_language_expression(&expression)?;
+                        let svc = camel_processor::SetBody::new(
+                            IdentityProcessor,
+                            move |exchange: &Exchange| {
+                                let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                                Self::value_to_body(value)
+                            },
+                        );
+                        processors.push(BoxProcessor::new(svc));
+                    }
+                },
+                BuilderStep::DeclarativeFilter { predicate, steps } => {
+                    let predicate = self.compile_filter_predicate(&predicate)?;
+                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_pipeline = compose_pipeline(sub_processors);
+                    let svc =
+                        camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::DeclarativeChoice { whens, otherwise } => {
+                    let mut when_clauses = Vec::new();
+                    for when_step in whens {
+                        let predicate = self.compile_filter_predicate(&when_step.predicate)?;
+                        let sub_processors =
+                            self.resolve_steps(when_step.steps, producer_ctx, registry)?;
+                        let pipeline = compose_pipeline(sub_processors);
+                        when_clauses.push(WhenClause {
+                            predicate,
+                            pipeline,
+                        });
+                    }
+                    let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
+                        let sub_processors =
+                            self.resolve_steps(otherwise_steps, producer_ctx, registry)?;
+                        Some(compose_pipeline(sub_processors))
+                    } else {
+                        None
+                    };
+                    let svc = ChoiceService::new(when_clauses, otherwise_pipeline);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::DeclarativeScript { expression } => {
+                    let expression = self.compile_language_expression(&expression)?;
+                    let svc = camel_processor::SetBody::new(
+                        IdentityProcessor,
+                        move |exchange: &Exchange| {
+                            let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                            Self::value_to_body(value)
+                        },
+                    );
+                    processors.push(BoxProcessor::new(svc));
                 }
                 BuilderStep::Split { config, steps } => {
                     let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;

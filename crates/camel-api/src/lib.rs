@@ -1,6 +1,7 @@
 pub mod aggregator;
 pub mod body;
 pub mod circuit_breaker;
+pub mod declarative;
 pub mod error;
 pub mod error_handler;
 pub mod exchange;
@@ -19,6 +20,7 @@ pub mod value;
 pub use aggregator::{AggregationFn, AggregatorConfig, CompletionCondition};
 pub use body::Body;
 pub use circuit_breaker::CircuitBreakerConfig;
+pub use declarative::{LanguageExpressionDef, ValueSourceDef};
 pub use error::CamelError;
 pub use error_handler::{
     ErrorHandlerConfig, ExceptionPolicy, ExceptionPolicyBuilder, ExponentialBackoff,

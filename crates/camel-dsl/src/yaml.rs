@@ -1,130 +1,405 @@
 //! YAML route definition parser.
 
+use std::path::Path;
+
 use camel_api::CamelError;
-use camel_core::route::{BuilderStep, RouteDefinition};
-use serde::Deserialize;
+use camel_core::route::RouteDefinition;
 
-/// Top-level YAML structure.
-#[derive(Deserialize)]
-pub struct YamlRoutes {
-    pub routes: Vec<YamlRoute>,
-}
+use crate::compile::compile_declarative_route;
+use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
+use crate::model::{
+    AggregateStepDef, AggregateStrategyDef, ChoiceStepDef, DeclarativeCircuitBreaker,
+    DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRetryPolicy, DeclarativeRoute,
+    DeclarativeStep, LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef,
+    MulticastStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
+    SplitExpressionDef, SplitStepDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+};
+pub use crate::yaml_ast::{
+    AggregateData, AggregateStep, ChoiceData, ChoiceStep, FilterStep, LogConfig, LogStep,
+    MulticastData, MulticastStep, PredicateBlock, ScriptData, ScriptStep, SetBodyConfig,
+    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitStep, StopStep, ToStep,
+    WireTapStep, YamlRoute, YamlRoutes, YamlStep,
+};
 
-/// A single route in YAML.
-#[derive(Deserialize)]
-pub struct YamlRoute {
-    /// Route ID (mandatory).
-    pub id: String,
-    /// Source URI.
-    pub from: String,
-    /// Processing steps.
-    #[serde(default)]
-    pub steps: Vec<YamlStep>,
-    /// Auto-startup (default: true).
-    #[serde(default = "default_true")]
-    pub auto_startup: bool,
-    /// Startup order (default: 1000).
-    #[serde(default = "default_startup_order")]
-    pub startup_order: i32,
-}
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 12] = [
+    DeclarativeStepKind::To,
+    DeclarativeStepKind::Log,
+    DeclarativeStepKind::SetHeader,
+    DeclarativeStepKind::SetBody,
+    DeclarativeStepKind::Filter,
+    DeclarativeStepKind::Choice,
+    DeclarativeStepKind::Split,
+    DeclarativeStepKind::Aggregate,
+    DeclarativeStepKind::WireTap,
+    DeclarativeStepKind::Multicast,
+    DeclarativeStepKind::Stop,
+    DeclarativeStepKind::Script,
+];
 
-fn default_true() -> bool {
-    true
-}
-fn default_startup_order() -> i32 {
-    1000
-}
+const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
 
-/// A step in the YAML pipeline.
-///
-/// Uses untagged deserialization to support the "one-key map" YAML format:
-/// ```yaml
-/// - to: "log:info"
-/// - set_header:
-///     key: "source"
-///     value: "timer"
-/// - log: "message"
-/// ```
-#[derive(Deserialize, Debug)]
-#[serde(untagged)]
-pub enum YamlStep {
-    To(ToStep),
-    SetHeader(SetHeaderStep),
-    Log(LogStep),
-}
-
-#[derive(Deserialize, Debug)]
-pub struct ToStep {
-    pub to: String,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct SetHeaderStep {
-    pub set_header: SetHeaderData,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct SetHeaderData {
-    pub key: String,
-    pub value: String,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct LogStep {
-    pub log: String,
-}
-
-/// Parse YAML text into route definitions.
-pub fn parse_yaml(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
+pub fn parse_yaml_to_declarative(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
     let routes: YamlRoutes = serde_yaml::from_str(yaml)
         .map_err(|e| CamelError::RouteError(format!("YAML parse error: {e}")))?;
 
-    let mut definitions = Vec::new();
-    for route in routes.routes {
-        if route.id.is_empty() {
-            return Err(CamelError::RouteError(
-                "route 'id' must not be empty".into(),
-            ));
-        }
-        let steps = route
-            .steps
-            .into_iter()
-            .map(yaml_step_to_builder_step)
-            .collect();
-        let def = RouteDefinition::new(&route.from, steps)
-            .with_route_id(&route.id)
-            .with_auto_startup(route.auto_startup)
-            .with_startup_order(route.startup_order);
-        definitions.push(def);
-    }
-    Ok(definitions)
+    routes
+        .routes
+        .into_iter()
+        .map(yaml_route_to_declarative_route)
+        .collect()
 }
 
-fn yaml_step_to_builder_step(step: YamlStep) -> BuilderStep {
+pub fn parse_yaml(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_yaml_to_declarative(yaml)?
+        .into_iter()
+        .map(compile_declarative_route)
+        .collect()
+}
+
+fn yaml_route_to_declarative_route(route: YamlRoute) -> Result<DeclarativeRoute, CamelError> {
+    if route.id.is_empty() {
+        return Err(CamelError::RouteError(
+            "route 'id' must not be empty".into(),
+        ));
+    }
+
+    if route.sequential && route.concurrent.is_some() {
+        return Err(CamelError::RouteError(
+            "route cannot set both 'sequential' and 'concurrent'".into(),
+        ));
+    }
+
+    let concurrency = if route.sequential {
+        Some(DeclarativeConcurrency::Sequential)
+    } else {
+        route
+            .concurrent
+            .map(|max| DeclarativeConcurrency::Concurrent {
+                max: if max == 0 { None } else { Some(max) },
+            })
+    };
+
+    let error_handler = route.error_handler.map(|eh| DeclarativeErrorHandler {
+        dead_letter_channel: eh.dead_letter_channel,
+        retry: eh.retry.map(|retry| DeclarativeRetryPolicy {
+            max_attempts: retry.max_attempts,
+            initial_delay_ms: retry.initial_delay_ms,
+            multiplier: retry.multiplier,
+            max_delay_ms: retry.max_delay_ms,
+            handled_by: retry.handled_by,
+        }),
+    });
+
+    let circuit_breaker = route.circuit_breaker.map(|cb| DeclarativeCircuitBreaker {
+        failure_threshold: cb.failure_threshold,
+        open_duration_ms: cb.open_duration_ms,
+    });
+
+    let steps = route
+        .steps
+        .into_iter()
+        .map(yaml_step_to_declarative_step)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(DeclarativeRoute {
+        from: route.from,
+        route_id: route.id,
+        auto_startup: route.auto_startup,
+        startup_order: route.startup_order,
+        concurrency,
+        error_handler,
+        circuit_breaker,
+        steps,
+    })
+}
+
+fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, CamelError> {
     match step {
-        YamlStep::To(ToStep { to: uri }) => BuilderStep::To(uri),
-        YamlStep::SetHeader(SetHeaderStep {
-            set_header: SetHeaderData { key, value },
-        }) => {
-            use camel_api::{IdentityProcessor, Value};
-            use camel_processor::SetHeader;
-            BuilderStep::Processor(camel_api::BoxProcessor::new(SetHeader::new(
-                IdentityProcessor,
-                key,
-                Value::String(value),
-            )))
+        YamlStep::To(ToStep { to }) => Ok(DeclarativeStep::To(ToStepDef::new(to))),
+        YamlStep::WireTap(WireTapStep { wire_tap }) => {
+            Ok(DeclarativeStep::WireTap(WireTapStepDef { uri: wire_tap }))
         }
-        YamlStep::Log(LogStep { log: message }) => {
-            use camel_processor::LogLevel;
-            BuilderStep::Processor(camel_api::BoxProcessor::new(
-                camel_processor::LogProcessor::new(LogLevel::Info, message),
-            ))
+        YamlStep::Stop(StopStep { stop }) => {
+            if stop {
+                Ok(DeclarativeStep::Stop)
+            } else {
+                Err(CamelError::RouteError(
+                    "'stop: false' is invalid; remove the step or use 'stop: true'".into(),
+                ))
+            }
+        }
+        YamlStep::Log(LogStep { log }) => {
+            let (message, level) = match log {
+                crate::yaml_ast::LogBody::Message(message) => (message, LogLevelDef::Info),
+                crate::yaml_ast::LogBody::Config(config) => {
+                    let level = match config.level.as_deref().unwrap_or("info") {
+                        "trace" => LogLevelDef::Trace,
+                        "debug" => LogLevelDef::Debug,
+                        "info" => LogLevelDef::Info,
+                        "warn" => LogLevelDef::Warn,
+                        "error" => LogLevelDef::Error,
+                        other => {
+                            return Err(CamelError::RouteError(format!(
+                                "unsupported log level `{other}`"
+                            )));
+                        }
+                    };
+                    (config.message, level)
+                }
+            };
+
+            Ok(DeclarativeStep::Log(LogStepDef { message, level }))
+        }
+        YamlStep::SetHeader(SetHeaderStep { set_header }) => {
+            let value = parse_value_source(
+                set_header.value,
+                set_header.language,
+                set_header.source,
+                set_header.simple,
+                set_header.rhai,
+                "set_header",
+            )?;
+            Ok(DeclarativeStep::SetHeader(SetHeaderStepDef {
+                key: set_header.key,
+                value,
+            }))
+        }
+        YamlStep::SetBody(SetBodyStep { set_body }) => {
+            let value = match set_body {
+                SetBodyData::Literal(value) => ValueSourceDef::Literal(value),
+                SetBodyData::Config(SetBodyConfig {
+                    value,
+                    language,
+                    source,
+                    simple,
+                    rhai,
+                }) => parse_value_source(value, language, source, simple, rhai, "set_body")?,
+            };
+            Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
+        }
+        YamlStep::Script(ScriptStep {
+            script: ScriptData { language, source },
+        }) => Ok(DeclarativeStep::Script(ScriptStepDef {
+            expression: LanguageExpressionDef { language, source },
+        })),
+        YamlStep::Filter(FilterStep { filter }) => {
+            let predicate = parse_predicate_block(&filter, "filter")?;
+            let steps = filter
+                .steps
+                .into_iter()
+                .map(yaml_step_to_declarative_step)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(DeclarativeStep::Filter(crate::model::FilterStepDef {
+                predicate,
+                steps,
+            }))
+        }
+        YamlStep::Choice(ChoiceStep {
+            choice: ChoiceData { when, otherwise },
+        }) => {
+            let whens = when
+                .into_iter()
+                .map(|block| {
+                    let predicate = parse_predicate_block(&block, "choice.when")?;
+                    let steps = block
+                        .steps
+                        .into_iter()
+                        .map(yaml_step_to_declarative_step)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(WhenStepDef { predicate, steps })
+                })
+                .collect::<Result<Vec<_>, CamelError>>()?;
+
+            let otherwise = match otherwise {
+                Some(steps) => Some(
+                    steps
+                        .into_iter()
+                        .map(yaml_step_to_declarative_step)
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                None => None,
+            };
+
+            Ok(DeclarativeStep::Choice(ChoiceStepDef { whens, otherwise }))
+        }
+        YamlStep::Split(SplitStep { split }) => {
+            let expression = match split.expression.as_str() {
+                "body_lines" | "lines" => SplitExpressionDef::BodyLines,
+                "body_json_array" | "json_array" => SplitExpressionDef::BodyJsonArray,
+                other => {
+                    return Err(CamelError::RouteError(format!(
+                        "unsupported split.expression `{other}`"
+                    )));
+                }
+            };
+
+            let aggregation = match split.aggregation.as_str() {
+                "last_wins" => SplitAggregationDef::LastWins,
+                "collect_all" => SplitAggregationDef::CollectAll,
+                "original" => SplitAggregationDef::Original,
+                other => {
+                    return Err(CamelError::RouteError(format!(
+                        "unsupported split.aggregation `{other}`"
+                    )));
+                }
+            };
+
+            let steps = split
+                .steps
+                .into_iter()
+                .map(yaml_step_to_declarative_step)
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(DeclarativeStep::Split(SplitStepDef {
+                expression,
+                aggregation,
+                parallel: split.parallel,
+                parallel_limit: split.parallel_limit,
+                stop_on_exception: split.stop_on_exception,
+                steps,
+            }))
+        }
+        YamlStep::Aggregate(AggregateStep { aggregate }) => {
+            let strategy = match aggregate.strategy.as_str() {
+                "collect_all" => AggregateStrategyDef::CollectAll,
+                other => {
+                    return Err(CamelError::RouteError(format!(
+                        "unsupported aggregate.strategy `{other}`"
+                    )));
+                }
+            };
+
+            Ok(DeclarativeStep::Aggregate(AggregateStepDef {
+                header: aggregate.header,
+                completion_size: aggregate.completion_size,
+                strategy,
+                max_buckets: aggregate.max_buckets,
+                bucket_ttl_ms: aggregate.bucket_ttl_ms,
+            }))
+        }
+        YamlStep::Multicast(MulticastStep { multicast }) => {
+            let aggregation = match multicast.aggregation.as_str() {
+                "last_wins" => MulticastAggregationDef::LastWins,
+                "collect_all" => MulticastAggregationDef::CollectAll,
+                "original" => MulticastAggregationDef::Original,
+                other => {
+                    return Err(CamelError::RouteError(format!(
+                        "unsupported multicast.aggregation `{other}`"
+                    )));
+                }
+            };
+
+            let steps = multicast
+                .steps
+                .into_iter()
+                .map(yaml_step_to_declarative_step)
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(DeclarativeStep::Multicast(MulticastStepDef {
+                steps,
+                parallel: multicast.parallel,
+                parallel_limit: multicast.parallel_limit,
+                stop_on_exception: multicast.stop_on_exception,
+                timeout_ms: multicast.timeout_ms,
+                aggregation,
+            }))
         }
     }
 }
 
-/// Load routes from a YAML file.
-pub fn load_from_file(path: &std::path::Path) -> Result<Vec<RouteDefinition>, CamelError> {
+fn parse_predicate_block(
+    block: &PredicateBlock,
+    context: &str,
+) -> Result<LanguageExpressionDef, CamelError> {
+    let mut selected = Vec::new();
+
+    if let (Some(language), Some(source)) = (block.language.as_ref(), block.source.as_ref()) {
+        selected.push((language.clone(), source.clone()));
+    } else if block.language.is_some() || block.source.is_some() {
+        return Err(CamelError::RouteError(format!(
+            "{context}: `language` and `source` must be set together"
+        )));
+    }
+
+    if let Some(source) = block.simple.as_ref() {
+        selected.push(("simple".to_string(), source.clone()));
+    }
+    if let Some(source) = block.rhai.as_ref() {
+        selected.push(("rhai".to_string(), source.clone()));
+    }
+
+    if selected.len() != 1 {
+        return Err(CamelError::RouteError(format!(
+            "{context} must define exactly one predicate source: `language+source`, `simple`, or `rhai`"
+        )));
+    }
+
+    let (language, source) = selected.remove(0);
+    Ok(LanguageExpressionDef { language, source })
+}
+
+fn parse_value_source(
+    literal: Option<serde_json::Value>,
+    language: Option<String>,
+    source: Option<String>,
+    simple: Option<String>,
+    rhai: Option<String>,
+    context: &str,
+) -> Result<ValueSourceDef, CamelError> {
+    let mut count = 0;
+    if literal.is_some() {
+        count += 1;
+    }
+    if language.is_some() || source.is_some() {
+        if language.is_some() && source.is_some() {
+            count += 1;
+        } else {
+            return Err(CamelError::RouteError(format!(
+                "{context}: `language` and `source` must be set together"
+            )));
+        }
+    }
+    if simple.is_some() {
+        count += 1;
+    }
+    if rhai.is_some() {
+        count += 1;
+    }
+
+    if count != 1 {
+        return Err(CamelError::RouteError(format!(
+            "{context} must define exactly one value source: `value`, `language+source`, `simple`, or `rhai`"
+        )));
+    }
+
+    if let Some(value) = literal {
+        return Ok(ValueSourceDef::Literal(value));
+    }
+    if let (Some(language), Some(source)) = (language, source) {
+        return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
+            language,
+            source,
+        }));
+    }
+    if let Some(source) = simple {
+        return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
+            language: "simple".to_string(),
+            source,
+        }));
+    }
+    if let Some(source) = rhai {
+        return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
+            language: "rhai".to_string(),
+            source,
+        }));
+    }
+
+    Err(CamelError::RouteError(format!(
+        "{context}: missing value source"
+    )))
+}
+
+pub fn load_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| CamelError::Io(format!("Failed to read {}: {e}", path.display())))?;
     parse_yaml(&content)
@@ -206,6 +481,91 @@ routes:
     }
 
     #[test]
+    fn test_parse_yaml_to_declarative_preserves_route_metadata() {
+        let yaml = r#"
+routes:
+  - id: "declarative-route"
+    from: "timer:tick"
+    auto_startup: false
+    startup_order: 7
+    steps:
+      - log: "hello"
+      - to: "mock:out"
+"#;
+
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id, "declarative-route");
+        assert_eq!(routes[0].from, "timer:tick");
+        assert!(!routes[0].auto_startup);
+        assert_eq!(routes[0].startup_order, 7);
+        assert_eq!(routes[0].steps.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_yaml_supports_all_declarative_step_kinds() {
+        let yaml = r#"
+routes:
+  - id: "all-steps"
+    from: "direct:start"
+    sequential: true
+    error_handler:
+      dead_letter_channel: "log:dlc"
+      retry:
+        max_attempts: 2
+        handled_by: "log:handled"
+    circuit_breaker:
+      failure_threshold: 3
+      open_duration_ms: 500
+    steps:
+      - log:
+          message: "hello"
+          level: "debug"
+      - set_header:
+          key: "kind"
+          value: "A"
+      - set_body:
+          value: "payload"
+      - filter:
+          simple: "${header.kind} == 'A'"
+          steps:
+            - to: "mock:filtered"
+      - choice:
+          when:
+            - simple: "${header.kind} == 'A'"
+              steps:
+                - to: "mock:a"
+          otherwise:
+            - to: "mock:other"
+      - split:
+          expression: body_lines
+          aggregation: collect_all
+          steps:
+            - to: "mock:split"
+      - aggregate:
+          header: "orderId"
+          completion_size: 2
+      - wire_tap: "mock:tap"
+      - multicast:
+          steps:
+            - to: "mock:left"
+            - to: "mock:right"
+      - script:
+          language: "simple"
+          source: "${body}"
+      - stop: true
+"#;
+
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].steps.len(), 11);
+
+        let defs = parse_yaml(yaml).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].route_id(), "all-steps");
+    }
+
+    #[test]
     fn test_load_from_file() {
         use std::io::Write;
         let temp_dir = std::env::temp_dir();
@@ -226,13 +586,12 @@ routes:
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].route_id(), "file-route");
 
-        // Cleanup
         std::fs::remove_file(&file_path).ok();
     }
 
     #[test]
     fn test_load_from_nonexistent_file() {
-        let result = load_from_file(std::path::Path::new("/nonexistent/path/routes.yaml"));
+        let result = load_from_file(Path::new("/nonexistent/path/routes.yaml"));
         assert!(result.is_err());
     }
 }
