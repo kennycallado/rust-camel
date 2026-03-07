@@ -110,6 +110,19 @@ impl Clone for Body {
     }
 }
 
+impl PartialEq for Body {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Body::Empty, Body::Empty) => true,
+            (Body::Text(a), Body::Text(b)) => a == b,
+            (Body::Json(a), Body::Json(b)) => a == b,
+            (Body::Bytes(a), Body::Bytes(b)) => a == b,
+            // Stream: two streams are never equal (single-consumption)
+            _ => false,
+        }
+    }
+}
+
 impl Body {
     /// Returns `true` if the body is empty.
     pub fn is_empty(&self) -> bool {
