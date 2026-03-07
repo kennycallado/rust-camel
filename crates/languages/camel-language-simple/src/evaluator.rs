@@ -1,6 +1,6 @@
-use crate::parser::{Expr, Op};
-use camel_api::Value;
+use crate::parser::{Expr, InterpolatedPart, Op};
 use camel_api::exchange::Exchange;
+use camel_api::Value;
 use camel_language_api::LanguageError;
 
 pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError> {
@@ -29,6 +29,24 @@ pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError
             // results are needed in the future, this arm should return Value directly
             // and callers (Predicate::matches) should coerce the result to bool.
             Ok(Value::Bool(result))
+        }
+
+        Expr::Interpolated(parts) => {
+            let mut result = String::new();
+            for part in parts {
+                match part {
+                    InterpolatedPart::Literal(text) => result.push_str(text),
+                    InterpolatedPart::Expr(sub_expr) => {
+                        let val = evaluate(sub_expr, exchange)?;
+                        match val {
+                            Value::Null => {} // missing value → empty string in interpolation
+                            Value::String(s) => result.push_str(&s),
+                            other => result.push_str(&other.to_string()),
+                        }
+                    }
+                }
+            }
+            Ok(Value::String(result))
         }
     }
 }

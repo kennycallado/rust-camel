@@ -3,8 +3,9 @@ routes:
     from: "timer:transform?period=5000"
     steps:
       - set_body:
-          value: "raw payload"
+          simple: "${header.CamelTimerCounter} World"
       - set_header:
           key: "source"
           value: "camel-cli"
-      - log: "message=Transformed: ${body} (source=${header.source})"
+      # log: messages are evaluated as Simple Language — ${...} expressions are interpolated
+      - log: "Transformed: ${body} (source=${header.source})"

@@ -59,16 +59,18 @@ pub enum LogLevelDef {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Note: `Eq` is not derived because `ValueSourceDef` contains `serde_json::Value`
+// which does not implement `Eq` (due to floating-point fields).
+#[derive(Debug, Clone, PartialEq)]
 pub struct LogStepDef {
-    pub message: String,
+    pub message: ValueSourceDef,
     pub level: LogLevelDef,
 }
 
 impl LogStepDef {
     pub fn info(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
+            message: ValueSourceDef::Literal(serde_json::Value::String(message.into())),
             level: LogLevelDef::Info,
         }
     }

@@ -13,6 +13,19 @@ pub enum Expr {
         op: Op,
         right: Box<Expr>,
     },
+    /// A string that mixes literal text with `${...}` interpolations.
+    /// Example: `"Got ${body} from ${header.source}"` →
+    ///   `[Literal("Got "), Expr(Body), Literal(" from "), Expr(Header("source"))]`
+    Interpolated(Vec<InterpolatedPart>),
+}
+
+/// One segment inside an `Expr::Interpolated`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InterpolatedPart {
+    /// Plain text segment.
+    Literal(String),
+    /// An evaluated sub-expression (`${...}`).
+    Expr(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,8 +42,8 @@ pub enum Op {
 pub fn parse(input: &str) -> Result<Expr, LanguageError> {
     let input = input.trim();
 
-    // Try binary expression: <lhs> <op> <rhs>
-    // Try operators longest-first to avoid partial matches (>= before >)
+    // Try binary expression first (highest priority).
+    // Try operators longest-first to avoid partial matches (>= before >).
     let ops = [
         (">=", Op::Gte),
         ("<=", Op::Lte),
@@ -56,7 +69,74 @@ pub fn parse(input: &str) -> Result<Expr, LanguageError> {
         }
     }
 
-    parse_atom(input)
+    // If input contains `${`:
+    //   - Pure single token (`${...}` with nothing before/after) → parse_atom
+    //     which validates it and returns the proper error on bad keys.
+    //   - Mixed (text + `${...}`) → parse_interpolated.
+    if input.contains("${") {
+        if is_pure_interpolation(input) {
+            return parse_atom(input);
+        } else {
+            return parse_interpolated(input);
+        }
+    }
+
+    // No `${` at all — try known atoms first, then fall back to plain StringLit.
+    // This enables `log: "Hello World"` without requiring single-quote wrapping.
+    if let Ok(expr) = parse_atom(input) {
+        return Ok(expr);
+    }
+    Ok(Expr::StringLit(input.to_string()))
+}
+
+/// Returns `true` when `input` is exactly one `${...}` token — the entire
+/// string starts with `${` and ends with the matching `}`.
+fn is_pure_interpolation(input: &str) -> bool {
+    if !input.starts_with("${") {
+        return false;
+    }
+    // Find the closing `}` and make sure it's at the very end.
+    // NOTE: We use `.find('}')` which locates the *first* `}`, not a properly
+    // matching/nested one. This is intentional — Simple Language does not support
+    // nested `${...}` expressions, so finding the first `}` is correct here.
+    if let Some(end) = input.find('}') {
+        end == input.len() - 1
+    } else {
+        false
+    }
+}
+
+/// Parse a string that contains a mix of literal text and `${...}` tokens.
+fn parse_interpolated(input: &str) -> Result<Expr, LanguageError> {
+    let mut parts: Vec<InterpolatedPart> = Vec::new();
+    let mut remaining = input;
+
+    while !remaining.is_empty() {
+        if let Some(start) = remaining.find("${") {
+            // Text before the `${`
+            if start > 0 {
+                parts.push(InterpolatedPart::Literal(remaining[..start].to_string()));
+            }
+            let after_dollar = &remaining[start..]; // starts with "${"
+                                                    // Find the matching `}`
+            if let Some(end) = after_dollar.find('}') {
+                let token = &after_dollar[..=end]; // e.g. "${header.x}"
+                let expr = parse_atom(token)?;
+                parts.push(InterpolatedPart::Expr(Box::new(expr)));
+                remaining = &after_dollar[end + 1..];
+            } else {
+                // No closing brace — treat the rest as a literal
+                parts.push(InterpolatedPart::Literal(after_dollar.to_string()));
+                remaining = "";
+            }
+        } else {
+            // No more `${` — rest is literal text
+            parts.push(InterpolatedPart::Literal(remaining.to_string()));
+            remaining = "";
+        }
+    }
+
+    Ok(Expr::Interpolated(parts))
 }
 
 /// Find the byte position of `op` in `input` that is outside single-quoted

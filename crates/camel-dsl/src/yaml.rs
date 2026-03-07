@@ -6,7 +6,7 @@ use camel_api::CamelError;
 use camel_core::route::RouteDefinition;
 
 use crate::compile::compile_declarative_route;
-use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
+use crate::contract::{assert_contract_coverage, DeclarativeStepKind};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, ChoiceStepDef, DeclarativeCircuitBreaker,
     DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRetryPolicy, DeclarativeRoute,
@@ -15,10 +15,11 @@ use crate::model::{
     SplitExpressionDef, SplitStepDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
-    AggregateData, AggregateStep, ChoiceData, ChoiceStep, FilterStep, LogConfig, LogStep,
-    MulticastData, MulticastStep, PredicateBlock, ScriptData, ScriptStep, SetBodyConfig,
-    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitExpressionConfig,
-    SplitExpressionYaml, SplitStep, StopStep, ToStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
+    AggregateData, AggregateStep, ChoiceData, ChoiceStep, FilterStep, LogConfig, LogMessageData,
+    LogMessageExpr, LogStep, MulticastData, MulticastStep, PredicateBlock, ScriptData, ScriptStep,
+    SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData,
+    SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, ToStep, WireTapStep,
+    YamlRoute, YamlRoutes, YamlStep,
 };
 
 const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 12] = [
@@ -129,8 +130,11 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
             }
         }
         YamlStep::Log(LogStep { log }) => {
-            let (message, level) = match log {
-                crate::yaml_ast::LogBody::Message(message) => (message, LogLevelDef::Info),
+            let (message_data, level) = match log {
+                crate::yaml_ast::LogBody::Message(message) => (
+                    crate::yaml_ast::LogMessageData::Literal(message),
+                    LogLevelDef::Info,
+                ),
                 crate::yaml_ast::LogBody::Config(config) => {
                     let level = match config.level.as_deref().unwrap_or("info") {
                         "trace" => LogLevelDef::Trace,
@@ -147,7 +151,24 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     (config.message, level)
                 }
             };
-
+            let message = match message_data {
+                // A bare string like `log: "Got ${body}"` is always evaluated as Simple Language,
+                // matching Apache Camel behaviour: the message field "uses simple language".
+                crate::yaml_ast::LogMessageData::Literal(s) => {
+                    ValueSourceDef::Expression(LanguageExpressionDef {
+                        language: "simple".to_string(),
+                        source: s,
+                    })
+                }
+                crate::yaml_ast::LogMessageData::Expr(expr) => parse_value_source(
+                    expr.value.map(serde_json::Value::String),
+                    expr.language,
+                    expr.source,
+                    expr.simple,
+                    expr.rhai,
+                    "log.message",
+                )?,
+            };
             Ok(DeclarativeStep::Log(LogStepDef { message, level }))
         }
         YamlStep::SetHeader(SetHeaderStep { set_header }) => {
@@ -663,6 +684,37 @@ routes:
         assert_eq!(defs[0].route_id(), "file-route");
 
         std::fs::remove_file(&file_path).ok();
+    }
+
+    /// Verifies that `log:` with a Simple Language expression is parsed into a
+    /// `DeclarativeStep::Log` that carries a `ValueSourceDef::Expression`, not a bare String.
+    /// This test drives the requirement that `LogStepDef.message` becomes a `ValueSourceDef`.
+    #[test]
+    fn test_log_step_with_simple_expression_parses_as_expression() {
+        let yaml = r#"
+routes:
+  - id: "log-expr"
+    from: "timer:tick"
+    steps:
+      - log:
+          message:
+            simple: "${header.CamelTimerCounter} World"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        let step = &routes[0].steps[0];
+        match step {
+            DeclarativeStep::Log(def) => match &def.message {
+                ValueSourceDef::Expression(expr) => {
+                    assert_eq!(expr.language, "simple");
+                    assert_eq!(expr.source, "${header.CamelTimerCounter} World");
+                }
+                ValueSourceDef::Literal(_) => {
+                    panic!("expected Expression, got Literal")
+                }
+            },
+            _ => panic!("expected Log step, got {:?}", step),
+        }
     }
 
     #[test]

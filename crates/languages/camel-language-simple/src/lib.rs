@@ -45,7 +45,7 @@ impl Language for SimpleLanguage {
 #[cfg(test)]
 mod tests {
     use super::SimpleLanguage;
-    use camel_api::{Value, exchange::Exchange, message::Message};
+    use camel_api::{exchange::Exchange, message::Message, Value};
     use camel_language_api::Language;
 
     fn exchange_with_header(key: &str, val: &str) -> Exchange {
@@ -138,9 +138,11 @@ mod tests {
 
     #[test]
     fn test_parse_error_unrecognized_token() {
+        // A pure `${...}` token that doesn't match any known form is a parse error.
+        // For example `${unknown}` is not a valid Simple expression.
         let lang = SimpleLanguage;
-        let result = lang.create_expression("@@invalid@@");
-        assert!(result.is_err());
+        let result = lang.create_expression("${unknown}");
+        assert!(result.is_err(), "unknown token should be a parse error");
     }
 
     #[test]
@@ -248,6 +250,81 @@ mod tests {
         let mut ex = Exchange::new(Message::default());
         ex.input.set_header("age", Value::Number(18.into()));
         assert!(pred.matches(&ex).unwrap());
+    }
+
+    // --- Mixed interpolation tests ---
+
+    #[test]
+    fn test_interpolated_text_with_header() {
+        // "Exchange #${header.CamelTimerCounter}" → "Exchange #42"
+        let lang = SimpleLanguage;
+        let expr = lang
+            .create_expression("Exchange #${header.CamelTimerCounter}")
+            .unwrap();
+        let ex = exchange_with_header("CamelTimerCounter", "42");
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::String("Exchange #42".to_string()));
+    }
+
+    #[test]
+    fn test_interpolated_text_with_body() {
+        // "Got ${body}" → "Got hello"
+        let lang = SimpleLanguage;
+        let expr = lang.create_expression("Got ${body}").unwrap();
+        let ex = exchange_with_body("hello");
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::String("Got hello".to_string()));
+    }
+
+    #[test]
+    fn test_interpolated_multiple_expressions() {
+        // "Transformed: ${body} (source=${header.source})" → real values
+        let lang = SimpleLanguage;
+        let expr = lang
+            .create_expression("Transformed: ${body} (source=${header.source})")
+            .unwrap();
+        let mut msg = camel_api::message::Message::new("data");
+        msg.set_header("source", Value::String("kafka".to_string()));
+        let ex = Exchange::new(msg);
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(
+            val,
+            Value::String("Transformed: data (source=kafka)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_interpolated_missing_header_becomes_empty() {
+        // Missing header in interpolated string yields empty string for that slot
+        let lang = SimpleLanguage;
+        let expr = lang
+            .create_expression("prefix-${header.missing}-suffix")
+            .unwrap();
+        let ex = exchange_with_body("x");
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::String("prefix--suffix".to_string()));
+    }
+
+    #[test]
+    fn test_interpolated_text_only_no_expressions() {
+        // Plain text with no ${...} — treated as a literal (no interpolation needed,
+        // but must still work without error)
+        let lang = SimpleLanguage;
+        let expr = lang.create_expression("Hello World").unwrap();
+        let ex = exchange_with_body("x");
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::String("Hello World".to_string()));
+    }
+
+    #[test]
+    fn test_interpolated_unclosed_brace_treated_as_literal() {
+        // An unclosed `${` has no matching `}` — the remainder is treated as
+        // plain literal text rather than causing a parse error.
+        let lang = SimpleLanguage;
+        let expr = lang.create_expression("Got ${body").unwrap();
+        let ex = exchange_with_body("hello");
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::String("Got ${body".to_string()));
     }
 
     #[test]

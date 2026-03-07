@@ -162,9 +162,34 @@ pub enum LogBody {
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {
-    pub message: String,
+    /// The log message. Can be a plain string literal or a nested expression object.
+    pub message: LogMessageData,
     #[serde(default)]
     pub level: Option<String>,
+}
+
+/// The `message` field inside a `log: { message: ... }` config block.
+/// Either a bare string literal or a value-source expression (simple, rhai, language+source).
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub enum LogMessageData {
+    Literal(String),
+    Expr(LogMessageExpr),
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LogMessageExpr {
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub simple: Option<String>,
+    #[serde(default)]
+    pub rhai: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]

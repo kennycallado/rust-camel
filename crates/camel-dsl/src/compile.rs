@@ -4,8 +4,8 @@ use camel_api::aggregator::{AggregationStrategy as AggregatorStrategy, Aggregato
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::{
-    AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
-    split_body_lines,
+    split_body_json_array, split_body_lines, AggregationStrategy as SplitAggregation,
+    SplitterConfig,
 };
 use camel_api::{CamelError, CircuitBreakerConfig};
 use camel_component::ConcurrencyModel;
@@ -88,9 +88,22 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
         DeclarativeStep::To(ToStepDef { uri }) => Ok(BuilderStep::To(uri)),
         DeclarativeStep::WireTap(WireTapStepDef { uri }) => Ok(BuilderStep::WireTap { uri }),
         DeclarativeStep::Log(LogStepDef { message, level }) => {
-            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
-                camel_processor::LogProcessor::new(compile_log_level(level), message),
-            )))
+            let compiled_level = compile_log_level(level);
+            match message {
+                ValueSourceDef::Literal(v) => {
+                    let s = match v {
+                        serde_json::Value::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
+                        camel_processor::LogProcessor::new(compiled_level, s),
+                    )))
+                }
+                ValueSourceDef::Expression(_) => Ok(BuilderStep::DeclarativeLog {
+                    level: compiled_level,
+                    message,
+                }),
+            }
         }
         DeclarativeStep::SetHeader(SetHeaderStepDef { key, value }) => {
             compile_set_header_step(key, value)

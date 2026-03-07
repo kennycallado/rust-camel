@@ -2,4 +2,5 @@ routes:
   - id: "hello"
     from: "timer:tick?period=2000"
     steps:
-      - log: "message=Hello from camel-cli! Exchange #${header.CamelTimerCounter}"
+      # log: messages are evaluated as Simple Language — ${...} expressions are interpolated
+      - log: "Hello from camel-cli! Exchange #${header.CamelTimerCounter}"

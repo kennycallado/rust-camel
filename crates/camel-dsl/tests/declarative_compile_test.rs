@@ -1,9 +1,9 @@
 use camel_core::route::BuilderStep;
 
 use camel_dsl::{
-    ChoiceStepDef, DeclarativeConcurrency, DeclarativeRoute, DeclarativeStep, FilterStepDef,
-    LanguageExpressionDef, LogStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, ToStepDef,
-    ValueSourceDef, WhenStepDef, compile_declarative_route,
+    compile_declarative_route, parse_yaml, ChoiceStepDef, DeclarativeConcurrency, DeclarativeRoute,
+    DeclarativeStep, FilterStepDef, LanguageExpressionDef, LogStepDef, ScriptStepDef,
+    SetBodyStepDef, SetHeaderStepDef, ToStepDef, ValueSourceDef, WhenStepDef,
 };
 
 #[test]
@@ -127,4 +127,71 @@ fn declarative_language_steps_are_deferred_to_runtime_registry() {
                 && whens[0].predicate.source == "when expr"
                 && matches!(whens[0].steps.as_slice(), [BuilderStep::To(uri)] if uri == "mock:when")
     ));
+}
+
+/// Integration test: verifies the full pipeline from YAML shorthand `log:` syntax
+/// through to compiled `BuilderStep::DeclarativeLog`.
+///
+/// This test ensures that:
+/// 1. YAML string `log: "Got ${body}"` is parsed by `yaml.rs`
+/// 2. `yaml.rs` converts it to `ValueSourceDef::Expression(LanguageExpressionDef { language: "simple", source: "Got ${body}" })`
+/// 3. `compile.rs` creates `BuilderStep::DeclarativeLog` (not a static `LogProcessor`)
+///
+/// The shorthand `log: "..."` form should always evaluate as Simple Language,
+/// matching Apache Camel behavior where the message field "uses simple language".
+#[test]
+fn log_step_with_interpolation_compiles_to_declarative_log() {
+    let yaml = r#"
+routes:
+  - id: "log-expr-route"
+    from: "timer:tick?period=1000"
+    steps:
+      - log: "Got ${body}"
+"#;
+    let defs = parse_yaml(yaml).expect("YAML parse should succeed");
+    assert_eq!(defs.len(), 1, "expected exactly one route");
+
+    let steps = defs[0].steps();
+    assert_eq!(steps.len(), 1, "expected exactly one step");
+
+    // Verify the step is DeclarativeLog (not a static LogProcessor)
+    match &steps[0] {
+        BuilderStep::DeclarativeLog { level, message } => {
+            // Verify the level defaults to Info
+            assert!(
+                matches!(level, camel_processor::LogLevel::Info),
+                "expected Info level, got {:?}",
+                level
+            );
+            // Verify the message is an Expression with Simple Language
+            match message {
+                ValueSourceDef::Expression(expr) => {
+                    assert_eq!(
+                        expr.language, "simple",
+                        "expected simple language, got {:?}",
+                        expr.language
+                    );
+                    assert_eq!(
+                        expr.source, "Got ${body}",
+                        "expected source 'Got ${{body}}', got {:?}",
+                        expr.source
+                    );
+                }
+                ValueSourceDef::Literal(_) => {
+                    panic!(
+                        "expected ValueSourceDef::Expression for log with ${{...}}, got Literal"
+                    );
+                }
+            }
+        }
+        BuilderStep::Processor(_) => {
+            panic!(
+                "expected BuilderStep::DeclarativeLog, got static Processor (LogProcessor). \
+                 This means the log message was treated as a literal instead of an expression."
+            );
+        }
+        other => {
+            panic!("expected BuilderStep::DeclarativeLog, got {:?}", other);
+        }
+    }
 }

@@ -90,3 +90,11 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | DSL Contract: more language shortcuts in YAML                        | DSL step contract postmortem            | DONE — documentado en READMEs y ejemplo yaml-dsl                                                                             | DONE   |
 | Route_id: compile-time enforcement (typestate pattern)               | ArcSwap postmortem                     | Baja — validación actual es runtime; typestate evitaría errores en examples                                                    |        |
 | Hot-reload: Skip action con hash comparison                          | ArcSwap postmortem                     | Baja — actualmente siempre Swap si from_uri igual; Skip evitaría swaps innecesarios pero requiere comparar steps               |        |
+| Streaming Body: native Axum response streaming                       | Gap 3 postmortem                       | Media — evitar materialización en HttpConsumer (\`into_bytes\`); requiere actualizar HttpReply para ser Stream-aware           |        |
+| Streaming Body: intelligent clone (re-open file)                     | Gap 3 postmortem                       | Media-baja — permitir que Body::clone() reabra archivos si \`origin\` es conocido para evitar single-consumption limit         |        |
+| Streaming Body: EIP error propagation                                | Gap 3 postmortem                       | Baja — refinar cómo Multicast/Splitter manejan errores de stream en vez de usar placeholders de texto                          |        |
+| Streaming Body: Direct streaming to File                             | Gap 3 review                           | Media — usar tokio::io::copy para volcar stream a disco directamente en FileProducer sin pasar por Vec<u8>                     |        |
+
+## Log EIP — Behavior Change
+`log:` steps in YAML DSL now evaluate their message as Simple Language (consistent with Apache Camel).
+Plain strings like `log: "Hello"` continue to work; strings with `${...}` are now interpolated.

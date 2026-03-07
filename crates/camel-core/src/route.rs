@@ -136,6 +136,11 @@ pub enum BuilderStep {
         steps: Vec<BuilderStep>,
         config: MulticastConfig,
     },
+    /// Declarative log step with a language-evaluated message, resolved at route-add time.
+    DeclarativeLog {
+        level: camel_processor::LogLevel,
+        message: ValueSourceDef,
+    },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -195,6 +200,9 @@ impl std::fmt::Debug for BuilderStep {
             BuilderStep::WireTap { uri } => write!(f, "BuilderStep::WireTap {{ uri: {uri:?} }}"),
             BuilderStep::Multicast { steps, .. } => {
                 write!(f, "BuilderStep::Multicast {{ steps: {steps:?}, .. }}")
+            }
+            BuilderStep::DeclarativeLog { level, .. } => {
+                write!(f, "BuilderStep::DeclarativeLog {{ level: {level:?}, .. }}")
             }
         }
     }
