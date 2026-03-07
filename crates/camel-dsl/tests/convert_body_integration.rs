@@ -3,7 +3,7 @@
 //! These tests cover:
 //! 1. YAML parsing of `convert_body_to` directive
 //! 2. Unknown target error handling
-//! 3. All valid target types (text, json, bytes, empty)
+//! 3. All valid target types (text, json, bytes)
 //! 4. Full pipeline from YAML → compile → BuilderStep::Processor
 //!
 //! Note: Builder API tests for ConvertBodyTo processor are in
@@ -73,9 +73,43 @@ routes:
 }
 
 #[test]
+fn yaml_convert_body_to_empty_target_rejected_at_parse_time() {
+    // `empty` must be rejected during YAML parsing rather than accepted and
+    // failing at runtime, because converting a non-empty body to Empty is not
+    // supported.
+    let yaml = r#"
+routes:
+  - id: "convert-empty-route"
+    from: "direct:start"
+    steps:
+      - convert_body_to: empty
+"#;
+    let result = parse_yaml(yaml);
+    assert!(
+        result.is_err(),
+        "expected parse error for unsupported 'empty' target, but got Ok"
+    );
+
+    let err_msg = match result {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("expected error"),
+    };
+    assert!(
+        err_msg.contains("unknown convert_body_to target"),
+        "error message should mention 'unknown convert_body_to target', got: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("empty"),
+        "error message should mention the invalid target 'empty', got: {}",
+        err_msg
+    );
+}
+
+#[test]
 fn yaml_convert_body_to_all_valid_targets_parse() {
-    // Test all four valid targets: text, json, bytes, empty
-    for target in ["text", "json", "bytes", "empty"] {
+    // Test all three valid targets: text, json, bytes
+    for target in ["text", "json", "bytes"] {
         let yaml = format!(
             r#"
 routes:
