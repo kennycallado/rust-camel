@@ -1,5 +1,6 @@
 use camel_api::aggregator::AggregatorConfig;
 use camel_api::body::Body;
+use camel_api::body_converter::BodyType;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
@@ -9,7 +10,9 @@ use camel_api::{
 };
 use camel_component::ConcurrencyModel;
 use camel_core::route::{BuilderStep, RouteDefinition, WhenStep};
-use camel_processor::{DynamicSetHeader, LogLevel, MapBody, SetBody, SetHeader, StopService};
+use camel_processor::{
+    ConvertBodyTo, DynamicSetHeader, LogLevel, MapBody, SetBody, SetHeader, StopService,
+};
 
 /// Shared step-accumulation methods for all builder types.
 ///
@@ -110,6 +113,24 @@ pub trait StepAccumulator: Sized {
     fn log(mut self, message: impl Into<String>, level: LogLevel) -> Self {
         use camel_processor::LogProcessor;
         let svc = LogProcessor::new(level, message.into());
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Convert the message body to the target type.
+    ///
+    /// Supported: Text ↔ Json ↔ Bytes. `Body::Stream` always fails.
+    /// Returns `TypeConversionFailed` if conversion is not possible.
+    ///
+    /// # Example
+    /// ```ignore
+    /// route.set_body(Value::String(r#"{"x":1}"#.into()))
+    ///      .convert_body_to(BodyType::Json)
+    ///      .to("direct:next")
+    /// ```
+    fn convert_body_to(mut self, target: BodyType) -> Self {
+        let svc = ConvertBodyTo::new(IdentityProcessor, target);
         self.steps_mut()
             .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
