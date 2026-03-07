@@ -231,3 +231,21 @@ routes:
       - log: "Before stop - this will appear"
       - stop: true
       - log: "After stop - this will NOT appear"
+
+  # ===========================================================================
+  # Route 11: Convert Body To (Type Conversion)
+  # ===========================================================================
+  # Demonstrates converting the message body between different types.
+  # This route shows Text → Json conversion, parsing a JSON string into
+  # structured data that can be processed as a Json body.
+  #
+  - id: "convert-body-demo"
+    from: "timer:convert-tick?period=5000&repeatCount=3"
+    startup_order: 600
+    steps:
+      - set_body:
+          value: '{"message": "hello from YAML", "ts": 1}'
+      - log: "Before conversion - body is Text containing JSON string"
+      - convert_body_to: json
+      - log: "After conversion - body is now Json type: ${body}"
+      - to: "log:converted-json?showBody=true"
