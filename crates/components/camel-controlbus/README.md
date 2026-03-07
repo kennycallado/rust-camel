@@ -36,9 +36,9 @@ controlbus:route?routeId=xxx&action=yyy
 | Action | Description |
 |--------|-------------|
 | `start` | Start a stopped route |
-| `stop` | Stop a running route |
-| `suspend` | Suspend a route (pause consumers) |
-| `resume` | Resume a suspended route |
+| `suspend` | Suspend a route (pause consumer intake, in-flight exchanges continue) |
+| `resume` | Resume a suspended route (restart consumer intake) |
+| `stop` | Stop a running route (full stop) |
 | `restart` | Stop and start a route |
 | `status` | Get route status (returned in body) |
 

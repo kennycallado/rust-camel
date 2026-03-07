@@ -69,10 +69,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // Start a specific route
 ctx.start_route("my-route").await?;
 
-// Suspend a route (pause without stopping consumers)
+// Suspend a route (pauses consumer intake, allows in-flight exchanges to complete)
 ctx.suspend_route("my-route").await?;
 
-// Resume a suspended route
+// Resume a suspended route (restarts consumer intake)
 ctx.resume_route("my-route").await?;
 
 // Stop a route
