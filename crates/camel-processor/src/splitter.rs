@@ -189,9 +189,13 @@ fn aggregate(
                     Body::Json(v) => v.clone(),
                     Body::Bytes(b) => Value::String(String::from_utf8_lossy(b).into_owned()),
                     Body::Empty => Value::Null,
-                    Body::Stream(s) => {
-                        Value::String(format!("[Stream: origin={:?}]", s.metadata.origin))
-                    }
+                    Body::Stream(s) => serde_json::json!({
+                        "_stream": {
+                            "origin": s.metadata.origin,
+                            "placeholder": true,
+                            "hint": "Materialize exchange body with .into_bytes() before aggregation if content needed"
+                        }
+                    }),
                 };
                 bodies.push(value);
             }
@@ -598,5 +602,101 @@ mod tests {
 
         // All fragments fail; LastWins returns the last error.
         assert!(result.is_err(), "expected error when all fragments fail");
+    }
+
+    // ── 13. Stream body aggregation creates valid JSON ───────────────────
+
+    #[tokio::test]
+    async fn test_splitter_stream_bodies_creates_valid_json() {
+        use camel_api::{StreamBody, StreamMetadata};
+        use bytes::Bytes;
+        use futures::stream;
+        use tokio::sync::Mutex;
+
+        let chunks = vec![Ok(Bytes::from("test"))];
+        let stream_body = StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream::iter(chunks))))),
+            metadata: StreamMetadata {
+                origin: Some("kafka://topic/partition".to_string()),
+                ..Default::default()
+            },
+        };
+
+        let original = Exchange::new(Message {
+            headers: Default::default(),
+            body: Body::Empty,
+        });
+
+        let results = vec![Ok(Exchange::new(Message {
+            headers: Default::default(),
+            body: Body::Stream(stream_body),
+        }))];
+
+        let result = aggregate(results, original, AggregationStrategy::CollectAll);
+
+        let exchange = result.expect("Expected Ok result");
+        assert!(
+            matches!(exchange.input.body, Body::Json(_)),
+            "Expected Json body"
+        );
+
+        if let Body::Json(value) = exchange.input.body {
+            let json_str = serde_json::to_string(&value).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+            assert!(parsed.is_array());
+            let arr = parsed.as_array().unwrap();
+            assert!(arr[0].is_object());
+            assert!(arr[0]["_stream"].is_object());
+            assert_eq!(arr[0]["_stream"]["origin"], "kafka://topic/partition");
+            assert_eq!(arr[0]["_stream"]["placeholder"], true);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_splitter_stream_with_none_origin_creates_valid_json() {
+        use camel_api::{StreamBody, StreamMetadata};
+        use bytes::Bytes;
+        use futures::stream;
+        use tokio::sync::Mutex;
+
+        let chunks = vec![Ok(Bytes::from("test"))];
+        let stream_body = StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream::iter(chunks))))),
+            metadata: StreamMetadata {
+                origin: None,
+                ..Default::default()
+            },
+        };
+
+        let original = Exchange::new(Message {
+            headers: Default::default(),
+            body: Body::Empty,
+        });
+
+        let results = vec![Ok(Exchange::new(Message {
+            headers: Default::default(),
+            body: Body::Stream(stream_body),
+        }))];
+
+        let result = aggregate(results, original, AggregationStrategy::CollectAll);
+
+        let exchange = result.expect("Expected Ok result");
+        assert!(
+            matches!(exchange.input.body, Body::Json(_)),
+            "Expected Json body"
+        );
+
+        if let Body::Json(value) = exchange.input.body {
+            let json_str = serde_json::to_string(&value).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+            assert!(parsed.is_array());
+            let arr = parsed.as_array().unwrap();
+            assert!(arr[0].is_object());
+            assert!(arr[0]["_stream"].is_object());
+            assert_eq!(arr[0]["_stream"]["origin"], serde_json::Value::Null);
+            assert_eq!(arr[0]["_stream"]["placeholder"], true);
+        }
     }
 }

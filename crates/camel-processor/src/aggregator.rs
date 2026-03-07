@@ -177,8 +177,8 @@ fn aggregate(
                     Body::Stream(s) => serde_json::json!({
                         "_stream": {
                             "origin": s.metadata.origin,
-                            "consumed": true,
-                            "hint": "Materialize with .into_bytes() before aggregation if content needed"
+                            "placeholder": true,
+                            "hint": "Materialize exchange body with .into_bytes() before aggregation if content needed"
                         }
                     }),
                 })
@@ -588,7 +588,7 @@ mod tests {
             assert!(arr[0].is_object(), "First element should be an object");
             assert!(arr[0]["_stream"].is_object(), "Should contain _stream object");
             assert_eq!(arr[0]["_stream"]["origin"], "file:///test.txt");
-            assert_eq!(arr[0]["_stream"]["consumed"], true, "consumed flag should be true");
+            assert_eq!(arr[0]["_stream"]["placeholder"], true, "placeholder flag should be true");
         }
     }
 
@@ -628,7 +628,7 @@ mod tests {
             assert!(arr[0].is_object(), "First element should be an object");
             assert!(arr[0]["_stream"].is_object(), "Should contain _stream object");
             assert_eq!(arr[0]["_stream"]["origin"], serde_json::Value::Null, "origin should be null when None");
-            assert_eq!(arr[0]["_stream"]["consumed"], true, "consumed flag should be true");
+            assert_eq!(arr[0]["_stream"]["placeholder"], true, "placeholder flag should be true");
         }
     }
 }

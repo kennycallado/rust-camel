@@ -191,9 +191,13 @@ fn aggregate(
                     Body::Json(v) => v.clone(),
                     Body::Bytes(b) => Value::String(String::from_utf8_lossy(b).into_owned()),
                     Body::Empty => Value::Null,
-                    Body::Stream(s) => {
-                        Value::String(format!("[Stream: origin={:?}]", s.metadata.origin))
-                    }
+                    Body::Stream(s) => serde_json::json!({
+                        "_stream": {
+                            "origin": s.metadata.origin,
+                            "placeholder": true,
+                            "hint": "Materialize exchange body with .into_bytes() before multicast aggregation"
+                        }
+                    }),
                 };
                 bodies.push(value);
             }
@@ -777,5 +781,88 @@ mod tests {
             "max concurrency was {}, expected <= 2",
             observed_max
         );
+    }
+
+    // ── 17. Stream body creates valid JSON placeholder ────────────────────
+
+    async fn setup_multicast_stream_test(origin: Option<String>) -> Exchange {
+        use camel_api::{Body, StreamBody, StreamMetadata};
+        use futures::stream;
+        use bytes::Bytes;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let chunks = vec![Ok(Bytes::from("test"))];
+        let stream_body = StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream::iter(chunks))))),
+            metadata: StreamMetadata {
+                origin,
+                ..Default::default()
+            },
+        };
+
+        let stream_body_clone = stream_body.clone();
+        let endpoints = vec![BoxProcessor::from_fn(move |ex: Exchange| {
+            let body_clone = stream_body_clone.clone();
+            Box::pin(async move {
+                let mut out = ex;
+                out.input.body = Body::Stream(body_clone);
+                Ok(out)
+            })
+        })];
+
+        let config = MulticastConfig::new().aggregation(MulticastStrategy::CollectAll);
+        let mut svc = MulticastService::new(endpoints, config);
+
+        svc.ready()
+            .await
+            .unwrap()
+            .call(Exchange::new(Message::new("")))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_multicast_stream_bodies_creates_valid_json() {
+        use camel_api::Body;
+
+        let result = setup_multicast_stream_test(Some("http://example.com/data".to_string())).await;
+
+        let Body::Json(value) = &result.input.body else {
+            panic!("Expected Json body, got {:?}", result.input.body);
+        };
+
+        let json_str = serde_json::to_string(&value).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(parsed.is_array());
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert!(arr[0]["_stream"].is_object());
+        assert_eq!(arr[0]["_stream"]["origin"], "http://example.com/data");
+        assert_eq!(arr[0]["_stream"]["placeholder"], true);
+    }
+
+    // ── 18. Stream body with None origin creates valid JSON ──────────────
+
+    #[tokio::test]
+    async fn test_multicast_stream_with_none_origin_creates_valid_json() {
+        use camel_api::Body;
+
+        let result = setup_multicast_stream_test(None).await;
+
+        let Body::Json(value) = &result.input.body else {
+            panic!("Expected Json body, got {:?}", result.input.body);
+        };
+
+        let json_str = serde_json::to_string(&value).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(parsed.is_array());
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert!(arr[0]["_stream"].is_object());
+        assert_eq!(arr[0]["_stream"]["origin"], serde_json::Value::Null);
+        assert_eq!(arr[0]["_stream"]["placeholder"], true);
     }
 }

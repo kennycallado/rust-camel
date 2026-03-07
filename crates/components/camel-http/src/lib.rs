@@ -17,6 +17,62 @@ use camel_endpoint::parse_uri;
 // HttpConfig
 // ---------------------------------------------------------------------------
 
+/// Configuration for an HTTP client (producer) endpoint.
+///
+/// # Memory Limits
+///
+/// HTTP operations enforce conservative memory limits to prevent denial-of-service
+/// attacks from untrusted network sources. These limits are significantly lower than
+/// file component limits (100MB) because HTTP typically handles API responses rather
+/// than large file transfers, and clients may be untrusted.
+///
+/// ## Default Limits
+///
+/// - **HTTP client body**: 10MB (typical API responses)
+/// - **HTTP server request**: 2MB (untrusted network input - see `HttpServerConfig`)
+/// - **HTTP server response**: 10MB (same as client - see `HttpServerConfig`)
+///
+/// ## Rationale
+///
+/// The 10MB limit for HTTP client responses is appropriate for most API interactions
+/// while providing protection against:
+/// - Malicious servers sending oversized responses
+/// - Runaway processes generating unexpectedly large payloads
+/// - Memory exhaustion attacks
+///
+/// The 2MB server request limit is even more conservative because it handles input
+/// from potentially untrusted clients on the public internet.
+///
+/// ## Overriding Limits
+///
+/// Override the default client body limit using the `maxBodySize` URI parameter:
+///
+/// ```text
+/// http://api.example.com/large-data?maxBodySize=52428800
+/// ```
+///
+/// For server endpoints, use `maxRequestBody` and `maxResponseBody` parameters:
+///
+/// ```text
+/// http://0.0.0.0:8080/upload?maxRequestBody=52428800
+/// ```
+///
+/// ## Behavior When Exceeded
+///
+/// When a body exceeds the configured limit:
+/// - An error is returned immediately
+/// - No memory is exhausted - the limit is checked before allocation
+/// - The HTTP connection is terminated cleanly
+///
+/// ## Security Considerations
+///
+/// HTTP endpoints should be treated with more caution than file endpoints because:
+/// - Clients may be unknown and untrusted
+/// - Network traffic can be spoofed or malicious
+/// - DoS attacks often exploit unbounded resource consumption
+///
+/// Only increase limits when you control both ends of the connection or when
+/// business requirements demand larger payloads.
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
     pub base_url: String,
