@@ -174,10 +174,13 @@ fn aggregate(
                         serde_json::Value::String(String::from_utf8_lossy(&b).into_owned())
                     }
                     Body::Empty => serde_json::Value::Null,
-                    Body::Stream(s) => serde_json::Value::String(format!(
-                        "[Stream: origin={:?}]",
-                        s.metadata.origin
-                    )),
+                    Body::Stream(s) => serde_json::json!({
+                        "_stream": {
+                            "origin": s.metadata.origin,
+                            "consumed": true,
+                            "hint": "Materialize with .into_bytes() before aggregation if content needed"
+                        }
+                    }),
                 })
                 .collect();
             Ok(Exchange::new(Message {
@@ -547,5 +550,49 @@ mod tests {
         let ex3 = make_exchange("orderId", "key-A", "body3");
         let result = svc.ready().await.unwrap().call(ex3).await;
         assert!(result.is_ok(), "Should be able to recreate evicted bucket");
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_stream_bodies_creates_valid_json() {
+        use camel_api::{Body, StreamBody, StreamMetadata};
+        use futures::stream;
+        use bytes::Bytes;
+        use tokio::sync::Mutex;
+
+        let chunks = vec![Ok(Bytes::from("test"))];
+        let stream_body = StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream::iter(chunks))))),
+            metadata: StreamMetadata {
+                origin: Some("file:///test.txt".to_string()),
+                ..Default::default()
+            },
+        };
+
+        let ex1 = Exchange::new(Message {
+            headers: Default::default(),
+            body: Body::Stream(stream_body),
+        });
+
+        let exchanges = vec![ex1];
+        let result = aggregate(exchanges, &AggregationStrategy::CollectAll);
+        
+        if let Ok(Exchange { input, .. }) = result {
+            if let Body::Json(value) = input.body {
+                // Should be valid JSON that can be parsed
+                let json_str = serde_json::to_string(&value).unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+                
+                // Should contain _stream object
+                assert!(parsed.is_array());
+                let arr = parsed.as_array().unwrap();
+                assert!(arr[0].is_object());
+                assert!(arr[0]["_stream"].is_object());
+                assert_eq!(arr[0]["_stream"]["origin"], "file:///test.txt");
+            } else {
+                panic!("Expected Json body");
+            }
+        } else {
+            panic!("Expected Ok result");
+        }
     }
 }
