@@ -6,7 +6,10 @@ use camel_core::CamelContext;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     // Load configuration from Camel.toml
     let config =

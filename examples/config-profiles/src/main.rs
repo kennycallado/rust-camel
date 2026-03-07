@@ -7,7 +7,10 @@ use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     // Get profile from environment or use default
     let profile = env::var("CAMEL_PROFILE").unwrap_or_else(|_| "development".to_string());

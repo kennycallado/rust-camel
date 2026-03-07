@@ -10,4 +10,5 @@ camel-component-timer = { path = "../../crates/components/camel-timer" }
 camel-component-log = { path = "../../crates/components/camel-log" }
 camel-api = { path = "../../crates/camel-api" }
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
 tracing-subscriber = "0.3"

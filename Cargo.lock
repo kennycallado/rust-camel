@@ -818,6 +818,7 @@ dependencies = [
  "camel-config",
  "camel-core",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -831,6 +832,7 @@ dependencies = [
  "camel-config",
  "camel-core",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
