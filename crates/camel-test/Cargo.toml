@@ -28,5 +28,7 @@ tempfile = "3"
 wiremock = "0.6"
 reqwest = { workspace = true }
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["redis"] }
+testcontainers-modules = { version = "0.11", features = ["redis", "kafka"] }
 camel-component-redis = { path = "../components/camel-redis" }
+camel-component-kafka = { path = "../components/camel-kafka" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

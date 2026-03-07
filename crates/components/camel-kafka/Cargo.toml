@@ -1,0 +1,25 @@
+[package]
+name = "camel-component-kafka"
+description = "Kafka component for rust-camel integration framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/camel-component-kafka"
+readme.workspace = true
+keywords = ["camel", "kafka", "integration", "messaging", "streaming"]
+categories = ["network-programming", "asynchronous", "development-tools"]
+
+[dependencies]
+camel-api       = { workspace = true }
+camel-component = { workspace = true }
+camel-endpoint  = { workspace = true }
+rdkafka         = { version = "0.36", features = ["tokio"] }
+tokio           = { workspace = true }
+async-trait     = { workspace = true }
+tower           = { workspace = true }
+serde_json      = { workspace = true }
+tracing         = { workspace = true }
+tokio-util      = { workspace = true }
+bytes           = { workspace = true }
+futures         = { workspace = true }
