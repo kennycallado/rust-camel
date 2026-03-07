@@ -18,7 +18,7 @@ pub mod value;
 
 // Re-export core types at crate root for convenience.
 pub use aggregator::{AggregationFn, AggregatorConfig, CompletionCondition};
-pub use body::Body;
+pub use body::{Body, StreamBody};
 pub use circuit_breaker::CircuitBreakerConfig;
 pub use declarative::{LanguageExpressionDef, ValueSourceDef};
 pub use error::CamelError;
