@@ -1,6 +1,7 @@
 pub mod aggregator;
 pub mod choice;
 pub mod circuit_breaker;
+pub mod convert_body;
 pub mod dynamic_set_header;
 pub mod error_handler;
 pub mod filter;
@@ -16,6 +17,7 @@ pub mod wire_tap;
 pub use aggregator::AggregatorService;
 pub use choice::{ChoiceService, WhenClause};
 pub use circuit_breaker::{CircuitBreakerLayer, CircuitBreakerService};
+pub use convert_body::ConvertBodyTo;
 pub use dynamic_set_header::{DynamicSetHeader, DynamicSetHeaderLayer};
 pub use error_handler::{ErrorHandlerLayer, ErrorHandlerService};
 pub use filter::FilterService;
