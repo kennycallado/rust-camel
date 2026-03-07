@@ -525,12 +525,14 @@ async fn test_suspend_drains_inflight_messages() {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(mock.clone());
 
-    let route = RouteBuilder::from(&format!("timer:drain-test?period={TIMER_PERIOD_MS}&repeatCount=5"))
-        .route_id("drain-route")
-        .auto_startup(true)
-        .to("mock:drain-result")
-        .build()
-        .unwrap();
+    let route = RouteBuilder::from(&format!(
+        "timer:drain-test?period={TIMER_PERIOD_MS}&repeatCount=5"
+    ))
+    .route_id("drain-route")
+    .auto_startup(true)
+    .to("mock:drain-result")
+    .build()
+    .unwrap();
 
     ctx.add_route_definition(route).unwrap();
     ctx.start().await.unwrap();

@@ -167,7 +167,7 @@ impl CamelConfig {
     pub fn from_file_with_profile(path: &str, profile: Option<&str>) -> Result<Self, ConfigError> {
         // Get profile from parameter or environment variable
         let env_profile = env::var("CAMEL_PROFILE").ok();
-        let profile = profile.or_else(|| env_profile.as_deref());
+        let profile = profile.or(env_profile.as_deref());
 
         // Read the TOML file as a generic value for deep merging
         let content = std::fs::read_to_string(path)
@@ -223,7 +223,7 @@ impl CamelConfig {
     ) -> Result<Self, ConfigError> {
         // Get profile from parameter or environment variable
         let env_profile = env::var("CAMEL_PROFILE").ok();
-        let profile = profile.or_else(|| env_profile.as_deref());
+        let profile = profile.or(env_profile.as_deref());
 
         // Read the TOML file as a generic value for deep merging
         let content = std::fs::read_to_string(path)

@@ -73,31 +73,30 @@ impl CamelConfig {
         }
 
         // Critical 4: Add file output support when configured
-        if config.enabled {
-            if let Some(ref file_config) = config.outputs.file
-                && file_config.enabled
-            {
-                let file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&file_config.path)
-                    .map_err(|e| {
-                        CamelError::Config(format!(
-                            "Failed to open trace file '{}': {}",
-                            file_config.path, e
-                        ))
-                    })?;
-                let layer = tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_span_events(FmtSpan::CLOSE)
-                    .with_writer(std::sync::Mutex::new(file))
-                    .with_target(true)
-                    .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
-                        meta.target() == "camel_tracer"
-                    }))
-                    .boxed();
-                layers.push(layer);
-            }
+        if config.enabled
+            && let Some(ref file_config) = config.outputs.file
+            && file_config.enabled
+        {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&file_config.path)
+                .map_err(|e| {
+                    CamelError::Config(format!(
+                        "Failed to open trace file '{}': {}",
+                        file_config.path, e
+                    ))
+                })?;
+            let layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_span_events(FmtSpan::CLOSE)
+                .with_writer(std::sync::Mutex::new(file))
+                .with_target(true)
+                .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+                    meta.target() == "camel_tracer"
+                }))
+                .boxed();
+            layers.push(layer);
         }
 
         // Critical 5: Initialize subscriber with proper error handling

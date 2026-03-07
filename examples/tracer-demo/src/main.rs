@@ -26,7 +26,9 @@ use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
-use camel_core::{CamelContext, DetailLevel, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs};
+use camel_core::{
+    CamelContext, DetailLevel, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
+};
 use tracing_subscriber::Layer;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
@@ -68,7 +70,9 @@ fn tracer_config(detail_level: DetailLevel) -> TracerConfig {
 
 async fn run_section_1() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Section 1: Minimal ===");
-    println!("Fields: correlation_id, route_id, step_id, step_index, timestamp, duration_ms, status");
+    println!(
+        "Fields: correlation_id, route_id, step_id, step_index, timestamp, duration_ms, status"
+    );
     println!("Route: timer → log  (3 exchanges)\n");
 
     let mut ctx = CamelContext::new();

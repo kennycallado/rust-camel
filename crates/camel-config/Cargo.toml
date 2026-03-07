@@ -13,7 +13,6 @@ categories.workspace = true
 [dependencies]
 camel-api.workspace = true
 camel-core.workspace = true
-camel-dsl.workspace = true
 camel-processor.workspace = true
 config = { workspace = true }
 glob = { workspace = true }

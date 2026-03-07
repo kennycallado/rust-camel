@@ -877,10 +877,9 @@ impl RouteController for DefaultRouteController {
         }
 
         // Get the stored channel sender (must exist for a suspended route)
-        let sender = managed
-            .channel_sender
-            .clone()
-            .ok_or_else(|| CamelError::RouteError("Suspended route has no channel sender".into()))?;
+        let sender = managed.channel_sender.clone().ok_or_else(|| {
+            CamelError::RouteError("Suspended route has no channel sender".into())
+        })?;
 
         // Get from_uri and concurrency for creating new consumer
         let from_uri = managed.from_uri.clone();
@@ -1332,12 +1331,9 @@ mod tests {
 
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        registry
-            .lock()
-            .unwrap()
-            .register(TrackingComponent {
-                cancelled: Arc::clone(&cancelled),
-            });
+        registry.lock().unwrap().register(TrackingComponent {
+            cancelled: Arc::clone(&cancelled),
+        });
         let mut controller = DefaultRouteController::new(Arc::clone(&registry));
         let self_ref: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
             DefaultRouteController::new(Arc::clone(&registry)),
@@ -1460,8 +1456,8 @@ mod tests {
         ));
         controller.set_self_ref(self_ref);
 
-        let def =
-            crate::route::RouteDefinition::new("suspend:test", vec![]).with_route_id("suspend-route");
+        let def = crate::route::RouteDefinition::new("suspend:test", vec![])
+            .with_route_id("suspend-route");
         controller.add_route(def).unwrap();
 
         // Start the route
@@ -1783,14 +1779,20 @@ mod tests {
         controller.add_route(def).unwrap();
 
         // Start the route
-        controller.start_route("stop-from-suspended-route").await.unwrap();
+        controller
+            .start_route("stop-from-suspended-route")
+            .await
+            .unwrap();
         assert_eq!(
             controller.route_status("stop-from-suspended-route"),
             Some(RouteStatus::Started)
         );
 
         // Suspend the route (consumer cancelled, pipeline still running)
-        controller.suspend_route("stop-from-suspended-route").await.unwrap();
+        controller
+            .suspend_route("stop-from-suspended-route")
+            .await
+            .unwrap();
         assert_eq!(
             controller.route_status("stop-from-suspended-route"),
             Some(RouteStatus::Suspended)
@@ -1808,7 +1810,10 @@ mod tests {
 
         // STOP from Suspended state - this is the critical regression test
         // Must cancel BOTH consumer token (even though consumer isn't running) AND pipeline token
-        controller.stop_route("stop-from-suspended-route").await.unwrap();
+        controller
+            .stop_route("stop-from-suspended-route")
+            .await
+            .unwrap();
 
         // Verify final state is Stopped
         assert_eq!(
@@ -1821,13 +1826,19 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // The route can be started again, proving clean shutdown
-        controller.start_route("stop-from-suspended-route").await.unwrap();
+        controller
+            .start_route("stop-from-suspended-route")
+            .await
+            .unwrap();
         assert_eq!(
             controller.route_status("stop-from-suspended-route"),
             Some(RouteStatus::Started)
         );
 
-        controller.stop_route("stop-from-suspended-route").await.unwrap();
+        controller
+            .stop_route("stop-from-suspended-route")
+            .await
+            .unwrap();
     }
 
     /// Test full suspend/resume cycle with stop.
@@ -1890,32 +1901,50 @@ mod tests {
 
         // Full cycle: start -> suspend -> resume -> suspend -> stop
         controller.start_route("cycle-route").await.unwrap();
-        assert_eq!(controller.route_status("cycle-route"), Some(RouteStatus::Started));
+        assert_eq!(
+            controller.route_status("cycle-route"),
+            Some(RouteStatus::Started)
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         controller.suspend_route("cycle-route").await.unwrap();
-        assert_eq!(controller.route_status("cycle-route"), Some(RouteStatus::Suspended));
+        assert_eq!(
+            controller.route_status("cycle-route"),
+            Some(RouteStatus::Suspended)
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         controller.resume_route("cycle-route").await.unwrap();
-        assert_eq!(controller.route_status("cycle-route"), Some(RouteStatus::Started));
+        assert_eq!(
+            controller.route_status("cycle-route"),
+            Some(RouteStatus::Started)
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         controller.suspend_route("cycle-route").await.unwrap();
-        assert_eq!(controller.route_status("cycle-route"), Some(RouteStatus::Suspended));
+        assert_eq!(
+            controller.route_status("cycle-route"),
+            Some(RouteStatus::Suspended)
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Stop from suspended state
         controller.stop_route("cycle-route").await.unwrap();
-        assert_eq!(controller.route_status("cycle-route"), Some(RouteStatus::Stopped));
+        assert_eq!(
+            controller.route_status("cycle-route"),
+            Some(RouteStatus::Stopped)
+        );
 
         // Can start again after stop
         controller.start_route("cycle-route").await.unwrap();
-        assert_eq!(controller.route_status("cycle-route"), Some(RouteStatus::Started));
+        assert_eq!(
+            controller.route_status("cycle-route"),
+            Some(RouteStatus::Started)
+        );
 
         controller.stop_route("cycle-route").await.unwrap();
     }
