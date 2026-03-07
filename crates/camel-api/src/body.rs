@@ -5,6 +5,8 @@ use futures::stream::BoxStream;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+const DEFAULT_MATERIALIZE_LIMIT: usize = 10 * 1024 * 1024;
+
 /// Metadata associated with a stream body.
 #[derive(Debug, Clone, Default)]
 pub struct StreamMetadata {
@@ -137,7 +139,7 @@ impl Body {
     /// let bytes = body.materialize().await?;
     /// ```
     pub async fn materialize(self) -> Result<Bytes, CamelError> {
-        self.into_bytes(10 * 1024 * 1024).await
+        self.into_bytes(DEFAULT_MATERIALIZE_LIMIT).await
     }
 
     /// Try to get the body as a string, converting from bytes if needed.
@@ -265,7 +267,7 @@ mod tests {
     async fn test_materialize_with_default_limit() {
         use futures::stream;
         
-        // 5MB stream - should succeed with default 10MB limit
+        // Small stream under limit - should succeed with default 10MB limit
         let chunks = vec![Ok(Bytes::from("test data"))];
         let stream = stream::iter(chunks);
         let body = Body::Stream(StreamBody {
@@ -276,6 +278,31 @@ mod tests {
         let result = body.materialize().await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Bytes::from("test data"));
+    }
+
+    #[tokio::test]
+    async fn test_materialize_non_stream_body_types() {
+        // Verify materialize() works with all body types, not just streams
+        
+        // Body::Empty
+        let body = Body::Empty;
+        let result = body.materialize().await.unwrap();
+        assert!(result.is_empty());
+
+        // Body::Bytes
+        let body = Body::Bytes(Bytes::from("bytes data"));
+        let result = body.materialize().await.unwrap();
+        assert_eq!(result, Bytes::from("bytes data"));
+
+        // Body::Text
+        let body = Body::Text("text data".to_string());
+        let result = body.materialize().await.unwrap();
+        assert_eq!(result, Bytes::from("text data"));
+
+        // Body::Json
+        let body = Body::Json(serde_json::json!({"key": "value"}));
+        let result = body.materialize().await.unwrap();
+        assert_eq!(result, Bytes::from_static(br#"{"key":"value"}"#));
     }
 
     #[tokio::test]
