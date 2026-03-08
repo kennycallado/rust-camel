@@ -1,5 +1,6 @@
 [package]
 name = "camel-container"
+description = "Container utilities for rust-camel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
