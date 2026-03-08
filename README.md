@@ -70,6 +70,7 @@ cargo run -p hello-world
 | `camel-language-simple` | Simple Language: `${header.x}`, `${body}`, operators |
 | `camel-language-rhai` | Rhai scripting language for full expression power |
 | `camel-bean` | Bean/Registry system for dependency injection and business logic integration |
+| `camel-prometheus` | Prometheus metrics exporter with /metrics endpoint |
 
 ## Building & Testing
 
@@ -156,6 +157,30 @@ Every exchange has a unique `correlation_id` for distributed tracing.
 ### Metrics
 
 Implement `MetricsCollector` trait to integrate with Prometheus, OpenTelemetry, etc.
+
+### Prometheus Metrics
+
+Export metrics to Prometheus:
+
+```rust
+use camel_prometheus::{PrometheusMetrics, MetricsServer};
+use std::sync::Arc;
+use std::net::SocketAddr;
+
+let prometheus = Arc::new(PrometheusMetrics::new());
+let ctx = CamelContext::with_metrics(Arc::clone(&prometheus) as Arc<dyn MetricsCollector>);
+
+// Start metrics server on port 9090
+let addr: SocketAddr = "0.0.0.0:9090".parse().unwrap();
+MetricsServer::run(addr, prometheus).await;
+```
+
+Available metrics:
+- `camel_exchanges_total{route}` - Total exchanges processed
+- `camel_errors_total{route, error_type}` - Total errors
+- `camel_exchange_duration_seconds{route}` - Exchange processing duration (histogram)
+- `camel_queue_depth{route}` - Current queue depth
+- `camel_circuit_breaker_state{route}` - Circuit breaker state
 
 ## Route Lifecycle Management
 
