@@ -9,7 +9,7 @@ license.workspace = true
 camel-api.workspace = true
 camel-core.workspace = true
 camel-builder.workspace = true
-camel-otel = { path = "../../crates/components/camel-otel" }
+camel-otel = { workspace = true }
 camel-component-http = { workspace = true, features = ["otel"] }
 camel-component-log.workspace = true
 camel-component-timer.workspace = true
