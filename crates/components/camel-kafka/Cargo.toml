@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/camel-component-kafka"
-readme.workspace = true
+readme = "README.md"
 keywords = ["camel", "kafka", "integration", "messaging", "streaming"]
 categories = ["network-programming", "asynchronous", "development-tools"]
 

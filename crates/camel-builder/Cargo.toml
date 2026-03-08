@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/camel-builder"
-readme.workspace = true
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 

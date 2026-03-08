@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/camel-component-redis"
-readme.workspace = true
+readme = "README.md"
 keywords = ["camel", "redis", "integration", "messaging", "cache"]
 categories = ["database", "asynchronous", "network-programming"]
 

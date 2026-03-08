@@ -7,7 +7,7 @@ description = "Command-line interface for Apache Camel in Rust"
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/camel-cli"
-readme.workspace = true
+readme = "README.md"
 keywords = ["camel", "cli", "integration", "messaging"]
 categories = ["command-line-utilities", "development-tools"]
 
