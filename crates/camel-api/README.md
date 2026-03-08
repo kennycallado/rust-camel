@@ -19,6 +19,67 @@ If you're building custom components or processors for rust-camel, you'll need t
 - **Metrics**: Metrics collection interfaces
 - **Route control**: Route controller traits for lifecycle management
 - **Streaming**: Lazy Body::Stream variant with materialize() helper and configurable memory limits
+- **Health monitoring**: Service health status tracking and Kubernetes-ready endpoints
+
+## Health Monitoring
+
+The health monitoring system provides Kubernetes-ready endpoints for monitoring service status.
+
+### Core Types
+
+| Type | Description |
+|------|-------------|
+| `HealthReport` | System-wide health report with status, services list, and timestamp |
+| `ServiceHealth` | Health status of an individual service (name + status) |
+| `HealthStatus` | Aggregated system health: `Healthy` or `Unhealthy` |
+| `ServiceStatus` | Individual service status: `Stopped`, `Started`, or `Failed` |
+
+### Usage Example
+
+```rust
+use camel_api::{HealthReport, HealthStatus, ServiceHealth, ServiceStatus, Lifecycle};
+use chrono::Utc;
+
+// Create a health report
+let report = HealthReport {
+    status: HealthStatus::Healthy,
+    services: vec![
+        ServiceHealth {
+            name: "prometheus".to_string(),
+            status: ServiceStatus::Started,
+        },
+    ],
+    timestamp: Utc::now(),
+};
+
+// Check service status via Lifecycle trait
+// (status() has a default implementation returning Stopped)
+let service = MyService::new();
+match service.status() {
+    ServiceStatus::Started => println!("Service is running"),
+    ServiceStatus::Stopped => println!("Service is stopped"),
+    ServiceStatus::Failed => println!("Service failed"),
+}
+```
+
+### Integration with CamelContext
+
+Health monitoring integrates with `CamelContext` (in `camel-core`) to aggregate service status:
+
+```rust
+// In camel-core
+let ctx = CamelContext::new();
+let report = ctx.health_check(); // Returns HealthReport
+```
+
+### Kubernetes Endpoints
+
+The `camel-prometheus` crate exposes these endpoints:
+- `/healthz` - Liveness probe (always 200 OK)
+- `/readyz` - Readiness probe (200 if healthy, 503 if unhealthy)
+- `/health` - Detailed health report (JSON)
+
+See `camel-prometheus` documentation for Kubernetes integration examples.
 
 ## Installation
 
@@ -67,6 +128,9 @@ let bytes = body.into_bytes(100 * 1024 * 1024).await?; // Custom limit
 | `Body` | Message body (Empty, Text, Json, Bytes, Stream) |
 | `Processor` | Trait for processing exchanges |
 | `CamelError` | Comprehensive error type |
+| `HealthReport` | System-wide health report |
+| `ServiceStatus` | Service lifecycle status enum |
+| `HealthStatus` | Aggregated health status enum |
 
 ## Documentation
 

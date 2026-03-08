@@ -182,6 +182,21 @@ Available metrics:
 
 **Architecture:** `PrometheusService` implements `Lifecycle` trait (following Apache Camel's Service pattern, adapted to avoid tower::Service confusion).
 
+### Health Monitoring
+
+Built-in health endpoints for Kubernetes:
+
+- `/healthz` - Liveness probe
+- `/readyz` - Readiness probe  
+- `/health` - Detailed health report
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 9090
+```
+
 ## Route Lifecycle Management
 
 rust-camel supports controlling when and how routes start:

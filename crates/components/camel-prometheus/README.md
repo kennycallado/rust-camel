@@ -83,3 +83,45 @@ PrometheusService (Lifecycle trait)
 ```
 
 **Note:** Uses `Lifecycle` trait (not `Service`) to avoid confusion with `tower::Service`.
+
+## Health Endpoints
+
+The PrometheusService exposes three health endpoints:
+
+| Endpoint | Purpose | HTTP Status |
+|----------|---------|-------------|
+| `/healthz` | Liveness probe | 200 (always) |
+| `/readyz` | Readiness probe | 200 if healthy, 503 if unhealthy |
+| `/health` | Detailed health | 200 (always) |
+
+### Kubernetes Integration
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 9090
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 9090
+  initialDelaySeconds: 5
+  periodSeconds: 5
+```
+
+### Health Report Format
+
+```json
+{
+  "status": "Healthy",
+  "services": [
+    {
+      "name": "prometheus",
+      "status": "Started"
+    }
+  ]
+}
+```

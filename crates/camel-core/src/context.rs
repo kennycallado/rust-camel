@@ -6,8 +6,8 @@ use tracing::{info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    CamelError, Lifecycle, MetricsCollector, NoOpMetrics, RouteController, RouteStatus,
-    SupervisionConfig,
+    CamelError, HealthReport, HealthStatus, Lifecycle, MetricsCollector, NoOpMetrics,
+    RouteController, RouteStatus, ServiceHealth, ServiceStatus, SupervisionConfig,
 };
 use camel_component::Component;
 use camel_language_api::Language;
@@ -347,6 +347,30 @@ impl CamelContext {
         self.cancel_token.cancel();
         let _ = self.route_controller.lock().await.stop_all_routes().await;
     }
+
+    /// Check health status of all registered services.
+    pub fn health_check(&self) -> HealthReport {
+        let services: Vec<ServiceHealth> = self
+            .services
+            .iter()
+            .map(|s| ServiceHealth {
+                name: s.name().to_string(),
+                status: s.status(),
+            })
+            .collect();
+
+        let status = if services.iter().all(|s| s.status == ServiceStatus::Started) {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Unhealthy
+        };
+
+        HealthReport {
+            status,
+            services,
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for CamelContext {
@@ -564,6 +588,15 @@ mod tests {
             error_text.contains("missing-lang"),
             "error should mention missing language, got: {error_text}"
         );
+    }
+
+    #[test]
+    fn test_health_check_empty_context() {
+        let ctx = CamelContext::new();
+        let report = ctx.health_check();
+
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert!(report.services.is_empty());
     }
 }
 

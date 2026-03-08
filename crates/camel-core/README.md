@@ -18,6 +18,7 @@ This is the main crate you'll use when building a rust-camel application. It bri
 - **Hot-reload**: Live route updates with ArcSwap (no downtime)
 - **Supervision**: Auto-recovery with configurable exponential backoff
 - **Tracer Integration**: Automatic message flow tracing support
+- **Health Monitoring**: Service health checks via `health_check()` method
 - **Bean Integration**: BeanRegistry support for YAML DSL bean step resolution
 
 ## Installation
@@ -85,6 +86,45 @@ ctx.stop_route("my-route").await?;
 // Check route status
 let status = ctx.route_status("my-route");
 ```
+
+## Health Monitoring
+
+CamelContext provides a `health_check()` method to monitor the status of all registered services.
+
+### Usage
+
+```rust
+use camel_core::context::CamelContext;
+use camel_api::{HealthStatus, ServiceStatus};
+
+let ctx = CamelContext::new();
+
+// Add services (they implement the Lifecycle trait)
+// ctx.with_lifecycle(prometheus_service);
+
+// Check health of all services
+let report = ctx.health_check();
+
+match report.status {
+    HealthStatus::Healthy => println!("All services are healthy"),
+    HealthStatus::Unhealthy => {
+        for service in &report.services {
+            if service.status != ServiceStatus::Started {
+                println!("Service {} is {:?}", service.name, service.status);
+            }
+        }
+    }
+}
+```
+
+### Integration with Prometheus
+
+When using `camel-prometheus`, the health check is automatically exposed via HTTP endpoints:
+- `/healthz` - Kubernetes liveness probe
+- `/readyz` - Kubernetes readiness probe (returns 503 if unhealthy)
+- `/health` - Detailed JSON health report
+
+See the `camel-prometheus` crate for Kubernetes integration examples.
 
 ## Core Types
 

@@ -7,6 +7,7 @@ pub mod error;
 pub mod error_handler;
 pub mod exchange;
 pub mod filter;
+pub mod health;
 pub mod lifecycle;
 pub mod message;
 pub mod metrics;
@@ -30,7 +31,8 @@ pub use error_handler::{
 };
 pub use exchange::{Exchange, ExchangePattern};
 pub use filter::FilterPredicate;
-pub use lifecycle::Lifecycle;
+pub use health::{HealthReport, ServiceHealth};
+pub use lifecycle::{HealthStatus, Lifecycle, ServiceStatus};
 pub use message::Message;
 pub use metrics::{MetricsCollector, NoOpMetrics};
 pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};

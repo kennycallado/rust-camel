@@ -1,6 +1,22 @@
 use crate::{CamelError, MetricsCollector};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// Status of a Lifecycle service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServiceStatus {
+    Stopped,
+    Started,
+    Failed,
+}
+
+/// Aggregated system health status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HealthStatus {
+    Healthy,
+    Unhealthy,
+}
 
 /// Lifecycle trait for background services.
 ///
@@ -32,6 +48,11 @@ pub trait Lifecycle: Send + Sync {
     fn as_metrics_collector(&self) -> Option<Arc<dyn MetricsCollector>> {
         None
     }
+
+    /// Current status of the service.
+    fn status(&self) -> ServiceStatus {
+        ServiceStatus::Stopped
+    }
 }
 
 #[cfg(test)]
@@ -61,5 +82,11 @@ mod tests {
         assert_eq!(service.name(), "test");
         service.start().await.unwrap();
         service.stop().await.unwrap();
+    }
+
+    #[test]
+    fn test_default_status_is_stopped() {
+        let service = TestService;
+        assert_eq!(service.status(), ServiceStatus::Stopped);
     }
 }

@@ -22,3 +22,4 @@ camel-builder.workspace = true
 camel-component-timer.workspace = true
 serde_json.workspace = true
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tower = { workspace = true, features = ["util"] }

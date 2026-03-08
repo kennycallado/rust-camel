@@ -61,6 +61,7 @@ members = [
     "examples/convert-body-to",
     "examples/bean-demo",
     "examples/prometheus-demo",
+    "examples/health-demo",
     "crates/components/camel-container",
     "crates/components/camel-prometheus",
 ]

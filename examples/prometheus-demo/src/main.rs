@@ -46,7 +46,20 @@ async fn main() -> Result<(), CamelError> {
 
     info!("Routes configured. Prometheus server will start automatically on http://0.0.0.0:9090");
     info!("Metrics available at http://0.0.0.0:9090/metrics");
+    info!("Health endpoints:");
+    info!("  - Liveness:  http://0.0.0.0:9090/healthz (always 200 OK)");
+    info!("  - Readiness: http://0.0.0.0:9090/readyz (200 if healthy, 503 if not)");
+    info!("  - Health:    http://0.0.0.0:9090/health  (detailed JSON report)");
 
+    // The Prometheus service automatically tracks its status (Stopped/Started/Failed)
+    // via the Lifecycle.status() method. The health endpoints expose this status.
+    //
+    // To inject a custom health checker (for aggregating multiple services):
+    // let prometheus.set_health_checker(Arc::new(|| {
+    //     ctx.health_check()  // This would capture ctx reference
+    // }));
+    //
+    // For now, the default health checker returns Healthy with empty services list.
     ctx.start().await?;
 
     info!("Routes started. Press Ctrl+C to stop.");
