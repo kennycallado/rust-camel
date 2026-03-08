@@ -409,11 +409,15 @@ name = "camel-cli"
 version = "0.3.5"
 dependencies = [
  "camel-api",
+ "camel-component-container",
+ "camel-component-controlbus",
  "camel-component-direct",
  "camel-component-file",
  "camel-component-http",
+ "camel-component-kafka",
  "camel-component-log",
  "camel-component-mock",
+ "camel-component-redis",
  "camel-component-timer",
  "camel-config",
  "camel-core",

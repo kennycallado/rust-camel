@@ -32,3 +32,7 @@ camel-component-direct.workspace = true
 camel-component-file.workspace = true
 camel-component-http.workspace = true
 camel-component-mock.workspace = true
+camel-component-controlbus.workspace = true
+camel-component-container.workspace = true
+camel-component-redis.workspace = true
+camel-component-kafka.workspace = true
