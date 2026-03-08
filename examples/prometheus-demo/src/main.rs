@@ -17,7 +17,7 @@ async fn main() -> Result<(), CamelError> {
     info!("Starting Prometheus metrics demo with Lifecycle integration");
 
     let prometheus = PrometheusService::new(9090);
-    
+
     let mut ctx = CamelContext::new()
         .with_lifecycle(prometheus)
         .with_tracing();
@@ -31,7 +31,7 @@ async fn main() -> Result<(), CamelError> {
             let start = std::time::Instant::now();
             async move {
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                
+
                 exchange.input.body = Body::Json(serde_json::json!({
                     "message": "processed",
                     "elapsed_us": start.elapsed().as_micros(),
@@ -51,9 +51,9 @@ async fn main() -> Result<(), CamelError> {
 
     info!("Routes started. Press Ctrl+C to stop.");
     tokio::signal::ctrl_c().await.ok();
-    
+
     ctx.stop().await?;
-    
+
     info!("Shutdown complete");
     Ok(())
 }

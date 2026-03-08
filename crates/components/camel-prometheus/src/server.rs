@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -58,7 +58,10 @@ impl MetricsServer {
             .route("/metrics", get(metrics_handler_axum))
             .with_state(metrics);
 
-        info!("Prometheus metrics server listening on {:?}", listener.local_addr());
+        info!(
+            "Prometheus metrics server listening on {:?}",
+            listener.local_addr()
+        );
 
         axum::serve(listener, app)
             .await
@@ -67,9 +70,7 @@ impl MetricsServer {
 }
 
 /// Axum handler for GET /metrics requests
-async fn metrics_handler_axum(
-    State(metrics): State<Arc<PrometheusMetrics>>,
-) -> impl IntoResponse {
+async fn metrics_handler_axum(State(metrics): State<Arc<PrometheusMetrics>>) -> impl IntoResponse {
     let output = metrics.gather();
     (
         StatusCode::OK,
@@ -111,10 +112,7 @@ mod tests {
         let response = metrics_handler(metrics).await;
 
         assert_eq!(response.status, 200);
-        assert_eq!(
-            response.content_type,
-            "text/plain; version=0.0.4"
-        );
+        assert_eq!(response.content_type, "text/plain; version=0.0.4");
         assert!(response.body.contains("camel_exchanges_total"));
         assert!(response.body.contains("test-route"));
     }
@@ -126,9 +124,6 @@ mod tests {
         let response = metrics_handler(metrics).await;
 
         // Prometheus requires this specific content-type
-        assert_eq!(
-            response.content_type,
-            "text/plain; version=0.0.4"
-        );
+        assert_eq!(response.content_type, "text/plain; version=0.0.4");
     }
 }

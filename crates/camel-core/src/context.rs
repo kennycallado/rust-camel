@@ -259,28 +259,26 @@ impl CamelContext {
         info!("Starting CamelContext");
 
         // Start lifecycle services first
-        let mut started_count = 0;
-        for service in &mut self.services {
+        for (i, service) in self.services.iter_mut().enumerate() {
             info!("Starting service: {}", service.name());
             if let Err(e) = service.start().await {
                 // Rollback: stop already started services in reverse order
                 warn!(
                     "Service {} failed to start, rolling back {} services",
                     service.name(),
-                    started_count
+                    i
                 );
-                for i in (0..started_count).rev() {
-                    if let Err(rollback_err) = self.services[i].stop().await {
+                for j in (0..i).rev() {
+                    if let Err(rollback_err) = self.services[j].stop().await {
                         warn!(
                             "Failed to stop service {} during rollback: {}",
-                            self.services[i].name(),
+                            self.services[j].name(),
                             rollback_err
                         );
                     }
                 }
                 return Err(e);
             }
-            started_count += 1;
         }
 
         // Then start routes
@@ -574,8 +572,8 @@ mod lifecycle_tests {
     use super::*;
     use async_trait::async_trait;
     use camel_api::Lifecycle;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct MockService {
         start_count: Arc<AtomicUsize>,

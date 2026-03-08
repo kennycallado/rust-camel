@@ -3,7 +3,9 @@ use camel_api::{Body, CamelError, Exchange, Message};
 use camel_component::{ConcurrencyModel, Consumer, ConsumerContext};
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{Consumer as RdConsumer, ConsumerContext as RdConsumerContext, Rebalance, StreamConsumer};
+use rdkafka::consumer::{
+    Consumer as RdConsumer, ConsumerContext as RdConsumerContext, Rebalance, StreamConsumer,
+};
 // Import rdkafka::Message trait to bring .topic(), .key(), .payload(), etc. into scope.
 // The alias `_` prevents a name conflict with camel_api::Message.
 use rdkafka::message::Message as _;
