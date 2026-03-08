@@ -192,7 +192,13 @@ impl ContainerConfig {
             .params
             .get("host")
             .cloned()
-            .or_else(|| Some("unix:///var/run/docker.sock".to_string()));
+            .or_else(|| {
+                Some(if cfg!(windows) {
+                    "npipe:////./pipe/docker_engine".to_string()
+                } else {
+                    "unix:///var/run/docker.sock".to_string()
+                })
+            });
 
         Ok(Self {
             operation: parts.path,
@@ -216,15 +222,19 @@ impl ContainerConfig {
         let host = self
             .host
             .as_deref()
-            .unwrap_or("unix:///var/run/docker.sock");
+            .unwrap_or(if cfg!(windows) {
+                "npipe:////./pipe/docker_engine"
+            } else {
+                "unix:///var/run/docker.sock"
+            });
 
-        if host.starts_with("unix://") {
-            return Ok(host.trim_start_matches("unix://"));
+        if host.starts_with("unix://") || host.starts_with("npipe://") {
+            return Ok(host);
         }
 
         if host.contains("://") {
             return Err(CamelError::ProcessorError(format!(
-                "Unsupported Docker host scheme: {} (only unix:// is supported)",
+                "Unsupported Docker host scheme: {} (only unix:// and npipe:// are supported)",
                 host
             )));
         }
@@ -234,7 +244,7 @@ impl ContainerConfig {
 
     pub fn connect_docker_client(&self) -> Result<Docker, CamelError> {
         let socket_path = self.docker_socket_path()?;
-        Docker::connect_with_unix(
+        Docker::connect_with_socket(
             socket_path,
             DOCKER_CONNECT_TIMEOUT_SECS,
             bollard::API_DEFAULT_VERSION,
