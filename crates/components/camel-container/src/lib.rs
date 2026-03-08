@@ -51,7 +51,7 @@ pub async fn cleanup_tracked_containers() {
 
     tracing::info!("Cleaning up {} tracked container(s)", ids.len());
 
-    let docker = match Docker::connect_with_unix_defaults() {
+    let docker = match Docker::connect_with_local_defaults() {
         Ok(d) => d,
         Err(e) => {
             tracing::error!("Failed to connect to Docker for cleanup: {}", e);
@@ -1404,7 +1404,7 @@ mod tests {
     #[tokio::test]
     async fn test_container_producer_lifecycle_operations_missing_id() {
         // Try to connect to Docker - if fails, return early
-        let docker = match Docker::connect_with_unix_defaults() {
+        let docker = match Docker::connect_with_local_defaults() {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("Skipping test: Could not connect to Docker daemon");
@@ -1458,7 +1458,7 @@ mod tests {
     #[tokio::test]
     async fn test_container_producer_stop_nonexistent() {
         // Try to connect to Docker - if fails, return early
-        let docker = match Docker::connect_with_unix_defaults() {
+        let docker = match Docker::connect_with_local_defaults() {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("Skipping test: Could not connect to Docker daemon");
@@ -1512,7 +1512,7 @@ mod tests {
     #[tokio::test]
     async fn test_container_producer_run_missing_image() {
         // Try to connect to Docker - if fails, return early
-        let docker = match Docker::connect_with_unix_defaults() {
+        let docker = match Docker::connect_with_local_defaults() {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("Skipping test: Could not connect to Docker daemon");
@@ -1561,7 +1561,7 @@ mod tests {
     #[tokio::test]
     async fn test_container_producer_run_image_from_header() {
         // Try to connect to Docker - if fails, return early
-        let docker = match Docker::connect_with_unix_defaults() {
+        let docker = match Docker::connect_with_local_defaults() {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("Skipping test: Could not connect to Docker daemon");
@@ -1620,7 +1620,7 @@ mod tests {
     /// This test verifies the full flow: create → start → set headers.
     #[tokio::test]
     async fn test_container_producer_run_alpine_container() {
-        let docker = match Docker::connect_with_unix_defaults() {
+        let docker = match Docker::connect_with_local_defaults() {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("Skipping test: Could not connect to Docker daemon");
@@ -1785,7 +1785,7 @@ mod tests {
         use tokio::sync::mpsc;
 
         // Try to connect to Docker - if fails, return early
-        let docker = match Docker::connect_with_unix_defaults() {
+        let docker = match Docker::connect_with_local_defaults() {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("Skipping test: Could not connect to Docker daemon");
@@ -1854,7 +1854,7 @@ mod tests {
     async fn test_container_producer_list_containers() {
         // Try to connect to Docker using default config
         // If ping fails, return early (effectively ignoring this test)
-        let docker = match Docker::connect_with_unix_defaults() {
+        let docker = match Docker::connect_with_local_defaults() {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("Skipping test: Could not connect to Docker daemon");
