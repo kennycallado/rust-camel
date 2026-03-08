@@ -258,11 +258,19 @@ impl CamelContext {
     pub async fn start(&mut self) -> Result<(), CamelError> {
         info!("Starting CamelContext");
 
+        // Start lifecycle services first
+        for service in &mut self.services {
+            info!("Starting service: {}", service.name());
+            service.start().await?;
+        }
+
+        // Then start routes
         self.route_controller
             .lock()
             .await
             .start_all_routes()
             .await?;
+
         info!("CamelContext started");
         Ok(())
     }
@@ -284,6 +292,12 @@ impl CamelContext {
 
         // Stop all routes via the controller
         self.route_controller.lock().await.stop_all_routes().await?;
+
+        // Then stop lifecycle services
+        for service in &mut self.services {
+            info!("Stopping service: {}", service.name());
+            service.stop().await?;
+        }
 
         info!("CamelContext stopped");
         Ok(())
@@ -521,5 +535,69 @@ mod tests {
             error_text.contains("missing-lang"),
             "error should mention missing language, got: {error_text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use camel_api::Lifecycle;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct MockService {
+        start_count: Arc<AtomicUsize>,
+        stop_count: Arc<AtomicUsize>,
+    }
+
+    impl MockService {
+        fn new() -> (Self, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+            let start_count = Arc::new(AtomicUsize::new(0));
+            let stop_count = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    start_count: start_count.clone(),
+                    stop_count: stop_count.clone(),
+                },
+                start_count,
+                stop_count,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Lifecycle for MockService {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        async fn start(&mut self) -> Result<(), CamelError> {
+            self.start_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            self.stop_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_context_starts_lifecycle_services() {
+        let (service, start_count, stop_count) = MockService::new();
+
+        let mut ctx = CamelContext::new().with_lifecycle(service);
+
+        assert_eq!(start_count.load(Ordering::SeqCst), 0);
+
+        ctx.start().await.unwrap();
+
+        assert_eq!(start_count.load(Ordering::SeqCst), 1);
+        assert_eq!(stop_count.load(Ordering::SeqCst), 0);
+
+        ctx.stop().await.unwrap();
+
+        assert_eq!(stop_count.load(Ordering::SeqCst), 1);
     }
 }
