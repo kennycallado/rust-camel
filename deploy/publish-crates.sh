@@ -54,8 +54,8 @@ publish_crate() {
   cargo publish $DRY_RUN
   cd "$WORKSPACE_ROOT" >/dev/null
   if [ -z "$DRY_RUN" ]; then
-    echo "⏳ Waiting 10s for crates.io to index..."
-    sleep 10
+    echo "⏳ Waiting 30s for crates.io to index..."
+    sleep 30
   fi
 }
 
