@@ -34,8 +34,10 @@ pub enum CamelError {
     #[error("Circuit breaker open: {0}")]
     CircuitOpen(String),
 
-    #[error("HTTP operation failed: {status_code} {status_text}")]
+    #[error("HTTP {method} {url} failed: {status_code} {status_text}")]
     HttpOperationFailed {
+        method: String,
+        url: String,
         status_code: u16,
         status_text: String,
         response_body: Option<String>,
@@ -67,6 +69,8 @@ mod tests {
     #[test]
     fn test_http_operation_failed_display() {
         let err = CamelError::HttpOperationFailed {
+            method: "GET".to_string(),
+            url: "https://example.com/test".to_string(),
             status_code: 404,
             status_text: "Not Found".to_string(),
             response_body: Some("page not found".to_string()),
@@ -79,6 +83,8 @@ mod tests {
     #[test]
     fn test_http_operation_failed_clone() {
         let err = CamelError::HttpOperationFailed {
+            method: "POST".to_string(),
+            url: "https://api.example.com/users".to_string(),
             status_code: 500,
             status_text: "Internal Server Error".to_string(),
             response_body: None,

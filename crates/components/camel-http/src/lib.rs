@@ -1101,6 +1101,8 @@ impl Service<Exchange> for HttpProducer {
                 && !HttpProducer::is_ok_status(status_code, config.ok_status_code_range)
             {
                 return Err(CamelError::HttpOperationFailed {
+                    method: method_str,
+                    url,
                     status_code,
                     status_text,
                     response_body: Some(String::from_utf8_lossy(&response_body).to_string()),
