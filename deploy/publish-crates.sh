@@ -60,6 +60,7 @@ publish_crate() {
 }
 
 # Core crates (in dependency order)
+publish_crate "camel-container" "crates/components/camel-container"
 publish_crate "camel-api" "crates/camel-api"
 publish_crate "camel-util" "crates/camel-util"
 publish_crate "camel-support" "crates/camel-support"
@@ -89,6 +90,10 @@ publish_crate "camel-health" "crates/camel-health"
 publish_crate "camel-dsl" "crates/camel-dsl"
 publish_crate "camel-config" "crates/camel-config" # Fixed path
 publish_crate "camel-builder" "crates/camel-builder"
+
+# OTel and Prometheus (depend on camel-builder + camel-component-timer)
+publish_crate "camel-otel" "crates/components/camel-otel"
+publish_crate "camel-prometheus" "crates/components/camel-prometheus"
 
 # Remaining component crates
 publish_crate "camel-component-log" "crates/components/camel-log"
