@@ -15,7 +15,7 @@ categories.workspace = true
 camel-api.workspace = true
 camel-core.workspace = true
 camel-dsl.workspace = true
-camel-otel = { path = "../components/camel-otel" }
+camel-otel = { workspace = true }
 camel-processor.workspace = true
 config = { workspace = true }
 glob = { workspace = true }

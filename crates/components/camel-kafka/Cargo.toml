@@ -15,7 +15,7 @@ categories = ["network-programming", "asynchronous", "development-tools"]
 camel-api       = { workspace = true }
 camel-component = { workspace = true }
 camel-endpoint  = { workspace = true }
-camel-otel      = { path = "../camel-otel", optional = true }
+camel-otel      = { workspace = true, optional = true }
 rdkafka         = { version = "0.36", features = ["tokio"] }
 tokio           = { workspace = true }
 async-trait     = { workspace = true }
