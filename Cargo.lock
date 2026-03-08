@@ -723,6 +723,7 @@ dependencies = [
 name = "camel-prometheus"
 version = "0.3.0"
 dependencies = [
+ "async-trait",
  "axum",
  "camel-api",
  "camel-builder",
