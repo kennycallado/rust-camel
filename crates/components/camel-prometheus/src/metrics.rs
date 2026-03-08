@@ -24,7 +24,7 @@ impl PrometheusMetrics {
         // Create and register exchanges_total counter
         let exchanges_total = CounterVec::new(
             Opts::new("exchanges_total", "Total number of exchanges processed").namespace("camel"),
-            &["route_id"],
+            &["route"],
         )
         .expect("Failed to create exchanges_total counter");
         registry
@@ -34,7 +34,7 @@ impl PrometheusMetrics {
         // Create and register errors_total counter
         let errors_total = CounterVec::new(
             Opts::new("errors_total", "Total number of errors").namespace("camel"),
-            &["route_id", "error_type"],
+            &["route", "error_type"],
         )
         .expect("Failed to create errors_total counter");
         registry
@@ -54,7 +54,7 @@ impl PrometheusMetrics {
                     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
                 ],
             },
-            &["route_id"],
+            &["route"],
         )
         .expect("Failed to create exchange_duration_seconds histogram");
         registry
@@ -64,7 +64,7 @@ impl PrometheusMetrics {
         // Create and register queue_depth gauge
         let queue_depth = GaugeVec::new(
             Opts::new("queue_depth", "Current queue depth").namespace("camel"),
-            &["route_id"],
+            &["route"],
         )
         .expect("Failed to create queue_depth gauge");
         registry
@@ -78,7 +78,7 @@ impl PrometheusMetrics {
                 "Circuit breaker state (0=closed, 1=open, 2=half_open)",
             )
             .namespace("camel"),
-            &["route_id"],
+            &["route"],
         )
         .expect("Failed to create circuit_breaker_state gauge");
         registry
@@ -269,6 +269,10 @@ mod tests {
         assert!(output.contains("camel_exchanges_total"));
         assert!(output.contains("camel_errors_total"));
         assert!(output.contains("camel_queue_depth"));
+
+        // Verify labels use 'route' not 'route_id'
+        assert!(output.contains("route=\"route-1\""));
+        assert!(!output.contains("route_id=\"route-1\""));
     }
 
     #[test]
