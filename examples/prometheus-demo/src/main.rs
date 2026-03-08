@@ -45,9 +45,11 @@ async fn main() -> Result<(), CamelError> {
 
     ctx.add_route_definition(route)?;
 
+    // Parse server address at top level
+    let addr = "127.0.0.1:9090".parse().expect("Invalid address");
+    
     // Start the metrics server in the background
     let metrics_server_task = tokio::spawn(async move {
-        let addr = "127.0.0.1:9090".parse().expect("Invalid address");
         MetricsServer::run(addr, metrics_for_server).await;
     });
 
