@@ -59,7 +59,7 @@ members = [
     "examples/auto-restart",
     "examples/tracer-demo",
     "examples/convert-body-to",
-    "examples/bean-demo",
+    "examples/bean-demo", "crates/components/camel-container",
 ]
 
 [workspace.package]

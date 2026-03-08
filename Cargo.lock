@@ -604,6 +604,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-container"
+version = "0.3.0"
+
+[[package]]
 name = "camel-core"
 version = "0.3.0"
 dependencies = [
