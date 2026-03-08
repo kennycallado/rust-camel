@@ -69,13 +69,15 @@ publish_crate() {
 }
 
 # Core crates (in dependency order)
-publish_crate "camel-container" "crates/components/camel-container"
 publish_crate "camel-api" "crates/camel-api"
 publish_crate "camel-util" "crates/camel-util"
 publish_crate "camel-support" "crates/camel-support"
 publish_crate "camel-endpoint" "crates/camel-endpoint"
 publish_crate "camel-component" "crates/camel-component"
 publish_crate "camel-processor" "crates/camel-processor"
+
+# Container component (depends on camel-api, camel-component, camel-endpoint)
+publish_crate "camel-component-container" "crates/components/camel-container"
 
 # Language crates (needed by camel-core)
 publish_crate "camel-language-api" "crates/languages/camel-language-api"

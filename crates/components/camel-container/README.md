@@ -34,53 +34,53 @@ container:<operation>[?options]
 
 ## Operations
 
-| Operation | Mode | Description |
-|-----------|------|-------------|
-| `list` | Producer | List all containers |
-| `run` | Producer | Create and start a container from an image |
-| `start` | Producer | Start an existing container |
-| `stop` | Producer | Stop a running container |
-| `remove` | Producer | Remove a container |
-| `events` | Consumer | Subscribe to Docker daemon events |
-| `logs` | Consumer | Stream logs from a container |
+| Operation | Mode     | Description                                |
+| --------- | -------- | ------------------------------------------ |
+| `list`    | Producer | List all containers                        |
+| `run`     | Producer | Create and start a container from an image |
+| `start`   | Producer | Start an existing container                |
+| `stop`    | Producer | Stop a running container                   |
+| `remove`  | Producer | Remove a container                         |
+| `events`  | Consumer | Subscribe to Docker daemon events          |
+| `logs`    | Consumer | Stream logs from a container               |
 
 ## URI Options
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `image` | - | Container image for `run` operation |
-| `name` | - | Container name for `run` operation |
-| `cmd` | - | Command to run in container (e.g., `sleep 30`) |
-| `ports` | - | Port mappings in format `hostPort:containerPort` (e.g., `8080:80,8443:443`) |
-| `env` | - | Environment variables in format `KEY=value` (e.g., `FOO=bar,BAZ=qux`) |
-| `network` | - | Network mode (`bridge`, `host`, `none`, or custom network name). When unset, Docker uses `bridge` by default. |
-| `containerId` | - | Container ID or name for `logs` consumer |
-| `follow` | `true` | Follow log output (logs consumer only) |
-| `timestamps` | `false` | Include timestamps in logs (logs consumer only) |
-| `tail` | `all` | Number of lines to show from end of logs (e.g., `100`) |
-| `autoPull` | `true` | Automatically pull image if not present locally |
-| `autoRemove` | `true` | Automatically remove container when it exits |
-| `host` | `unix:///var/run/docker.sock` | Docker host (Unix socket only) |
+| Option        | Default                       | Description                                                                                                   |
+| ------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `image`       | -                             | Container image for `run` operation                                                                           |
+| `name`        | -                             | Container name for `run` operation                                                                            |
+| `cmd`         | -                             | Command to run in container (e.g., `sleep 30`)                                                                |
+| `ports`       | -                             | Port mappings in format `hostPort:containerPort` (e.g., `8080:80,8443:443`)                                   |
+| `env`         | -                             | Environment variables in format `KEY=value` (e.g., `FOO=bar,BAZ=qux`)                                         |
+| `network`     | -                             | Network mode (`bridge`, `host`, `none`, or custom network name). When unset, Docker uses `bridge` by default. |
+| `containerId` | -                             | Container ID or name for `logs` consumer                                                                      |
+| `follow`      | `true`                        | Follow log output (logs consumer only)                                                                        |
+| `timestamps`  | `false`                       | Include timestamps in logs (logs consumer only)                                                               |
+| `tail`        | `all`                         | Number of lines to show from end of logs (e.g., `100`)                                                        |
+| `autoPull`    | `true`                        | Automatically pull image if not present locally                                                               |
+| `autoRemove`  | `true`                        | Automatically remove container when it exits                                                                  |
+| `host`        | `unix:///var/run/docker.sock` | Docker host (Unix socket only)                                                                                |
 
 ## Headers
 
 ### Input Headers (for operations)
 
-| Header | Description |
-|--------|-------------|
+| Header                 | Description                                                   |
+| ---------------------- | ------------------------------------------------------------- |
 | `CamelContainerAction` | Override operation (`list`, `run`, `start`, `stop`, `remove`) |
-| `CamelContainerImage` | Container image (required for `run`) |
-| `CamelContainerId` | Container ID (required for `start`, `stop`, `remove`) |
-| `CamelContainerName` | Container name (optional for `run`) |
+| `CamelContainerImage`  | Container image (required for `run`)                          |
+| `CamelContainerId`     | Container ID (required for `start`, `stop`, `remove`)         |
+| `CamelContainerName`   | Container name (optional for `run`)                           |
 
 ### Output Headers (from responses)
 
-| Header | Description |
-|--------|-------------|
-| `CamelContainerActionResult` | Operation result (`success`) |
-| `CamelContainerId` | Created container ID (from `run`), or container ID for logs |
-| `CamelContainerLogStream` | Log stream type: `stdout`, `stderr`, `console` (logs consumer only) |
-| `CamelContainerLogTimestamp` | Log timestamp when `timestamps=true` (logs consumer only) |
+| Header                       | Description                                                         |
+| ---------------------------- | ------------------------------------------------------------------- |
+| `CamelContainerActionResult` | Operation result (`success`)                                        |
+| `CamelContainerId`           | Created container ID (from `run`), or container ID for logs         |
+| `CamelContainerLogStream`    | Log stream type: `stdout`, `stderr`, `console` (logs consumer only) |
+| `CamelContainerLogTimestamp` | Log timestamp when `timestamps=true` (logs consumer only)           |
 
 ## Usage
 
@@ -99,6 +99,7 @@ let route = RouteBuilder::from("timer:tick?period=60000")
 ```
 
 This will:
+
 1. Pull `alpine:latest` if not present (`autoPull=true` by default)
 2. Run `sleep 30` in the container
 3. Auto-remove the container when it exits (`autoRemove=true`)
@@ -202,12 +203,14 @@ let route = RouteBuilder::from("container:logs?containerId=my-app&timestamps=tru
 ```
 
 Each log line becomes an exchange with:
+
 - **Body**: The log line content
 - **CamelContainerId**: Container ID/name
 - **CamelContainerLogStream**: `stdout` or `stderr`
 - **CamelContainerLogTimestamp**: Timestamp (when `timestamps=true`)
 
 Options:
+
 - `follow=true` (default): Stream new logs as they arrive
 - `follow=false`: Get historical logs and exit
 - `tail=100`: Get last 100 lines only
@@ -320,20 +323,21 @@ use camel_component_container::cleanup_tracked_containers;
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
     // ... setup routes and context ...
-    
+
     ctx.start().await?;
-    
+
     tokio::signal::ctrl_c().await.ok();
     ctx.stop().await?;
-    
+
     // Cleanup any tracked containers (important for hot-reload)
     cleanup_tracked_containers().await;
-    
+
     Ok(())
 }
 ```
 
 This is especially important for:
+
 - **Hot-reload scenarios**: Prevents orphaned containers when the application restarts
 - **Long-running containers**: Ensures cleanup even if containers haven't finished naturally
 - **Graceful shutdown**: Guarantees no containers are left behind
