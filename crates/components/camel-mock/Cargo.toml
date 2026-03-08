@@ -4,6 +4,9 @@ description = "Mock component for rust-camel testing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-component-mock"
 
 [dependencies]
 camel-api.workspace = true

@@ -1,10 +1,11 @@
 [package]
 name = "camel-component-redis"
-description = "Redis component for rust-camel integration framework"
+description = "Redis component for rust-camel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/camel-component-redis"
 readme.workspace = true
 keywords = ["camel", "redis", "integration", "messaging", "cache"]

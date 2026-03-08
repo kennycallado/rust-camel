@@ -67,6 +67,7 @@ version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/kennycallado/rust-camel"
+homepage = "https://github.com/kennycallado/rust-camel"
 documentation = "https://docs.rs/camel-api"
 readme = "README.md"
 keywords = ["camel", "integration", "messaging", "routing", "enterprise"]

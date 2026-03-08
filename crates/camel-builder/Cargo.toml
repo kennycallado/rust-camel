@@ -4,6 +4,12 @@ description = "Fluent route builder API for rust-camel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-builder"
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true

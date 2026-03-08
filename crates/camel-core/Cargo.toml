@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/camel-core"
 readme = "README.md"
 keywords.workspace = true
@@ -19,7 +20,7 @@ camel-component.workspace = true
 camel-endpoint.workspace = true
 camel-language-api.workspace = true
 camel-language-simple.workspace = true
-camel-bean = { path = "../camel-bean" }
+camel-bean.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

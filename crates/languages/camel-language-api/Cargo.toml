@@ -4,6 +4,9 @@ description = "Language trait API for rust-camel (Expression, Predicate)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-language-api"
 
 [dependencies]
 camel-api.workspace = true

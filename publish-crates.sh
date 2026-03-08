@@ -70,6 +70,11 @@ publish_crate "camel-processor" "crates/camel-processor"
 # Language crates (needed by camel-core)
 publish_crate "camel-language-api" "crates/languages/camel-language-api"
 publish_crate "camel-language-simple" "crates/languages/camel-language-simple"
+publish_crate "camel-language-rhai" "crates/languages/camel-language-rhai"
+
+# Bean crates (needed by camel-core)
+publish_crate "camel-bean-macros" "crates/camel-bean-macros"
+publish_crate "camel-bean" "crates/camel-bean"
 
 # Core engine
 publish_crate "camel-core" "crates/camel-core"
@@ -90,7 +95,11 @@ publish_crate "camel-component-log" "crates/components/camel-log"
 publish_crate "camel-component-file" "crates/components/camel-file"
 publish_crate "camel-component-http" "crates/components/camel-http"
 publish_crate "camel-component-redis" "crates/components/camel-redis"
+publish_crate "camel-component-kafka" "crates/components/camel-kafka"
 publish_crate "camel-component-controlbus" "crates/components/camel-controlbus"
+
+# Test utilities
+publish_crate "camel-test" "crates/camel-test"
 
 # Cli
 publish_crate "camel-cli" "crates/camel-cli"

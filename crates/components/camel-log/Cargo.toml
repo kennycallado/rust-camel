@@ -4,6 +4,9 @@ description = "Log component for rust-camel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-component-log"
 
 [dependencies]
 camel-api.workspace = true

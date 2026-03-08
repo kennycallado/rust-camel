@@ -4,6 +4,9 @@ description = "Utility functions and helpers for rust-camel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-util"
 
 [dependencies]
 thiserror.workspace = true
