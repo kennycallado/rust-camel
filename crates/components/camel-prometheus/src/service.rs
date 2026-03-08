@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 
 use crate::PrometheusMetrics;
 use async_trait::async_trait;
@@ -82,20 +82,15 @@ impl Lifecycle for PrometheusService {
     async fn start(&mut self) -> Result<(), CamelError> {
         use tokio::net::TcpListener;
 
-        let listener = TcpListener::bind(self.addr)
-            .await
-            .map_err(|e| {
-                self.status.store(2, Ordering::SeqCst);
-                CamelError::Io(e.to_string())
-            })?;
+        let listener = TcpListener::bind(self.addr).await.map_err(|e| {
+            self.status.store(2, Ordering::SeqCst);
+            CamelError::Io(e.to_string())
+        })?;
 
-        let actual_port = listener
-            .local_addr()
-            .map(|addr| addr.port())
-            .map_err(|e| {
-                self.status.store(2, Ordering::SeqCst);
-                CamelError::Io(e.to_string())
-            })?;
+        let actual_port = listener.local_addr().map(|addr| addr.port()).map_err(|e| {
+            self.status.store(2, Ordering::SeqCst);
+            CamelError::Io(e.to_string())
+        })?;
 
         self.bound_port.store(actual_port, Ordering::SeqCst);
 
@@ -106,9 +101,7 @@ impl Lifecycle for PrometheusService {
             match health_checker {
                 Some(checker) => {
                     crate::MetricsServer::run_with_listener_and_health_checker(
-                        listener,
-                        metrics,
-                        checker,
+                        listener, metrics, checker,
                     )
                     .await;
                 }
@@ -165,12 +158,10 @@ mod tests {
         assert!(service.health_checker().is_none());
 
         // Inject health checker
-        let checker = Arc::new(|| {
-            HealthReport {
-                status: HealthStatus::Healthy,
-                services: vec![],
-                ..Default::default()
-            }
+        let checker = Arc::new(|| HealthReport {
+            status: HealthStatus::Healthy,
+            services: vec![],
+            ..Default::default()
         });
 
         service.set_health_checker(checker);

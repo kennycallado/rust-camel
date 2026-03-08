@@ -180,7 +180,7 @@ async fn test_prometheus_service_with_context() {
 async fn test_prometheus_service_multiple_start_stop_cycles() {
     // Verify that we can start/stop multiple times with different ports
     for i in 0..3 {
-    let mut service = PrometheusService::new(0);
+        let mut service = PrometheusService::new(0);
         service
             .start()
             .await

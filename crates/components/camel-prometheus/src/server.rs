@@ -249,7 +249,12 @@ mod tests {
             .with_state(state);
 
         let response = app
-            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -258,18 +263,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_readyz_returns_200_when_healthy() {
-        let health_checker =
-            Arc::new(|| HealthReport {
-                status: HealthStatus::Healthy,
-                ..Default::default()
-            }) as HealthChecker;
+        let health_checker = Arc::new(|| HealthReport {
+            status: HealthStatus::Healthy,
+            ..Default::default()
+        }) as HealthChecker;
         let state: ServerState = (Arc::new(PrometheusMetrics::new()), Some(health_checker));
         let app = Router::new()
             .route("/readyz", get(MetricsServer::readyz))
             .with_state(state);
 
         let response = app
-            .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -278,18 +287,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_readyz_returns_503_when_unhealthy() {
-        let health_checker =
-            Arc::new(|| HealthReport {
-                status: HealthStatus::Unhealthy,
-                ..Default::default()
-            }) as HealthChecker;
+        let health_checker = Arc::new(|| HealthReport {
+            status: HealthStatus::Unhealthy,
+            ..Default::default()
+        }) as HealthChecker;
         let state: ServerState = (Arc::new(PrometheusMetrics::new()), Some(health_checker));
         let app = Router::new()
             .route("/readyz", get(MetricsServer::readyz))
             .with_state(state);
 
         let response = app
-            .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -298,22 +311,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_returns_json_health_report() {
-        let health_checker =
-            Arc::new(|| HealthReport {
-                status: HealthStatus::Healthy,
-                services: vec![ServiceHealth {
-                    name: "test-service".to_string(),
-                    status: ServiceStatus::Started,
-                }],
-                ..Default::default()
-            }) as HealthChecker;
+        let health_checker = Arc::new(|| HealthReport {
+            status: HealthStatus::Healthy,
+            services: vec![ServiceHealth {
+                name: "test-service".to_string(),
+                status: ServiceStatus::Started,
+            }],
+            ..Default::default()
+        }) as HealthChecker;
         let state: ServerState = (Arc::new(PrometheusMetrics::new()), Some(health_checker));
         let app = Router::new()
             .route("/health", get(MetricsServer::health))
             .with_state(state);
 
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 

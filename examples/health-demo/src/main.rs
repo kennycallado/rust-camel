@@ -14,14 +14,15 @@ async fn main() -> Result<(), CamelError> {
         .init();
 
     info!("=== Health Monitoring Demo ===");
-    info!("This example demonstrates the health monitoring system with Kubernetes-ready endpoints\n");
+    info!(
+        "This example demonstrates the health monitoring system with Kubernetes-ready endpoints\n"
+    );
 
     // Create Prometheus service with dynamic port allocation
     let prometheus = PrometheusService::new(9090);
 
     // Create CamelContext with the prometheus service
-    let mut ctx = CamelContext::new()
-        .with_lifecycle(prometheus);
+    let mut ctx = CamelContext::new().with_lifecycle(prometheus);
 
     // Register components
     ctx.register_component(TimerComponent::new());
@@ -56,11 +57,11 @@ async fn main() -> Result<(), CamelError> {
 
     // Demonstrate health_check() API
     info!("=== Health Check API Demo ===");
-    
+
     let report = ctx.health_check();
     info!("System Status: {:?}", report.status);
     info!("Timestamp: {}", report.timestamp.to_rfc3339());
-    
+
     if report.services.is_empty() {
         info!("Services: (none - health checker not wired to context)");
         info!("Note: To wire health checker, inject it before adding service to context");
@@ -95,7 +96,7 @@ async fn main() -> Result<(), CamelError> {
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await.ok();
-    
+
     info!("\nShutting down...");
     ctx.stop().await?;
 

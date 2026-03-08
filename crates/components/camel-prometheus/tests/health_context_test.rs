@@ -29,29 +29,28 @@ async fn wait_for_server(port: u16, timeout_ms: u64) -> Result<(), String> {
 async fn test_health_with_context() {
     let prometheus = PrometheusService::new(0);
     let port_accessor = prometheus.port_accessor();
-    
-    let mut ctx = CamelContext::new()
-        .with_lifecycle(prometheus);
-    
+
+    let mut ctx = CamelContext::new().with_lifecycle(prometheus);
+
     ctx.start().await.unwrap();
-    
+
     let port = port_accessor.load(std::sync::atomic::Ordering::SeqCst);
     wait_for_server(port, 2000).await.unwrap();
-    
+
     // Test /healthz (always 200)
     let response = reqwest::get(format!("http://127.0.0.1:{}/healthz", port))
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    
+
     // Test /health (detailed)
     let response = reqwest::get(format!("http://127.0.0.1:{}/health", port))
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
-    
+
     let body = response.text().await.unwrap();
     assert!(body.contains("Healthy"));
-    
+
     ctx.stop().await.unwrap();
 }
