@@ -6,7 +6,8 @@ use tracing::info;
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    CamelError, MetricsCollector, NoOpMetrics, RouteController, RouteStatus, SupervisionConfig,
+    CamelError, Lifecycle, MetricsCollector, NoOpMetrics, RouteController, RouteStatus,
+    SupervisionConfig,
 };
 use camel_component::Component;
 use camel_language_api::Language;
@@ -34,6 +35,7 @@ pub struct CamelContext {
     metrics: Arc<dyn MetricsCollector>,
     languages: SharedLanguageRegistry,
     shutdown_timeout: std::time::Duration,
+    services: Vec<Box<dyn Lifecycle>>,
 }
 
 impl CamelContext {
@@ -73,6 +75,7 @@ impl CamelContext {
             metrics,
             languages,
             shutdown_timeout: std::time::Duration::from_secs(30),
+            services: Vec::new(),
         }
     }
 
@@ -115,6 +118,7 @@ impl CamelContext {
             metrics,
             languages,
             shutdown_timeout: std::time::Duration::from_secs(30),
+            services: Vec::new(),
         }
     }
 
@@ -156,6 +160,17 @@ impl CamelContext {
     /// separately via init_tracing_subscriber (called in camel-config bridge).
     pub fn with_tracer_config(mut self, config: TracerConfig) -> Self {
         self.set_tracer_config(config);
+        self
+    }
+
+    /// Register a lifecycle service (Apache Camel: addService pattern)
+    pub fn with_lifecycle<L: Lifecycle + 'static>(mut self, service: L) -> Self {
+        // Auto-register MetricsCollector if available
+        if let Some(collector) = service.as_metrics_collector() {
+            self.metrics = collector;
+        }
+
+        self.services.push(Box::new(service));
         self
     }
 
