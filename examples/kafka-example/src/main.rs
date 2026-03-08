@@ -11,7 +11,7 @@
 //!   KAFKA_BROKERS=localhost:9092 cargo run -p kafka-example
 
 use camel_api::{CamelError, Value};
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_kafka::KafkaComponent;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
