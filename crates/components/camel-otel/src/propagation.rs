@@ -22,8 +22,8 @@
 use std::collections::HashMap;
 
 use camel_api::exchange::Exchange;
-use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry::Context;
+use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 
 /// Header name for the W3C traceparent header.
@@ -191,7 +191,9 @@ pub fn extract_into_exchange(exchange: &mut Exchange, headers: &HashMap<String, 
 mod tests {
     use super::*;
     use camel_api::message::Message;
-    use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
+    use opentelemetry::trace::{
+        SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+    };
 
     /// Create a valid traceparent header value for testing.
     fn make_traceparent(trace_id_hex: &str, span_id_hex: &str, sampled: bool) -> String {
@@ -204,28 +206,28 @@ mod tests {
         // Create a context with a valid span context
         let trace_id_hex = "4bf92f3577b34da6a3ce929d0e0e4736";
         let span_id_hex = "00f067aa0ba902b7";
-        
+
         let traceparent = make_traceparent(trace_id_hex, span_id_hex, true);
-        
+
         // Create headers with traceparent
         let mut headers = HashMap::new();
         headers.insert("traceparent".to_string(), traceparent.clone());
-        
+
         // Extract context
         let extracted = extract_context(&headers);
-        
+
         // Inject into new headers
         let mut new_headers = HashMap::new();
         inject_context(&extracted, &mut new_headers);
-        
+
         // Verify roundtrip - the traceparent should be preserved
         assert!(new_headers.contains_key("traceparent"));
         let new_traceparent = new_headers.get("traceparent").unwrap();
-        
+
         // Parse and compare trace IDs (they should match)
         let original_parts: Vec<&str> = traceparent.split('-').collect();
         let new_parts: Vec<&str> = new_traceparent.split('-').collect();
-        
+
         assert_eq!(original_parts[0], new_parts[0], "version should match");
         assert_eq!(original_parts[1], new_parts[1], "trace-id should match");
         assert_eq!(original_parts[2], new_parts[2], "parent-id should match");
@@ -236,12 +238,15 @@ mod tests {
     fn test_extract_empty_headers_returns_default_context() {
         let headers = HashMap::new();
         let cx = extract_context(&headers);
-        
+
         // The extracted context should have no valid span context
         let span = cx.span();
         let span_context = span.span_context();
-        
-        assert!(!span_context.is_valid(), "Empty headers should produce invalid span context");
+
+        assert!(
+            !span_context.is_valid(),
+            "Empty headers should produce invalid span context"
+        );
     }
 
     #[test]
@@ -250,7 +255,7 @@ mod tests {
         let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap();
         let span_id = SpanId::from_hex("00f067aa0ba902b7").unwrap();
         let trace_state = TraceState::default();
-        
+
         let span_context = SpanContext::new(
             trace_id,
             span_id,
@@ -258,23 +263,29 @@ mod tests {
             true, // is_remote - this is a remote span context
             trace_state,
         );
-        
+
         // Create a context with this span context
         let cx = Context::new().with_remote_span_context(span_context);
-        
+
         let mut headers = HashMap::new();
         inject_context(&cx, &mut headers);
-        
+
         // Verify traceparent header exists
-        assert!(headers.contains_key("traceparent"), "Should have traceparent header");
-        
+        assert!(
+            headers.contains_key("traceparent"),
+            "Should have traceparent header"
+        );
+
         let traceparent = headers.get("traceparent").unwrap();
-        
+
         // Verify format: version-traceid-spanid-flags
         let parts: Vec<&str> = traceparent.split('-').collect();
         assert_eq!(parts.len(), 4, "traceparent should have 4 parts");
         assert_eq!(parts[0], "00", "version should be 00");
-        assert_eq!(parts[1], "4bf92f3577b34da6a3ce929d0e0e4736", "trace-id should match");
+        assert_eq!(
+            parts[1], "4bf92f3577b34da6a3ce929d0e0e4736",
+            "trace-id should match"
+        );
         assert_eq!(parts[2], "00f067aa0ba902b7", "span-id should match");
         assert_eq!(parts[3], "01", "flags should be 01 (sampled)");
     }
@@ -282,7 +293,7 @@ mod tests {
     #[test]
     fn test_inject_from_exchange() {
         let mut exchange = Exchange::new(Message::new("test"));
-        
+
         // Create a span context and attach to exchange
         let trace_id = TraceId::from_hex("12345678901234567890123456789012").unwrap();
         let span_id = SpanId::from_hex("1234567890123456").unwrap();
@@ -293,29 +304,33 @@ mod tests {
             true,
             TraceState::default(),
         );
-        
+
         exchange.otel_context = Context::new().with_remote_span_context(span_context);
-        
+
         let mut headers = HashMap::new();
         inject_from_exchange(&exchange, &mut headers);
-        
-        assert!(headers.contains_key("traceparent"), "Should inject traceparent from exchange");
+
+        assert!(
+            headers.contains_key("traceparent"),
+            "Should inject traceparent from exchange"
+        );
     }
 
     #[test]
     fn test_extract_into_exchange() {
         let mut exchange = Exchange::new(Message::new("test"));
-        
+
         // Verify initial context is empty
         assert!(!exchange.otel_context.span().span_context().is_valid());
-        
+
         // Create headers with traceparent
         let mut headers = HashMap::new();
-        let traceparent = make_traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", true);
+        let traceparent =
+            make_traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", true);
         headers.insert("traceparent".to_string(), traceparent);
-        
+
         extract_into_exchange(&mut exchange, &headers);
-        
+
         // Verify context was extracted
         assert!(
             exchange.otel_context.span().span_context().is_valid(),
@@ -327,10 +342,13 @@ mod tests {
     fn test_header_keys_case_insensitive() {
         let mut headers = HashMap::new();
         // Use uppercase key
-        headers.insert("TRACEPARENT".to_string(), make_traceparent("00000000000000000000000000000123", "0000000000000456", true));
-        
+        headers.insert(
+            "TRACEPARENT".to_string(),
+            make_traceparent("00000000000000000000000000000123", "0000000000000456", true),
+        );
+
         let cx = extract_context(&headers);
-        
+
         assert!(
             cx.span().span_context().is_valid(),
             "Should extract from case-insensitive header keys"
@@ -344,14 +362,17 @@ mod tests {
             "traceparent".to_string(),
             make_traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", true),
         );
-        headers.insert("tracestate".to_string(), "vendor1=value1,vendor2=value2".to_string());
-        
+        headers.insert(
+            "tracestate".to_string(),
+            "vendor1=value1,vendor2=value2".to_string(),
+        );
+
         let cx = extract_context(&headers);
-        
+
         let span = cx.span();
         let span_context = span.span_context();
         assert!(span_context.is_valid());
-        
+
         // TraceState should be extracted - check by getting a header from it
         let trace_state = span_context.trace_state();
         // In OTel v0.31, we can check if tracestate has content by getting a key

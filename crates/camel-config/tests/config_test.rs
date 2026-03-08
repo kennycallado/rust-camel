@@ -133,3 +133,76 @@ max_connections = 1000
         3000
     ); // From default - THIS WILL FAIL
 }
+
+#[test]
+fn test_otel_config_from_toml() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("Camel.toml");
+
+    let content = r#"
+[default]
+log_level = "INFO"
+
+[default.observability.otel]
+enabled = true
+endpoint = "http://localhost:4317"
+service_name = "my-app"
+log_level = "debug"
+"#;
+    fs::write(&config_path, content).unwrap();
+
+    let config =
+        CamelConfig::from_file(config_path.to_str().unwrap()).expect("Failed to load config");
+
+    let otel = config
+        .observability
+        .otel
+        .expect("otel config should be present");
+    assert!(otel.enabled);
+    assert_eq!(otel.endpoint, "http://localhost:4317");
+    assert_eq!(otel.service_name, "my-app");
+    assert_eq!(otel.log_level, "debug");
+}
+
+#[test]
+fn test_otel_config_defaults() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("Camel.toml");
+
+    let content = r#"
+[default]
+"#;
+    fs::write(&config_path, content).unwrap();
+
+    let config =
+        CamelConfig::from_file(config_path.to_str().unwrap()).expect("Failed to load config");
+
+    // When no [observability.otel] section, otel should be None
+    assert!(config.observability.otel.is_none());
+}
+
+#[test]
+fn test_otel_config_partial_defaults() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("Camel.toml");
+
+    let content = r#"
+[default]
+
+[default.observability.otel]
+enabled = true
+"#;
+    fs::write(&config_path, content).unwrap();
+
+    let config =
+        CamelConfig::from_file(config_path.to_str().unwrap()).expect("Failed to load config");
+
+    let otel = config
+        .observability
+        .otel
+        .expect("otel config should be present");
+    assert!(otel.enabled);
+    assert_eq!(otel.endpoint, "http://localhost:4317");
+    assert_eq!(otel.service_name, "rust-camel");
+    assert_eq!(otel.log_level, "info");
+}

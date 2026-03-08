@@ -91,6 +91,7 @@ fn test_tracer_file_output_invalid_path_returns_error() {
                     opentelemetry: None,
                 },
             },
+            otel: None,
         },
         supervision: None,
     };

@@ -103,8 +103,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Ensure publish script is executable
-        run: chmod +x ./publish-crates.sh
+        run: chmod +x ./deploy/publish-crates.sh
       - name: Publish workspace crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: ./publish-crates.sh
+        run: ./deploy/publish-crates.sh

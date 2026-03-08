@@ -3,6 +3,7 @@ use crate::discovery::discover_routes;
 use camel_api::CamelError;
 use camel_core::CamelContext;
 use camel_core::route::RouteDefinition;
+use camel_otel::{OtelConfig, OtelService};
 use tracing::Level;
 use tracing_subscriber::Layer;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -24,22 +25,38 @@ impl CamelConfig {
     }
 
     /// Create a CamelContext configured from this CamelConfig.
-    /// Initializes tracing subscriber if tracing is enabled.
+    ///
+    /// When `[observability.otel]` is enabled, an `OtelService` lifecycle is
+    /// registered and the normal `init_tracing_subscriber()` is skipped —
+    /// `OtelService::start()` installs its own composed subscriber (fmt + OTLP logs).
     pub fn configure_context(config: &CamelConfig) -> Result<CamelContext, CamelError> {
-        // Task 1: Use supervision when configured
+        let otel_enabled = config
+            .observability
+            .otel
+            .as_ref()
+            .is_some_and(|o| o.enabled);
+
+        // Build context with optional supervision
         let mut ctx = if let Some(ref sup) = config.supervision {
             CamelContext::with_supervision(sup.clone().into_supervision_config())
         } else {
             CamelContext::new()
         };
 
-        // Task 3: Apply shutdown timeout from config
         ctx.set_shutdown_timeout(std::time::Duration::from_millis(config.timeout_ms));
 
         let tracer_config = config.observability.tracer.clone();
 
-        // Task 2: Always initialize tracing subscriber (general log_level layer + optional tracer layer)
-        Self::init_tracing_subscriber(&tracer_config, &config.log_level)?;
+        if otel_enabled {
+            // OtelService owns the subscriber — skip init_tracing_subscriber
+            let otel_cfg = config.observability.otel.as_ref().unwrap();
+            let otel_config = OtelConfig::new(&otel_cfg.endpoint, &otel_cfg.service_name)
+                .with_log_level(&otel_cfg.log_level);
+            let otel_service = OtelService::new(otel_config);
+            ctx = ctx.with_lifecycle(otel_service);
+        } else {
+            Self::init_tracing_subscriber(&tracer_config, &config.log_level)?;
+        }
 
         ctx.set_tracer_config(tracer_config);
         Ok(ctx)

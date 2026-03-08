@@ -31,6 +31,18 @@ enum Commands {
         /// Disable file-watcher hot-reload (overrides Camel.toml watch setting)
         #[arg(long, overrides_with = "watch")]
         no_watch: bool,
+
+        /// Enable OpenTelemetry export (traces, metrics, logs)
+        #[arg(long)]
+        otel: bool,
+
+        /// OTLP endpoint URL (implies --otel)
+        #[arg(long, value_name = "URL")]
+        otel_endpoint: Option<String>,
+
+        /// OTel service name (implies --otel)
+        #[arg(long, value_name = "NAME")]
+        service_name: Option<String>,
     },
 }
 
@@ -44,6 +56,9 @@ async fn main() {
             config,
             watch,
             no_watch,
+            otel,
+            otel_endpoint,
+            service_name,
         } => {
             // Resolve CLI watch override: --watch → Some(true), --no-watch → Some(false), neither → None
             let cli_watch = if watch {
@@ -53,14 +68,21 @@ async fn main() {
             } else {
                 None
             };
-            run(routes, config, cli_watch).await
+            run(routes, config, cli_watch, otel, otel_endpoint, service_name).await
         }
     }
 }
 
-async fn run(routes_override: Option<String>, config_path: String, cli_watch: Option<bool>) {
+async fn run(
+    routes_override: Option<String>,
+    config_path: String,
+    cli_watch: Option<bool>,
+    otel: bool,
+    otel_endpoint: Option<String>,
+    service_name: Option<String>,
+) {
     // 1. Load config (fall back to empty config with serde defaults if Camel.toml not found)
-    let camel_config: camel_config::config::CamelConfig =
+    let mut camel_config: camel_config::config::CamelConfig =
         camel_config::config::CamelConfig::from_file(&config_path).unwrap_or_else(|_| {
             // Build an empty config so serde defaults apply
             config::Config::builder()
@@ -71,6 +93,27 @@ async fn run(routes_override: Option<String>, config_path: String, cli_watch: Op
                     std::process::exit(1);
                 })
         });
+
+    // 1b. Apply OTel CLI overrides (--otel-endpoint and --service-name imply --otel)
+    let otel_enabled = otel || otel_endpoint.is_some() || service_name.is_some();
+    if otel_enabled {
+        let otel_cfg = camel_config
+            .observability
+            .otel
+            .get_or_insert(camel_config::OtelCamelConfig {
+                enabled: true,
+                endpoint: "http://localhost:4317".to_string(),
+                service_name: "rust-camel".to_string(),
+                log_level: "info".to_string(),
+            });
+        otel_cfg.enabled = true;
+        if let Some(ep) = otel_endpoint {
+            otel_cfg.endpoint = ep;
+        }
+        if let Some(name) = service_name {
+            otel_cfg.service_name = name;
+        }
+    }
 
     // 2. Build context (also initialises tracing subscriber)
     let mut ctx = camel_config::config::CamelConfig::configure_context(&camel_config)

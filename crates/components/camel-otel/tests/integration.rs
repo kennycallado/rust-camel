@@ -21,9 +21,11 @@ use camel_core::tracer::TracingProcessor;
 use camel_otel::propagation::{
     extract_context, extract_into_exchange, inject_context, inject_from_exchange,
 };
-use opentelemetry::global;
-use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, Tracer, TracerProvider, TraceState};
 use opentelemetry::Context;
+use opentelemetry::global;
+use opentelemetry::trace::{
+    SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState, Tracer, TracerProvider,
+};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
 use tower::{Service, ServiceExt};
 

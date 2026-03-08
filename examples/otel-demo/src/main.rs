@@ -24,27 +24,22 @@
 //! - Makes an HTTP GET request to httpbin.org/get
 //! - All exchanges are traced and metrics are exported via OTLP
 
-use camel_api::body::Body;
 use camel_api::Value;
+use camel_api::body::Body;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_http::HttpComponent;
+use camel_component_http::{HttpComponent, HttpsComponent};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
+use camel_core::{DetailLevel, StdoutOutput, TracerConfig, TracerOutputs};
 use camel_otel::{OtelConfig, OtelService};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing subscriber for console output
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_env_filter("info")
-        .init();
-
-    tracing::info!("Starting OpenTelemetry demo for rust-camel");
-
     // Create OpenTelemetry configuration
     // Points to the OTLP collector (grafana/otel-lgtm) running locally
+    // OtelService::start() will initialize the tracing subscriber with
+    // fmt layer (console) + OTel log bridge (OTLP export) automatically.
     let otel_config = OtelConfig::new("http://localhost:4317", "rust-camel-otel-demo");
 
     // Create the OpenTelemetry service
@@ -53,11 +48,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build CamelContext with the OtelService as a lifecycle service
     // The OtelService will be started before routes and stopped after routes
-    let mut ctx = CamelContext::new().with_lifecycle(otel_service);
+    let mut ctx = CamelContext::new()
+        .with_lifecycle(otel_service)
+        .with_tracer_config(TracerConfig {
+            enabled: true,
+            detail_level: DetailLevel::Medium,
+            outputs: TracerOutputs {
+                stdout: StdoutOutput {
+                    enabled: false, // suppress noisy JSON to stdout
+                    ..Default::default()
+                },
+                file: None,
+                opentelemetry: None,
+            },
+        });
 
     // Register required components
     ctx.register_component(TimerComponent::new());
     ctx.register_component(HttpComponent::new());
+    ctx.register_component(HttpsComponent::new());
     ctx.register_component(LogComponent::new());
 
     // Define the route:

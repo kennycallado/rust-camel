@@ -8,9 +8,9 @@ use rdkafka::consumer::{
 };
 // Import rdkafka::Message trait to bring .topic(), .key(), .payload(), etc. into scope.
 // The alias `_` prevents a name conflict with camel_api::Message.
-use rdkafka::message::Message as _;
 #[cfg(feature = "otel")]
 use rdkafka::message::Headers as _;
+use rdkafka::message::Message as _;
 use rdkafka::message::OwnedMessage;
 use serde_json::Value;
 use std::sync::Arc;
@@ -572,8 +572,10 @@ mod tests {
     mod otel_tests {
         use super::*;
         use camel_api::message::Message;
-        use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
         use opentelemetry::Context;
+        use opentelemetry::trace::{
+            SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+        };
         use rdkafka::message::{Header, OwnedHeaders};
         use std::collections::HashMap;
 
@@ -585,8 +587,9 @@ mod tests {
         #[test]
         fn test_inject_from_exchange_produces_traceparent() {
             // Create an exchange with a valid span context
-            let mut exchange = Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
-            
+            let mut exchange =
+                Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+
             let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap();
             let span_id = SpanId::from_hex("00f067aa0ba902b7").unwrap();
             let span_context = SpanContext::new(
@@ -609,19 +612,24 @@ mod tests {
             );
 
             let traceparent = headers_map.get("traceparent").unwrap();
-            assert!(traceparent.starts_with("00-"), "traceparent should start with version 00");
+            assert!(
+                traceparent.starts_with("00-"),
+                "traceparent should start with version 00"
+            );
         }
 
         #[test]
         fn test_extract_into_exchange_populates_otel_context() {
             // Create a headers HashMap with traceparent
             let mut headers_map = HashMap::new();
-            let traceparent = make_traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", true);
+            let traceparent =
+                make_traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", true);
             headers_map.insert("traceparent".to_string(), traceparent);
 
             // Create an exchange and extract context
-            let mut exchange = Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
-            
+            let mut exchange =
+                Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+
             // Verify initial context is invalid
             assert!(
                 !exchange.otel_context.span().span_context().is_valid(),
@@ -641,9 +649,10 @@ mod tests {
         #[test]
         fn test_kafka_headers_roundtrip() {
             // Simulate the full flow: inject into HashMap -> convert to Kafka headers -> extract back
-            
+
             // Step 1: Create exchange with span context
-            let mut exchange = Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+            let mut exchange =
+                Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
             let trace_id = TraceId::from_hex("12345678901234567890123456789012").unwrap();
             let span_id = SpanId::from_hex("1234567890123456").unwrap();
             let span_context = SpanContext::new(
@@ -680,7 +689,8 @@ mod tests {
             }
 
             // Step 5: Extract into new exchange (consumer logic)
-            let mut new_exchange = Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+            let mut new_exchange =
+                Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
             camel_otel::extract_into_exchange(&mut new_exchange, &extracted_map);
 
             // Step 6: Verify the span context was preserved
@@ -689,8 +699,11 @@ mod tests {
             let original_sc = original_span.span_context();
             let extracted_span = new_exchange.otel_context.span();
             let extracted_sc = extracted_span.span_context();
-            
-            assert!(extracted_sc.is_valid(), "Extracted span context should be valid");
+
+            assert!(
+                extracted_sc.is_valid(),
+                "Extracted span context should be valid"
+            );
             assert_eq!(
                 original_sc.trace_id(),
                 extracted_sc.trace_id(),

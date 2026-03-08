@@ -8,9 +8,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use camel_api::metrics::MetricsCollector;
+use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
-use opentelemetry::KeyValue;
 
 /// Metric names following camel naming conventions
 mod metric_names {

@@ -2191,10 +2191,7 @@ mod tests {
                 parts[1], "4bf92f3577b34da6a3ce929d0e0e4736",
                 "trace-id should match"
             );
-            assert_eq!(
-                parts[2], "00f067aa0ba902b7",
-                "span-id should match"
-            );
+            assert_eq!(parts[2], "00f067aa0ba902b7", "span-id should match");
             assert_eq!(parts[3], "01", "flags should be 01 (sampled)");
         }
 
@@ -2224,7 +2221,10 @@ mod tests {
             let client = reqwest::Client::new();
             let send_fut = client
                 .post(format!("http://127.0.0.1:{port}/trace"))
-                .header("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+                .header(
+                    "traceparent",
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                )
                 .body("test")
                 .send();
 
@@ -2286,7 +2286,10 @@ mod tests {
             let client = reqwest::Client::new();
             let send_fut = client
                 .post(format!("http://127.0.0.1:{port}/trace"))
-                .header("TraceParent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+                .header(
+                    "TraceParent",
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                )
                 .body("test")
                 .send();
 
@@ -2375,10 +2378,8 @@ mod tests {
                                 })
                                 .unwrap_or_default();
 
-                            let body = format!(
-                                r#"{{"echo":"ok","traceparent":"{}"}}"#,
-                                traceparent
-                            );
+                            let body =
+                                format!(r#"{{"echo":"ok","traceparent":"{}"}}"#, traceparent);
                             let response = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Received-Traceparent: {}\r\n\r\n{}",
                                 body.len(),

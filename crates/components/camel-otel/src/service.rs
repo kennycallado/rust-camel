@@ -23,15 +23,20 @@
 
 use async_trait::async_trait;
 use camel_api::{CamelError, Lifecycle, ServiceStatus};
-use opentelemetry::global;
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry::global;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::resource::Resource;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use tracing::warn;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::config::{OtelConfig, OtelProtocol, OtelSampler};
 
@@ -48,6 +53,7 @@ pub struct OtelService {
     config: OtelConfig,
     tracer_provider: Option<SdkTracerProvider>,
     meter_provider: Option<SdkMeterProvider>,
+    logger_provider: Option<SdkLoggerProvider>,
     status: AtomicU8,
 }
 
@@ -58,6 +64,7 @@ impl OtelService {
             config,
             tracer_provider: None,
             meter_provider: None,
+            logger_provider: None,
             status: AtomicU8::new(STATUS_STOPPED),
         }
     }
@@ -74,14 +81,18 @@ impl OtelService {
         match self.config.protocol {
             OtelProtocol::Grpc => SpanExporter::builder()
                 .with_tonic()
-                .with_endpoint(format!("{}/v1/traces", self.config.endpoint))
+                .with_endpoint(&self.config.endpoint)
                 .build()
-                .map_err(|e| CamelError::Config(format!("Failed to build gRPC span exporter: {}", e))),
+                .map_err(|e| {
+                    CamelError::Config(format!("Failed to build gRPC span exporter: {}", e))
+                }),
             OtelProtocol::HttpProtobuf => SpanExporter::builder()
                 .with_http()
                 .with_endpoint(format!("{}/v1/traces", self.config.endpoint))
                 .build()
-                .map_err(|e| CamelError::Config(format!("Failed to build HTTP span exporter: {}", e))),
+                .map_err(|e| {
+                    CamelError::Config(format!("Failed to build HTTP span exporter: {}", e))
+                }),
         }
     }
 
@@ -90,31 +101,80 @@ impl OtelService {
         match self.config.protocol {
             OtelProtocol::Grpc => MetricExporter::builder()
                 .with_tonic()
-                .with_endpoint(format!("{}/v1/metrics", self.config.endpoint))
+                .with_endpoint(&self.config.endpoint)
                 .build()
-                .map_err(|e| CamelError::Config(format!("Failed to build gRPC metric exporter: {}", e))),
+                .map_err(|e| {
+                    CamelError::Config(format!("Failed to build gRPC metric exporter: {}", e))
+                }),
             OtelProtocol::HttpProtobuf => MetricExporter::builder()
                 .with_http()
                 .with_endpoint(format!("{}/v1/metrics", self.config.endpoint))
                 .build()
-                .map_err(|e| CamelError::Config(format!("Failed to build HTTP metric exporter: {}", e))),
+                .map_err(|e| {
+                    CamelError::Config(format!("Failed to build HTTP metric exporter: {}", e))
+                }),
         }
+    }
+
+    /// Build the OTLP log exporter based on the configured protocol.
+    fn build_log_exporter(&self) -> Result<LogExporter, CamelError> {
+        match self.config.protocol {
+            OtelProtocol::Grpc => LogExporter::builder()
+                .with_tonic()
+                .with_endpoint(&self.config.endpoint)
+                .build()
+                .map_err(|e| {
+                    CamelError::Config(format!("Failed to build gRPC log exporter: {}", e))
+                }),
+            OtelProtocol::HttpProtobuf => LogExporter::builder()
+                .with_http()
+                .with_endpoint(format!("{}/v1/logs", self.config.endpoint))
+                .build()
+                .map_err(|e| {
+                    CamelError::Config(format!("Failed to build HTTP log exporter: {}", e))
+                }),
+        }
+    }
+
+    /// Initialize the tracing subscriber with fmt + OTel log bridge layers.
+    ///
+    /// This composes:
+    /// - `tracing_subscriber::fmt` layer for console output
+    /// - `OpenTelemetryTracingBridge` layer for OTLP log export
+    /// - `EnvFilter` to suppress noisy internal crates (hyper, tonic, h2, reqwest)
+    ///
+    /// Uses `try_init()` so it's safe if a subscriber is already set.
+    fn init_subscriber(&self, logger_provider: &SdkLoggerProvider) {
+        let otel_layer = OpenTelemetryTracingBridge::new(logger_provider);
+
+        let filter = EnvFilter::new(format!(
+            "{level},h2=off,hyper=off,tonic=off,reqwest=off,tower=off",
+            level = self.config.log_level
+        ));
+
+        let fmt_layer = fmt::layer().with_target(false);
+
+        // try_init() silently ignores "already set" errors
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .with(otel_layer)
+            .try_init();
     }
 
     /// Build the OpenTelemetry resource with service name and additional attributes.
     fn build_resource(&self) -> Resource {
-        let mut attrs: Vec<KeyValue> = vec![
-            KeyValue::new(opentelemetry_semantic_conventions::resource::SERVICE_NAME, self.config.service_name.clone()),
-        ];
+        let mut attrs: Vec<KeyValue> = vec![KeyValue::new(
+            opentelemetry_semantic_conventions::resource::SERVICE_NAME,
+            self.config.service_name.clone(),
+        )];
 
         // Add custom resource attributes
         for (key, value) in &self.config.resource_attrs {
             attrs.push(KeyValue::new(key.clone(), value.clone()));
         }
 
-        Resource::builder()
-            .with_attributes(attrs)
-            .build()
+        Resource::builder().with_attributes(attrs).build()
     }
 
     /// Convert `OtelSampler` to SDK `Sampler`.
@@ -132,7 +192,8 @@ impl OtelService {
             && !(0.0..=1.0).contains(&ratio)
         {
             return Err(CamelError::Config(format!(
-                "TraceIdRatioBased sampler ratio must be in [0.0, 1.0], got {}", ratio
+                "TraceIdRatioBased sampler ratio must be in [0.0, 1.0], got {}",
+                ratio
             )));
         }
         Ok(())
@@ -169,6 +230,25 @@ impl Lifecycle for OtelService {
 
         let resource = self.build_resource();
 
+        // Build and install LoggerProvider + subscriber FIRST (before any tracing calls)
+        if self.config.logs_enabled {
+            let log_exporter = match self.build_log_exporter() {
+                Ok(exporter) => exporter,
+                Err(e) => {
+                    self.status.store(STATUS_FAILED, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+
+            let logger_provider = SdkLoggerProvider::builder()
+                .with_resource(resource.clone())
+                .with_batch_exporter(log_exporter)
+                .build();
+
+            self.init_subscriber(&logger_provider);
+            self.logger_provider = Some(logger_provider);
+        }
+
         // Build and install TracerProvider
         let span_exporter = match self.build_span_exporter() {
             Ok(exporter) => exporter,
@@ -196,7 +276,7 @@ impl Lifecycle for OtelService {
                 return Err(e);
             }
         };
-        
+
         let periodic_reader = PeriodicReader::builder(metric_exporter)
             .with_interval(Duration::from_secs(60))
             .build();
@@ -208,20 +288,20 @@ impl Lifecycle for OtelService {
 
         global::set_meter_provider(meter_provider.clone());
         self.meter_provider = Some(meter_provider);
-        
-        self.status.store(STATUS_STARTED, Ordering::SeqCst);
 
-        // Note: We intentionally do NOT install the opentelemetry-appender-tracing bridge here
-        // because the global tracing subscriber may already be initialized by camel-config's
-        // context_ext.rs. Adding a layer after init is not possible.
-        //
-        // If OTel log export via tracing is needed, users should configure the bridge
-        // BEFORE calling CamelConfig::configure_context() or manage the subscriber manually.
+        self.status.store(STATUS_STARTED, Ordering::SeqCst);
 
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
+        // Shutdown LoggerProvider first (flush pending logs before traces/metrics)
+        if let Some(provider) = self.logger_provider.take()
+            && let Err(e) = provider.shutdown()
+        {
+            warn!("Error shutting down LoggerProvider: {:?}", e);
+        }
+
         // Shutdown TracerProvider
         if let Some(provider) = self.tracer_provider.take()
             && let Err(e) = provider.shutdown()
@@ -235,14 +315,8 @@ impl Lifecycle for OtelService {
         {
             warn!("Error shutting down MeterProvider: {:?}", e);
         }
-        
-        self.status.store(STATUS_STOPPED, Ordering::SeqCst);
 
-        // Note: We don't explicitly "clear" globals because:
-        // 1. opentelemetry::global doesn't provide a clear/reset function
-        // 2. After shutdown, the providers are in a terminal state
-        // 3. Subsequent calls to global::tracer()/meter() would return no-op instances
-        // 4. A new OtelService would need to be created and started to reinitialize
+        self.status.store(STATUS_STOPPED, Ordering::SeqCst);
 
         Ok(())
     }
@@ -262,16 +336,17 @@ mod tests {
     fn test_otel_service_new() {
         let config = OtelConfig::new("http://localhost:4317", "test-service");
         let service = OtelService::new(config);
-        
+
         assert_eq!(service.name(), "otel");
         assert!(service.tracer_provider.is_none());
         assert!(service.meter_provider.is_none());
+        assert!(service.logger_provider.is_none());
     }
 
     #[test]
     fn test_otel_service_default() {
         let service = OtelService::with_defaults();
-        
+
         assert_eq!(service.name(), "otel");
         assert_eq!(service.config.endpoint, "http://localhost:4317");
         assert_eq!(service.config.service_name, "rust-camel");
@@ -282,10 +357,10 @@ mod tests {
         let config = OtelConfig::new("http://localhost:4317", "my-service")
             .with_resource_attr("deployment.environment", "production")
             .with_resource_attr("service.version", "1.0.0");
-        
+
         let service = OtelService::new(config);
         let resource = service.build_resource();
-        
+
         // Resource should contain service.name and custom attributes
         // Note: Resource doesn't expose a simple way to iterate attributes in 0.31,
         // so we just verify it builds without error
@@ -296,7 +371,7 @@ mod tests {
     fn test_to_sdk_sampler_always_on() {
         let sampler = OtelSampler::AlwaysOn;
         let sdk_sampler = OtelService::to_sdk_sampler(&sampler);
-        
+
         assert!(matches!(sdk_sampler, Sampler::AlwaysOn));
     }
 
@@ -304,7 +379,7 @@ mod tests {
     fn test_to_sdk_sampler_always_off() {
         let sampler = OtelSampler::AlwaysOff;
         let sdk_sampler = OtelService::to_sdk_sampler(&sampler);
-        
+
         assert!(matches!(sdk_sampler, Sampler::AlwaysOff));
     }
 
@@ -312,7 +387,7 @@ mod tests {
     fn test_to_sdk_sampler_trace_id_ratio() {
         let sampler = OtelSampler::TraceIdRatioBased(0.5);
         let sdk_sampler = OtelService::to_sdk_sampler(&sampler);
-        
+
         assert!(matches!(sdk_sampler, Sampler::TraceIdRatioBased(r) if r == 0.5));
     }
 
@@ -323,30 +398,33 @@ mod tests {
         // It will fail to connect, but that's OK - we're testing the flow.
         let config = OtelConfig::new("http://localhost:9999", "test-service"); // Invalid port
         let mut service = OtelService::new(config);
-        
+
         // Verify initial state
         assert!(service.tracer_provider.is_none());
         assert!(service.meter_provider.is_none());
+        assert!(service.logger_provider.is_none());
         assert_eq!(service.status(), ServiceStatus::Stopped);
-        
+
         // Note: start() may fail because the endpoint is invalid, but we test the logic
         let result = service.start().await;
-        
+
         // The exporter build should succeed (build happens lazily), so start() typically
         // succeeds even with an invalid endpoint. Either way, verify state consistency.
         if result.is_ok() {
             // On success, providers should be set and status should be Started
             assert!(service.tracer_provider.is_some());
             assert!(service.meter_provider.is_some());
+            assert!(service.logger_provider.is_some());
             assert_eq!(service.status(), ServiceStatus::Started);
-            
+
             // Stop should work
             let stop_result = service.stop().await;
             assert!(stop_result.is_ok());
-            
+
             // Providers should be cleared and status should be Stopped
             assert!(service.tracer_provider.is_none());
             assert!(service.meter_provider.is_none());
+            assert!(service.logger_provider.is_none());
             assert_eq!(service.status(), ServiceStatus::Stopped);
         } else {
             // On failure, state must remain clean
@@ -362,21 +440,19 @@ mod tests {
         // FIXME: This test sets global OTel state which can interfere with parallel tests.
         // Consider using isolated unit tests or serial_test crate for better isolation.
         let mut service = OtelService::with_defaults();
-        
+
         // Manually set tracer_provider to simulate already-started state
         // We use a simple provider without exporter for this test
         let resource = Resource::builder()
             .with_attributes(vec![KeyValue::new("test", "value")])
             .build();
-        let provider = SdkTracerProvider::builder()
-            .with_resource(resource)
-            .build();
+        let provider = SdkTracerProvider::builder().with_resource(resource).build();
         service.tracer_provider = Some(provider);
-        
+
         // Second start should warn and return Ok
         let result = service.start().await;
         assert!(result.is_ok());
-        
+
         // Clean up
         service.tracer_provider.take();
     }
@@ -384,7 +460,7 @@ mod tests {
     #[tokio::test]
     async fn test_stop_when_not_started() {
         let mut service = OtelService::with_defaults();
-        
+
         // Stop when not started should succeed
         let result = service.stop().await;
         assert!(result.is_ok());
@@ -397,12 +473,12 @@ mod tests {
             .with_sampler(OtelSampler::TraceIdRatioBased(0.0));
         let service = OtelService::new(config);
         assert!(service.validate_config().is_ok());
-        
+
         let config = OtelConfig::new("http://localhost:4317", "test")
             .with_sampler(OtelSampler::TraceIdRatioBased(0.5));
         let service = OtelService::new(config);
         assert!(service.validate_config().is_ok());
-        
+
         let config = OtelConfig::new("http://localhost:4317", "test")
             .with_sampler(OtelSampler::TraceIdRatioBased(1.0));
         let service = OtelService::new(config);
@@ -416,13 +492,19 @@ mod tests {
             .with_sampler(OtelSampler::TraceIdRatioBased(-0.1));
         let service = OtelService::new(config);
         let err = service.validate_config().unwrap_err();
-        assert!(err.to_string().contains("TraceIdRatioBased sampler ratio must be in [0.0, 1.0]"));
-        
+        assert!(
+            err.to_string()
+                .contains("TraceIdRatioBased sampler ratio must be in [0.0, 1.0]")
+        );
+
         let config = OtelConfig::new("http://localhost:4317", "test")
             .with_sampler(OtelSampler::TraceIdRatioBased(1.5));
         let service = OtelService::new(config);
         let err = service.validate_config().unwrap_err();
-        assert!(err.to_string().contains("TraceIdRatioBased sampler ratio must be in [0.0, 1.0]"));
+        assert!(
+            err.to_string()
+                .contains("TraceIdRatioBased sampler ratio must be in [0.0, 1.0]")
+        );
     }
 
     #[test]

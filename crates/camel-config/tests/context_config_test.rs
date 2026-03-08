@@ -1,4 +1,4 @@
-use camel_config::CamelConfig;
+use camel_config::{CamelConfig, ObservabilityConfig, OtelCamelConfig};
 use std::fs;
 use tempfile::tempdir;
 
@@ -154,5 +154,59 @@ fn test_configure_context_with_invalid_log_level() {
     assert!(
         result.is_ok(),
         "configure_context should succeed even with invalid log level (should default to INFO)"
+    );
+}
+
+#[test]
+fn test_configure_context_with_otel_enabled_registers_lifecycle() {
+    let config = CamelConfig {
+        routes: vec![],
+        watch: false,
+        log_level: "INFO".to_string(),
+        timeout_ms: 5000,
+        components: Default::default(),
+        observability: ObservabilityConfig {
+            otel: Some(OtelCamelConfig {
+                enabled: true,
+                endpoint: "http://localhost:4317".to_string(),
+                service_name: "test-service".to_string(),
+                log_level: "info".to_string(),
+            }),
+            ..Default::default()
+        },
+        supervision: None,
+    };
+
+    let ctx = CamelConfig::configure_context(&config).expect("configure_context should succeed");
+
+    // The health report should contain a service named "otel"
+    let report = ctx.health_check();
+    let otel_service = report.services.iter().find(|s| s.name == "otel");
+    assert!(
+        otel_service.is_some(),
+        "OtelService should be registered as a lifecycle when otel.enabled=true"
+    );
+}
+
+#[test]
+fn test_configure_context_without_otel_no_lifecycle() {
+    let config = CamelConfig {
+        routes: vec![],
+        watch: false,
+        log_level: "INFO".to_string(),
+        timeout_ms: 5000,
+        components: Default::default(),
+        observability: Default::default(),
+        supervision: None,
+    };
+
+    let ctx = CamelConfig::configure_context(&config).expect("configure_context should succeed");
+
+    // No OTel service should be registered
+    let report = ctx.health_check();
+    let otel_service = report.services.iter().find(|s| s.name == "otel");
+    assert!(
+        otel_service.is_none(),
+        "OtelService should NOT be registered when otel is not configured"
     );
 }

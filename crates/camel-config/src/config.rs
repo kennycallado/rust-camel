@@ -64,6 +64,29 @@ pub struct ObservabilityConfig {
 
     #[serde(default)]
     pub tracer: TracerConfig,
+
+    #[serde(default)]
+    pub otel: Option<OtelCamelConfig>,
+}
+
+/// OpenTelemetry configuration for `[observability.otel]` in Camel.toml.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OtelCamelConfig {
+    /// Enable OTel export (traces, metrics, logs). Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// OTLP endpoint. Default: "http://localhost:4317".
+    #[serde(default = "default_otel_endpoint")]
+    pub endpoint: String,
+
+    /// Service name reported to the OTel backend. Default: "rust-camel".
+    #[serde(default = "default_otel_service_name")]
+    pub service_name: String,
+
+    /// Log level filter for the OTel subscriber. Default: "info".
+    #[serde(default = "default_otel_log_level")]
+    pub log_level: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -124,6 +147,16 @@ fn default_http_max_connections() -> usize {
 }
 fn default_metrics_port() -> u16 {
     9090
+}
+
+fn default_otel_endpoint() -> String {
+    "http://localhost:4317".to_string()
+}
+fn default_otel_service_name() -> String {
+    "rust-camel".to_string()
+}
+fn default_otel_log_level() -> String {
+    "info".to_string()
 }
 
 fn default_initial_delay_ms() -> u64 {

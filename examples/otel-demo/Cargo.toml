@@ -15,4 +15,3 @@ camel-component-log.workspace = true
 camel-component-timer.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true

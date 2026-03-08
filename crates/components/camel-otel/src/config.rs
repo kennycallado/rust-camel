@@ -33,6 +33,10 @@ pub struct OtelConfig {
     pub sampler: OtelSampler,
     /// Additional resource attributes (key-value pairs)
     pub resource_attrs: Vec<(String, String)>,
+    /// Whether to export logs via OTLP (default: true)
+    pub logs_enabled: bool,
+    /// Log level filter for the OTel subscriber (default: "info")
+    pub log_level: String,
 }
 
 impl OtelConfig {
@@ -45,6 +49,8 @@ impl OtelConfig {
             protocol: OtelProtocol::default(),
             sampler: OtelSampler::default(),
             resource_attrs: vec![],
+            logs_enabled: true,
+            log_level: "info".to_string(),
         }
     }
 
@@ -63,6 +69,12 @@ impl OtelConfig {
     /// Add a resource attribute.
     pub fn with_resource_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.resource_attrs.push((key.into(), value.into()));
+        self
+    }
+
+    /// Set the log level filter for the OTel subscriber.
+    pub fn with_log_level(mut self, level: impl Into<String>) -> Self {
+        self.log_level = level.into();
         self
     }
 }
@@ -86,5 +98,32 @@ mod tests {
             .with_resource_attr("env", "production");
         assert_eq!(cfg.resource_attrs.len(), 1);
         assert!(matches!(cfg.sampler, OtelSampler::TraceIdRatioBased(f) if f == 0.5));
+    }
+
+    #[test]
+    fn test_otel_config_logs_enabled_default() {
+        let cfg = OtelConfig::new("http://localhost:4317", "my-service");
+        assert!(cfg.logs_enabled, "logs_enabled should default to true");
+    }
+
+    #[test]
+    fn test_otel_config_log_level_default() {
+        let cfg = OtelConfig::new("http://localhost:4317", "my-service");
+        assert_eq!(cfg.log_level, "info", "log_level should default to 'info'");
+    }
+
+    #[test]
+    fn test_otel_config_with_log_level() {
+        let cfg = OtelConfig::new("http://localhost:4317", "my-service").with_log_level("debug");
+        assert_eq!(cfg.log_level, "debug");
+    }
+
+    #[test]
+    fn test_otel_config_logs_disabled() {
+        let cfg = OtelConfig::new("http://localhost:4317", "my-service");
+        // Mutate directly since it's pub
+        let mut cfg = cfg;
+        cfg.logs_enabled = false;
+        assert!(!cfg.logs_enabled);
     }
 }

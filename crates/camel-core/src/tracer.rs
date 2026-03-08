@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer};
-use opentelemetry::{global, Context as OtelContext, KeyValue};
+use opentelemetry::{Context as OtelContext, KeyValue, global};
 use tower::Service;
 use tower::ServiceExt;
 use tracing::Instrument;
@@ -105,7 +105,10 @@ impl Service<Exchange> for TracingProcessor {
                 "headers_count",
                 exchange.input.headers.len() as i64,
             ));
-            attributes.push(KeyValue::new("body_type", body_type_name(&exchange.input.body)));
+            attributes.push(KeyValue::new(
+                "body_type",
+                body_type_name(&exchange.input.body),
+            ));
             attributes.push(KeyValue::new("has_error", exchange.has_error()));
         }
 
@@ -174,7 +177,8 @@ impl Service<Exchange> for TracingProcessor {
                 tracing::Span::current().record("duration_ms", duration_ms);
 
                 // Record duration on OTel span
-                cx.span().set_attribute(KeyValue::new("duration_ms", duration_ms as i64));
+                cx.span()
+                    .set_attribute(KeyValue::new("duration_ms", duration_ms as i64));
 
                 match &result {
                     Ok(ex) => {
@@ -198,8 +202,10 @@ impl Service<Exchange> for TracingProcessor {
 
                         // Record error on OTel span
                         cx.span().set_status(Status::error(e.to_string()));
-                        cx.span()
-                            .set_attribute(KeyValue::new("error_type", std::any::type_name::<CamelError>()));
+                        cx.span().set_attribute(KeyValue::new(
+                            "error_type",
+                            std::any::type_name::<CamelError>(),
+                        ));
                     }
                 }
 
@@ -348,11 +354,7 @@ mod tests {
             exchange.otel_context.span().span_context().is_valid(),
             "Parent context should be valid"
         );
-        let _parent_trace_id = exchange
-            .otel_context
-            .span()
-            .span_context()
-            .trace_id();
+        let _parent_trace_id = exchange.otel_context.span().span_context().trace_id();
 
         let result = tracer.ready().await.unwrap().call(exchange).await;
 
@@ -408,12 +410,7 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_processor_span_name_format() {
         let inner = BoxProcessor::new(IdentityProcessor);
-        let tracer = TracingProcessor::new(
-            inner,
-            "my-route".to_string(),
-            5,
-            DetailLevel::Minimal,
-        );
+        let tracer = TracingProcessor::new(inner, "my-route".to_string(), 5, DetailLevel::Minimal);
 
         // Span name should be "route_id/step_id"
         assert_eq!(tracer.span_name(), "my-route/step-5");

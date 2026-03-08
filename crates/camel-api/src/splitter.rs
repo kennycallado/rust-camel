@@ -263,8 +263,8 @@ mod tests {
 
     #[test]
     fn test_fragment_exchange_inherits_otel_context() {
-        use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId};
         use opentelemetry::Context;
+        use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId};
 
         // Create parent exchange with a valid span context
         let mut parent = Exchange::new(Message::new("test"));
@@ -302,8 +302,8 @@ mod tests {
 
     #[test]
     fn test_all_fragments_share_same_trace_context() {
-        use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId};
         use opentelemetry::Context;
+        use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId};
 
         // Create parent with a specific trace ID
         let mut parent = Exchange::new(Message::new("line1\nline2\nline3"));

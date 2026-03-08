@@ -594,6 +594,7 @@ dependencies = [
  "camel-component-timer",
  "camel-core",
  "camel-dsl",
+ "camel-otel",
  "camel-processor",
  "config",
  "glob",
@@ -725,6 +726,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2587,7 +2589,6 @@ dependencies = [
  "camel-otel",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
