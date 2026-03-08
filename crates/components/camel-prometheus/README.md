@@ -6,7 +6,29 @@ Prometheus metrics integration for rust-camel.
 
 Implements `MetricsCollector` trait to export rust-camel metrics in Prometheus format.
 
+**New in 0.3.0:** `PrometheusService` with `Lifecycle` trait for automatic server management.
+
 ## Quick Start
+
+### Simple API (Recommended)
+
+```rust
+use camel_prometheus::PrometheusService;
+use camel_core::context::CamelContext;
+
+// Prometheus server starts/stops automatically with context
+let ctx = CamelContext::new()
+    .with_lifecycle(PrometheusService::new(9090))
+    .with_tracing();
+
+ctx.start().await?;
+// Server running on http://0.0.0.0:9090/metrics
+
+ctx.stop().await?;
+// Server stopped automatically
+```
+
+### Manual Setup (Backward Compatible)
 
 ```rust
 use camel_prometheus::{PrometheusMetrics, MetricsServer};
@@ -14,19 +36,23 @@ use camel_core::context::CamelContext;
 use std::sync::Arc;
 use std::net::SocketAddr;
 
-#[tokio::main]
-async fn main() {
-    // Create Prometheus metrics collector
-    let prometheus = Arc::new(PrometheusMetrics::new());
-    
-    // Configure context with metrics
-    let ctx = CamelContext::with_metrics(Arc::clone(&prometheus) as Arc<dyn MetricsCollector>);
-    
-    // Start metrics server on port 9090
-    let addr: SocketAddr = "0.0.0.0:9090".parse().unwrap();
-    MetricsServer::run(addr, Arc::clone(&prometheus)).await;
-}
+let prometheus = Arc::new(PrometheusMetrics::new());
+let ctx = CamelContext::with_metrics(Arc::clone(&prometheus));
+
+// Start server manually
+let addr: SocketAddr = "0.0.0.0:9090".parse().unwrap();
+tokio::spawn(async move {
+    MetricsServer::run(addr, prometheus).await;
+});
 ```
+
+## PrometheusService
+
+`PrometheusService` implements the `Lifecycle` trait, which follows Apache Camel's Service pattern:
+
+- Automatically starts HTTP server when `CamelContext.start()` is called
+- Automatically stops when `CamelContext.stop()` is called
+- Auto-registers `PrometheusMetrics` as `MetricsCollector`
 
 ## Metrics Exposed
 
@@ -45,3 +71,15 @@ GET /metrics
 ```
 
 Returns Prometheus text format metrics.
+
+## Architecture
+
+```
+PrometheusService (Lifecycle trait)
+    ↓
+    ├── Manages HTTP server lifecycle (start/stop)
+    ├── Auto-registers MetricsCollector
+    └── MetricsServer (uses tower::Service internally via axum)
+```
+
+**Note:** Uses `Lifecycle` trait (not `Service`) to avoid confusion with `tower::Service`.

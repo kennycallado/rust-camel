@@ -160,19 +160,17 @@ Implement `MetricsCollector` trait to integrate with Prometheus, OpenTelemetry, 
 
 ### Prometheus Metrics
 
-Export metrics to Prometheus:
+Export metrics to Prometheus with automatic lifecycle management:
 
 ```rust
-use camel_prometheus::{PrometheusMetrics, MetricsServer};
-use std::sync::Arc;
-use std::net::SocketAddr;
+use camel_prometheus::PrometheusService;
 
-let prometheus = Arc::new(PrometheusMetrics::new());
-let ctx = CamelContext::with_metrics(Arc::clone(&prometheus) as Arc<dyn MetricsCollector>);
+let ctx = CamelContext::new()
+    .with_lifecycle(PrometheusService::new(9090))
+    .with_tracing();
 
-// Start metrics server on port 9090
-let addr: SocketAddr = "0.0.0.0:9090".parse().unwrap();
-MetricsServer::run(addr, prometheus).await;
+ctx.start().await?;
+// Prometheus server starts automatically
 ```
 
 Available metrics:
@@ -181,6 +179,8 @@ Available metrics:
 - `camel_exchange_duration_seconds{route}` - Exchange processing duration (histogram)
 - `camel_queue_depth{route}` - Current queue depth
 - `camel_circuit_breaker_state{route}` - Circuit breaker state
+
+**Architecture:** `PrometheusService` implements `Lifecycle` trait (following Apache Camel's Service pattern, adapted to avoid tower::Service confusion).
 
 ## Route Lifecycle Management
 
