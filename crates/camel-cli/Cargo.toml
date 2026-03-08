@@ -36,3 +36,8 @@ camel-component-controlbus.workspace = true
 camel-component-container.workspace = true
 camel-component-redis.workspace = true
 camel-component-kafka.workspace = true
+
+[features]
+default = []
+cmake-build = ["camel-component-kafka/cmake-build"]
+dynamic-linking = ["camel-component-kafka/dynamic-linking"]

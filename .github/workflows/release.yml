@@ -23,22 +23,27 @@ jobs:
             target: x86_64-unknown-linux-gnu
             use-cross: false
             bin-suffix: ""
+            kafka-features: "cmake-build"
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             use-cross: true
             bin-suffix: ""
+            kafka-features: "dynamic-linking"
           - os: macos-latest
             target: x86_64-apple-darwin
             use-cross: false
             bin-suffix: ""
+            kafka-features: "cmake-build"
           - os: macos-latest
             target: aarch64-apple-darwin
             use-cross: false
             bin-suffix: ""
+            kafka-features: "cmake-build"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             use-cross: false
             bin-suffix: ".exe"
+            kafka-features: "cmake-build"
 
     steps:
       - uses: actions/checkout@v4
@@ -60,9 +65,9 @@ jobs:
       - name: Build binary
         run: |
           if [[ "${{ matrix.use-cross }}" == "true" ]]; then
-            cross build -p camel-cli --release --target ${{ matrix.target }}
+            cross build -p camel-cli --release --target ${{ matrix.target }} --features "${{ matrix.kafka-features }}"
           else
-            cargo build -p camel-cli --release --target ${{ matrix.target }}
+            cargo build -p camel-cli --release --target ${{ matrix.target }} --features "${{ matrix.kafka-features }}"
           fi
         shell: bash
 
