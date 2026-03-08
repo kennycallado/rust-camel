@@ -88,11 +88,15 @@ publish_crate "camel-component-mock" "crates/components/camel-mock"
 # Remaining core crates
 publish_crate "camel-health" "crates/camel-health"
 publish_crate "camel-dsl" "crates/camel-dsl"
-publish_crate "camel-config" "crates/camel-config" # Fixed path
 publish_crate "camel-builder" "crates/camel-builder"
 
-# OTel and Prometheus (depend on camel-builder + camel-component-timer)
+# OTel (must come before camel-config which depends on it)
 publish_crate "camel-otel" "crates/components/camel-otel"
+
+# camel-config depends on camel-otel
+publish_crate "camel-config" "crates/camel-config"
+
+# Prometheus depends on camel-builder + camel-component-timer
 publish_crate "camel-prometheus" "crates/components/camel-prometheus"
 
 # Remaining component crates
