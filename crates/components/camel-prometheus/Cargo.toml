@@ -1,0 +1,22 @@
+[package]
+name = "camel-prometheus"
+description = "Prometheus metrics integration for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-prometheus"
+
+[dependencies]
+camel-api.workspace = true
+prometheus = "0.14"
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-component-timer.workspace = true
+serde_json.workspace = true
