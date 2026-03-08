@@ -7,6 +7,16 @@ use std::sync::Arc;
 /// This trait follows Apache Camel's Service pattern but uses a different name
 /// to avoid confusion with tower::Service which is the core of rust-camel's
 /// request processing.
+///
+/// # Why `&mut self`?
+///
+/// The `start()` and `stop()` methods require `&mut self` to ensure:
+/// - **Exclusive access**: Prevents concurrent start/stop operations on the same service
+/// - **Safe state transitions**: Services can safely mutate their internal state
+/// - **No data races**: Compile-time guarantee of single-threaded access to service state
+///
+/// This design choice trades flexibility for safety - services cannot be started/stopped
+/// concurrently, which simplifies implementation and prevents race conditions.
 #[async_trait]
 pub trait Lifecycle: Send + Sync {
     /// Service name for logging
