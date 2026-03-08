@@ -1,4 +1,5 @@
 use std::net::{SocketAddr, IpAddr, Ipv4Addr};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -10,6 +11,8 @@ pub struct PrometheusService {
     addr: SocketAddr,
     metrics: Arc<PrometheusMetrics>,
     server_handle: Option<JoinHandle<()>>,
+    /// The actual bound port (set after start(), 0 before)
+    bound_port: Arc<AtomicU16>,
 }
 
 impl PrometheusService {
@@ -18,7 +21,23 @@ impl PrometheusService {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port),
             metrics: Arc::new(PrometheusMetrics::new()),
             server_handle: None,
+            bound_port: Arc::new(AtomicU16::new(0)),
         }
+    }
+    
+    /// Returns the actual port the server is listening on (after start())
+    /// 
+    /// Returns 0 if the service hasn't been started yet.
+    pub fn port(&self) -> u16 {
+        self.bound_port.load(Ordering::SeqCst)
+    }
+    
+    /// Returns a cloneable accessor for the bound port.
+    /// 
+    /// Use this when you need to read the port after the service has been
+    /// moved into a CamelContext or other container.
+    pub fn port_accessor(&self) -> Arc<AtomicU16> {
+        Arc::clone(&self.bound_port)
     }
 }
 
@@ -39,6 +58,12 @@ impl Lifecycle for PrometheusService {
         let listener = TcpListener::bind(self.addr)
             .await
             .map_err(|e| CamelError::Io(e.to_string()))?;
+        
+        // Store actual port (useful when binding to port 0)
+        let actual_port = listener.local_addr()
+            .map(|addr| addr.port())
+            .map_err(|e| CamelError::Io(e.to_string()))?;
+        self.bound_port.store(actual_port, Ordering::SeqCst);
         
         let metrics = Arc::clone(&self.metrics);
         
