@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
@@ -259,9 +259,28 @@ impl CamelContext {
         info!("Starting CamelContext");
 
         // Start lifecycle services first
+        let mut started_count = 0;
         for service in &mut self.services {
             info!("Starting service: {}", service.name());
-            service.start().await?;
+            if let Err(e) = service.start().await {
+                // Rollback: stop already started services in reverse order
+                warn!(
+                    "Service {} failed to start, rolling back {} services",
+                    service.name(),
+                    started_count
+                );
+                for i in (0..started_count).rev() {
+                    if let Err(rollback_err) = self.services[i].stop().await {
+                        warn!(
+                            "Failed to stop service {} during rollback: {}",
+                            self.services[i].name(),
+                            rollback_err
+                        );
+                    }
+                }
+                return Err(e);
+            }
+            started_count += 1;
         }
 
         // Then start routes
@@ -294,13 +313,25 @@ impl CamelContext {
         self.route_controller.lock().await.stop_all_routes().await?;
 
         // Then stop lifecycle services
+        // Continue stopping all services even if some fail
+        let mut first_error = None;
         for service in &mut self.services {
             info!("Stopping service: {}", service.name());
-            service.stop().await?;
+            if let Err(e) = service.stop().await {
+                warn!("Service {} failed to stop: {}", service.name(), e);
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
         }
 
         info!("CamelContext stopped");
-        Ok(())
+
+        if let Some(e) = first_error {
+            Err(e)
+        } else {
+            Ok(())
+        }
     }
 
     /// Get the graceful shutdown timeout used by [`stop()`](Self::stop).
@@ -599,5 +630,79 @@ mod lifecycle_tests {
         ctx.stop().await.unwrap();
 
         assert_eq!(stop_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_service_start_failure_rollback() {
+        struct FailingService {
+            start_count: Arc<AtomicUsize>,
+            stop_count: Arc<AtomicUsize>,
+            should_fail: bool,
+        }
+
+        #[async_trait]
+        impl Lifecycle for FailingService {
+            fn name(&self) -> &str {
+                "failing"
+            }
+
+            async fn start(&mut self) -> Result<(), CamelError> {
+                self.start_count.fetch_add(1, Ordering::SeqCst);
+                if self.should_fail {
+                    Err(CamelError::ProcessorError("intentional failure".into()))
+                } else {
+                    Ok(())
+                }
+            }
+
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                self.stop_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let start1 = Arc::new(AtomicUsize::new(0));
+        let stop1 = Arc::new(AtomicUsize::new(0));
+        let start2 = Arc::new(AtomicUsize::new(0));
+        let stop2 = Arc::new(AtomicUsize::new(0));
+        let start3 = Arc::new(AtomicUsize::new(0));
+        let stop3 = Arc::new(AtomicUsize::new(0));
+
+        let service1 = FailingService {
+            start_count: start1.clone(),
+            stop_count: stop1.clone(),
+            should_fail: false,
+        };
+        let service2 = FailingService {
+            start_count: start2.clone(),
+            stop_count: stop2.clone(),
+            should_fail: true, // This one will fail
+        };
+        let service3 = FailingService {
+            start_count: start3.clone(),
+            stop_count: stop3.clone(),
+            should_fail: false,
+        };
+
+        let mut ctx = CamelContext::new()
+            .with_lifecycle(service1)
+            .with_lifecycle(service2)
+            .with_lifecycle(service3);
+
+        // Attempt to start - should fail
+        let result = ctx.start().await;
+        assert!(result.is_err());
+
+        // Verify service1 was started and then stopped (rollback)
+        assert_eq!(start1.load(Ordering::SeqCst), 1);
+        assert_eq!(stop1.load(Ordering::SeqCst), 1);
+
+        // Verify service2 was attempted to start but failed
+        assert_eq!(start2.load(Ordering::SeqCst), 1);
+        assert_eq!(stop2.load(Ordering::SeqCst), 0);
+
+        // Verify service3 was never started
+        assert_eq!(start3.load(Ordering::SeqCst), 0);
+        assert_eq!(stop3.load(Ordering::SeqCst), 0);
     }
 }
