@@ -730,6 +730,7 @@ dependencies = [
  "camel-component-timer",
  "camel-core",
  "prometheus",
+ "reqwest",
  "serde_json",
  "tokio",
  "tracing",
