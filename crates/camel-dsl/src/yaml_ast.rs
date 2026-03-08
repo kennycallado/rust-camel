@@ -30,11 +30,11 @@ pub struct YamlErrorHandler {
     #[serde(default)]
     pub dead_letter_channel: Option<String>,
     #[serde(default)]
-    pub retry: Option<YamlRetryPolicy>,
+    pub retry: Option<YamlRedeliveryPolicy>,
 }
 
 #[derive(Deserialize)]
-pub struct YamlRetryPolicy {
+pub struct YamlRedeliveryPolicy {
     pub max_attempts: u32,
     #[serde(default = "default_initial_delay_ms")]
     pub initial_delay_ms: u64,
@@ -42,6 +42,8 @@ pub struct YamlRetryPolicy {
     pub multiplier: f64,
     #[serde(default = "default_max_delay_ms")]
     pub max_delay_ms: u64,
+    #[serde(default = "default_jitter_factor")]
+    pub jitter_factor: f64,
     #[serde(default)]
     pub handled_by: Option<String>,
 }
@@ -72,6 +74,10 @@ fn default_multiplier() -> f64 {
 
 fn default_max_delay_ms() -> u64 {
     10_000
+}
+
+fn default_jitter_factor() -> f64 {
+    0.0
 }
 
 fn default_failure_threshold() -> u32 {

@@ -125,6 +125,13 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | OTel: HTTP Consumer conectar contexto entrante al CamelContext       | OTel postmortem                        | Media — el consumer extrae `otel_context` del request pero no lo propaga a las rutas internas que procesan esa request             |        |
 | OTel: Tests `#[ignore]` refactorizar con `serial_test`              | OTel postmortem                        | Baja — `test_start_stop_lifecycle` y `test_double_start_guard` ignorados por estado global; consistente con cómo `camel-test` lo resolvió |        |
 | OTel: `TracingProcessor` performance benchmarks                      | OTel postmortem                        | Baja — medir overhead noop provider vs real provider en `compose_traced_pipeline`                                                  |        |
+| RedeliveryPolicy: delay patterns (`1:1000;5:5000`)                   | RedeliveryPolicy design v2             | Baja — rango de delays por intento                                                                                                   |        |
+| RedeliveryPolicy: `onRedelivery` hook                                | RedeliveryPolicy design v2             | Baja — processor antes de cada retry                                                                                                 |        |
+| RedeliveryPolicy: `onPrepareFailure` hook                            | RedeliveryPolicy design v2             | Baja — processor antes de DLC                                                                                                        |        |
+| RedeliveryPolicy: `onExceptionOccurred` hook                         | RedeliveryPolicy design v2             | Baja — processor al fallar                                                                                                           |        |
+| RedeliveryPolicy: `useOriginalMessage`                               | RedeliveryPolicy design v2             | Baja — preservar mensaje original                                                                                                    |        |
+| RedeliveryPolicy: log levels configurables                           | RedeliveryPolicy design v2             | Baja — retriesExhaustedLogLevel, retryAttemptedLogLevel                                                                              |        |
+| RedeliveryPolicy: Camel.toml integration                             | RedeliveryPolicy design v2             | Baja — configuración global desde camel-config                                                                                       |        |
 
 ## Log EIP — Behavior Change
 

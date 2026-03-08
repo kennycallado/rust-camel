@@ -138,6 +138,7 @@ notify = { version = "6", features = ["macos_fsevent"] }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["kafka"] }
 prometheus = "0.14"
+rand = "0.8"
 
 # OpenTelemetry dependencies
 opentelemetry = { version = "0.31", features = ["trace", "logs", "metrics"] }

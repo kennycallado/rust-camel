@@ -5,8 +5,8 @@ use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::{
-    AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
-    split_body_lines,
+    split_body_json_array, split_body_lines, AggregationStrategy as SplitAggregation,
+    SplitterConfig,
 };
 use camel_api::{CamelError, CircuitBreakerConfig, IdentityProcessor};
 use camel_component::ConcurrencyModel;
@@ -65,6 +65,9 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
             retry.multiplier,
             Duration::from_millis(retry.max_delay_ms),
         );
+        if retry.jitter_factor > 0.0 {
+            builder = builder.with_jitter(retry.jitter_factor);
+        }
         if let Some(uri) = retry.handled_by {
             builder = builder.handled_by(uri);
         }

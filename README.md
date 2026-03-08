@@ -249,6 +249,63 @@ RouteBuilder::from("timer:monitor")
 
 See `examples/lazy-route` for a complete example.
 
+## Error Handling
+
+rust-camel provides sophisticated error handling with retry policies and dead letter channels.
+
+### RedeliveryPolicy with Jitter
+
+Configure retry behavior with exponential backoff and jitter:
+
+```rust
+use camel_api::error_handler::{ErrorHandlerConfig, RedeliveryPolicy};
+use std::time::Duration;
+
+let error_handler = ErrorHandlerConfig::dead_letter_channel("log:errors")
+    .on_exception(|e| matches!(e, CamelError::Io(_)))
+    .retry(3)  // Max 3 retry attempts
+    .with_backoff(
+        Duration::from_millis(100),  // Initial delay: 100ms
+        2.0,                          // Multiplier: 2x
+        Duration::from_secs(10)      // Max delay: 10s
+    )
+    .with_jitter(0.2)  // ±20% randomization (recommended: 0.1-0.3)
+    .build();
+```
+
+**Jitter Benefits:**
+- Prevents thundering herd in distributed systems
+- Recommended values: 0.1-0.3 (10-30%)
+- Adds randomization: `delay ± (delay * jitter_factor)`
+
+### Camel-Compatible Headers
+
+During retries, these headers are automatically set:
+
+- `CamelRedelivered` - `true` when exchange is being retried
+- `CamelRedeliveryCounter` - Current retry attempt (1-indexed)
+- `CamelRedeliveryMaxCounter` - Maximum retry attempts
+
+### YAML Configuration
+
+```yaml
+routes:
+  - id: "retry-example"
+    from: "timer:tick"
+    error_handler:
+      dead_letter_uri: "log:dlc"
+      retry:
+        max_attempts: 3
+        initial_delay_ms: 100
+        multiplier: 2.0
+        max_delay_ms: 10000
+        jitter_factor: 0.2
+    steps:
+      - to: "direct:processor"
+```
+
+See `examples/error-handling` for complete examples.
+
 ## Configuration
 
 rust-camel supports external configuration via `Camel.toml` files using the `camel-config` crate:

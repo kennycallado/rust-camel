@@ -4,8 +4,8 @@ use std::task::{Context, Poll};
 
 use tower::{Layer, Service, ServiceExt};
 
-use camel_api::error_handler::ExceptionPolicy;
-use camel_api::{BoxProcessor, CamelError, Exchange};
+use camel_api::error_handler::{ExceptionPolicy, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER};
+use camel_api::{BoxProcessor, CamelError, Exchange, Value};
 
 /// Tower Layer that wraps a pipeline with error handling behaviour.
 ///
@@ -138,12 +138,22 @@ where
                     for attempt in 0..backoff.max_attempts {
                         let delay = backoff.delay_for(attempt);
                         tokio::time::sleep(delay).await;
-                        match inner.ready().await?.call(original.clone()).await {
+
+                        // Set redelivery headers
+                        let mut ex = original.clone();
+                        ex.input.set_header(HEADER_REDELIVERED, Value::Bool(true));
+                        ex.input.set_header(HEADER_REDELIVERY_COUNTER, Value::Number((attempt + 1).into()));
+                        ex.input.set_header(HEADER_REDELIVERY_MAX_COUNTER, Value::Number(backoff.max_attempts.into()));
+
+                        match inner.ready().await?.call(ex).await {
                             Ok(ex) => return Ok(ex),
                             Err(_e) => {
                                 if attempt + 1 == backoff.max_attempts {
                                     // Retries exhausted — send to handler.
                                     let mut ex = original.clone();
+                                    ex.input.set_header(HEADER_REDELIVERED, Value::Bool(true));
+                                    ex.input.set_header(HEADER_REDELIVERY_COUNTER, Value::Number(backoff.max_attempts.into()));
+                                    ex.input.set_header(HEADER_REDELIVERY_MAX_COUNTER, Value::Number(backoff.max_attempts.into()));
                                     ex.set_error(_e);
                                     let handler = policy_producer.or(dlc);
                                     return send_to_handler(ex, handler).await;
@@ -200,8 +210,8 @@ async fn send_to_handler(
 mod tests {
     use super::*;
     use camel_api::{
-        BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message,
-        error_handler::ExponentialBackoff,
+        BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message, Value,
+        error_handler::RedeliveryPolicy,
     };
     use std::sync::{
         Arc,
@@ -272,11 +282,12 @@ mod tests {
         let inner = fail_n_times(2);
         let policy = ExceptionPolicy {
             matches: Arc::new(|_| true),
-            retry: Some(ExponentialBackoff {
+            retry: Some(RedeliveryPolicy {
                 max_attempts: 3,
                 initial_delay: Duration::from_millis(1),
                 multiplier: 1.0,
                 max_delay: Duration::from_millis(10),
+                jitter_factor: 0.0,
             }),
             handled_by: None,
         };
@@ -300,11 +311,12 @@ mod tests {
         });
         let policy = ExceptionPolicy {
             matches: Arc::new(|_| true),
-            retry: Some(ExponentialBackoff {
+            retry: Some(RedeliveryPolicy {
                 max_attempts: 2,
                 initial_delay: Duration::from_millis(1),
                 multiplier: 1.0,
                 max_delay: Duration::from_millis(10),
+                jitter_factor: 0.0,
             }),
             handled_by: None,
         };
@@ -379,6 +391,87 @@ mod tests {
         let result = svc.oneshot(make_exchange()).await;
         assert!(result.is_ok());
         assert_eq!(*received.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_redelivery_headers_are_set() {
+        use camel_api::error_handler::{RedeliveryPolicy, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER};
+
+        let inner = fail_n_times(10);
+        let received = Arc::new(std::sync::Mutex::new(None));
+        let received_clone = Arc::clone(&received);
+        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+            let r = Arc::clone(&received_clone);
+            Box::pin(async move {
+                *r.lock().unwrap() = Some(ex.clone());
+                Ok(ex)
+            })
+        });
+
+        let policy = ExceptionPolicy {
+            matches: Arc::new(|_| true),
+            retry: Some(RedeliveryPolicy {
+                max_attempts: 2,
+                initial_delay: Duration::from_millis(1),
+                multiplier: 1.0,
+                max_delay: Duration::from_millis(10),
+                jitter_factor: 0.0,
+            }),
+            handled_by: None,
+        };
+
+        let svc = ErrorHandlerService::new(inner, Some(dlc), vec![(policy, None)]);
+        let _ = svc.oneshot(make_exchange()).await.unwrap();
+
+        let ex = received.lock().unwrap().take().unwrap();
+        assert_eq!(ex.input.header(HEADER_REDELIVERED), Some(&Value::Bool(true)));
+        assert_eq!(ex.input.header(HEADER_REDELIVERY_COUNTER), Some(&Value::Number(2.into())));
+        assert_eq!(ex.input.header(HEADER_REDELIVERY_MAX_COUNTER), Some(&Value::Number(2.into())));
+    }
+
+    #[tokio::test]
+    async fn test_jitter_produces_varying_delays_in_retry_flow() {
+        use std::time::Instant;
+
+        let inner = fail_n_times(10);
+        let received = Arc::new(std::sync::Mutex::new(None));
+        let received_clone = Arc::clone(&received);
+        let dlc = BoxProcessor::from_fn(move |ex: Exchange| {
+            let r = Arc::clone(&received_clone);
+            Box::pin(async move {
+                *r.lock().unwrap() = Some(ex.clone());
+                Ok(ex)
+            })
+        });
+
+        let policy = ExceptionPolicy {
+            matches: Arc::new(|_| true),
+            retry: Some(RedeliveryPolicy {
+                max_attempts: 5,
+                initial_delay: Duration::from_millis(20),
+                multiplier: 1.0,
+                max_delay: Duration::from_millis(100),
+                jitter_factor: 0.5,
+            }),
+            handled_by: None,
+        };
+
+        let start = Instant::now();
+        let svc = ErrorHandlerService::new(inner, Some(dlc), vec![(policy, None)]);
+        let _ = svc.oneshot(make_exchange()).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(received.lock().unwrap().is_some(), "DLC should have received exchange");
+
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "5 retries with 20ms base delay should take at least 50ms (with jitter low bound)"
+        );
+
+        assert!(
+            elapsed <= Duration::from_millis(500),
+            "5 retries with 20ms base delay + 50% jitter should not exceed 500ms"
+        );
     }
 
     // Stopped is a control-flow sentinel, not a real error.

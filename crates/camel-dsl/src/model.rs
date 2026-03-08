@@ -13,18 +13,19 @@ pub struct DeclarativeCircuitBreaker {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct DeclarativeRetryPolicy {
+pub struct DeclarativeRedeliveryPolicy {
     pub max_attempts: u32,
     pub initial_delay_ms: u64,
     pub multiplier: f64,
     pub max_delay_ms: u64,
+    pub jitter_factor: f64,
     pub handled_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclarativeErrorHandler {
     pub dead_letter_channel: Option<String>,
-    pub retry: Option<DeclarativeRetryPolicy>,
+    pub retry: Option<DeclarativeRedeliveryPolicy>,
 }
 
 #[derive(Debug, Clone)]

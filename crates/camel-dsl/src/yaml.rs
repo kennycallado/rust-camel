@@ -6,10 +6,10 @@ use camel_api::CamelError;
 use camel_core::route::RouteDefinition;
 
 use crate::compile::compile_declarative_route;
-use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
+use crate::contract::{assert_contract_coverage, DeclarativeStepKind};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
-    DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRetryPolicy, DeclarativeRoute,
+    DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRedeliveryPolicy, DeclarativeRoute,
     DeclarativeStep, LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef,
     MulticastStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
     SplitExpressionDef, SplitStepDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
@@ -83,11 +83,12 @@ fn yaml_route_to_declarative_route(route: YamlRoute) -> Result<DeclarativeRoute,
 
     let error_handler = route.error_handler.map(|eh| DeclarativeErrorHandler {
         dead_letter_channel: eh.dead_letter_channel,
-        retry: eh.retry.map(|retry| DeclarativeRetryPolicy {
+        retry: eh.retry.map(|retry| DeclarativeRedeliveryPolicy {
             max_attempts: retry.max_attempts,
             initial_delay_ms: retry.initial_delay_ms,
             multiplier: retry.multiplier,
             max_delay_ms: retry.max_delay_ms,
+            jitter_factor: retry.jitter_factor,
             handled_by: retry.handled_by,
         }),
     });

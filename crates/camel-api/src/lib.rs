@@ -27,8 +27,12 @@ pub use circuit_breaker::CircuitBreakerConfig;
 pub use declarative::{LanguageExpressionDef, ValueSourceDef};
 pub use error::CamelError;
 pub use error_handler::{
-    ErrorHandlerConfig, ExceptionPolicy, ExceptionPolicyBuilder, ExponentialBackoff,
+    ErrorHandlerConfig, ExceptionPolicy, ExceptionPolicyBuilder, RedeliveryPolicy,
+    HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER,
 };
+// Backwards compatibility re-export (deprecated)
+#[allow(deprecated)]
+pub use error_handler::ExponentialBackoff;
 pub use exchange::{Exchange, ExchangePattern};
 pub use filter::FilterPredicate;
 pub use health::{HealthReport, ServiceHealth};
