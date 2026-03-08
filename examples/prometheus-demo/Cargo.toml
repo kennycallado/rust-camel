@@ -1,0 +1,19 @@
+[package]
+name = "prometheus-demo"
+description = "Prometheus metrics integration example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+camel-prometheus = { path = "../../crates/components/camel-prometheus" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+rand = "0.8"

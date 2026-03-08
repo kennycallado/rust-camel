@@ -60,6 +60,7 @@ members = [
     "examples/tracer-demo",
     "examples/convert-body-to",
     "examples/bean-demo",
+    "examples/prometheus-demo",
     "crates/components/camel-container",
     "crates/components/camel-prometheus",
 ]
