@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
+use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::PrometheusMetrics;
@@ -35,6 +36,29 @@ impl MetricsServer {
             .unwrap_or_else(|e| panic!("Failed to bind to {}: {}", addr, e));
 
         info!("Prometheus metrics server listening on {}", addr);
+
+        axum::serve(listener, app)
+            .await
+            .expect("Failed to start metrics server");
+    }
+
+    /// Starts the metrics server with an existing listener
+    ///
+    /// This function runs indefinitely until the server is stopped.
+    /// Use this when you need to bind the listener before spawning the server task.
+    ///
+    /// # Arguments
+    /// * `listener` - A bound TCP listener
+    /// * `metrics` - The PrometheusMetrics instance to expose
+    ///
+    /// # Panics
+    /// Panics if the server fails to start.
+    pub async fn run_with_listener(listener: TcpListener, metrics: Arc<PrometheusMetrics>) {
+        let app = Router::new()
+            .route("/metrics", get(metrics_handler_axum))
+            .with_state(metrics);
+
+        info!("Prometheus metrics server listening on {:?}", listener.local_addr());
 
         axum::serve(listener, app)
             .await

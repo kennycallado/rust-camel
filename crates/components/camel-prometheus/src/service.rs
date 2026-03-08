@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -15,7 +15,7 @@ pub struct PrometheusService {
 impl PrometheusService {
     pub fn new(port: u16) -> Self {
         Self {
-            addr: format!("0.0.0.0:{}", port).parse().unwrap(),
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port),
             metrics: Arc::new(PrometheusMetrics::new()),
             server_handle: None,
         }
@@ -33,11 +33,17 @@ impl Lifecycle for PrometheusService {
     }
     
     async fn start(&mut self) -> Result<(), CamelError> {
-        let addr = self.addr;
+        use tokio::net::TcpListener;
+        
+        // Bind listener BEFORE spawning to detect errors early
+        let listener = TcpListener::bind(self.addr)
+            .await
+            .map_err(|e| CamelError::Io(e.to_string()))?;
+        
         let metrics = Arc::clone(&self.metrics);
         
         let handle = tokio::spawn(async move {
-            crate::MetricsServer::run(addr, metrics).await;
+            crate::MetricsServer::run_with_listener(listener, metrics).await;
         });
         
         self.server_handle = Some(handle);
