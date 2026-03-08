@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use camel_api::{Body, CamelError, Exchange, Message};
 use camel_component::{ConcurrencyModel, Consumer, ConsumerContext};
+use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{Consumer as RdConsumer, StreamConsumer};
+use rdkafka::consumer::{Consumer as RdConsumer, ConsumerContext as RdConsumerContext, Rebalance, StreamConsumer};
 // Import rdkafka::Message trait to bring .topic(), .key(), .payload(), etc. into scope.
 // The alias `_` prevents a name conflict with camel_api::Message.
 use rdkafka::message::Message as _;
@@ -13,6 +14,31 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+// ---------------------------------------------------------------------------
+// ReadyContext — notifies when the consumer gets its first partition assignment
+// ---------------------------------------------------------------------------
+
+/// A custom rdkafka context that fires an `Arc<Notify>` when the consumer
+/// receives its first partition assignment via the rebalance callback.
+/// This avoids polling `assignment()` in a tight loop (which itself requires
+/// `recv()` to drive the rebalance protocol — a deadlock).
+struct ReadyContext {
+    ready: Arc<Notify>,
+}
+
+impl ClientContext for ReadyContext {}
+
+impl RdConsumerContext for ReadyContext {
+    fn post_rebalance(&self, rebalance: &Rebalance<'_>) {
+        if matches!(rebalance, Rebalance::Assign(_)) {
+            // Partitions were assigned — signal any waiters.
+            self.ready.notify_waiters();
+        }
+    }
+}
+
+type ReadyStreamConsumer = StreamConsumer<ReadyContext>;
 
 use crate::config::KafkaConfig;
 
@@ -158,15 +184,16 @@ async fn run_consumer_loop(
 ) -> Result<(), CamelError> {
     use rdkafka::consumer::CommitMode;
 
-    let consumer: StreamConsumer = ClientConfig::new()
+    let consumer: ReadyStreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", &config.brokers)
         .set("group.id", &config.group_id)
         .set("auto.offset.reset", &config.auto_offset_reset)
         .set("session.timeout.ms", config.session_timeout_ms.to_string())
         .set("enable.auto.commit", "false")
         .set("fetch.wait.max.ms", config.poll_timeout_ms.to_string())
-        .set("max.poll.records", config.max_poll_records.to_string())
-        .create()
+        // Note: max.poll.records is a Java Kafka client concept; librdkafka uses
+        // queued.max.messages.kbytes / max.partition.fetch.bytes instead.
+        .create_with_context(ReadyContext { ready })
         .map_err(|e| {
             CamelError::ProcessorError(format!("Failed to create Kafka consumer: {}", e))
         })?;
@@ -180,26 +207,9 @@ async fn run_consumer_loop(
 
     info!(topic = %config.topic, "Kafka consumer subscribed");
 
-    // Poll assignment in background until partitions are assigned, then notify.
-    // This allows callers holding a `ready` handle to wait without arbitrary sleeps.
-    {
-        let consumer_ref = &consumer;
-        let ready_ref = ready.clone();
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
-        loop {
-            interval.tick().await;
-            if cancel_token.is_cancelled() {
-                return Ok(());
-            }
-            match consumer_ref.assignment() {
-                Ok(tpl) if tpl.count() > 0 => {
-                    ready_ref.notify_waiters();
-                    break;
-                }
-                _ => {}
-            }
-        }
-    }
+    // The ReadyContext::post_rebalance callback fires `ready.notify_waiters()`
+    // when partitions are assigned. No polling loop needed — recv() drives the
+    // rebalance protocol automatically.
 
     loop {
         tokio::select! {

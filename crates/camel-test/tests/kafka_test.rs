@@ -53,9 +53,7 @@ async fn test_kafka_producer_sends_without_error() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(camel_api::Value::String("hello-kafka".to_string()))
-        .to(&format!(
-            "kafka:test-produce?brokers={brokers}&acks=all"
-        ))
+        .to(&format!("kafka:test-produce?brokers={brokers}&acks=all"))
         .to("mock:result")
         .route_id("kafka-producer-test")
         .build()
@@ -104,8 +102,9 @@ async fn test_kafka_consumer_receives_message() {
     .unwrap();
 
     // Producer route: timer (once) → set_body → kafka:test-consume
-    // Delay=3s gives the consumer time to join the group and get partition assignment
-    let producer_route = RouteBuilder::from("timer:produce?period=3000&repeatCount=1")
+    // delay=5000 gives the consumer time to join the group and get partition assignment
+    // before the first message is sent (the timer's 'delay' param controls the initial wait).
+    let producer_route = RouteBuilder::from("timer:produce?period=3000&delay=5000&repeatCount=1")
         .set_body(camel_api::Value::String("round-trip-payload".to_string()))
         .to(&format!("kafka:test-consume?brokers={brokers}&acks=all"))
         .route_id("kafka-producer-for-consumer-test")
@@ -116,9 +115,9 @@ async fn test_kafka_consumer_receives_message() {
     ctx.add_route_definition(producer_route).unwrap();
     ctx.start().await.unwrap();
 
-    // Give consumer time to assign partitions, then producer fires,
-    // then consumer receives. 10s total budget.
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    // Give consumer time to assign partitions (5s delay before producer fires),
+    // then consumer receives. 15s total budget is comfortable.
+    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
     ctx.stop().await.unwrap();
 
     let endpoint = mock.get_endpoint("consumed").unwrap();
@@ -151,18 +150,19 @@ async fn test_kafka_consumer_sets_headers() {
     .build()
     .unwrap();
 
-    let producer_route = RouteBuilder::from("timer:hdr-produce?period=3000&repeatCount=1")
-        .set_body(camel_api::Value::String("header-check".to_string()))
-        .to(&format!("kafka:test-headers?brokers={brokers}&acks=all"))
-        .route_id("kafka-headers-producer")
-        .build()
-        .unwrap();
+    let producer_route =
+        RouteBuilder::from("timer:hdr-produce?period=3000&delay=5000&repeatCount=1")
+            .set_body(camel_api::Value::String("header-check".to_string()))
+            .to(&format!("kafka:test-headers?brokers={brokers}&acks=all"))
+            .route_id("kafka-headers-producer")
+            .build()
+            .unwrap();
 
     ctx.add_route_definition(consumer_route).unwrap();
     ctx.add_route_definition(producer_route).unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
     ctx.stop().await.unwrap();
 
     let endpoint = mock.get_endpoint("headers").unwrap();

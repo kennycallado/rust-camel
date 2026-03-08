@@ -4,11 +4,12 @@
 //!   - Route 1 (Producer): timer → set_body → to(kafka:TOPIC)
 //!   - Route 2 (Consumer): from(kafka:TOPIC) → log
 //!
-//! Prerequisites:
-//!   docker run -p 9092:9092 apache/kafka:latest
+//! A Kafka broker is started automatically via testcontainers (requires Docker).
+//! No external infrastructure needed — just run:
 //!
-//! Run:
-//!   KAFKA_BROKERS=localhost:9092 cargo run -p kafka-example
+//!   cargo run -p kafka-example
+//!
+//! Press Ctrl+C to stop.
 
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
@@ -16,6 +17,8 @@ use camel_component_kafka::KafkaComponent;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::kafka::apache;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
@@ -26,7 +29,19 @@ async fn main() -> Result<(), CamelError> {
 
     const TOPIC: &str = "orders";
 
-    let brokers = std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".to_string());
+    // Start a Kafka broker in Docker (KRaft mode, no Zookeeper).
+    // The container is kept alive for the duration of main() via _container.
+    println!("Starting Kafka broker via testcontainers (requires Docker)...");
+    let _container = apache::Kafka::default()
+        .start()
+        .await
+        .expect("Failed to start Kafka container — is Docker running?");
+    let port = _container
+        .get_host_port_ipv4(apache::KAFKA_PORT)
+        .await
+        .expect("Failed to get Kafka port");
+    let brokers = format!("127.0.0.1:{port}");
+    println!("Kafka broker available at {brokers}");
 
     let mut ctx = CamelContext::new();
     ctx.register_component(TimerComponent::new());
@@ -59,9 +74,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(producer_route)?;
     ctx.add_route_definition(consumer_route)?;
 
-    println!("Starting Kafka example...");
-    println!("Prerequisites: docker run -p 9092:9092 apache/kafka:latest");
-    println!("Press Ctrl+C to stop.");
+    println!("Starting Kafka example... Press Ctrl+C to stop.");
 
     ctx.start().await?;
 

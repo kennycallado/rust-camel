@@ -1993,6 +1993,8 @@ dependencies = [
  "camel-component-log",
  "camel-component-timer",
  "camel-core",
+ "testcontainers",
+ "testcontainers-modules",
  "tokio",
  "tracing-subscriber",
 ]
