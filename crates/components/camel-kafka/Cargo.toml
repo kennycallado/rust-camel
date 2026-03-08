@@ -16,7 +16,7 @@ camel-api       = { workspace = true }
 camel-component = { workspace = true }
 camel-endpoint  = { workspace = true }
 camel-otel      = { workspace = true, optional = true }
-rdkafka         = { version = "0.36", features = ["tokio"] }
+rdkafka         = { version = "0.36", features = ["tokio", "cmake-build"] }
 tokio           = { workspace = true }
 async-trait     = { workspace = true }
 tower           = { workspace = true }
