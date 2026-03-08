@@ -1,0 +1,28 @@
+[package]
+name = "camel-otel"
+description = "OpenTelemetry integration for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-otel"
+
+[dependencies]
+camel-api.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry-semantic-conventions.workspace = true
+opentelemetry-appender-tracing.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+camel-core.workspace = true
+camel-builder.workspace = true
+tokio = { workspace = true }
+opentelemetry_sdk = { version = "0.31", features = ["testing"] }
+tower = { workspace = true }

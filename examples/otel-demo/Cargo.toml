@@ -1,0 +1,18 @@
+[package]
+name = "otel-demo"
+description = "OpenTelemetry integration demo for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-otel = { path = "../../crates/components/camel-otel" }
+camel-component-http = { workspace = true, features = ["otel"] }
+camel-component-log.workspace = true
+camel-component-timer.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

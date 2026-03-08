@@ -9,6 +9,8 @@ use rdkafka::consumer::{
 // Import rdkafka::Message trait to bring .topic(), .key(), .payload(), etc. into scope.
 // The alias `_` prevents a name conflict with camel_api::Message.
 use rdkafka::message::Message as _;
+#[cfg(feature = "otel")]
+use rdkafka::message::Headers as _;
 use rdkafka::message::OwnedMessage;
 use serde_json::Value;
 use std::sync::Arc;
@@ -174,6 +176,23 @@ pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
             "offset": msg.offset(),
         }),
     );
+
+    // Extract W3C TraceContext headers for distributed tracing (otel feature only)
+    #[cfg(feature = "otel")]
+    {
+        let mut headers_map = std::collections::HashMap::new();
+        if let Some(headers) = msg.headers() {
+            for i in 0..headers.count() {
+                let header = headers.get(i);
+                if let Some(value_bytes) = header.value {
+                    if let Ok(v) = std::str::from_utf8(value_bytes) {
+                        headers_map.insert(header.key.to_string(), v.to_string());
+                    }
+                }
+            }
+        }
+        camel_otel::extract_into_exchange(&mut exchange, &headers_map);
+    }
 
     exchange
 }
@@ -543,5 +562,145 @@ mod tests {
         cancel_token.cancel();
         let result = consumer.stop().await;
         assert!(result.is_ok());
+    }
+
+    // ---------------------------------------------------------------------------
+    // OTel propagation tests (only compiled with 'otel' feature)
+    // ---------------------------------------------------------------------------
+
+    #[cfg(feature = "otel")]
+    mod otel_tests {
+        use super::*;
+        use camel_api::message::Message;
+        use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
+        use opentelemetry::Context;
+        use rdkafka::message::{Header, OwnedHeaders};
+        use std::collections::HashMap;
+
+        fn make_traceparent(trace_id_hex: &str, span_id_hex: &str, sampled: bool) -> String {
+            let flags = if sampled { "01" } else { "00" };
+            format!("00-{}-{}-{}", trace_id_hex, span_id_hex, flags)
+        }
+
+        #[test]
+        fn test_inject_from_exchange_produces_traceparent() {
+            // Create an exchange with a valid span context
+            let mut exchange = Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+            
+            let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap();
+            let span_id = SpanId::from_hex("00f067aa0ba902b7").unwrap();
+            let span_context = SpanContext::new(
+                trace_id,
+                span_id,
+                TraceFlags::SAMPLED,
+                true,
+                TraceState::default(),
+            );
+            exchange.otel_context = Context::new().with_remote_span_context(span_context);
+
+            // Inject into a HashMap (simulating what producer does)
+            let mut headers_map = HashMap::new();
+            camel_otel::inject_from_exchange(&exchange, &mut headers_map);
+
+            // Verify traceparent is present
+            assert!(
+                headers_map.contains_key("traceparent"),
+                "Headers should contain traceparent after injection"
+            );
+
+            let traceparent = headers_map.get("traceparent").unwrap();
+            assert!(traceparent.starts_with("00-"), "traceparent should start with version 00");
+        }
+
+        #[test]
+        fn test_extract_into_exchange_populates_otel_context() {
+            // Create a headers HashMap with traceparent
+            let mut headers_map = HashMap::new();
+            let traceparent = make_traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", true);
+            headers_map.insert("traceparent".to_string(), traceparent);
+
+            // Create an exchange and extract context
+            let mut exchange = Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+            
+            // Verify initial context is invalid
+            assert!(
+                !exchange.otel_context.span().span_context().is_valid(),
+                "Exchange should start with invalid span context"
+            );
+
+            // Extract context from headers
+            camel_otel::extract_into_exchange(&mut exchange, &headers_map);
+
+            // Verify context is now valid
+            assert!(
+                exchange.otel_context.span().span_context().is_valid(),
+                "Exchange should have valid span context after extraction"
+            );
+        }
+
+        #[test]
+        fn test_kafka_headers_roundtrip() {
+            // Simulate the full flow: inject into HashMap -> convert to Kafka headers -> extract back
+            
+            // Step 1: Create exchange with span context
+            let mut exchange = Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+            let trace_id = TraceId::from_hex("12345678901234567890123456789012").unwrap();
+            let span_id = SpanId::from_hex("1234567890123456").unwrap();
+            let span_context = SpanContext::new(
+                trace_id,
+                span_id,
+                TraceFlags::SAMPLED,
+                true,
+                TraceState::default(),
+            );
+            exchange.otel_context = Context::new().with_remote_span_context(span_context);
+
+            // Step 2: Inject into HashMap (producer logic)
+            let mut headers_map = HashMap::new();
+            camel_otel::inject_from_exchange(&exchange, &mut headers_map);
+
+            // Step 3: Convert to Kafka OwnedHeaders (producer logic)
+            let mut kafka_headers = OwnedHeaders::new();
+            for (key, value) in &headers_map {
+                kafka_headers = kafka_headers.insert(Header {
+                    key,
+                    value: Some(value.as_bytes()),
+                });
+            }
+
+            // Step 4: Extract back from Kafka headers to HashMap (consumer logic)
+            let mut extracted_map = HashMap::new();
+            for i in 0..kafka_headers.count() {
+                let header = kafka_headers.get(i);
+                if let Some(value_bytes) = header.value {
+                    if let Ok(v) = std::str::from_utf8(value_bytes) {
+                        extracted_map.insert(header.key.to_string(), v.to_string());
+                    }
+                }
+            }
+
+            // Step 5: Extract into new exchange (consumer logic)
+            let mut new_exchange = Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+            camel_otel::extract_into_exchange(&mut new_exchange, &extracted_map);
+
+            // Step 6: Verify the span context was preserved
+            // Note: span() returns a SpanRef that borrows from context, so we need to bind it
+            let original_span = exchange.otel_context.span();
+            let original_sc = original_span.span_context();
+            let extracted_span = new_exchange.otel_context.span();
+            let extracted_sc = extracted_span.span_context();
+            
+            assert!(extracted_sc.is_valid(), "Extracted span context should be valid");
+            assert_eq!(
+                original_sc.trace_id(),
+                extracted_sc.trace_id(),
+                "Trace ID should be preserved"
+            );
+            assert_eq!(
+                original_sc.span_id(),
+                extracted_sc.span_id(),
+                "Span ID should be preserved"
+            );
+        }
     }
 }

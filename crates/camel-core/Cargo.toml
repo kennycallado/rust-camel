@@ -32,6 +32,7 @@ serde = { workspace = true }
 chrono = { workspace = true }
 tracing-subscriber = { workspace = true }
 notify.workspace = true
+opentelemetry = { workspace = true }
 
 [dev-dependencies]
 futures = "0.3"

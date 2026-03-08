@@ -22,6 +22,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
+opentelemetry = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

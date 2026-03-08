@@ -24,3 +24,7 @@ axum.workspace = true
 http.workspace = true
 tokio-util.workspace = true
 url = { workspace = true }
+camel-otel = { path = "../camel-otel", optional = true }
+
+[features]
+otel = ["dep:camel-otel"]

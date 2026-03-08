@@ -563,7 +563,22 @@ impl Consumer for HttpConsumer {
                         }
                     }
 
-                    let exchange = Exchange::new(msg);
+                    #[allow(unused_mut)]
+                    let mut exchange = Exchange::new(msg);
+
+                    // Extract W3C TraceContext headers for distributed tracing (opt-in via "otel" feature)
+                    #[cfg(feature = "otel")]
+                    {
+                        let headers: HashMap<String, String> = envelope
+                            .headers
+                            .iter()
+                            .filter_map(|(k, v)| {
+                                Some((k.as_str().to_lowercase(), v.to_str().ok()?.to_string()))
+                            })
+                            .collect();
+                        camel_otel::extract_into_exchange(&mut exchange, &headers);
+                    }
+
                     let reply_tx = envelope.reply_tx;
                     let sender = ctx.sender().clone();
                     let path_clone = path.clone();
@@ -1031,6 +1046,21 @@ impl Service<Exchange> for HttpProducer {
 
             if let Some(timeout) = config.response_timeout {
                 request = request.timeout(timeout);
+            }
+
+            // Inject W3C TraceContext headers for distributed tracing (opt-in via "otel" feature)
+            #[cfg(feature = "otel")]
+            {
+                let mut otel_headers = HashMap::new();
+                camel_otel::inject_from_exchange(&exchange, &mut otel_headers);
+                for (k, v) in otel_headers {
+                    if let (Ok(name), Ok(val)) = (
+                        reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                        reqwest::header::HeaderValue::from_str(&v),
+                    ) {
+                        request = request.header(name, val);
+                    }
+                }
             }
 
             for (key, value) in &exchange.input.headers {
@@ -2103,5 +2133,265 @@ mod tests {
             consumer.concurrency_model(),
             ConcurrencyModel::Concurrent { max: None }
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // OpenTelemetry propagation tests (only compiled with "otel" feature)
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "otel")]
+    mod otel_tests {
+        use super::*;
+        use camel_api::Message;
+        use tower::ServiceExt;
+
+        #[tokio::test]
+        async fn test_producer_injects_traceparent_header() {
+            let (url, _handle) = start_test_server_with_header_capture().await;
+            let ctx = test_producer_ctx();
+
+            let component = HttpComponent::new();
+            let endpoint = component
+                .create_endpoint(&format!("{url}/api?allowPrivateIps=true"))
+                .unwrap();
+            let producer = endpoint.create_producer(&ctx).unwrap();
+
+            // Create exchange with an OTel context by extracting from a traceparent header
+            let mut exchange = Exchange::new(Message::default());
+            let mut headers = std::collections::HashMap::new();
+            headers.insert(
+                "traceparent".to_string(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+            );
+            camel_otel::extract_into_exchange(&mut exchange, &headers);
+
+            let result = producer.oneshot(exchange).await.unwrap();
+
+            // Verify request succeeded
+            let status = result
+                .input
+                .header("CamelHttpResponseCode")
+                .and_then(|v| v.as_u64())
+                .unwrap();
+            assert_eq!(status, 200);
+
+            // The test server echoes back the received traceparent header
+            let traceparent = result.input.header("x-received-traceparent");
+            assert!(
+                traceparent.is_some(),
+                "traceparent header should have been sent"
+            );
+
+            let traceparent_str = traceparent.unwrap().as_str().unwrap();
+            // Verify format: version-traceid-spanid-flags
+            let parts: Vec<&str> = traceparent_str.split('-').collect();
+            assert_eq!(parts.len(), 4, "traceparent should have 4 parts");
+            assert_eq!(parts[0], "00", "version should be 00");
+            assert_eq!(
+                parts[1], "4bf92f3577b34da6a3ce929d0e0e4736",
+                "trace-id should match"
+            );
+            assert_eq!(
+                parts[2], "00f067aa0ba902b7",
+                "span-id should match"
+            );
+            assert_eq!(parts[3], "01", "flags should be 01 (sampled)");
+        }
+
+        #[tokio::test]
+        async fn test_consumer_extracts_traceparent_header() {
+            use camel_component::{ConsumerContext, ExchangeEnvelope};
+
+            // Get an OS-assigned free port
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+
+            let component = HttpComponent::new();
+            let endpoint = component
+                .create_endpoint(&format!("http://127.0.0.1:{port}/trace"))
+                .unwrap();
+            let mut consumer = endpoint.create_consumer().unwrap();
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+            let token = tokio_util::sync::CancellationToken::new();
+            let ctx = ConsumerContext::new(tx, token.clone());
+
+            tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            // Send request with traceparent header
+            let client = reqwest::Client::new();
+            let send_fut = client
+                .post(format!("http://127.0.0.1:{port}/trace"))
+                .header("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+                .body("test")
+                .send();
+
+            let (http_result, _) = tokio::join!(send_fut, async {
+                if let Some(envelope) = rx.recv().await {
+                    // Verify the exchange has a valid OTel context by re-injecting it
+                    // and checking the traceparent matches
+                    let mut injected_headers = std::collections::HashMap::new();
+                    camel_otel::inject_from_exchange(&envelope.exchange, &mut injected_headers);
+
+                    assert!(
+                        injected_headers.contains_key("traceparent"),
+                        "Exchange should have traceparent after extraction"
+                    );
+
+                    let traceparent = injected_headers.get("traceparent").unwrap();
+                    let parts: Vec<&str> = traceparent.split('-').collect();
+                    assert_eq!(parts.len(), 4, "traceparent should have 4 parts");
+                    assert_eq!(
+                        parts[1], "4bf92f3577b34da6a3ce929d0e0e4736",
+                        "Trace ID should match the original traceparent header"
+                    );
+
+                    if let Some(reply_tx) = envelope.reply_tx {
+                        let _ = reply_tx.send(Ok(envelope.exchange));
+                    }
+                }
+            });
+
+            let resp = http_result.unwrap();
+            assert_eq!(resp.status().as_u16(), 200);
+
+            token.cancel();
+        }
+
+        #[tokio::test]
+        async fn test_consumer_extracts_mixed_case_traceparent_header() {
+            use camel_component::{ConsumerContext, ExchangeEnvelope};
+
+            // Get an OS-assigned free port
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+
+            let component = HttpComponent::new();
+            let endpoint = component
+                .create_endpoint(&format!("http://127.0.0.1:{port}/trace"))
+                .unwrap();
+            let mut consumer = endpoint.create_consumer().unwrap();
+
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+            let token = tokio_util::sync::CancellationToken::new();
+            let ctx = ConsumerContext::new(tx, token.clone());
+
+            tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            // Send request with MIXED-CASE TraceParent header (not lowercase)
+            let client = reqwest::Client::new();
+            let send_fut = client
+                .post(format!("http://127.0.0.1:{port}/trace"))
+                .header("TraceParent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+                .body("test")
+                .send();
+
+            let (http_result, _) = tokio::join!(send_fut, async {
+                if let Some(envelope) = rx.recv().await {
+                    // Verify the exchange has a valid OTel context by re-injecting it
+                    // and checking the traceparent matches
+                    let mut injected_headers = HashMap::new();
+                    camel_otel::inject_from_exchange(&envelope.exchange, &mut injected_headers);
+
+                    assert!(
+                        injected_headers.contains_key("traceparent"),
+                        "Exchange should have traceparent after extraction from mixed-case header"
+                    );
+
+                    let traceparent = injected_headers.get("traceparent").unwrap();
+                    let parts: Vec<&str> = traceparent.split('-').collect();
+                    assert_eq!(parts.len(), 4, "traceparent should have 4 parts");
+                    assert_eq!(
+                        parts[1], "4bf92f3577b34da6a3ce929d0e0e4736",
+                        "Trace ID should match the original mixed-case TraceParent header"
+                    );
+
+                    if let Some(reply_tx) = envelope.reply_tx {
+                        let _ = reply_tx.send(Ok(envelope.exchange));
+                    }
+                }
+            });
+
+            let resp = http_result.unwrap();
+            assert_eq!(resp.status().as_u16(), 200);
+
+            token.cancel();
+        }
+
+        #[tokio::test]
+        async fn test_producer_no_trace_context_no_crash() {
+            let (url, _handle) = start_test_server().await;
+            let ctx = test_producer_ctx();
+
+            let component = HttpComponent::new();
+            let endpoint = component
+                .create_endpoint(&format!("{url}/api?allowPrivateIps=true"))
+                .unwrap();
+            let producer = endpoint.create_producer(&ctx).unwrap();
+
+            // Create exchange with default (empty) otel_context - no trace context
+            let exchange = Exchange::new(Message::default());
+
+            // Should succeed without panic
+            let result = producer.oneshot(exchange).await.unwrap();
+
+            // Verify request succeeded
+            let status = result
+                .input
+                .header("CamelHttpResponseCode")
+                .and_then(|v| v.as_u64())
+                .unwrap();
+            assert_eq!(status, 200);
+        }
+
+        /// Test server that captures and echoes back the traceparent header
+        async fn start_test_server_with_header_capture() -> (String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let url = format!("http://127.0.0.1:{}", addr.port());
+
+            let handle = tokio::spawn(async move {
+                loop {
+                    if let Ok((mut stream, _)) = listener.accept().await {
+                        tokio::spawn(async move {
+                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                            let mut buf = vec![0u8; 8192];
+                            let n = stream.read(&mut buf).await.unwrap_or(0);
+                            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+
+                            // Extract traceparent header from request
+                            let traceparent = request
+                                .lines()
+                                .find(|line| line.to_lowercase().starts_with("traceparent:"))
+                                .map(|line| {
+                                    line.split(':')
+                                        .nth(1)
+                                        .map(|s| s.trim().to_string())
+                                        .unwrap_or_default()
+                                })
+                                .unwrap_or_default();
+
+                            let body = format!(
+                                r#"{{"echo":"ok","traceparent":"{}"}}"#,
+                                traceparent
+                            );
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Received-Traceparent: {}\r\n\r\n{}",
+                                body.len(),
+                                traceparent,
+                                body
+                            );
+                            let _ = stream.write_all(response.as_bytes()).await;
+                        });
+                    }
+                }
+            });
+
+            (url, handle)
+        }
     }
 }

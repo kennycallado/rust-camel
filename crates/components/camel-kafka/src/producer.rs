@@ -1,5 +1,7 @@
 use camel_api::{Body, CamelError, Exchange};
 use rdkafka::config::ClientConfig;
+#[cfg(feature = "otel")]
+use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::json;
 use std::future::Future;
@@ -101,6 +103,14 @@ impl Service<Exchange> for KafkaProducer {
 
             let timeout = Duration::from_millis(config.request_timeout_ms as u64);
 
+            // Inject W3C TraceContext headers for distributed tracing (otel feature only)
+            #[cfg(feature = "otel")]
+            let otel_headers = {
+                let mut headers_map = std::collections::HashMap::new();
+                camel_otel::inject_from_exchange(&exchange, &mut headers_map);
+                headers_map
+            };
+
             let delivery_result = {
                 let mut record = FutureRecord::to(&topic).payload(&payload);
                 if let Some(ref k) = key {
@@ -108,6 +118,17 @@ impl Service<Exchange> for KafkaProducer {
                 }
                 if let Some(p) = partition {
                     record = record.partition(p);
+                }
+                #[cfg(feature = "otel")]
+                {
+                    let mut owned_headers = OwnedHeaders::new();
+                    for (key, value) in &otel_headers {
+                        owned_headers = owned_headers.insert(Header {
+                            key,
+                            value: Some(value.as_bytes()),
+                        });
+                    }
+                    record = record.headers(owned_headers);
                 }
                 producer.send(record, timeout).await
             };

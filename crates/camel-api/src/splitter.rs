@@ -83,14 +83,34 @@ impl SplitterConfig {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Create a fragment exchange that inherits headers and properties from the
-/// parent, but with a new body.
+/// Create a fragment exchange that inherits headers, properties, and OTel context
+/// from the parent, but with a new body.
+///
+/// # OpenTelemetry Trace Propagation
+///
+/// Each fragment inherits the parent's `otel_context`, which carries the active span
+/// context. When TracingProcessor processes a fragment, it will create a child span
+/// linked to the parent span. This creates a natural fan-out relationship in the
+/// distributed trace:
+///
+/// ```text
+/// ParentExchange (span A)
+///   ├─ Fragment 1 (span B, child of A)
+///   ├─ Fragment 2 (span C, child of A)
+///   └─ Fragment N (span N, child of A)
+/// ```
+///
+/// This parent-child relationship is the correct semantic for message splitting,
+/// as fragments are logical subdivisions of the parent message, not independent
+/// operations that merely reference the parent (which would warrant span links).
 fn fragment_exchange(parent: &Exchange, body: Body) -> Exchange {
     let mut msg = Message::new(body);
     msg.headers = parent.input.headers.clone();
     let mut ex = Exchange::new(msg);
     ex.properties = parent.properties.clone();
     ex.pattern = parent.pattern;
+    // Inherit OTel context so fragment spans are children of the parent span
+    ex.otel_context = parent.otel_context.clone();
     ex
 }
 
@@ -239,5 +259,81 @@ mod tests {
         assert!(config.parallel);
         assert_eq!(config.parallel_limit, Some(4));
         assert!(!config.stop_on_exception);
+    }
+
+    #[test]
+    fn test_fragment_exchange_inherits_otel_context() {
+        use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId};
+        use opentelemetry::Context;
+
+        // Create parent exchange with a valid span context
+        let mut parent = Exchange::new(Message::new("test"));
+        let trace_id = TraceId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 123]);
+        let span_id = SpanId::from_bytes([0, 0, 0, 0, 0, 0, 1, 200]);
+        let span_context = SpanContext::new(
+            trace_id,
+            span_id,
+            TraceFlags::SAMPLED,
+            true,
+            Default::default(),
+        );
+        let expected_trace_id = span_context.trace_id();
+        parent.otel_context = Context::current().with_remote_span_context(span_context);
+
+        // Create fragment via split_body_lines
+        let fragments = split_body_lines()(&parent);
+        assert!(!fragments.is_empty(), "Should have at least one fragment");
+
+        // Verify each fragment has the same span context as parent
+        for fragment in &fragments {
+            let span = fragment.otel_context.span();
+            let frag_span_ctx = span.span_context();
+            assert!(
+                frag_span_ctx.is_valid(),
+                "Fragment should have valid span context"
+            );
+            assert_eq!(
+                frag_span_ctx.trace_id(),
+                expected_trace_id,
+                "Fragment should have same trace ID as parent"
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_fragments_share_same_trace_context() {
+        use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId};
+        use opentelemetry::Context;
+
+        // Create parent with a specific trace ID
+        let mut parent = Exchange::new(Message::new("line1\nline2\nline3"));
+        let trace_id =
+            TraceId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x3B, 0x9A, 0xCA, 0x09]);
+        let span_id = SpanId::from_bytes([0, 0, 0, 0, 0, 0, 0, 111]);
+        let span_context = SpanContext::new(
+            trace_id,
+            span_id,
+            TraceFlags::SAMPLED,
+            true,
+            Default::default(),
+        );
+        parent.otel_context = Context::current().with_remote_span_context(span_context);
+
+        let fragments = split_body_lines()(&parent);
+        assert_eq!(fragments.len(), 3);
+
+        // All fragments should share the same trace ID
+        let trace_ids: Vec<_> = fragments
+            .iter()
+            .map(|f| {
+                let span = f.otel_context.span();
+                span.span_context().trace_id()
+            })
+            .collect();
+
+        assert!(
+            trace_ids.iter().all(|&id| id == trace_id),
+            "All fragments should have the same trace ID"
+        );
     }
 }

@@ -62,8 +62,10 @@ members = [
     "examples/bean-demo",
     "examples/prometheus-demo",
     "examples/health-demo",
+    "examples/otel-demo",
     "crates/components/camel-container",
     "crates/components/camel-prometheus",
+    "crates/components/camel-otel",
 ]
 
 [workspace.package]
@@ -102,6 +104,7 @@ camel-component-redis = { path = "crates/components/camel-redis", version = "0.3
 camel-component-kafka = { path = "crates/components/camel-kafka", version = "0.3.0" }
 camel-component-controlbus = { path = "crates/components/camel-controlbus", version = "0.3.0" }
 camel-component-prometheus = { path = "crates/components/camel-prometheus", version = "0.3.0" }
+camel-component-otel = { path = "crates/components/camel-otel", version = "0.3.0" }
 camel-language-api = { path = "crates/languages/camel-language-api", version = "0.3.0" }
 camel-language-rhai = { path = "crates/languages/camel-language-rhai", version = "0.3.0" }
 camel-language-simple = { path = "crates/languages/camel-language-simple", version = "0.3.0" }
@@ -135,4 +138,11 @@ notify = { version = "6", features = ["macos_fsevent"] }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["kafka"] }
 prometheus = "0.14"
+
+# OpenTelemetry dependencies
+opentelemetry = { version = "0.31", features = ["trace", "logs", "metrics"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace", "logs", "metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "trace", "logs", "metrics"] }
+opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
+opentelemetry-appender-tracing = { version = "0.31" }
 

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use opentelemetry::Context;
 use uuid::Uuid;
 
 use crate::error::CamelError;
@@ -34,6 +35,10 @@ pub struct Exchange {
     pub pattern: ExchangePattern,
     /// Unique correlation ID for distributed tracing.
     pub correlation_id: String,
+    /// OpenTelemetry context for distributed tracing propagation.
+    /// Carries the active span context between processing steps.
+    /// Defaults to an empty context (noop span) if OTel is not active.
+    pub otel_context: Context,
 }
 
 impl Exchange {
@@ -46,6 +51,7 @@ impl Exchange {
             error: None,
             pattern: ExchangePattern::default(),
             correlation_id: Uuid::new_v4().to_string(),
+            otel_context: Context::new(),
         }
     }
 
@@ -58,6 +64,7 @@ impl Exchange {
             error: None,
             pattern: ExchangePattern::InOut,
             correlation_id: Uuid::new_v4().to_string(),
+            otel_context: Context::new(),
         }
     }
 
@@ -143,5 +150,23 @@ mod tests {
 
         // Verify no error
         assert!(!ex.has_error());
+    }
+
+    #[test]
+    fn test_exchange_otel_context_default() {
+        let ex = Exchange::default();
+        // Field must exist and be accessible — compilation is the test
+        // Also verify it's a fresh context (noop span)
+        use opentelemetry::trace::TraceContextExt;
+        assert!(!ex.otel_context.span().span_context().is_valid());
+    }
+
+    #[test]
+    fn test_exchange_otel_context_propagates_in_clone() {
+        let ex = Exchange::default();
+        let cloned = ex.clone();
+        // Both should have the same (empty) context
+        use opentelemetry::trace::TraceContextExt;
+        assert!(!cloned.otel_context.span().span_context().is_valid());
     }
 }
