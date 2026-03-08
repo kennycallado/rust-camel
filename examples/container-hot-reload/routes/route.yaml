@@ -1,0 +1,11 @@
+routes:
+  - id: "container-events-route"
+    from: "container:events"
+    steps:
+      - log: "message=${body}"
+
+  - id: "container-producer"
+    from: "timer:lifecycle?delay=3000&period=10000"
+    steps:
+      - to: "container:run?image=alpine:latest&cmd=sleep 15"
+      - log: "message=✅ Container created: ${header.CamelContainerId}"

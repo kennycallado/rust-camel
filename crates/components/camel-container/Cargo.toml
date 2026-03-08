@@ -1,8 +1,8 @@
 [package]
-name = "camel-container"
-description = "Container utilities for rust-camel"
+name = "camel-component-container"
 version.workspace = true
-edition.workspace = true
+description = "Docker/Container component for rust-camel — run, manage and listen to container events via the Camel routing engine"
+edition = "2024"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -12,3 +12,15 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+camel-api = { workspace = true }
+camel-component = { workspace = true }
+camel-endpoint = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+bollard = { version = "0.18.1" }
+futures = { workspace = true }
+tower = { workspace = true }
+once_cell = "1.20"

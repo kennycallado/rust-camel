@@ -1,0 +1,16 @@
+routes:
+  - id: "container-events"
+    from: "container:events"
+    steps:
+      - log: "message=${body}"
+
+  - id: "nginx-logs"
+    from: "container:logs?containerId=nginx-demo&timestamps=true"
+    steps:
+      - log: "message=[${header.CamelContainerLogStream}] ${body}"
+
+  - id: "nginx-server"
+    from: "timer:start?delay=3000&repeatCount=1"
+    steps:
+      - to: "container:run?image=nginx:alpine&name=nginx-demo&network=host&autoRemove=true"
+      - log: "message=🌐 Nginx running at http://localhost:80 (ID: ${header.CamelContainerId})"
