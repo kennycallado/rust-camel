@@ -28,30 +28,39 @@ publish_crate() {
   # Get current version (check if workspace version)
   local version_line=$(grep '^version' Cargo.toml | head -1)
   local current_version
-  
+
   if echo "$version_line" | grep -q "workspace"; then
     current_version=$WORKSPACE_VERSION
   else
     current_version=$(echo "$version_line" | cut -d'"' -f2)
   fi
 
-  # Check if this specific version already exists
-  local existing_version=$(cargo search "$crate" 2>&1 | grep "^$crate = " | sed -n 's/.*"\([^"]*\)".*/\1/p')
-  
-  if [ "$existing_version" = "$current_version" ]; then
+  # Check via crates.io API (authoritative, no cache issues)
+  local http_status=$(curl -s -o /dev/null -w "%{http_code}" \
+    "https://crates.io/api/v1/crates/${crate}/${current_version}")
+
+  if [ "$http_status" = "200" ]; then
     echo "⚠️  $crate@$current_version already exists on crates.io, skipping..."
     cd "$WORKSPACE_ROOT" >/dev/null
     return 0
   fi
 
-  # Check if older version exists
-  if [ -n "$existing_version" ]; then
-    echo "📦 Updating $crate from $existing_version to $current_version..."
-  else
-    echo "📦 Publishing new crate $crate@$current_version..."
-  fi
+  echo "📦 Publishing $crate@$current_version..."
 
-  cargo publish $DRY_RUN
+  # Capture output; treat "already exists" as success (idempotent)
+  local publish_output
+  publish_output=$(cargo publish $DRY_RUN 2>&1) || {
+    if echo "$publish_output" | grep -q "already exists"; then
+      echo "⚠️  $crate@$current_version already exists (race), skipping..."
+      cd "$WORKSPACE_ROOT" >/dev/null
+      return 0
+    fi
+    echo "$publish_output"
+    cd "$WORKSPACE_ROOT" >/dev/null
+    return 1
+  }
+  echo "$publish_output"
+
   cd "$WORKSPACE_ROOT" >/dev/null
   if [ -z "$DRY_RUN" ]; then
     echo "⏳ Waiting 30s for crates.io to index..."
