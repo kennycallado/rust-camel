@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use crate::{CamelError, MetricsCollector};
 use std::sync::Arc;
 
@@ -6,6 +7,7 @@ use std::sync::Arc;
 /// This trait follows Apache Camel's Service pattern but uses a different name
 /// to avoid confusion with tower::Service which is the core of rust-camel's
 /// request processing.
+#[async_trait]
 pub trait Lifecycle: Send + Sync {
     /// Service name for logging
     fn name(&self) -> &str;
@@ -28,6 +30,7 @@ mod tests {
 
     struct TestService;
     
+    #[async_trait]
     impl Lifecycle for TestService {
         fn name(&self) -> &str {
             "test"
