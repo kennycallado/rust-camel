@@ -13,7 +13,7 @@ async fn wait_for_server(port: u16, timeout_ms: u64) -> Result<(), String> {
 
     loop {
         match client
-            .get(&format!("http://127.0.0.1:{}/metrics", port))
+            .get(format!("http://127.0.0.1:{}/metrics", port))
             .timeout(Duration::from_millis(100))
             .send()
             .await
@@ -163,7 +163,7 @@ async fn test_prometheus_service_with_context() {
         .expect("Server should start within timeout");
 
     // Test HTTP endpoint
-    let response = reqwest::get(&format!("http://127.0.0.1:{}/metrics", port))
+    let response = reqwest::get(format!("http://127.0.0.1:{}/metrics", port))
         .await
         .expect("Failed to fetch metrics");
 

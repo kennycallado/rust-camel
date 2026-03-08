@@ -53,7 +53,7 @@ async fn test_kafka_producer_sends_without_error() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(camel_api::Value::String("hello-kafka".to_string()))
-        .to(&format!("kafka:test-produce?brokers={brokers}&acks=all"))
+        .to(format!("kafka:test-produce?brokers={brokers}&acks=all"))
         .to("mock:result")
         .route_id("kafka-producer-test")
         .build()
@@ -106,7 +106,7 @@ async fn test_kafka_consumer_receives_message() {
     // before the first message is sent (the timer's 'delay' param controls the initial wait).
     let producer_route = RouteBuilder::from("timer:produce?period=3000&delay=5000&repeatCount=1")
         .set_body(camel_api::Value::String("round-trip-payload".to_string()))
-        .to(&format!("kafka:test-consume?brokers={brokers}&acks=all"))
+        .to(format!("kafka:test-consume?brokers={brokers}&acks=all"))
         .route_id("kafka-producer-for-consumer-test")
         .build()
         .unwrap();
@@ -153,7 +153,7 @@ async fn test_kafka_consumer_sets_headers() {
     let producer_route =
         RouteBuilder::from("timer:hdr-produce?period=3000&delay=5000&repeatCount=1")
             .set_body(camel_api::Value::String("header-check".to_string()))
-            .to(&format!("kafka:test-headers?brokers={brokers}&acks=all"))
+            .to(format!("kafka:test-headers?brokers={brokers}&acks=all"))
             .route_id("kafka-headers-producer")
             .build()
             .unwrap();
