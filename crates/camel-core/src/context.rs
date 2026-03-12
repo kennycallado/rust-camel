@@ -310,10 +310,10 @@ impl CamelContext {
         // Stop all routes via the controller
         self.route_controller.lock().await.stop_all_routes().await?;
 
-        // Then stop lifecycle services
+        // Then stop lifecycle services in reverse insertion order (LIFO)
         // Continue stopping all services even if some fail
         let mut first_error = None;
-        for service in &mut self.services {
+        for service in self.services.iter_mut().rev() {
             info!("Stopping service: {}", service.name());
             if let Err(e) = service.stop().await {
                 warn!("Service {} failed to stop: {}", service.name(), e);
@@ -735,5 +735,52 @@ mod lifecycle_tests {
         // Verify service3 was never started
         assert_eq!(start3.load(Ordering::SeqCst), 0);
         assert_eq!(stop3.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_services_stop_in_reverse_order() {
+        use std::sync::Mutex as StdMutex;
+
+        struct OrderTracker {
+            name: String,
+            order: Arc<StdMutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl Lifecycle for OrderTracker {
+            fn name(&self) -> &str {
+                &self.name
+            }
+
+            async fn start(&mut self) -> Result<(), CamelError> {
+                Ok(())
+            }
+
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                self.order
+                    .lock()
+                    .unwrap()
+                    .push(self.name.clone());
+                Ok(())
+            }
+        }
+
+        let order = Arc::new(StdMutex::new(Vec::<String>::new()));
+
+        let s1 = OrderTracker { name: "first".into(),  order: Arc::clone(&order) };
+        let s2 = OrderTracker { name: "second".into(), order: Arc::clone(&order) };
+        let s3 = OrderTracker { name: "third".into(),  order: Arc::clone(&order) };
+
+        let mut ctx = CamelContext::new()
+            .with_lifecycle(s1)
+            .with_lifecycle(s2)
+            .with_lifecycle(s3);
+
+        ctx.start().await.unwrap();
+        ctx.stop().await.unwrap();
+
+        let stopped = order.lock().unwrap();
+        assert_eq!(*stopped, vec!["third", "second", "first"],
+            "services must stop in reverse insertion order");
     }
 }

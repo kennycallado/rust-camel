@@ -26,9 +26,13 @@ toml = "0.8"
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true
 tempfile = "3"
 camel-component-timer = { path = "../components/camel-timer" }
 camel-component-log = { path = "../components/camel-log" }
+
+[features]
+otel = ["dep:tracing-opentelemetry"]

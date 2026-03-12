@@ -88,7 +88,6 @@ fn test_tracer_file_output_invalid_path_returns_error() {
                         path: "/invalid/nonexistent/path/trace.log".to_string(),
                         format: OutputFormat::Json,
                     }),
-                    opentelemetry: None,
                 },
             },
             otel: None,

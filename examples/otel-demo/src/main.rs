@@ -23,6 +23,12 @@
 //! - Logs each tick
 //! - Makes an HTTP GET request to httpbin.org/get
 //! - All exchanges are traced and metrics are exported via OTLP
+//!
+//! # Architecture
+//!
+//! This example uses the manual context setup pattern. For production, prefer
+//! `CamelConfig::configure_context()` which installs a unified subscriber with
+//! 4 layers including the tracing-opentelemetry bridge.
 
 use camel_api::Value;
 use camel_api::body::Body;
@@ -38,12 +44,12 @@ use camel_otel::{OtelConfig, OtelService};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create OpenTelemetry configuration
     // Points to the OTLP collector (grafana/otel-lgtm) running locally
-    // OtelService::start() will initialize the tracing subscriber with
-    // fmt layer (console) + OTel log bridge (OTLP export) automatically.
     let otel_config = OtelConfig::new("http://localhost:4317", "rust-camel-otel-demo");
 
     // Create the OpenTelemetry service
-    // This will initialize global TracerProvider and MeterProvider
+    // OtelService manages global TracerProvider and MeterProvider only.
+    // Note: For the tracing-opentelemetry bridge layer, use CamelConfig::configure_context()
+    // with the `otel` feature enabled, which installs a unified 4-layer subscriber.
     let otel_service = OtelService::new(otel_config);
 
     // Build CamelContext with the OtelService as a lifecycle service
@@ -59,7 +65,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 },
                 file: None,
-                opentelemetry: None,
             },
         });
 

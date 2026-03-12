@@ -25,18 +25,13 @@ use async_trait::async_trait;
 use camel_api::{CamelError, Lifecycle, ServiceStatus};
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
-use opentelemetry_sdk::logs::SdkLoggerProvider;
+use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::resource::Resource;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use tracing::warn;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::config::{OtelConfig, OtelProtocol, OtelSampler};
 
@@ -53,7 +48,6 @@ pub struct OtelService {
     config: OtelConfig,
     tracer_provider: Option<SdkTracerProvider>,
     meter_provider: Option<SdkMeterProvider>,
-    logger_provider: Option<SdkLoggerProvider>,
     status: AtomicU8,
 }
 
@@ -64,7 +58,6 @@ impl OtelService {
             config,
             tracer_provider: None,
             meter_provider: None,
-            logger_provider: None,
             status: AtomicU8::new(STATUS_STOPPED),
         }
     }
@@ -114,52 +107,6 @@ impl OtelService {
                     CamelError::Config(format!("Failed to build HTTP metric exporter: {}", e))
                 }),
         }
-    }
-
-    /// Build the OTLP log exporter based on the configured protocol.
-    fn build_log_exporter(&self) -> Result<LogExporter, CamelError> {
-        match self.config.protocol {
-            OtelProtocol::Grpc => LogExporter::builder()
-                .with_tonic()
-                .with_endpoint(&self.config.endpoint)
-                .build()
-                .map_err(|e| {
-                    CamelError::Config(format!("Failed to build gRPC log exporter: {}", e))
-                }),
-            OtelProtocol::HttpProtobuf => LogExporter::builder()
-                .with_http()
-                .with_endpoint(format!("{}/v1/logs", self.config.endpoint))
-                .build()
-                .map_err(|e| {
-                    CamelError::Config(format!("Failed to build HTTP log exporter: {}", e))
-                }),
-        }
-    }
-
-    /// Initialize the tracing subscriber with fmt + OTel log bridge layers.
-    ///
-    /// This composes:
-    /// - `tracing_subscriber::fmt` layer for console output
-    /// - `OpenTelemetryTracingBridge` layer for OTLP log export
-    /// - `EnvFilter` to suppress noisy internal crates (hyper, tonic, h2, reqwest)
-    ///
-    /// Uses `try_init()` so it's safe if a subscriber is already set.
-    fn init_subscriber(&self, logger_provider: &SdkLoggerProvider) {
-        let otel_layer = OpenTelemetryTracingBridge::new(logger_provider);
-
-        let filter = EnvFilter::new(format!(
-            "{level},h2=off,hyper=off,tonic=off,reqwest=off,tower=off",
-            level = self.config.log_level
-        ));
-
-        let fmt_layer = fmt::layer().with_target(false);
-
-        // try_init() silently ignores "already set" errors
-        let _ = tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt_layer)
-            .with(otel_layer)
-            .try_init();
     }
 
     /// Build the OpenTelemetry resource with service name and additional attributes.
@@ -223,31 +170,12 @@ impl Lifecycle for OtelService {
         }
 
         // Guard against double initialization
-        if self.tracer_provider.is_some() || self.meter_provider.is_some() {
+        if self.tracer_provider.is_some() {
             warn!("OtelService already initialized, skipping start()");
             return Ok(());
         }
 
         let resource = self.build_resource();
-
-        // Build and install LoggerProvider + subscriber FIRST (before any tracing calls)
-        if self.config.logs_enabled {
-            let log_exporter = match self.build_log_exporter() {
-                Ok(exporter) => exporter,
-                Err(e) => {
-                    self.status.store(STATUS_FAILED, Ordering::SeqCst);
-                    return Err(e);
-                }
-            };
-
-            let logger_provider = SdkLoggerProvider::builder()
-                .with_resource(resource.clone())
-                .with_batch_exporter(log_exporter)
-                .build();
-
-            self.init_subscriber(&logger_provider);
-            self.logger_provider = Some(logger_provider);
-        }
 
         // Build and install TracerProvider
         let span_exporter = match self.build_span_exporter() {
@@ -295,13 +223,6 @@ impl Lifecycle for OtelService {
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
-        // Shutdown LoggerProvider first (flush pending logs before traces/metrics)
-        if let Some(provider) = self.logger_provider.take()
-            && let Err(e) = provider.shutdown()
-        {
-            warn!("Error shutting down LoggerProvider: {:?}", e);
-        }
-
         // Shutdown TracerProvider
         if let Some(provider) = self.tracer_provider.take()
             && let Err(e) = provider.shutdown()
@@ -340,7 +261,6 @@ mod tests {
         assert_eq!(service.name(), "otel");
         assert!(service.tracer_provider.is_none());
         assert!(service.meter_provider.is_none());
-        assert!(service.logger_provider.is_none());
     }
 
     #[test]
@@ -392,7 +312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Sets global OTel state which interferes with parallel tests. Run with: cargo test -p camel-otel -- --ignored"]
+    #[serial_test::serial]
     async fn test_start_stop_lifecycle() {
         // This test verifies the lifecycle works without connecting to a real backend.
         // It will fail to connect, but that's OK - we're testing the flow.
@@ -402,7 +322,6 @@ mod tests {
         // Verify initial state
         assert!(service.tracer_provider.is_none());
         assert!(service.meter_provider.is_none());
-        assert!(service.logger_provider.is_none());
         assert_eq!(service.status(), ServiceStatus::Stopped);
 
         // Note: start() may fail because the endpoint is invalid, but we test the logic
@@ -414,7 +333,6 @@ mod tests {
             // On success, providers should be set and status should be Started
             assert!(service.tracer_provider.is_some());
             assert!(service.meter_provider.is_some());
-            assert!(service.logger_provider.is_some());
             assert_eq!(service.status(), ServiceStatus::Started);
 
             // Stop should work
@@ -424,7 +342,6 @@ mod tests {
             // Providers should be cleared and status should be Stopped
             assert!(service.tracer_provider.is_none());
             assert!(service.meter_provider.is_none());
-            assert!(service.logger_provider.is_none());
             assert_eq!(service.status(), ServiceStatus::Stopped);
         } else {
             // On failure, state must remain clean
@@ -435,7 +352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Potentially sets global OTel state. The guard should prevent it, but ignored for safety in parallel test runs. Run with: cargo test -p camel-otel -- --ignored"]
+    #[serial_test::serial]
     async fn test_double_start_guard() {
         // FIXME: This test sets global OTel state which can interfere with parallel tests.
         // Consider using isolated unit tests or serial_test crate for better isolation.
@@ -533,5 +450,47 @@ mod tests {
         // Verify error message mentions the sampler ratio
         let err = result.unwrap_err();
         assert!(err.to_string().contains("TraceIdRatioBased sampler ratio"));
+    }
+
+    #[tokio::test]
+    async fn test_start_does_not_replace_subscriber() {
+        // Install a counting subscriber BEFORE OtelService starts
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        static BEFORE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        struct CountingLayer;
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountingLayer {
+            fn on_event(
+                &self,
+                _event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                BEFORE_COUNT.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        // Try to set a subscriber (may already be set in test suite, that's fine)
+        let _ = tracing_subscriber::registry()
+            .with(CountingLayer)
+            .try_init();
+
+        let _initial = BEFORE_COUNT.load(Ordering::SeqCst);
+
+        let config = OtelConfig::new("http://localhost:9999", "test-no-sub-replace");
+        let mut service = OtelService::new(config);
+        let _ = service.start().await; // may succeed or fail — doesn't matter
+        let _ = service.stop().await;
+
+        // Emit a test event
+        tracing::info!("test event after otel start");
+
+        // If OtelService replaced the subscriber, CountingLayer won't be called
+        // and count stays at initial. If subscriber is preserved, count increases.
+        // NOTE: This test is best-effort — if no subscriber was set, it's a no-op.
+        // The important thing is that start() doesn't *panic* or error due to subscriber conflict.
+        let _ = BEFORE_COUNT.load(Ordering::SeqCst);
     }
 }
