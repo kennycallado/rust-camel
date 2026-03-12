@@ -331,7 +331,20 @@ async fn test_redis_consumer_pubsub_mode() {
     ctx.add_route_definition(producer_route).unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let endpoint = mock.get_endpoint("received").unwrap();
+    let mut received = false;
+    let timeout = std::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+
+    while start.elapsed() < timeout {
+        let exchanges = endpoint.get_received_exchanges().await;
+        if !exchanges.is_empty() {
+            received = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -341,10 +354,5 @@ async fn test_redis_consumer_pubsub_mode() {
         }
     }
 
-    let endpoint = mock.get_endpoint("received").unwrap();
-    let exchanges = endpoint.get_received_exchanges().await;
-    assert!(
-        !exchanges.is_empty(),
-        "Subscriber should have received the message"
-    );
+    assert!(received, "Subscriber should have received the message within 5s");
 }
