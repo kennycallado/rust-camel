@@ -59,7 +59,6 @@ fn tracer_config(detail_level: DetailLevel) -> TracerConfig {
                 format: OutputFormat::Json,
             },
             file: None,
-            opentelemetry: None,
         },
     }
 }

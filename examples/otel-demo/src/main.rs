@@ -59,7 +59,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 },
                 file: None,
-                opentelemetry: None,
             },
         });
 

@@ -55,11 +55,6 @@
 //! - **Full**: Includes all fields from Minimal and Medium plus:
 //!   - Up to 3 message headers (`header_0`, `header_1`, `header_2`)
 //!
-//! ### OpenTelemetry Support
-//!
-//! OpenTelemetry output is prepared in the configuration types but not yet implemented.
-//! It is planned for a future release.
-//!
 //! //! Configuration types for the Tracer EIP live in `camel-core` rather than `camel-config`
 //! //! to avoid a circular dependency — `camel-config` depends on `camel-core`.
 //!
@@ -74,8 +69,7 @@ pub mod supervising_route_controller;
 pub mod tracer;
 
 pub use config::{
-    DetailLevel, FileOutput, OpenTelemetryOutput, OutputFormat, StdoutOutput, TracerConfig,
-    TracerOutputs,
+    DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
 };
 pub use context::CamelContext;
 pub use registry::Registry;

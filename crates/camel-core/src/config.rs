@@ -24,9 +24,6 @@ pub struct TracerOutputs {
 
     #[serde(default)]
     pub file: Option<FileOutput>,
-
-    #[serde(default)]
-    pub opentelemetry: Option<OpenTelemetryOutput>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,19 +50,6 @@ pub struct FileOutput {
     pub path: String,
     #[serde(default = "default_format")]
     pub format: OutputFormat,
-}
-
-/// Configuration for OpenTelemetry output from the tracer.
-///
-/// Note: OpenTelemetry output is not yet implemented. This type is prepared
-/// for a future release.
-#[derive(Debug, Clone, Deserialize)]
-pub struct OpenTelemetryOutput {
-    pub enabled: bool,
-    #[serde(default = "default_otel_endpoint")]
-    pub endpoint: String,
-    #[serde(default = "default_service_name")]
-    pub service_name: String,
 }
 
 /// Controls the level of detail captured in trace spans.
@@ -102,10 +86,4 @@ fn default_format() -> OutputFormat {
 }
 fn default_true() -> bool {
     true
-}
-fn default_otel_endpoint() -> String {
-    "http://localhost:4317".to_string()
-}
-fn default_service_name() -> String {
-    "rust-camel".to_string()
 }
