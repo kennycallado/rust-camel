@@ -102,13 +102,13 @@ publish_crate "camel-dsl" "crates/camel-dsl"
 publish_crate "camel-builder" "crates/camel-builder"
 
 # OTel (must come before camel-config which depends on it)
-publish_crate "camel-otel" "crates/components/camel-otel"
+publish_crate "camel-otel" "crates/services/camel-otel"
 
 # camel-config depends on camel-otel
 publish_crate "camel-config" "crates/camel-config"
 
 # Prometheus depends on camel-builder + camel-component-timer
-publish_crate "camel-prometheus" "crates/components/camel-prometheus"
+publish_crate "camel-prometheus" "crates/services/camel-prometheus"
 
 # Remaining component crates
 publish_crate "camel-component-log" "crates/components/camel-log"

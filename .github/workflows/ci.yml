@@ -13,8 +13,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
+  unit-tests:
+    name: Unit Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -27,3 +27,17 @@ jobs:
         run: cargo build --workspace
       - name: Test (unit only — no Docker required)
         run: cargo test --workspace --lib
+
+  full-tests-linux:
+    name: Full Tests (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Docker availability
+        run: docker info
+      - name: Build
+        run: cargo build --workspace
+      - name: Test (full workspace)
+        run: cargo test --workspace

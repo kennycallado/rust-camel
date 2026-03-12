@@ -1348,6 +1348,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_container_producer_resolves_operation_from_header() {
+        // Try to connect to Docker - if fails, return early
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("Skipping test: Could not connect to Docker daemon");
+                return;
+            }
+        };
+
+        if docker.ping().await.is_err() {
+            eprintln!("Skipping test: Docker daemon not responding to ping");
+            return;
+        }
+
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:run").unwrap();
 
