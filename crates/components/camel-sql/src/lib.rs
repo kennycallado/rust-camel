@@ -4,6 +4,7 @@ pub mod endpoint;
 pub mod headers;
 pub mod producer;
 pub mod query;
+pub(crate) mod utils;
 
 use camel_api::CamelError;
 use camel_component::{Component, Endpoint};

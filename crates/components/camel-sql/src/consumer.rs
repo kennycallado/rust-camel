@@ -1,13 +1,21 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::OnceCell;
+use serde_json::Value as JsonValue;
+use sqlx::any::AnyRow;
 use sqlx::AnyPool;
+use sqlx::any::AnyPoolOptions;
+use tokio::sync::OnceCell;
+use tracing::{error, info};
 
-use camel_api::CamelError;
+use camel_api::{Body, CamelError, Exchange, Message};
 use camel_component::{ConcurrencyModel, Consumer, ConsumerContext};
 
 use crate::config::SqlConfig;
+use crate::headers;
+use crate::query::{parse_query_template, resolve_params};
+use crate::utils::{bind_json_values, row_to_json};
 
 pub struct SqlConsumer {
     pub(crate) config: SqlConfig,
@@ -18,12 +26,206 @@ impl SqlConsumer {
     pub fn new(config: SqlConfig, pool: Arc<OnceCell<AnyPool>>) -> Self {
         Self { config, pool }
     }
+
+    /// Poll the database for new rows and process them.
+    async fn poll_database(
+        &self,
+        pool: &AnyPool,
+        context: &ConsumerContext,
+    ) -> Result<(), CamelError> {
+        // Parse the query template
+        let template = parse_query_template(&self.config.query, self.config.placeholder)?;
+
+        // Create an empty exchange for parameter resolution (consumer has no input)
+        let empty_exchange = Exchange::new(Message::default());
+
+        // Resolve parameters
+        let prepared = resolve_params(&template, &empty_exchange)?;
+
+        // Build and execute the query
+        let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
+        let rows: Vec<AnyRow> = query
+            .fetch_all(pool)
+            .await
+            .map_err(|e| CamelError::ProcessorError(format!("Query execution failed: {}", e)))?;
+
+        // Check for empty result set
+        if rows.is_empty() && !self.config.route_empty_result_set {
+            return Ok(());
+        }
+
+        // Apply max_messages_per_poll limit
+        let rows_to_process: Vec<AnyRow> = if let Some(max) = self.config.max_messages_per_poll {
+            if max > 0 {
+                rows.into_iter().take(max as usize).collect()
+            } else {
+                rows
+            }
+        } else {
+            rows
+        };
+
+        if self.config.use_iterator {
+            // Process each row individually
+            for row in rows_to_process {
+                let row_json = row_to_json(&row)?;
+
+                // Create exchange with the row as JSON body
+                let mut msg = Message::new(Body::Json(row_json.clone()));
+
+                // Set individual column headers
+                if let Some(obj) = row_json.as_object() {
+                    for (key, value) in obj {
+                        msg.set_header(key.clone(), value.clone());
+                    }
+                }
+
+                let exchange = Exchange::new(msg);
+
+                // Send and wait for processing
+                let result = context.send_and_wait(exchange).await;
+
+                // Handle post-processing (onConsume/onConsumeFailed)
+                if let Err(e) =
+                    self.handle_post_processing(pool, &result, &row_json).await
+                {
+                    error!(error = %e, "Post-processing failed");
+                    // Continue processing other rows even if post-processing fails
+                    // unless break_batch_on_consume_fail is set
+                    if self.config.break_batch_on_consume_fail {
+                        return Err(e);
+                    }
+                }
+            }
+        } else {
+            // Process all rows as a single batch
+            let rows_json: Vec<JsonValue> = rows_to_process
+                .iter()
+                .map(row_to_json)
+                .collect::<Result<Vec<_>, CamelError>>()?;
+
+            let row_count = rows_json.len();
+
+            // Create exchange with array of rows
+            let mut msg = Message::new(Body::Json(JsonValue::Array(rows_json)));
+            msg.set_header(headers::ROW_COUNT, JsonValue::Number(row_count.into()));
+
+            let exchange = Exchange::new(msg);
+
+            // Send (fire-and-forget for batch mode)
+            context.send(exchange).await?;
+        }
+
+        // Execute on_consume_batch_complete if configured
+        if let Some(ref batch_query) = self.config.on_consume_batch_complete
+            && let Err(e) = self.execute_post_query(pool, batch_query, &JsonValue::Null).await
+        {
+            error!(error = %e, "onConsumeBatchComplete query failed");
+        }
+
+        Ok(())
+    }
+
+    /// Handle post-processing after a row is processed (onConsume/onConsumeFailed).
+    async fn handle_post_processing(
+        &self,
+        pool: &AnyPool,
+        result: &Result<Exchange, CamelError>,
+        row_json: &JsonValue,
+    ) -> Result<(), CamelError> {
+        match result {
+            Ok(_) => {
+                // Success - execute onConsume if configured
+                if let Some(ref on_consume) = self.config.on_consume {
+                    self.execute_post_query(pool, on_consume, row_json).await?;
+                }
+            }
+            Err(_) => {
+                // Failure - execute onConsumeFailed if configured
+                if let Some(ref on_consume_failed) = self.config.on_consume_failed {
+                    self.execute_post_query(pool, on_consume_failed, row_json).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute a post-processing query with the row data as parameters.
+    async fn execute_post_query(
+        &self,
+        pool: &AnyPool,
+        query_str: &str,
+        row_json: &JsonValue,
+    ) -> Result<(), CamelError> {
+        // Parse the query template
+        let template = parse_query_template(query_str, self.config.placeholder)?;
+
+        // Create a temporary exchange with the row as body for parameter resolution
+        let temp_exchange = Exchange::new(Message::new(Body::Json(row_json.clone())));
+
+        // Resolve parameters
+        let prepared = resolve_params(&template, &temp_exchange)?;
+
+        // Build and execute the query
+        let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
+        query
+            .execute(pool)
+            .await
+            .map_err(|e| CamelError::ProcessorError(format!("Post-query execution failed: {}", e)))?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl Consumer for SqlConsumer {
-    async fn start(&mut self, _context: ConsumerContext) -> Result<(), CamelError> {
-        // TODO: Full implementation in Task 7
+    async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
+        // Step 1: Initialize the connection pool
+        let pool = self
+            .pool
+            .get_or_try_init(|| async {
+                AnyPoolOptions::new()
+                    .max_connections(self.config.max_connections)
+                    .min_connections(self.config.min_connections)
+                    .idle_timeout(Duration::from_secs(self.config.idle_timeout_secs))
+                    .max_lifetime(Duration::from_secs(self.config.max_lifetime_secs))
+                    .connect(&self.config.db_url)
+                    .await
+                    .map_err(|e| {
+                        CamelError::EndpointCreationFailed(format!(
+                            "Failed to connect to database: {}",
+                            e
+                        ))
+                    })
+            })
+            .await?;
+
+        // Step 2: Initial delay before starting polling
+        if self.config.initial_delay_ms > 0 {
+            tokio::select! {
+                _ = context.cancelled() => {
+                    info!("SQL consumer stopped during initial delay");
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(Duration::from_millis(self.config.initial_delay_ms)) => {}
+            }
+        }
+
+        // Step 3: Polling loop
+        loop {
+            tokio::select! {
+                _ = context.cancelled() => {
+                    info!("SQL consumer stopped");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(self.config.delay_ms)) => {
+                    if let Err(e) = self.poll_database(pool, &context).await {
+                        error!(error = %e, "SQL consumer poll failed");
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -33,5 +235,31 @@ impl Consumer for SqlConsumer {
 
     fn concurrency_model(&self) -> ConcurrencyModel {
         ConcurrencyModel::Sequential
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SqlConfig;
+
+    fn test_config() -> SqlConfig {
+        SqlConfig::from_uri("sql:select * from t?db_url=postgres://localhost/test").unwrap()
+    }
+
+    #[test]
+    fn test_consumer_concurrency_model() {
+        let c = SqlConsumer::new(test_config(), Arc::new(OnceCell::new()));
+        assert_eq!(c.concurrency_model(), ConcurrencyModel::Sequential);
+    }
+
+    #[test]
+    fn test_consumer_stores_config() {
+        let config = SqlConfig::from_uri(
+            "sql:select * from t?db_url=postgres://localhost/test&delay=2000&onConsume=update t set done=true"
+        ).unwrap();
+        let c = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        assert_eq!(c.config.delay_ms, 2000);
+        assert!(c.config.on_consume.is_some());
     }
 }

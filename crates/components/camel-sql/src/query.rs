@@ -271,12 +271,11 @@ fn resolve_named_param(
     exchange: &Exchange,
 ) -> Result<serde_json::Value, CamelError> {
     // 1. Try body if it's a JSON object
-    if let Some(json) = body_json {
-        if let Some(obj) = json.as_object() {
-            if let Some(value) = obj.get(name) {
-                return Ok(value.clone());
-            }
-        }
+    if let Some(json) = body_json
+        && let Some(obj) = json.as_object()
+        && let Some(value) = obj.get(name)
+    {
+        return Ok(value.clone());
     }
 
     // 2. Try headers
