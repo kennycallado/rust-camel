@@ -410,10 +410,7 @@ async fn test_producer_select_one() {
         _ => panic!("Body should be JSON"),
     };
     assert!(json.is_object(), "Body should be a JSON object, not array");
-    assert_eq!(
-        json.get("name").and_then(|v| v.as_str()),
-        Some("SingleRow")
-    );
+    assert_eq!(json.get("name").and_then(|v| v.as_str()), Some("SingleRow"));
     assert_eq!(json.get("value").and_then(|v| v.as_i64()), Some(700));
 }
 
@@ -439,11 +436,7 @@ async fn test_producer_batch() {
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     // Batch body: array of arrays with params
-    let batch_body = serde_json::json!([
-        ["Alice", 100],
-        ["Bob", 200],
-        ["Charlie", 300]
-    ]);
+    let batch_body = serde_json::json!([["Alice", 100], ["Bob", 200], ["Charlie", 300]]);
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(Value::from(batch_body))
@@ -547,7 +540,11 @@ async fn test_producer_noop() {
 
     // Verify original body is preserved
     let body = exchanges[0].input.body.as_text();
-    assert_eq!(body, Some("OriginalBody"), "Body should be preserved in noop mode");
+    assert_eq!(
+        body,
+        Some("OriginalBody"),
+        "Body should be preserved in noop mode"
+    );
 
     // Verify CamelSql.UpdateCount header is still set
     let update_count = exchanges[0]
@@ -619,7 +616,10 @@ async fn test_consumer_polling() {
     let exchanges = endpoint.get_received_exchanges().await;
 
     // Consumer should have processed the row (potentially multiple times since it's a polling query)
-    assert!(!exchanges.is_empty(), "Consumer should have received at least one exchange");
+    assert!(
+        !exchanges.is_empty(),
+        "Consumer should have received at least one exchange"
+    );
 
     // Verify the body contains the row data
     let first_exchange = &exchanges[0];
@@ -697,7 +697,10 @@ async fn test_consumer_on_consume() {
         .expect("Failed to count processed_rows");
 
     // Should have at least 1 row in processed_rows (from onConsume)
-    assert!(count >= 1, "onConsume should have inserted into processed_rows");
+    assert!(
+        count >= 1,
+        "onConsume should have inserted into processed_rows"
+    );
 }
 
 // ===========================================================================

@@ -32,7 +32,10 @@ impl Component for SqlComponent {
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
         let config = SqlConfig::from_uri(uri)?;
-        Ok(Box::new(endpoint::SqlEndpoint::new(uri.to_string(), config)))
+        Ok(Box::new(endpoint::SqlEndpoint::new(
+            uri.to_string(),
+            config,
+        )))
     }
 }
 
@@ -64,7 +67,9 @@ mod tests {
     #[test]
     fn test_endpoint_uri() {
         let c = SqlComponent::new();
-        let ep = c.create_endpoint("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        let ep = c
+            .create_endpoint("sql:select 1?db_url=postgres://localhost/test")
+            .unwrap();
         assert_eq!(ep.uri(), "sql:select 1?db_url=postgres://localhost/test");
     }
 }

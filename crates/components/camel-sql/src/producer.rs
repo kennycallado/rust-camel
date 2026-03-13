@@ -5,17 +5,17 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use serde_json::json;
+use sqlx::AnyPool;
 use sqlx::any::AnyRow;
 use sqlx::pool::PoolOptions;
-use sqlx::AnyPool;
 use tokio::sync::OnceCell;
 use tower::Service;
 
-use camel_api::{Body, CamelError, Exchange, Message};
 use crate::config::{SqlConfig, SqlOutputType};
 use crate::headers;
-use crate::query::{is_select_query, parse_query_template, resolve_params, PreparedQuery};
+use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
+use camel_api::{Body, CamelError, Exchange, Message};
 
 #[derive(Clone)]
 pub struct SqlProducer {
@@ -74,14 +74,12 @@ impl Service<Exchange> for SqlProducer {
                         .min_connections(config.min_connections)
                         .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
                         .max_lifetime(Duration::from_secs(config.max_lifetime_secs));
-                    opts.connect(&config.db_url)
-                        .await
-                        .map_err(|e| {
-                            CamelError::EndpointCreationFailed(format!(
-                                "Failed to connect to database: {}",
-                                e
-                            ))
-                        })
+                    opts.connect(&config.db_url).await.map_err(|e| {
+                        CamelError::EndpointCreationFailed(format!(
+                            "Failed to connect to database: {}",
+                            e
+                        ))
+                    })
                 })
                 .await
                 .map_err(|e: CamelError| e.clone())?;
@@ -236,9 +234,10 @@ async fn execute_batch(
         total_rows_affected += result.rows_affected();
     }
 
-    exchange
-        .input
-        .set_header(headers::UPDATE_COUNT, serde_json::json!(total_rows_affected));
+    exchange.input.set_header(
+        headers::UPDATE_COUNT,
+        serde_json::json!(total_rows_affected),
+    );
 
     Ok(())
 }

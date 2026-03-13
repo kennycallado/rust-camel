@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
-use sqlx::any::AnyRow;
 use sqlx::AnyPool;
 use sqlx::any::AnyPoolOptions;
+use sqlx::any::AnyRow;
 use tokio::sync::OnceCell;
 use tracing::{error, info};
 
@@ -86,9 +86,7 @@ impl SqlConsumer {
                 let result = context.send_and_wait(exchange).await;
 
                 // Handle post-processing (onConsume/onConsumeFailed)
-                if let Err(e) =
-                    self.handle_post_processing(pool, &result, &row_json).await
-                {
+                if let Err(e) = self.handle_post_processing(pool, &result, &row_json).await {
                     error!(error = %e, "Post-processing failed");
                     // Continue processing other rows even if post-processing fails
                     // unless break_batch_on_consume_fail is set
@@ -118,7 +116,9 @@ impl SqlConsumer {
 
         // Execute on_consume_batch_complete if configured
         if let Some(ref batch_query) = self.config.on_consume_batch_complete
-            && let Err(e) = self.execute_post_query(pool, batch_query, &JsonValue::Null).await
+            && let Err(e) = self
+                .execute_post_query(pool, batch_query, &JsonValue::Null)
+                .await
         {
             error!(error = %e, "onConsumeBatchComplete query failed");
         }
@@ -143,7 +143,8 @@ impl SqlConsumer {
             Err(_) => {
                 // Failure - execute onConsumeFailed if configured
                 if let Some(ref on_consume_failed) = self.config.on_consume_failed {
-                    self.execute_post_query(pool, on_consume_failed, row_json).await?;
+                    self.execute_post_query(pool, on_consume_failed, row_json)
+                        .await?;
                 }
             }
         }
@@ -168,10 +169,9 @@ impl SqlConsumer {
 
         // Build and execute the query
         let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
-        query
-            .execute(pool)
-            .await
-            .map_err(|e| CamelError::ProcessorError(format!("Post-query execution failed: {}", e)))?;
+        query.execute(pool).await.map_err(|e| {
+            CamelError::ProcessorError(format!("Post-query execution failed: {}", e))
+        })?;
 
         Ok(())
     }
