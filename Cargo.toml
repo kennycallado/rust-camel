@@ -148,7 +148,7 @@ config = "0.14"
 glob = "0.3"
 notify = { version = "6", features = ["macos_fsevent"] }
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["kafka"] }
+testcontainers-modules = { version = "0.11", features = ["kafka", "postgres"] }
 prometheus = "0.14"
 rand = "0.8"
 
