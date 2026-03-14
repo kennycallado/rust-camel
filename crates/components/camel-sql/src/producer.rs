@@ -392,6 +392,7 @@ async fn execute_batch(
 mod tests {
     use super::*;
     use camel_api::Message;
+    use camel_endpoint::UriConfig;
     use std::sync::Arc;
     use tokio::sync::OnceCell;
 

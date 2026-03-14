@@ -8,6 +8,7 @@ pub(crate) mod utils;
 
 use camel_api::CamelError;
 use camel_component::{Component, Endpoint};
+use camel_endpoint::UriConfig;
 
 pub use config::{SqlConfig, SqlOutputType};
 

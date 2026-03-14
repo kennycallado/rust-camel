@@ -1,12 +1,13 @@
 use std::str::FromStr;
 
 use camel_api::CamelError;
-use camel_endpoint::parse_uri;
+use camel_endpoint::{parse_uri, UriComponents, UriConfig};
 
 /// Output type for SQL query results.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum SqlOutputType {
     /// Return all rows as a list.
+    #[default]
     SelectList,
     /// Return a single row (first result).
     SelectOne,
@@ -31,146 +32,204 @@ impl FromStr for SqlOutputType {
 }
 
 /// Configuration for SQL component endpoints.
+///
+/// URI format: `sql:<query>?db_url=<url>&param1=val1&param2=val2`
+///
+/// The query can be inline SQL or a file reference with `file:` prefix:
+/// - `sql:SELECT * FROM users?db_url=...` - inline SQL
+/// - `sql:file:/path/to/query.sql?db_url=...` - read SQL from file
 #[derive(Debug, Clone)]
 pub struct SqlConfig {
     // Connection
+    /// Database connection URL (required).
     pub db_url: String,
+    /// Maximum connections in the pool. Default: 5.
     pub max_connections: u32,
+    /// Minimum connections in the pool. Default: 1.
     pub min_connections: u32,
+    /// Idle timeout in seconds. Default: 300.
     pub idle_timeout_secs: u64,
+    /// Maximum connection lifetime in seconds. Default: 1800.
     pub max_lifetime_secs: u64,
 
     // Query
+    /// The SQL query (from URI path or file).
     pub query: String,
-    /// Path to a file containing the SQL query (populated when URI starts with `sql:file:...`)
+    /// Path to the file containing the SQL query (when using `file:` prefix).
     pub source_path: Option<String>,
+    /// Output type for query results. Default: SelectList.
     pub output_type: SqlOutputType,
+    /// Placeholder character for parameters. Default: '#'.
     pub placeholder: char,
+    /// If true, don't execute the query (dry run). Default: false.
     pub noop: bool,
 
     // Consumer (polling)
+    /// Delay between polls in milliseconds. Default: 500.
     pub delay_ms: u64,
+    /// Initial delay before first poll in milliseconds. Default: 1000.
     pub initial_delay_ms: u64,
+    /// Maximum messages per poll.
     pub max_messages_per_poll: Option<i32>,
+    /// SQL to execute after consuming each message.
     pub on_consume: Option<String>,
+    /// SQL to execute if consumption fails.
     pub on_consume_failed: Option<String>,
+    /// SQL to execute after consuming a batch.
     pub on_consume_batch_complete: Option<String>,
+    /// Route empty result sets. Default: false.
     pub route_empty_result_set: bool,
+    /// Use iterator for results. Default: true.
     pub use_iterator: bool,
+    /// Expected number of rows affected.
     pub expected_update_count: Option<i64>,
+    /// Break batch on consume failure. Default: false.
     pub break_batch_on_consume_fail: bool,
 
     // Producer
+    /// Enable batch mode. Default: false.
     pub batch: bool,
+    /// Use message body for SQL. Default: false.
     pub use_message_body_for_sql: bool,
 }
 
-impl SqlConfig {
-    /// Parse configuration from a Camel-style URI.
-    ///
-    /// URI format: `sql:<query>?db_url=<url>&param1=val1&param2=val2`
-    ///
-    /// # Errors
-    ///
-    /// Returns `CamelError::InvalidUri` if the scheme is not "sql".
-    /// Returns `CamelError::Config` if `db_url` parameter is missing.
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
-        let components = parse_uri(uri)?;
+impl UriConfig for SqlConfig {
+    fn scheme() -> &'static str {
+        "sql"
+    }
 
+    fn from_uri(uri: &str) -> Result<Self, CamelError> {
+        let parts = parse_uri(uri)?;
+        Self::from_components(parts)
+    }
+
+    fn from_components(parts: UriComponents) -> Result<Self, CamelError> {
         // Validate scheme
-        if components.scheme != "sql" {
+        if parts.scheme != Self::scheme() {
             return Err(CamelError::InvalidUri(format!(
-                "Expected scheme 'sql', got '{}'",
-                components.scheme
+                "expected scheme '{}' but got '{}'",
+                Self::scheme(),
+                parts.scheme
             )));
         }
 
-        // Detect file-based query
-        let (query, source_path) = if components.path.starts_with("file:") {
-            let file_path = components.path.trim_start_matches("file:").to_string();
+        let params = &parts.params;
+
+        // Handle file: prefix for query
+        let (query, source_path) = if parts.path.starts_with("file:") {
+            let file_path = parts.path.trim_start_matches("file:").to_string();
             let contents = std::fs::read_to_string(&file_path).map_err(|e| {
                 CamelError::Config(format!("Failed to read SQL file '{}': {}", file_path, e))
             })?;
             (contents.trim().to_string(), Some(file_path))
         } else {
-            (components.path.clone(), None)
+            (parts.path.clone(), None)
         };
 
-        // Extract required db_url
-        let db_url = components
-            .params
+        // Required parameter: db_url
+        let db_url = params
             .get("db_url")
             .ok_or_else(|| CamelError::Config("db_url parameter is required".to_string()))?
             .clone();
 
-        // Helper functions for parameter extraction
-        let get_param = |name: &str| -> Option<&String> { components.params.get(name) };
+        // Connection parameters
+        let max_connections = params
+            .get("maxConnections")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5);
+        let min_connections = params
+            .get("minConnections")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        let idle_timeout_secs = params
+            .get("idleTimeoutSecs")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        let max_lifetime_secs = params
+            .get("maxLifetimeSecs")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1800);
 
-        let get_u32 = |name: &str, default: u32| -> u32 {
-            get_param(name)
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default)
-        };
+        // Query parameters
+        let output_type = params
+            .get("outputType")
+            .map(|s| s.parse())
+            .transpose()?
+            .unwrap_or_default();
+        let placeholder = params
+            .get("placeholder")
+            .filter(|v| !v.is_empty())
+            .map(|v| v.chars().next().unwrap())
+            .unwrap_or('#');
+        let noop = params
+            .get("noop")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        let get_u64 = |name: &str, default: u64| -> u64 {
-            get_param(name)
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default)
-        };
+        // Consumer parameters
+        let delay_ms = params
+            .get("delay")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500);
+        let initial_delay_ms = params
+            .get("initialDelay")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
+        let max_messages_per_poll = params
+            .get("maxMessagesPerPoll")
+            .and_then(|v| v.parse().ok());
+        let on_consume = params.get("onConsume").cloned();
+        let on_consume_failed = params.get("onConsumeFailed").cloned();
+        let on_consume_batch_complete = params.get("onConsumeBatchComplete").cloned();
+        let route_empty_result_set = params
+            .get("routeEmptyResultSet")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let use_iterator = params
+            .get("useIterator")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        let expected_update_count = params
+            .get("expectedUpdateCount")
+            .and_then(|v| v.parse().ok());
+        let break_batch_on_consume_fail = params
+            .get("breakBatchOnConsumeFail")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        let get_i32 = |name: &str| -> Option<i32> { get_param(name).and_then(|v| v.parse().ok()) };
+        // Producer parameters
+        let batch = params
+            .get("batch")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let use_message_body_for_sql = params
+            .get("useMessageBodyForSql")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        let get_i64 = |name: &str| -> Option<i64> { get_param(name).and_then(|v| v.parse().ok()) };
-
-        let get_bool = |name: &str, default: bool| -> bool {
-            get_param(name)
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(default)
-        };
-
-        let get_char = |name: &str, default: char| -> char {
-            get_param(name)
-                .filter(|v| !v.is_empty())
-                .map(|v| v.chars().next().unwrap())
-                .unwrap_or(default)
-        };
-
-        let get_string = |name: &str| -> Option<String> { get_param(name).cloned() };
-
-        // Build config with defaults
-        Ok(SqlConfig {
-            // Connection
+        Ok(Self {
             db_url,
-            max_connections: get_u32("maxConnections", 5),
-            min_connections: get_u32("minConnections", 1),
-            idle_timeout_secs: get_u64("idleTimeoutSecs", 300),
-            max_lifetime_secs: get_u64("maxLifetimeSecs", 1800),
-
-            // Query
+            max_connections,
+            min_connections,
+            idle_timeout_secs,
+            max_lifetime_secs,
             query,
             source_path,
-            output_type: get_param("outputType")
-                .map(|s| s.parse())
-                .transpose()?
-                .unwrap_or(SqlOutputType::SelectList),
-            placeholder: get_char("placeholder", '#'),
-            noop: get_bool("noop", false),
-
-            // Consumer
-            delay_ms: get_u64("delay", 500),
-            initial_delay_ms: get_u64("initialDelay", 1000),
-            max_messages_per_poll: get_i32("maxMessagesPerPoll"),
-            on_consume: get_string("onConsume"),
-            on_consume_failed: get_string("onConsumeFailed"),
-            on_consume_batch_complete: get_string("onConsumeBatchComplete"),
-            route_empty_result_set: get_bool("routeEmptyResultSet", false),
-            use_iterator: get_bool("useIterator", true),
-            expected_update_count: get_i64("expectedUpdateCount"),
-            break_batch_on_consume_fail: get_bool("breakBatchOnConsumeFail", false),
-
-            // Producer
-            batch: get_bool("batch", false),
-            use_message_body_for_sql: get_bool("useMessageBodyForSql", false),
+            output_type,
+            placeholder,
+            noop,
+            delay_ms,
+            initial_delay_ms,
+            max_messages_per_poll,
+            on_consume,
+            on_consume_failed,
+            on_consume_batch_complete,
+            route_empty_result_set,
+            use_iterator,
+            expected_update_count,
+            break_batch_on_consume_fail,
+            batch,
+            use_message_body_for_sql,
         })
     }
 }

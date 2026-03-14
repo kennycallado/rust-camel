@@ -292,6 +292,7 @@ impl Consumer for SqlConsumer {
 mod tests {
     use super::*;
     use crate::config::SqlConfig;
+    use camel_endpoint::UriConfig;
 
     fn test_config() -> SqlConfig {
         SqlConfig::from_uri("sql:select * from t?db_url=postgres://localhost/test").unwrap()

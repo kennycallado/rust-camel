@@ -15,6 +15,7 @@ members = [
     "crates/camel-builder",
     "crates/camel-component",
     "crates/camel-endpoint",
+    "crates/camel-endpoint-macros",
     "crates/camel-test",
     "crates/components/camel-timer",
     "crates/components/camel-log",
@@ -75,6 +76,9 @@ members = [
     "crates/services/camel-otel",
 ]
 
+[workspace.metadata.crane]
+name = "rust-camel"
+
 [workspace.package]
 version = "0.4.0"
 edition = "2024"
@@ -104,6 +108,7 @@ camel-dsl = { path = "crates/camel-dsl", version = "=0.4.0" }
 camel-builder = { path = "crates/camel-builder", version = "=0.4.0" }
 camel-component = { path = "crates/camel-component", version = "=0.4.0" }
 camel-endpoint = { path = "crates/camel-endpoint", version = "=0.4.0" }
+camel-endpoint-macros = { path = "crates/camel-endpoint-macros", version = "=0.4.0" }
 camel-test = { path = "crates/camel-test", version = "=0.4.0" }
 camel-component-timer = { path = "crates/components/camel-timer", version = "=0.4.0" }
 camel-component-log = { path = "crates/components/camel-log", version = "=0.4.0" }

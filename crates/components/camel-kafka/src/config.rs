@@ -1,5 +1,5 @@
 use camel_api::CamelError;
-use camel_endpoint::parse_uri;
+use camel_endpoint::UriConfig;
 use rdkafka::config::ClientConfig;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -49,28 +49,258 @@ impl std::str::FromStr for SaslAuthType {
     }
 }
 
+/// Configuration parsed from a Kafka URI.
+///
+/// Format: `kafka:topic?brokers=localhost:9092&groupId=camel&...`
+///
+/// # Fields
+///
+/// - `topic` - Kafka topic name (path component, required)
+/// - `brokers` - Comma-separated broker addresses (default: "localhost:9092")
+/// - `group_id` - Consumer group ID (default: "camel")
+/// - `auto_offset_reset` - Auto offset reset policy, must be "earliest", "latest", or "none" (default: "latest")
+/// - `session_timeout_ms` - Session timeout in milliseconds (default: 45000)
+/// - `poll_timeout_ms` - Poll timeout in milliseconds (default: 5000)
+/// - `max_poll_records` - Max poll records (default: 500)
+/// - `acks` - Producer acks setting, must be "0", "1", or "all" (default: "all")
+/// - `request_timeout_ms` - Request timeout in milliseconds (default: 30000)
+/// - `security_protocol` - Security protocol (default: Plaintext)
+/// - `sasl_auth_type` - SASL authentication type (default: None)
+/// - `sasl_username` - SASL username (required for SASL mechanisms except None and Ssl)
+/// - `sasl_password` - SASL password (required for SASL mechanisms except None and Ssl)
+/// - `ssl_keystore_location` - SSL keystore location
+/// - `ssl_keystore_password` - SSL keystore password
+/// - `ssl_truststore_location` - SSL truststore location
+/// - `ssl_truststore_password` - SSL truststore password
+/// - `allow_manual_commit` - Allow manual commit (default: false)
 #[derive(Clone)]
 pub struct KafkaConfig {
+    /// Kafka topic name (path component).
     pub topic: String,
+
+    /// Comma-separated broker addresses. Default: "localhost:9092".
     pub brokers: String,
+
+    /// Consumer group ID. Default: "camel".
     pub group_id: String,
+
+    /// Auto offset reset policy. Default: "latest".
+    /// Must be "earliest", "latest", or "none".
     pub auto_offset_reset: String,
+
+    /// Session timeout in milliseconds. Default: 45000.
     pub session_timeout_ms: u32,
+
+    /// Poll timeout in milliseconds. Default: 5000.
     pub poll_timeout_ms: u32,
+
+    /// Max poll records. Default: 500.
     pub max_poll_records: u32,
+
+    /// Producer acks setting. Default: "all".
+    /// Must be "0", "1", or "all".
     pub acks: String,
+
+    /// Request timeout in milliseconds. Default: 30000.
     pub request_timeout_ms: u32,
-    // Security
+
+    /// Security protocol. Default: Plaintext.
     pub security_protocol: SecurityProtocol,
+
+    /// SASL authentication type. Default: None.
     pub sasl_auth_type: SaslAuthType,
+
+    /// SASL username (required for SASL mechanisms except None and Ssl).
     pub sasl_username: Option<String>,
+
+    /// SASL password (required for SASL mechanisms except None and Ssl).
     pub sasl_password: Option<String>,
+
+    /// SSL keystore location.
     pub ssl_keystore_location: Option<String>,
+
+    /// SSL keystore password.
     pub ssl_keystore_password: Option<String>,
+
+    /// SSL truststore location.
     pub ssl_truststore_location: Option<String>,
+
+    /// SSL truststore password.
     pub ssl_truststore_password: Option<String>,
-    // Manual commit
+
+    /// Allow manual commit. Default: false.
     pub allow_manual_commit: bool,
+}
+
+impl KafkaConfig {
+    /// Parse a Kafka URI into configuration.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = KafkaConfig::from_uri("kafka:my-topic?brokers=localhost:9092&groupId=my-group")?;
+    /// ```
+    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
+        let parts = camel_endpoint::parse_uri(uri)?;
+        Self::from_components(parts)
+    }
+
+    /// Parse already-extracted URI components into configuration.
+    pub fn from_components(parts: camel_endpoint::UriComponents) -> Result<Self, CamelError> {
+        // Validate scheme
+        if parts.scheme != "kafka" {
+            return Err(CamelError::InvalidUri(format!(
+                "expected scheme 'kafka', got '{}'",
+                parts.scheme
+            )));
+        }
+
+        // Extract topic from path
+        let topic = parts.path.trim_start_matches('/').to_string();
+        if topic.is_empty() {
+            return Err(CamelError::InvalidUri(
+                "Kafka URI must specify a topic (e.g. kafka:my-topic)".to_string(),
+            ));
+        }
+
+        // Parse all parameters using defaults
+        let brokers = parts
+            .params
+            .get("brokers")
+            .cloned()
+            .unwrap_or_else(|| "localhost:9092".to_string());
+
+        let group_id = parts
+            .params
+            .get("groupId")
+            .cloned()
+            .unwrap_or_else(|| "camel".to_string());
+
+        let auto_offset_reset = parts
+            .params
+            .get("autoOffsetReset")
+            .cloned()
+            .unwrap_or_else(|| "latest".to_string());
+
+        let session_timeout_ms = parts
+            .params
+            .get("sessionTimeoutMs")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(45000);
+
+        let poll_timeout_ms = parts
+            .params
+            .get("pollTimeoutMs")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5000);
+
+        let max_poll_records = parts
+            .params
+            .get("maxPollRecords")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(500);
+
+        let acks = parts
+            .params
+            .get("acks")
+            .cloned()
+            .unwrap_or_else(|| "all".to_string());
+
+        let request_timeout_ms = parts
+            .params
+            .get("requestTimeoutMs")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30000);
+
+        let security_protocol = parts
+            .params
+            .get("securityProtocol")
+            .map(|s| s.parse::<SecurityProtocol>())
+            .transpose()
+            .map_err(CamelError::InvalidUri)?
+            .unwrap_or_default();
+
+        let sasl_auth_type = parts
+            .params
+            .get("saslAuthType")
+            .map(|s| s.parse::<SaslAuthType>())
+            .transpose()
+            .map_err(CamelError::InvalidUri)?
+            .unwrap_or_default();
+
+        let sasl_username = parts.params.get("saslUsername").cloned();
+        let sasl_password = parts.params.get("saslPassword").cloned();
+
+        let ssl_keystore_location = parts.params.get("sslKeystoreLocation").cloned();
+        let ssl_keystore_password = parts.params.get("sslKeystorePassword").cloned();
+        let ssl_truststore_location = parts.params.get("sslTruststoreLocation").cloned();
+        let ssl_truststore_password = parts.params.get("sslTruststorePassword").cloned();
+
+        let allow_manual_commit = parts
+            .params
+            .get("allowManualCommit")
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let config = Self {
+            topic,
+            brokers,
+            group_id,
+            auto_offset_reset,
+            session_timeout_ms,
+            poll_timeout_ms,
+            max_poll_records,
+            acks,
+            request_timeout_ms,
+            security_protocol,
+            sasl_auth_type,
+            sasl_username,
+            sasl_password,
+            ssl_keystore_location,
+            ssl_keystore_password,
+            ssl_truststore_location,
+            ssl_truststore_password,
+            allow_manual_commit,
+        };
+
+        config.validate()
+    }
+
+    fn validate(self) -> Result<Self, CamelError> {
+        // Validate acks
+        if !matches!(self.acks.as_str(), "0" | "1" | "all") {
+            return Err(CamelError::InvalidUri(format!(
+                "acks must be '0', '1', or 'all', got '{}'",
+                self.acks
+            )));
+        }
+
+        // Validate auto_offset_reset
+        if !matches!(
+            self.auto_offset_reset.as_str(),
+            "earliest" | "latest" | "none"
+        ) {
+            return Err(CamelError::InvalidUri(format!(
+                "autoOffsetReset must be 'earliest', 'latest', or 'none', got '{}'",
+                self.auto_offset_reset
+            )));
+        }
+
+        // Validate: SASL mechanisms (not SSL-only) require username + password
+        if self.sasl_auth_type != SaslAuthType::None && self.sasl_auth_type != SaslAuthType::Ssl {
+            if self.sasl_username.is_none() {
+                return Err(CamelError::InvalidUri(
+                    "saslAuthType requires saslUsername parameter".to_string(),
+                ));
+            }
+            if self.sasl_password.is_none() {
+                return Err(CamelError::InvalidUri(
+                    "saslAuthType requires saslPassword parameter".to_string(),
+                ));
+            }
+        }
+
+        Ok(self)
+    }
 }
 
 impl std::fmt::Debug for KafkaConfig {
@@ -110,150 +340,25 @@ impl std::fmt::Debug for KafkaConfig {
     }
 }
 
-impl KafkaConfig {
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
-        let parts = parse_uri(uri)?;
+// Implement the UriConfig trait to satisfy the interface contract
+impl UriConfig for KafkaConfig {
+    fn scheme() -> &'static str {
+        "kafka"
+    }
 
-        if parts.scheme != "kafka" {
-            return Err(CamelError::InvalidUri(format!(
-                "expected scheme 'kafka', got '{}'",
-                parts.scheme
-            )));
-        }
+    fn from_uri(uri: &str) -> Result<Self, CamelError> {
+        // Call inherent method explicitly using the concrete type
+        KafkaConfig::from_uri(uri)
+    }
 
-        // Topic is the path component (e.g., "kafka:orders" → path = "orders")
-        let topic = parts.path.trim_start_matches('/').to_string();
-        if topic.is_empty() {
-            return Err(CamelError::InvalidUri(
-                "Kafka URI must specify a topic (e.g. kafka:my-topic)".to_string(),
-            ));
-        }
+    fn from_components(parts: camel_endpoint::UriComponents) -> Result<Self, CamelError> {
+        // Call inherent method explicitly using the concrete type
+        KafkaConfig::from_components(parts)
+    }
 
-        let brokers = parts
-            .params
-            .get("brokers")
-            .cloned()
-            .unwrap_or_else(|| "localhost:9092".to_string());
-
-        let group_id = parts
-            .params
-            .get("groupId")
-            .cloned()
-            .unwrap_or_else(|| "camel".to_string());
-
-        let auto_offset_reset = parts
-            .params
-            .get("autoOffsetReset")
-            .cloned()
-            .unwrap_or_else(|| "latest".to_string());
-
-        let session_timeout_ms = parts
-            .params
-            .get("sessionTimeoutMs")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(45000u32);
-
-        let poll_timeout_ms = parts
-            .params
-            .get("pollTimeoutMs")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5000u32);
-
-        let max_poll_records = parts
-            .params
-            .get("maxPollRecords")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(500u32);
-
-        let acks = parts
-            .params
-            .get("acks")
-            .cloned()
-            .unwrap_or_else(|| "all".to_string());
-
-        if !matches!(acks.as_str(), "0" | "1" | "all") {
-            return Err(CamelError::InvalidUri(format!(
-                "acks must be '0', '1', or 'all', got '{acks}'"
-            )));
-        }
-
-        let auto_offset_reset_val = auto_offset_reset.as_str();
-        if !matches!(auto_offset_reset_val, "earliest" | "latest" | "none") {
-            return Err(CamelError::InvalidUri(format!(
-                "autoOffsetReset must be 'earliest', 'latest', or 'none', got '{auto_offset_reset}'"
-            )));
-        }
-
-        let request_timeout_ms = parts
-            .params
-            .get("requestTimeoutMs")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(30000u32);
-
-        let security_protocol = parts
-            .params
-            .get("securityProtocol")
-            .map(|s| s.parse::<SecurityProtocol>())
-            .transpose()
-            .map_err(CamelError::InvalidUri)?
-            .unwrap_or_default();
-
-        let sasl_auth_type = parts
-            .params
-            .get("saslAuthType")
-            .map(|s| s.parse::<SaslAuthType>())
-            .transpose()
-            .map_err(CamelError::InvalidUri)?
-            .unwrap_or_default();
-
-        let sasl_username = parts.params.get("saslUsername").cloned();
-        let sasl_password = parts.params.get("saslPassword").cloned();
-
-        let ssl_keystore_location = parts.params.get("sslKeystoreLocation").cloned();
-        let ssl_keystore_password = parts.params.get("sslKeystorePassword").cloned();
-        let ssl_truststore_location = parts.params.get("sslTruststoreLocation").cloned();
-        let ssl_truststore_password = parts.params.get("sslTruststorePassword").cloned();
-
-        let allow_manual_commit = parts
-            .params
-            .get("allowManualCommit")
-            .map(|s| s.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        // Validate: SASL mechanisms (not SSL-only) require username + password
-        if sasl_auth_type != SaslAuthType::None && sasl_auth_type != SaslAuthType::Ssl {
-            if sasl_username.is_none() {
-                return Err(CamelError::InvalidUri(
-                    "saslAuthType requires saslUsername parameter".to_string(),
-                ));
-            }
-            if sasl_password.is_none() {
-                return Err(CamelError::InvalidUri(
-                    "saslAuthType requires saslPassword parameter".to_string(),
-                ));
-            }
-        }
-
-        Ok(Self {
-            topic,
-            brokers,
-            group_id,
-            auto_offset_reset,
-            session_timeout_ms,
-            poll_timeout_ms,
-            max_poll_records,
-            acks,
-            request_timeout_ms,
-            security_protocol,
-            sasl_auth_type,
-            sasl_username,
-            sasl_password,
-            ssl_keystore_location,
-            ssl_keystore_password,
-            ssl_truststore_location,
-            ssl_truststore_password,
-            allow_manual_commit,
-        })
+    fn validate(self) -> Result<Self, CamelError> {
+        // Call inherent method explicitly
+        KafkaConfig::validate(self)
     }
 }
 

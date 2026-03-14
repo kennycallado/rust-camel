@@ -761,8 +761,20 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "camel-api",
+ "camel-endpoint-macros",
  "camel-util",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "camel-endpoint-macros"
+version = "0.4.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

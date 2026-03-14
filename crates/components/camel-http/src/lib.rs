@@ -11,7 +11,7 @@ use tracing::debug;
 
 use camel_api::{BoxProcessor, CamelError, Exchange, body::Body};
 use camel_component::{Component, Consumer, Endpoint, ProducerContext};
-use camel_endpoint::parse_uri;
+use camel_endpoint::{parse_uri, UriComponents, UriConfig};
 
 // ---------------------------------------------------------------------------
 // HttpConfig
@@ -90,9 +90,32 @@ pub struct HttpConfig {
     pub max_body_size: usize,
 }
 
-impl HttpConfig {
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
+/// Camel options that should NOT be forwarded as HTTP query params
+const HTTP_CAMEL_OPTIONS: &[&str] = &[
+    "httpMethod",
+    "throwExceptionOnFailure",
+    "okStatusCodeRange",
+    "followRedirects",
+    "connectTimeout",
+    "responseTimeout",
+    "allowPrivateIps",
+    "blockedHosts",
+    "maxBodySize",
+];
+
+impl UriConfig for HttpConfig {
+    /// Returns "http" as the primary scheme (also accepts "https")
+    fn scheme() -> &'static str {
+        "http"
+    }
+
+    fn from_uri(uri: &str) -> Result<Self, CamelError> {
         let parts = parse_uri(uri)?;
+        Self::from_components(parts)
+    }
+
+    fn from_components(parts: UriComponents) -> Result<Self, CamelError> {
+        // Validate scheme - accept both http and https
         if parts.scheme != "http" && parts.scheme != "https" {
             return Err(CamelError::InvalidUri(format!(
                 "expected scheme 'http' or 'https', got '{}'",
@@ -100,6 +123,8 @@ impl HttpConfig {
             )));
         }
 
+        // Construct base_url from scheme + path
+        // e.g., "http://localhost:8080/api" from scheme "http" and path "//localhost:8080/api"
         let base_url = format!("{}:{}", parts.scheme, parts.path);
 
         let http_method = parts.params.get("httpMethod").cloned();
@@ -110,6 +135,7 @@ impl HttpConfig {
             .map(|v| v != "false")
             .unwrap_or(true);
 
+        // Parse status code range from "start-end" format (e.g., "200-299")
         let ok_status_code_range = parts
             .params
             .get("okStatusCodeRange")
@@ -145,6 +171,7 @@ impl HttpConfig {
             .map(|v| v == "true")
             .unwrap_or(false); // Default: block private IPs
 
+        // Parse comma-separated blocked hosts
         let blocked_hosts = parts
             .params
             .get("blockedHosts")
@@ -157,31 +184,18 @@ impl HttpConfig {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(10 * 1024 * 1024); // Default: 10MB
 
-        // CAMEL_OPTIONS: params that are consumed by Camel,        // Any remaining params should be forwarded as HTTP query params
-        let camel_options = [
-            "httpMethod",
-            "throwExceptionOnFailure",
-            "okStatusCodeRange",
-            "followRedirects",
-            "connectTimeout",
-            "responseTimeout",
-            "allowPrivateIps",
-            "blockedHosts",
-            "maxBodySize",
-        ];
-
+        // Collect remaining params (not Camel options) as query params
         let query_params: HashMap<String, String> = parts
             .params
             .into_iter()
-            .filter(|(k, _)| !camel_options.contains(&k.as_str()))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .filter(|(k, _)| !HTTP_CAMEL_OPTIONS.contains(&k.as_str()))
             .collect();
 
         Ok(Self {
             base_url,
             http_method,
             throw_exception_on_failure,
-            ok_status_code_range: (ok_status_code_range.0, ok_status_code_range.1),
+            ok_status_code_range,
             follow_redirects,
             connect_timeout,
             response_timeout,
@@ -212,9 +226,19 @@ pub struct HttpServerConfig {
     pub max_response_body: usize,
 }
 
-impl HttpServerConfig {
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
+impl UriConfig for HttpServerConfig {
+    /// Returns "http" as the primary scheme (also accepts "https")
+    fn scheme() -> &'static str {
+        "http"
+    }
+
+    fn from_uri(uri: &str) -> Result<Self, CamelError> {
         let parts = parse_uri(uri)?;
+        Self::from_components(parts)
+    }
+
+    fn from_components(parts: UriComponents) -> Result<Self, CamelError> {
+        // Validate scheme - accept both http and https
         if parts.scheme != "http" && parts.scheme != "https" {
             return Err(CamelError::InvalidUri(format!(
                 "expected scheme 'http' or 'https', got '{}'",
@@ -240,20 +264,22 @@ impl HttpServerConfig {
         }
         .to_string();
 
-        // Parse host:port
+        // Parse host:port from authority
         let (host, port) = if let Some(colon) = authority.rfind(':') {
             let port_str = &authority[colon + 1..];
             match port_str.parse::<u16>() {
                 Ok(p) => (authority[..colon].to_string(), p),
                 Err(_) => {
                     return Err(CamelError::InvalidUri(format!(
-                        "invalid port '{}' in URI '{}'",
-                        port_str, uri
+                        "invalid port '{}' in authority",
+                        port_str
                     )));
                 }
             }
         } else {
-            (authority.to_string(), 80)
+            // Default port based on scheme: 443 for https, 80 for http
+            let default_port = if parts.scheme == "https" { 443 } else { 80 };
+            (authority.to_string(), default_port)
         };
 
         let max_request_body = parts
@@ -1210,6 +1236,27 @@ mod tests {
     }
 
     #[test]
+    fn test_http_config_scheme() {
+        // UriConfig trait method returns "http" as primary scheme
+        assert_eq!(HttpConfig::scheme(), "http");
+    }
+
+    #[test]
+    fn test_http_config_from_components() {
+        // Test from_components directly (trait method)
+        let components = camel_endpoint::UriComponents {
+            scheme: "https".to_string(),
+            path: "//api.example.com/v1".to_string(),
+            params: std::collections::HashMap::from([
+                ("httpMethod".to_string(), "POST".to_string()),
+            ]),
+        };
+        let config = HttpConfig::from_components(components).unwrap();
+        assert_eq!(config.base_url, "https://api.example.com/v1");
+        assert_eq!(config.http_method, Some("POST".to_string()));
+    }
+
+    #[test]
     fn test_http_config_with_options() {
         let config = HttpConfig::from_uri(
             "https://api.example.com/v1?httpMethod=PUT&throwExceptionOnFailure=false&followRedirects=true&connectTimeout=5000&responseTimeout=10000"
@@ -1845,6 +1892,29 @@ mod tests {
     }
 
     #[test]
+    fn test_http_server_config_scheme() {
+        // UriConfig trait method returns "http" as primary scheme
+        assert_eq!(HttpServerConfig::scheme(), "http");
+    }
+
+    #[test]
+    fn test_http_server_config_from_components() {
+        // Test from_components directly (trait method)
+        let components = camel_endpoint::UriComponents {
+            scheme: "https".to_string(),
+            path: "//0.0.0.0:8443/api".to_string(),
+            params: std::collections::HashMap::from([
+                ("maxRequestBody".to_string(), "5242880".to_string()),
+            ]),
+        };
+        let cfg = HttpServerConfig::from_components(components).unwrap();
+        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.port, 8443);
+        assert_eq!(cfg.path, "/api");
+        assert_eq!(cfg.max_request_body, 5242880);
+    }
+
+    #[test]
     fn test_http_server_config_default_path() {
         let cfg = HttpServerConfig::from_uri("http://0.0.0.0:3000").unwrap();
         assert_eq!(cfg.path, "/");
@@ -1858,6 +1928,17 @@ mod tests {
     #[test]
     fn test_http_server_config_invalid_port() {
         assert!(HttpServerConfig::from_uri("http://localhost:abc/path").is_err());
+    }
+
+    #[test]
+    fn test_http_server_config_default_port_by_scheme() {
+        // HTTP without explicit port should default to 80
+        let cfg_http = HttpServerConfig::from_uri("http://0.0.0.0/orders").unwrap();
+        assert_eq!(cfg_http.port, 80);
+
+        // HTTPS without explicit port should default to 443
+        let cfg_https = HttpServerConfig::from_uri("https://0.0.0.0/orders").unwrap();
+        assert_eq!(cfg_https.port, 443);
     }
 
     #[test]

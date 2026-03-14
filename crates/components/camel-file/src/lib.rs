@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -16,25 +17,33 @@ use camel_api::{
     BoxProcessor, CamelError, Exchange, Message, body::Body, body::StreamBody, body::StreamMetadata,
 };
 use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
-use camel_endpoint::parse_uri;
+use camel_endpoint::{parse_uri, UriConfig};
 
 // ---------------------------------------------------------------------------
 // FileExistStrategy
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Strategy for handling existing files when writing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileExistStrategy {
+    /// Overwrite existing file (default).
+    #[default]
     Override,
+    /// Append to existing file.
     Append,
+    /// Fail if file exists.
     Fail,
 }
 
-impl FileExistStrategy {
-    fn from_str(s: &str) -> Self {
+impl FromStr for FileExistStrategy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "Append" | "append" => FileExistStrategy::Append,
-            "Fail" | "fail" => FileExistStrategy::Fail,
-            _ => FileExistStrategy::Override,
+            "Override" | "override" => Ok(FileExistStrategy::Override),
+            "Append" | "append" => Ok(FileExistStrategy::Append),
+            "Fail" | "fail" => Ok(FileExistStrategy::Fail),
+            _ => Ok(FileExistStrategy::Override), // Default for unknown values
         }
     }
 }
@@ -92,136 +101,116 @@ impl FileExistStrategy {
 /// - Keeping the body as a stream throughout the route
 /// - Using streaming processors that don't require full materialization
 /// - Adjusting `max_body_size` only when you control the input sources
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, UriConfig)]
+#[uri_scheme = "file"]
+#[uri_config(skip_impl)]
 pub struct FileConfig {
+    /// Directory path to read from or write to.
     pub directory: String,
+
+    /// Polling delay in milliseconds (companion field for `delay`).
+    #[allow(dead_code)]
+    #[uri_param(name = "delay", default = "500")]
+    delay_ms: u64,
+
+    /// Polling delay as Duration.
     pub delay: Duration,
+
+    /// Initial delay in milliseconds (companion field for `initial_delay`).
+    #[allow(dead_code)]
+    #[uri_param(name = "initialDelay", default = "1000")]
+    initial_delay_ms: u64,
+
+    /// Initial delay as Duration.
     pub initial_delay: Duration,
+
+    /// If true, don't delete or move files after processing.
+    #[uri_param(default = "false")]
     pub noop: bool,
+
+    /// If true, delete files after processing.
+    #[uri_param(default = "false")]
     pub delete: bool,
-    pub move_to: Option<String>,
+
+    /// Directory to move processed files to (only if not noop/delete).
+    /// Default is ".camel" when not specified and noop/delete are false.
+    #[uri_param(name = "move")]
+    move_to: Option<String>,
+
+    /// Fixed filename for producer (optional).
+    #[uri_param(name = "fileName")]
     pub file_name: Option<String>,
+
+    /// Regex pattern for including files (consumer).
+    #[uri_param]
     pub include: Option<String>,
+
+    /// Regex pattern for excluding files (consumer).
+    #[uri_param]
     pub exclude: Option<String>,
+
+    /// Whether to scan directories recursively.
+    #[uri_param(default = "false")]
     pub recursive: bool,
+
+    /// Strategy for handling existing files when writing.
+    #[uri_param(name = "fileExist", default = "Override")]
     pub file_exist: FileExistStrategy,
+
+    /// Prefix for temporary files during atomic writes.
+    #[uri_param(name = "tempPrefix")]
     pub temp_prefix: Option<String>,
+
+    /// Whether to automatically create directories.
+    #[uri_param(name = "autoCreate", default = "true")]
     pub auto_create: bool,
-    // Timeout fields for preventing hanging on slow filesystems
+
+    /// Read timeout in milliseconds (companion field for `read_timeout`).
+    #[allow(dead_code)]
+    #[uri_param(name = "readTimeout", default = "30000")]
+    read_timeout_ms: u64,
+
+    /// Read timeout as Duration.
     pub read_timeout: Duration,
+
+    /// Write timeout in milliseconds (companion field for `write_timeout`).
+    #[allow(dead_code)]
+    #[uri_param(name = "writeTimeout", default = "30000")]
+    write_timeout_ms: u64,
+
+    /// Write timeout as Duration.
     pub write_timeout: Duration,
-    // Memory limit for body materialization (in bytes)
+
+    /// Maximum body size for materialization in bytes.
+    #[uri_param(name = "maxBodySize", default = "104857600")]
     pub max_body_size: usize,
 }
 
-impl FileConfig {
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
+impl UriConfig for FileConfig {
+    fn scheme() -> &'static str {
+        "file"
+    }
+
+    fn from_uri(uri: &str) -> Result<Self, CamelError> {
         let parts = parse_uri(uri)?;
-        if parts.scheme != "file" {
-            return Err(CamelError::InvalidUri(format!(
-                "expected scheme 'file', got '{}'",
-                parts.scheme
-            )));
-        }
+        Self::from_components(parts)
+    }
 
-        let delay = parts
-            .params
-            .get("delay")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(500);
+    fn from_components(parts: camel_endpoint::UriComponents) -> Result<Self, CamelError> {
+        Self::parse_uri_components(parts)?.validate()
+    }
 
-        let initial_delay = parts
-            .params
-            .get("initialDelay")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(1000);
-
-        let noop = parts
-            .params
-            .get("noop")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        let delete = parts
-            .params
-            .get("delete")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        let move_to = if noop || delete {
+    fn validate(self) -> Result<Self, CamelError> {
+        // Apply conditional logic for move_to:
+        // - If noop or delete is true, move_to should be None
+        // - Otherwise, if move_to is None, default to ".camel"
+        let move_to = if self.noop || self.delete {
             None
         } else {
-            Some(
-                parts
-                    .params
-                    .get("move")
-                    .cloned()
-                    .unwrap_or_else(|| ".camel".to_string()),
-            )
+            Some(self.move_to.unwrap_or_else(|| ".camel".to_string()))
         };
 
-        let file_name = parts.params.get("fileName").cloned();
-        let include = parts.params.get("include").cloned();
-        let exclude = parts.params.get("exclude").cloned();
-
-        let recursive = parts
-            .params
-            .get("recursive")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        let file_exist = parts
-            .params
-            .get("fileExist")
-            .map(|v| FileExistStrategy::from_str(v))
-            .unwrap_or(FileExistStrategy::Override);
-
-        let temp_prefix = parts.params.get("tempPrefix").cloned();
-
-        let auto_create = parts
-            .params
-            .get("autoCreate")
-            .map(|v| v != "false")
-            .unwrap_or(true);
-
-        let read_timeout = parts
-            .params
-            .get("readTimeout")
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_secs(30));
-
-        let write_timeout = parts
-            .params
-            .get("writeTimeout")
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_secs(30));
-
-        let max_body_size = parts
-            .params
-            .get("maxBodySize")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(100 * 1024 * 1024); // Default: 100MB
-
-        Ok(Self {
-            directory: parts.path,
-            delay: Duration::from_millis(delay),
-            initial_delay: Duration::from_millis(initial_delay),
-            noop,
-            delete,
-            move_to,
-            file_name,
-            include,
-            exclude,
-            recursive,
-            file_exist,
-            temp_prefix,
-            auto_create,
-            read_timeout,
-            write_timeout,
-            max_body_size,
-        })
+        Ok(Self { move_to, ..self })
     }
 }
 
