@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/camel-otel"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true
