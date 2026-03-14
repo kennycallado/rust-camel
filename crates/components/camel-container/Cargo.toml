@@ -2,12 +2,12 @@
 name = "camel-component-container"
 version.workspace = true
 description = "Docker/Container component for rust-camel — run, manage and listen to container events via the Camel routing engine"
-edition = "2024"
+edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
-readme.workspace = true
+documentation = "https://docs.rs/camel-component-container"
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 
