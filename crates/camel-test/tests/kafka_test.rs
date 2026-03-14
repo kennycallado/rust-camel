@@ -189,8 +189,6 @@ async fn test_kafka_consumer_sets_headers() {
         ex.input.header("CamelKafkaGroupId").is_some(),
         "CamelKafkaGroupId header must be present"
     );
-    assert!(
-        ex.properties.contains_key("kafka.manual.commit"),
-        "kafka.manual.commit property must be present"
-    );
+    // Note: kafka.manual.commit JSON property removed; use exchange.get_extension::<KafkaManualCommit>("kafka.manual_commit")
+    // when allowManualCommit=true is configured.
 }

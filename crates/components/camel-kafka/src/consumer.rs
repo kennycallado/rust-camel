@@ -14,10 +14,13 @@ use rdkafka::message::Message as _;
 use rdkafka::message::OwnedMessage;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+use crate::config::apply_security_config;
+use crate::manual_commit::{CommitRequest, KafkaManualCommit};
 
 // ---------------------------------------------------------------------------
 // ReadyContext — notifies when the consumer gets its first partition assignment
@@ -123,7 +126,6 @@ impl Consumer for KafkaConsumer {
 ///
 /// Sets headers: CamelKafkaTopic, CamelKafkaPartition, CamelKafkaOffset,
 /// CamelKafkaKey (if present), CamelKafkaTimestamp (if present), CamelKafkaGroupId
-/// Sets property: "kafka.manual.commit" → JSON object with {topic, partition, offset}
 pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
     // Payload
     let body = match msg.payload() {
@@ -167,16 +169,6 @@ pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
         .input
         .set_header("CamelKafkaGroupId", Value::String(group_id.to_string()));
 
-    // Store commit metadata in properties for user reference
-    exchange.properties.insert(
-        "kafka.manual.commit".to_string(),
-        serde_json::json!({
-            "topic": msg.topic(),
-            "partition": msg.partition(),
-            "offset": msg.offset(),
-        }),
-    );
-
     // Extract W3C TraceContext headers for distributed tracing (otel feature only)
     #[cfg(feature = "otel")]
     {
@@ -205,19 +197,35 @@ async fn run_consumer_loop(
 ) -> Result<(), CamelError> {
     use rdkafka::consumer::CommitMode;
 
-    let consumer: ReadyStreamConsumer = ClientConfig::new()
+    let (commit_tx, commit_rx): (
+        Option<mpsc::Sender<CommitRequest>>,
+        Option<mpsc::Receiver<CommitRequest>>,
+    ) = if config.allow_manual_commit {
+        let (tx, rx) = mpsc::channel(32);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    let mut client_cfg = ClientConfig::new();
+    client_cfg
         .set("bootstrap.servers", &config.brokers)
         .set("group.id", &config.group_id)
         .set("auto.offset.reset", &config.auto_offset_reset)
         .set("session.timeout.ms", config.session_timeout_ms.to_string())
         .set("enable.auto.commit", "false")
-        .set("fetch.wait.max.ms", config.poll_timeout_ms.to_string())
-        // Note: max.poll.records is a Java Kafka client concept; librdkafka uses
-        // queued.max.messages.kbytes / max.partition.fetch.bytes instead.
+        .set("fetch.wait.max.ms", config.poll_timeout_ms.to_string());
+
+    apply_security_config(&config, &mut client_cfg);
+
+    let consumer: ReadyStreamConsumer = client_cfg
         .create_with_context(ReadyContext { ready })
         .map_err(|e| {
             CamelError::ProcessorError(format!("Failed to create Kafka consumer: {}", e))
         })?;
+
+    // Wrap in Arc to share between main loop and commit handler task
+    let consumer = Arc::new(consumer);
 
     consumer.subscribe(&[config.topic.as_str()]).map_err(|e| {
         CamelError::ProcessorError(format!(
@@ -227,6 +235,34 @@ async fn run_consumer_loop(
     })?;
 
     info!(topic = %config.topic, "Kafka consumer subscribed");
+
+    // Spawn commit handler task if manual commit is enabled
+    let commit_handle = if let Some(mut rx) = commit_rx {
+        let consumer_for_commits = consumer.clone();
+        Some(tokio::spawn(async move {
+            use rdkafka::TopicPartitionList;
+            use rdkafka::consumer::CommitMode;
+            while let Some(req) = rx.recv().await {
+                let mut tpl = TopicPartitionList::new();
+                tpl.add_partition_offset(
+                    &req.topic,
+                    req.partition,
+                    rdkafka::Offset::Offset(req.offset + 1),
+                )
+                .expect("topic/partition from valid message should never fail");
+                let result = consumer_for_commits
+                    .commit(&tpl, CommitMode::Sync)
+                    .map_err(|e| CamelError::ProcessorError(format!("Commit failed: {e}")));
+                if let Some(reply_tx) = req.reply_tx {
+                    let _ = reply_tx.send(result);
+                } else if let Err(ref e) = result {
+                    error!(error = %e, "Async Kafka commit failed");
+                }
+            }
+        }))
+    } else {
+        None
+    };
 
     // The ReadyContext::post_rebalance callback fires `ready.notify_waiters()`
     // when partitions are assigned. No polling loop needed — recv() drives the
@@ -248,28 +284,44 @@ async fn run_consumer_loop(
                     Ok(msg) => {
                         // Must detach before await point (BorrowedMessage not 'static)
                         let owned = msg.detach();
-                        let exchange = build_exchange(&owned, &config.group_id);
-                        if let Err(e) = ctx.send(exchange).await {
-                            error!(error = %e, "Failed to send exchange to pipeline");
-                        }
-                        // Commit offset after dispatching (at-least-once semantics)
-                        let tpl = {
-                            use rdkafka::TopicPartitionList;
-                            let mut tpl = TopicPartitionList::new();
+                        let mut exchange = build_exchange(&owned, &config.group_id);
+
+                        if let Some(ref tx) = commit_tx {
+                            // Manual commit mode: store handle in extensions, user is responsible for commit
+                            let handle = KafkaManualCommit::new(
+                                owned.topic().to_string(),
+                                owned.partition(),
+                                owned.offset(),
+                                tx.clone(),
+                            );
+                            exchange.set_extension("kafka.manual_commit", Arc::new(handle));
+                            if let Err(e) = ctx.send(exchange).await {
+                                error!(error = %e, "Failed to send exchange to pipeline");
+                            }
+                        } else {
+                            // Auto-commit mode: dispatch then commit (at-least-once semantics)
+                            if let Err(e) = ctx.send(exchange).await {
+                                error!(error = %e, "Failed to send exchange to pipeline");
+                            }
+                            let mut tpl = rdkafka::TopicPartitionList::new();
                             tpl.add_partition_offset(
                                 owned.topic(),
                                 owned.partition(),
                                 rdkafka::Offset::Offset(owned.offset() + 1),
                             ).expect("topic/partition from valid message should never fail");
-                            tpl
-                        };
-                        if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
-                            warn!(error = %e, "Failed to commit Kafka offset");
+                            if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
+                                warn!(error = %e, "Failed to commit Kafka offset");
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    // Wait for the commit handler to drain in-flight commits
+    if let Some(handle) = commit_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
     }
 
     Ok(())
@@ -399,26 +451,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_exchange_manual_commit_is_json_object() {
-        let msg = make_msg(None, None, "my-topic", Timestamp::NotAvailable, 2, 42);
-        let ex = build_exchange(&msg, "g");
-        let val = ex
-            .properties
-            .get("kafka.manual.commit")
-            .expect("kafka.manual.commit property must be present");
-        assert!(
-            matches!(val, Value::Object(_)),
-            "kafka.manual.commit must be a JSON Object, got: {:?}",
-            val
-        );
-        // Verify the object contains the expected fields
-        let obj = val.as_object().expect("already asserted Object above");
-        assert_eq!(obj.get("topic").and_then(|v| v.as_str()), Some("my-topic"));
-        assert_eq!(obj.get("partition").and_then(|v| v.as_i64()), Some(2));
-        assert_eq!(obj.get("offset").and_then(|v| v.as_i64()), Some(42));
-    }
-
-    #[test]
     fn test_build_exchange_binary_key_no_header() {
         let binary_key = vec![0xff, 0xfe];
         let msg = make_msg(None, Some(binary_key), "t", Timestamp::NotAvailable, 0, 0);
@@ -531,7 +563,6 @@ mod tests {
         assert!(ex.input.header("CamelKafkaPartition").is_some());
         assert!(ex.input.header("CamelKafkaOffset").is_some());
         assert!(ex.input.header("CamelKafkaGroupId").is_some());
-        assert!(ex.properties.contains_key("kafka.manual.commit"));
 
         cancel_token.cancel();
         consumer.stop().await.unwrap();

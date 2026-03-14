@@ -12,7 +12,7 @@ use std::time::Duration;
 use tower::Service;
 use tracing::{debug, error};
 
-use crate::config::KafkaConfig;
+use crate::config::{KafkaConfig, apply_security_config};
 
 #[derive(Clone)]
 pub struct KafkaProducer {
@@ -22,14 +22,16 @@ pub struct KafkaProducer {
 
 impl KafkaProducer {
     pub fn new(config: KafkaConfig) -> Result<Self, CamelError> {
-        let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", &config.brokers)
+        let mut cc = ClientConfig::new();
+        cc.set("bootstrap.servers", &config.brokers)
             .set("message.timeout.ms", config.request_timeout_ms.to_string())
-            .set("acks", &config.acks)
-            .create()
-            .map_err(|e| {
-                CamelError::ProcessorError(format!("Failed to create Kafka producer: {}", e))
-            })?;
+            .set("acks", &config.acks);
+
+        apply_security_config(&config, &mut cc);
+
+        let producer: FutureProducer = cc.create().map_err(|e| {
+            CamelError::ProcessorError(format!("Failed to create Kafka producer: {}", e))
+        })?;
 
         Ok(Self {
             config,

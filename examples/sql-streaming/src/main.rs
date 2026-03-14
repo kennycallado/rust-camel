@@ -95,15 +95,15 @@ async fn main() -> Result<(), CamelError> {
         .route_id("select-list-route")
         .to(select_list_uri.as_str())
         .process(|ex: Exchange| async move {
-            if let Body::Json(json) = &ex.input.body {
-                if let Some(arr) = json.as_array() {
-                    println!("  Result: JSON array with {} rows", arr.len());
-                    println!("  First 3 rows:");
-                    for (i, row) in arr.iter().take(3).enumerate() {
-                        println!("    [{}] {}", i, serde_json::to_string(row).unwrap());
-                    }
-                    println!("  ... (all {} rows loaded in memory)\n", arr.len());
+            if let Body::Json(json) = &ex.input.body
+                && let Some(arr) = json.as_array()
+            {
+                println!("  Result: JSON array with {} rows", arr.len());
+                println!("  First 3 rows:");
+                for (i, row) in arr.iter().take(3).enumerate() {
+                    println!("    [{}] {}", i, serde_json::to_string(row).unwrap());
                 }
+                println!("  ... (all {} rows loaded in memory)\n", arr.len());
             }
             Ok(ex)
         })

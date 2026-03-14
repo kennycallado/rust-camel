@@ -1,4 +1,6 @@
+use std::any::Any;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use opentelemetry::Context;
 use uuid::Uuid;
@@ -21,7 +23,7 @@ pub enum ExchangePattern {
 ///
 /// It contains the input message, an optional output message,
 /// properties for passing data between processors, and error state.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Exchange {
     /// The input (incoming) message.
     pub input: Message,
@@ -29,6 +31,9 @@ pub struct Exchange {
     pub output: Option<Message>,
     /// Exchange-scoped properties for passing data between processors.
     pub properties: HashMap<String, Value>,
+    /// Non-serializable extension values (e.g., channel senders).
+    /// Stored as `Arc<dyn Any + Send + Sync>` so cloning is cheap (ref-count bump).
+    pub extensions: HashMap<String, Arc<dyn Any + Send + Sync>>,
     /// Error state, if processing failed.
     pub error: Option<CamelError>,
     /// The exchange pattern.
@@ -48,6 +53,7 @@ impl Exchange {
             input,
             output: None,
             properties: HashMap::new(),
+            extensions: HashMap::new(),
             error: None,
             pattern: ExchangePattern::default(),
             correlation_id: Uuid::new_v4().to_string(),
@@ -61,6 +67,7 @@ impl Exchange {
             input,
             output: None,
             properties: HashMap::new(),
+            extensions: HashMap::new(),
             error: None,
             pattern: ExchangePattern::InOut,
             correlation_id: Uuid::new_v4().to_string(),
@@ -91,6 +98,32 @@ impl Exchange {
     /// Set an error on this exchange.
     pub fn set_error(&mut self, error: CamelError) {
         self.error = Some(error);
+    }
+
+    /// Store a non-serializable extension value (e.g. a channel sender).
+    pub fn set_extension(&mut self, key: impl Into<String>, value: Arc<dyn Any + Send + Sync>) {
+        self.extensions.insert(key.into(), value);
+    }
+
+    /// Retrieve a typed extension value. Returns `None` if the key is absent
+    /// or the stored value is not of type `T`.
+    pub fn get_extension<T: Any>(&self, key: &str) -> Option<&T> {
+        self.extensions.get(key)?.downcast_ref::<T>()
+    }
+}
+
+impl Clone for Exchange {
+    fn clone(&self) -> Self {
+        Self {
+            input: self.input.clone(),
+            output: self.output.clone(),
+            properties: self.properties.clone(),
+            extensions: self.extensions.clone(), // Arc ref-count bump, cheap
+            error: self.error.clone(),
+            pattern: self.pattern,
+            correlation_id: self.correlation_id.clone(),
+            otel_context: self.otel_context.clone(),
+        }
     }
 }
 
@@ -168,5 +201,41 @@ mod tests {
         // Both should have the same (empty) context
         use opentelemetry::trace::TraceContextExt;
         assert!(!cloned.otel_context.span().span_context().is_valid());
+    }
+
+    #[test]
+    fn test_set_and_get_extension() {
+        use std::sync::Arc;
+        let mut ex = Exchange::default();
+        ex.set_extension("my.key", Arc::new(42u32));
+        let val: Option<&u32> = ex.get_extension("my.key");
+        assert_eq!(val, Some(&42u32));
+    }
+
+    #[test]
+    fn test_get_extension_wrong_type_returns_none() {
+        use std::sync::Arc;
+        let mut ex = Exchange::default();
+        ex.set_extension("my.key", Arc::new(42u32));
+        let val: Option<&String> = ex.get_extension("my.key");
+        assert!(val.is_none());
+    }
+
+    #[test]
+    fn test_get_extension_missing_key_returns_none() {
+        let ex = Exchange::default();
+        let val: Option<&u32> = ex.get_extension("nope");
+        assert!(val.is_none());
+    }
+
+    #[test]
+    fn test_clone_shares_extension_arc() {
+        use std::sync::Arc;
+        let mut ex = Exchange::default();
+        ex.set_extension("shared", Arc::new(99u64));
+        let cloned = ex.clone();
+        // Both see the same value
+        assert_eq!(ex.get_extension::<u64>("shared"), Some(&99u64));
+        assert_eq!(cloned.get_extension::<u64>("shared"), Some(&99u64));
     }
 }

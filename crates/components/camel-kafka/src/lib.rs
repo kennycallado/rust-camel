@@ -1,9 +1,11 @@
 pub mod config;
 pub mod consumer;
+pub mod manual_commit;
 pub mod producer;
 
 pub use config::KafkaConfig;
 pub use consumer::KafkaConsumer;
+pub use manual_commit::KafkaManualCommit;
 pub use producer::KafkaProducer;
 
 use camel_api::{BoxProcessor, CamelError};
