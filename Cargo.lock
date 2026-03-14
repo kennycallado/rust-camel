@@ -4137,6 +4137,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "sql-example"
+version = "0.3.5"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-sql",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "sqlx"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

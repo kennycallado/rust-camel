@@ -39,6 +39,7 @@ members = [
     "examples/splitter",
     "examples/file-polling",
     "examples/file-pipeline",
+    "examples/sql-example",
     "examples/http-client",
     "examples/aggregator",
     "examples/wiretap",
