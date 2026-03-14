@@ -615,9 +615,11 @@ name = "camel-component-mock"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "camel-api",
  "camel-component",
  "camel-endpoint",
+ "serde_json",
  "tokio",
  "tower",
 ]

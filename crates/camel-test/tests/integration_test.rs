@@ -2522,3 +2522,55 @@ async fn test_xml_body_pipeline() {
         "Body should be converted from Xml to Text"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test: New mock assertion API — reference migration example
+// ---------------------------------------------------------------------------
+
+/// Demonstrates the new `await_exchanges` + `ExchangeAssert` API.
+///
+/// This is the reference example for migrating away from the old pattern:
+///
+/// ```
+/// // OLD (fragile — fixed sleep):
+/// tokio::time::sleep(Duration::from_millis(200)).await;
+/// let received = mock.get_received_exchanges().await;
+/// assert_eq!(received.len(), 3);
+/// assert_eq!(received[0].input.body.as_text(), Some("timer://tick tick #1"));
+///
+/// // NEW (reliable — Notify-based):
+/// ep.await_exchanges(3, Duration::from_millis(2000)).await;
+/// ep.exchange(0).assert_body_text("timer://tick tick #1");
+/// ```
+///
+/// Timer body format: `"timer://<name> tick #<n>"` (e.g. `"timer://tick tick #1"`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mock_new_assertion_api() {
+    use std::time::Duration;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
+        .route_id("test-mock-new-assertion-api")
+        .to("mock:assert-api-result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    let ep = mock.get_endpoint("assert-api-result").unwrap();
+
+    // Wait for exactly 3 exchanges — no sleep needed.
+    ep.await_exchanges(3, Duration::from_millis(2000)).await;
+
+    // Timer body format: "timer://<name> tick #<n>"
+    ep.exchange(0).assert_body_text("timer://tick tick #1");
+    ep.exchange(1).assert_body_text("timer://tick tick #2");
+    ep.exchange(2).assert_body_text("timer://tick tick #3");
+
+    ctx.stop().await.unwrap();
+}

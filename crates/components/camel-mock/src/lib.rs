@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tower::Service;
 
 use camel_api::{BoxProcessor, CamelError, Exchange};
@@ -80,6 +80,7 @@ impl Component for MockComponent {
                     uri: uri.to_string(),
                     name,
                     received: Arc::new(Mutex::new(Vec::new())),
+                    notify: Arc::new(Notify::new()),
                 })
             })
             .clone();
@@ -108,6 +109,7 @@ pub struct MockEndpointInner {
     uri: String,
     pub name: String,
     received: Arc<Mutex<Vec<Exchange>>>,
+    notify: Arc<Notify>,
 }
 
 impl MockEndpointInner {
@@ -128,6 +130,71 @@ impl MockEndpointInner {
             "MockEndpoint expected {expected} exchanges, got {actual}"
         );
     }
+
+    /// Wait until at least `count` exchanges have been received, or panic on timeout.
+    ///
+    /// Uses `tokio::sync::Notify` — no polling. Returns immediately if `count`
+    /// exchanges are already present.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `timeout` elapses before `count` exchanges arrive.
+    pub async fn await_exchanges(&self, count: usize, timeout: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            {
+                let received = self.received.lock().await;
+                if received.len() >= count {
+                    return;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                // Re-check in case the final exchange arrived between the lock drop
+                // above and entering the select — Notify does not buffer permits.
+                let got = self.received.lock().await.len();
+                if got >= count {
+                    return;
+                }
+                panic!(
+                    "MockEndpoint '{}': timed out waiting for {} exchanges (got {} after {:?})",
+                    self.name, count, got, timeout
+                );
+            }
+            tokio::select! {
+                _ = self.notify.notified() => {}
+                _ = tokio::time::sleep(remaining) => {}
+            }
+        }
+    }
+
+    /// Return an [`ExchangeAssert`] for the exchange at `idx`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx` is out of bounds. Always call [`await_exchanges`] first
+    /// to ensure the exchange has been received.
+    ///
+    /// Panics if called from a single-threaded tokio runtime. Use
+    /// `#[tokio::test(flavor = "multi_thread")]` for tests that call this method.
+    ///
+    /// [`await_exchanges`]: MockEndpointInner::await_exchanges
+    pub fn exchange(&self, idx: usize) -> ExchangeAssert {
+        let received = tokio::task::block_in_place(|| self.received.blocking_lock());
+        if idx >= received.len() {
+            panic!(
+                "MockEndpoint '{}': exchange index {} out of bounds (got {} exchanges)",
+                self.name,
+                idx,
+                received.len()
+            );
+        }
+        ExchangeAssert {
+            exchange: received[idx].clone(),
+            idx,
+            endpoint_name: self.name.clone(),
+        }
+    }
 }
 
 impl Endpoint for MockEndpoint {
@@ -144,6 +211,7 @@ impl Endpoint for MockEndpoint {
     fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(MockProducer {
             received: Arc::clone(&self.0.received),
+            notify: Arc::clone(&self.0.notify),
         }))
     }
 }
@@ -156,6 +224,7 @@ impl Endpoint for MockEndpoint {
 #[derive(Clone)]
 struct MockProducer {
     received: Arc<Mutex<Vec<Exchange>>>,
+    notify: Arc<Notify>,
 }
 
 impl Service<Exchange> for MockProducer {
@@ -169,10 +238,155 @@ impl Service<Exchange> for MockProducer {
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let received = Arc::clone(&self.received);
+        let notify = Arc::clone(&self.notify);
         Box::pin(async move {
             received.lock().await.push(exchange.clone());
+            notify.notify_waiters();
             Ok(exchange)
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ExchangeAssert
+// ---------------------------------------------------------------------------
+
+/// A handle for making synchronous assertions on a recorded exchange.
+///
+/// Obtain one via [`MockEndpointInner::exchange`] after calling
+/// [`MockEndpointInner::await_exchanges`].
+///
+/// All methods panic with descriptive messages on failure, making test output
+/// self-explanatory without additional context.
+pub struct ExchangeAssert {
+    exchange: Exchange,
+    idx: usize,
+    endpoint_name: String,
+}
+
+impl ExchangeAssert {
+    fn location(&self) -> String {
+        format!("MockEndpoint '{}' exchange[{}]", self.endpoint_name, self.idx)
+    }
+
+    /// Assert that the body is `Body::Text` equal to `expected`.
+    pub fn assert_body_text(self, expected: &str) -> Self {
+        match self.exchange.input.body.as_text() {
+            Some(actual) if actual == expected => {}
+            Some(actual) => panic!(
+                "{}: expected body text {:?}, got {:?}",
+                self.location(), expected, actual
+            ),
+            None => panic!(
+                "{}: expected body text {:?}, but body is not Body::Text (got {:?})",
+                self.location(), expected, self.exchange.input.body
+            ),
+        }
+        self
+    }
+
+    /// Assert that the body is `Body::Json` equal to `expected`.
+    pub fn assert_body_json(self, expected: serde_json::Value) -> Self {
+        match &self.exchange.input.body {
+            camel_api::Body::Json(actual) if *actual == expected => {}
+            camel_api::Body::Json(actual) => panic!(
+                "{}: expected body JSON {}, got {}",
+                self.location(), expected, actual
+            ),
+            other => panic!(
+                "{}: expected body JSON {}, but body is not Body::Json (got {:?})",
+                self.location(), expected, other
+            ),
+        }
+        self
+    }
+
+    /// Assert that the body is `Body::Bytes` equal to `expected`.
+    pub fn assert_body_bytes(self, expected: &[u8]) -> Self {
+        match &self.exchange.input.body {
+            camel_api::Body::Bytes(actual) if actual.as_ref() == expected => {}
+            camel_api::Body::Bytes(actual) => panic!(
+                "{}: expected body bytes {:?}, got {:?}",
+                self.location(), expected, actual
+            ),
+            other => panic!(
+                "{}: expected body bytes {:?}, but body is not Body::Bytes (got {:?})",
+                self.location(), expected, other
+            ),
+        }
+        self
+    }
+
+    /// Assert that header `key` exists and equals `expected`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the header is missing or its value does not match `expected`.
+    pub fn assert_header(self, key: &str, expected: serde_json::Value) -> Self {
+        match self.exchange.input.headers.get(key) {
+            Some(actual) if *actual == expected => {}
+            Some(actual) => panic!(
+                "{}: expected header {:?} = {}, got {}",
+                self.location(),
+                key,
+                expected,
+                actual
+            ),
+            None => panic!(
+                "{}: expected header {:?} = {}, but header is absent",
+                self.location(),
+                key,
+                expected
+            ),
+        }
+        self
+    }
+
+    /// Assert that header `key` is present (any value).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the header key is absent.
+    pub fn assert_header_exists(self, key: &str) -> Self {
+        if !self.exchange.input.headers.contains_key(key) {
+            panic!(
+                "{}: expected header {:?} to be present, but it was absent",
+                self.location(),
+                key
+            );
+        }
+        self
+    }
+
+    /// Assert that the exchange has an error (`exchange.error` is `Some`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `exchange.error` is `None`.
+    pub fn assert_has_error(self) -> Self {
+        if self.exchange.error.is_none() {
+            panic!(
+                "{}: expected exchange to have an error, but error is None",
+                self.location()
+            );
+        }
+        self
+    }
+
+    /// Assert that the exchange has no error (`exchange.error` is `None`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `exchange.error` is `Some`.
+    pub fn assert_no_error(self) -> Self {
+        if let Some(ref err) = self.exchange.error {
+            panic!(
+                "{}: expected exchange to have no error, but got: {}",
+                self.location(),
+                err
+            );
+        }
+        self
     }
 }
 
@@ -185,7 +399,6 @@ mod tests {
     use super::*;
     use camel_api::Message;
     use std::sync::Arc;
-    use tokio::sync::Mutex;
     use tower::ServiceExt;
 
     // NullRouteController for testing
@@ -349,5 +562,285 @@ mod tests {
         let received = inner.get_received_exchanges().await;
         assert_eq!(received[0].input.body.as_text(), Some("from-ep1"));
         assert_eq!(received[1].input.body.as_text(), Some("from-ep2"));
+    }
+
+    #[tokio::test]
+    async fn await_exchanges_resolves_immediately() {
+        // If exchanges are already present, await_exchanges returns without timeout.
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:immediate").unwrap();
+        let inner = component.get_endpoint("immediate").unwrap();
+
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer.call(Exchange::new(Message::new("a"))).await.unwrap();
+        producer.call(Exchange::new(Message::new("b"))).await.unwrap();
+
+        // Should return immediately — both exchanges already received.
+        inner.await_exchanges(2, std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn await_exchanges_waits_then_resolves() {
+        // await_exchanges unblocks when a producer sends after the call.
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:waiter").unwrap();
+        let inner = component.get_endpoint("waiter").unwrap();
+
+        // Spawn producer that sends after a short delay.
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            producer.call(Exchange::new(Message::new("delayed"))).await.unwrap();
+        });
+
+        // This should block until the spawned task delivers the exchange.
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+
+        let received = inner.get_received_exchanges().await;
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].input.body.as_text(), Some("delayed"));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "timed out waiting for 5 exchanges")]
+    async fn await_exchanges_times_out() {
+        let component = MockComponent::new();
+        let _endpoint = component.create_endpoint("mock:timeout").unwrap();
+        let inner = component.get_endpoint("timeout").unwrap();
+
+        // Nobody sends — should panic after timeout.
+        inner.await_exchanges(5, std::time::Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exchange_idx_returns_assert() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:assert-idx").unwrap();
+        let inner = component.get_endpoint("assert-idx").unwrap();
+
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer.call(Exchange::new(Message::new("hello"))).await.unwrap();
+
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        // Should not panic — index 0 exists.
+        let _assert = inner.exchange(0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic(expected = "exchange index 5 out of bounds")]
+    async fn exchange_idx_out_of_bounds() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:oob").unwrap();
+        let inner = component.get_endpoint("oob").unwrap();
+
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer.call(Exchange::new(Message::new("only-one"))).await.unwrap();
+
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        // Only 1 exchange, index 5 should panic.
+        let _assert = inner.exchange(5);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assert_body_text_pass() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:body-text-pass").unwrap();
+        let inner = component.get_endpoint("body-text-pass").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer.call(Exchange::new(Message::new("hello"))).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_body_text("hello");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic(expected = "expected body text")]
+    async fn assert_body_text_fail() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:body-text-fail").unwrap();
+        let inner = component.get_endpoint("body-text-fail").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer.call(Exchange::new(Message::new("hello"))).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_body_text("world");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assert_body_json_pass() {
+        use camel_api::Body;
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:body-json-pass").unwrap();
+        let inner = component.get_endpoint("body-json-pass").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut msg = Message::new("");
+        msg.body = Body::Json(serde_json::json!({"key": "value"}));
+        producer.call(Exchange::new(msg)).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_body_json(serde_json::json!({"key": "value"}));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic(expected = "expected body JSON")]
+    async fn assert_body_json_fail() {
+        use camel_api::Body;
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:body-json-fail").unwrap();
+        let inner = component.get_endpoint("body-json-fail").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut msg = Message::new("");
+        msg.body = Body::Json(serde_json::json!({"key": "value"}));
+        producer.call(Exchange::new(msg)).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_body_json(serde_json::json!({"key": "other"}));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assert_body_bytes_pass() {
+        use bytes::Bytes;
+        use camel_api::Body;
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:body-bytes-pass").unwrap();
+        let inner = component.get_endpoint("body-bytes-pass").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut msg = Message::new("");
+        msg.body = Body::Bytes(Bytes::from_static(b"binary"));
+        producer.call(Exchange::new(msg)).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_body_bytes(b"binary");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic(expected = "expected body bytes")]
+    async fn assert_body_bytes_fail() {
+        use bytes::Bytes;
+        use camel_api::Body;
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:body-bytes-fail").unwrap();
+        let inner = component.get_endpoint("body-bytes-fail").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut msg = Message::new("");
+        msg.body = Body::Bytes(Bytes::from_static(b"binary"));
+        producer.call(Exchange::new(msg)).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_body_bytes(b"different");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assert_header_pass() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:hdr-pass").unwrap();
+        let inner = component.get_endpoint("hdr-pass").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut msg = Message::new("body");
+        msg.headers.insert("x-key".to_string(), serde_json::json!("value"));
+        producer.call(Exchange::new(msg)).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_header("x-key", serde_json::json!("value"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic(expected = "expected header")]
+    async fn assert_header_fail() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:hdr-fail").unwrap();
+        let inner = component.get_endpoint("hdr-fail").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut msg = Message::new("body");
+        msg.headers.insert("x-key".to_string(), serde_json::json!("value"));
+        producer.call(Exchange::new(msg)).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_header("x-key", serde_json::json!("other"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assert_header_exists_pass() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:hdr-exists-pass").unwrap();
+        let inner = component.get_endpoint("hdr-exists-pass").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut msg = Message::new("body");
+        msg.headers.insert("x-present".to_string(), serde_json::json!(42));
+        producer.call(Exchange::new(msg)).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_header_exists("x-present");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic(expected = "expected header")]
+    async fn assert_header_exists_fail() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:hdr-exists-fail").unwrap();
+        let inner = component.get_endpoint("hdr-exists-fail").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer.call(Exchange::new(Message::new("body"))).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_header_exists("x-missing");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assert_has_error_pass() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:err-pass").unwrap();
+        let inner = component.get_endpoint("err-pass").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut ex = Exchange::new(Message::new("body"));
+        ex.error = Some(camel_api::CamelError::ProcessorError("oops".to_string()));
+        producer.call(ex).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_has_error();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic(expected = "expected exchange to have an error")]
+    async fn assert_has_error_fail() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:has-err-fail").unwrap();
+        let inner = component.get_endpoint("has-err-fail").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer.call(Exchange::new(Message::new("body"))).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_has_error();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assert_no_error_pass() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:no-err-pass").unwrap();
+        let inner = component.get_endpoint("no-err-pass").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer.call(Exchange::new(Message::new("body"))).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_no_error();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic(expected = "expected exchange to have no error")]
+    async fn assert_no_error_fail() {
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component.create_endpoint("mock:no-err-fail").unwrap();
+        let inner = component.get_endpoint("no-err-fail").unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut ex = Exchange::new(Message::new("body"));
+        ex.error = Some(camel_api::CamelError::ProcessorError("oops".to_string()));
+        producer.call(ex).await.unwrap();
+        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner.exchange(0).assert_no_error();
     }
 }
