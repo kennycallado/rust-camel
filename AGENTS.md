@@ -1,6 +1,7 @@
 ## CRITICAL
 
 - Always read (/home/kenny/.config/opencode/instructions/agent/behavior.md)
+- Never add to staging something that is in .gitignore
 
 ## IMPORTANT
 
