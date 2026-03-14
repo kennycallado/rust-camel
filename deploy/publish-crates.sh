@@ -116,6 +116,7 @@ publish_crate "camel-component-file" "crates/components/camel-file"
 publish_crate "camel-component-http" "crates/components/camel-http"
 publish_crate "camel-component-redis" "crates/components/camel-redis"
 publish_crate "camel-component-kafka" "crates/components/camel-kafka"
+publish_crate "camel-component-sql" "crates/components/camel-sql"
 publish_crate "camel-component-controlbus" "crates/components/camel-controlbus"
 
 # Test utilities
