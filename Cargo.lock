@@ -692,6 +692,7 @@ dependencies = [
  "camel-dsl",
  "camel-otel",
  "camel-processor",
+ "camel-prometheus",
  "config",
  "glob",
  "serde",

@@ -11,8 +11,6 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
         timeout_ms: 5000,
         components: ComponentsConfig::default(),
         observability: ObservabilityConfig {
-            metrics_enabled: false,
-            metrics_port: 9090,
             tracer: TracerConfig {
                 enabled: true,
                 detail_level: DetailLevel::Minimal,
@@ -36,6 +34,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
             } else {
                 None
             },
+            prometheus: None,
         },
         supervision: None,
     }

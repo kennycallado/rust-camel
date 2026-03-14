@@ -87,6 +87,22 @@ impl CamelConfig {
             ctx = ctx.with_lifecycle(otel_service);
         }
 
+        // Prometheus
+        if let Some(ref prom) = config.observability.prometheus {
+            if prom.enabled {
+                let addr: std::net::SocketAddr = format!("{}:{}", prom.host, prom.port)
+                    .parse()
+                    .map_err(|_| {
+                        CamelError::Config(format!(
+                            "Invalid prometheus bind address: {}:{}",
+                            prom.host, prom.port
+                        ))
+                    })?;
+                let prom_service = camel_prometheus::PrometheusService::new(addr);
+                ctx = ctx.with_lifecycle(prom_service);
+            }
+        }
+
         ctx.set_tracer_config(tracer_config);
         Ok(ctx)
     }

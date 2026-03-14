@@ -58,16 +58,36 @@ pub struct HttpConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ObservabilityConfig {
     #[serde(default)]
-    pub metrics_enabled: bool,
-
-    #[serde(default = "default_metrics_port")]
-    pub metrics_port: u16,
-
-    #[serde(default)]
     pub tracer: TracerConfig,
 
     #[serde(default)]
     pub otel: Option<OtelCamelConfig>,
+
+    #[serde(default)]
+    pub prometheus: Option<PrometheusCamelConfig>,
+}
+
+/// Prometheus metrics configuration for `[observability.prometheus]` in Camel.toml.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PrometheusCamelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "default_prometheus_host")]
+    pub host: String,
+
+    #[serde(default = "default_prometheus_port")]
+    pub port: u16,
+}
+
+impl Default for PrometheusCamelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_prometheus_host(),
+            port: default_prometheus_port(),
+        }
+    }
 }
 
 /// Protocol for OTLP export.
@@ -179,7 +199,11 @@ fn default_http_connect_timeout() -> u64 {
 fn default_http_max_connections() -> usize {
     100
 }
-fn default_metrics_port() -> u16 {
+
+fn default_prometheus_host() -> String {
+    "0.0.0.0".to_string()
+}
+fn default_prometheus_port() -> u16 {
     9090
 }
 
@@ -209,6 +233,54 @@ fn default_backoff_multiplier() -> f64 {
 
 fn default_max_delay_ms() -> u64 {
     60000
+}
+
+#[cfg(test)]
+mod prometheus_config_tests {
+    use super::*;
+
+    fn parse(toml: &str) -> CamelConfig {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(toml, config::FileFormat::Toml))
+            .build()
+            .unwrap();
+        cfg.try_deserialize().unwrap()
+    }
+
+    #[test]
+    fn test_prometheus_absent_is_none() {
+        let cfg = parse("");
+        assert!(cfg.observability.prometheus.is_none());
+    }
+
+    #[test]
+    fn test_prometheus_defaults() {
+        let cfg = parse(
+            r#"
+[observability.prometheus]
+enabled = true
+"#,
+        );
+        let p = cfg.observability.prometheus.unwrap();
+        assert!(p.enabled);
+        assert_eq!(p.host, "0.0.0.0");
+        assert_eq!(p.port, 9090);
+    }
+
+    #[test]
+    fn test_prometheus_full() {
+        let cfg = parse(
+            r#"
+[observability.prometheus]
+enabled = true
+host = "127.0.0.1"
+port = 9091
+"#,
+        );
+        let p = cfg.observability.prometheus.unwrap();
+        assert_eq!(p.host, "127.0.0.1");
+        assert_eq!(p.port, 9091);
+    }
 }
 
 /// Deep merge two TOML values

@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 
@@ -21,9 +21,9 @@ pub struct PrometheusService {
 }
 
 impl PrometheusService {
-    pub fn new(port: u16) -> Self {
+    pub fn new(addr: SocketAddr) -> Self {
         Self {
-            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port),
+            addr,
             metrics: Arc::new(PrometheusMetrics::new()),
             server_handle: None,
             bound_port: Arc::new(AtomicU16::new(0)),
@@ -131,13 +131,19 @@ mod tests {
 
     #[test]
     fn test_create_prometheus_service() {
-        let service = PrometheusService::new(9090);
+        let service = PrometheusService::new(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+            9090,
+        ));
         assert_eq!(service.name(), "prometheus");
     }
 
     #[tokio::test]
     async fn test_prometheus_service_status_transitions() {
-        let mut service = PrometheusService::new(0);
+        let mut service = PrometheusService::new(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+            0,
+        ));
 
         assert_eq!(service.status(), ServiceStatus::Stopped);
 
@@ -152,7 +158,10 @@ mod tests {
     fn test_health_checker_injection() {
         use camel_api::HealthStatus;
 
-        let mut service = PrometheusService::new(9090);
+        let mut service = PrometheusService::new(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+            9090,
+        ));
 
         // Initially no health checker
         assert!(service.health_checker().is_none());
@@ -170,5 +179,13 @@ mod tests {
         // Call the checker
         let report = service.health_checker().unwrap()();
         assert_eq!(report.status, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_prometheus_service_with_socket_addr() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9091);
+        let service = PrometheusService::new(addr);
+        assert_eq!(service.name(), "prometheus");
     }
 }

@@ -16,6 +16,7 @@ camel-api.workspace = true
 camel-core.workspace = true
 camel-dsl.workspace = true
 camel-otel = { workspace = true }
+camel-prometheus = { path = "../services/camel-prometheus" }
 camel-processor.workspace = true
 config = { workspace = true }
 glob = { workspace = true }
