@@ -1,10 +1,12 @@
-use crate::config::CamelConfig;
+use crate::config::{CamelConfig, OtelProtocol, OtelSampler};
 use crate::discovery::discover_routes;
 use camel_api::CamelError;
 use camel_core::CamelContext;
 use camel_core::config::OutputFormat;
 use camel_core::route::RouteDefinition;
-use camel_otel::{OtelConfig, OtelService};
+use camel_otel::{
+    OtelConfig, OtelProtocol as OtelProtocolOtel, OtelSampler as OtelSamplerOtel, OtelService,
+};
 use tracing::Level;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
@@ -55,8 +57,32 @@ impl CamelConfig {
         // OtelService manages providers only — subscriber is already installed above
         if otel_enabled {
             let otel_cfg = config.observability.otel.as_ref().unwrap();
-            let otel_config = OtelConfig::new(&otel_cfg.endpoint, &otel_cfg.service_name)
-                .with_log_level(&otel_cfg.log_level);
+
+            let protocol = match otel_cfg.protocol {
+                OtelProtocol::Grpc => OtelProtocolOtel::Grpc,
+                OtelProtocol::Http => OtelProtocolOtel::HttpProtobuf,
+            };
+
+            let sampler = match &otel_cfg.sampler {
+                OtelSampler::AlwaysOn => OtelSamplerOtel::AlwaysOn,
+                OtelSampler::AlwaysOff => OtelSamplerOtel::AlwaysOff,
+                OtelSampler::Ratio => {
+                    let ratio = otel_cfg.sampler_ratio.unwrap_or(1.0).clamp(0.0, 1.0);
+                    OtelSamplerOtel::TraceIdRatioBased(ratio)
+                }
+            };
+
+            let mut otel_config = OtelConfig::new(&otel_cfg.endpoint, &otel_cfg.service_name)
+                .with_protocol(protocol)
+                .with_sampler(sampler)
+                .with_log_level(&otel_cfg.log_level)
+                .with_logs_enabled(otel_cfg.logs_enabled)
+                .with_metrics_interval_ms(otel_cfg.metrics_interval_ms);
+
+            for (key, value) in &otel_cfg.resource_attrs {
+                otel_config = otel_config.with_resource_attr(key, value);
+            }
+
             let otel_service = OtelService::new(otel_config);
             ctx = ctx.with_lifecycle(otel_service);
         }

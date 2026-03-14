@@ -171,6 +171,7 @@ fn test_configure_context_with_otel_enabled_registers_lifecycle() {
                 endpoint: "http://localhost:4317".to_string(),
                 service_name: "test-service".to_string(),
                 log_level: "info".to_string(),
+                ..Default::default()
             }),
             ..Default::default()
         },

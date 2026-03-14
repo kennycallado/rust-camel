@@ -1,6 +1,7 @@
 use camel_core::config::TracerConfig;
 use config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
 
@@ -69,24 +70,57 @@ pub struct ObservabilityConfig {
     pub otel: Option<OtelCamelConfig>,
 }
 
+/// Protocol for OTLP export.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OtelProtocol {
+    #[default]
+    Grpc,
+    Http,
+}
+
+/// Sampling strategy.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OtelSampler {
+    #[default]
+    AlwaysOn,
+    AlwaysOff,
+    Ratio,
+}
+
 /// OpenTelemetry configuration for `[observability.otel]` in Camel.toml.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct OtelCamelConfig {
-    /// Enable OTel export (traces, metrics, logs). Default: false.
     #[serde(default)]
     pub enabled: bool,
 
-    /// OTLP endpoint. Default: "http://localhost:4317".
     #[serde(default = "default_otel_endpoint")]
     pub endpoint: String,
 
-    /// Service name reported to the OTel backend. Default: "rust-camel".
     #[serde(default = "default_otel_service_name")]
     pub service_name: String,
 
-    /// Log level filter for the OTel subscriber. Default: "info".
     #[serde(default = "default_otel_log_level")]
     pub log_level: String,
+
+    #[serde(default)]
+    pub protocol: OtelProtocol,
+
+    #[serde(default)]
+    pub sampler: OtelSampler,
+
+    #[serde(default)]
+    pub sampler_ratio: Option<f64>,
+
+    #[serde(default = "default_otel_metrics_interval_ms")]
+    pub metrics_interval_ms: u64,
+
+    #[serde(default = "default_true")]
+    pub logs_enabled: bool,
+
+    #[serde(default)]
+    pub resource_attrs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -157,6 +191,12 @@ fn default_otel_service_name() -> String {
 }
 fn default_otel_log_level() -> String {
     "info".to_string()
+}
+fn default_otel_metrics_interval_ms() -> u64 {
+    60000
+}
+fn default_true() -> bool {
+    true
 }
 
 fn default_initial_delay_ms() -> u64 {

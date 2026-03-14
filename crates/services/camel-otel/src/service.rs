@@ -251,7 +251,7 @@ impl Lifecycle for OtelService {
         };
 
         let periodic_reader = PeriodicReader::builder(metric_exporter)
-            .with_interval(Duration::from_secs(60))
+            .with_interval(Duration::from_millis(self.config.metrics_interval_ms))
             .build();
 
         let meter_provider = SdkMeterProvider::builder()

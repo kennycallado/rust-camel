@@ -55,7 +55,41 @@ let config = OtelConfig::new("http://otel-collector:4317", "payments-service")
     .with_resource_attr("service.version", "2.3.1");
 
 let ctx = CamelContext::new().with_lifecycle(OtelService::new(config));
+ ```
+
+### Configuration via Camel.toml
+
+All OTel parameters can be configured in `Camel.toml`:
+
+```toml
+[observability.otel]
+enabled = true
+endpoint = "http://localhost:4317"
+service_name = "my-app"
+log_level = "info"
+protocol = "grpc"               # "grpc" or "http"
+sampler = "ratio"               # "always_on", "always_off", or "ratio"
+sampler_ratio = 0.1             # Only used when sampler = "ratio"
+metrics_interval_ms = 15000     # Metrics export interval (default: 60000)
+logs_enabled = true             # Export logs via OTLP (default: true)
+
+[observability.otel.resource_attrs]
+env = "production"
+region = "us-east-1"
 ```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable OTel export |
+| `endpoint` | `http://localhost:4317` | OTLP endpoint |
+| `service_name` | `rust-camel` | Service name reported to backend |
+| `log_level` | `info` | Log level filter |
+| `protocol` | `grpc` | Export protocol (`grpc` or `http`) |
+| `sampler` | `always_on` | Sampling strategy |
+| `sampler_ratio` | - | Ratio (0.0-1.0) when sampler = "ratio" |
+| `metrics_interval_ms` | `60000` | Metrics export interval in ms |
+| `logs_enabled` | `true` | Export logs via OTLP |
+| `resource_attrs` | `{}` | Custom resource attributes |
 
 ## OtelService
 

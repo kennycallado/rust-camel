@@ -106,6 +106,7 @@ async fn run(
                     endpoint: "http://localhost:4317".to_string(),
                     service_name: "rust-camel".to_string(),
                     log_level: "info".to_string(),
+                    ..Default::default()
                 });
         otel_cfg.enabled = true;
         if let Some(ep) = otel_endpoint {
