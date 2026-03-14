@@ -20,6 +20,13 @@ kafka:topic[?param=value&...]
 | `maxPollRecords` | `500` | Max records per poll |
 | `acks` | `all` | Producer acknowledgment: `0`/`1`/`all` |
 | `requestTimeoutMs` | `30000` | Producer delivery timeout (ms) |
+| `allowManualCommit` | `false` | Enable manual offset commit via `KafkaManualCommit` |
+| `securityProtocol` | — | `PLAINTEXT`/`SSL`/`SASL_PLAINTEXT`/`SASL_SSL` |
+| `saslAuthType` | — | `PLAIN`/`SCRAM_SHA_256`/`SCRAM_SHA_512`/`SSL` |
+| `saslUsername` | — | SASL username (required when `saslAuthType` is PLAIN/SCRAM) |
+| `saslPassword` | — | SASL password (required when `saslAuthType` is PLAIN/SCRAM) |
+| `sslKeystoreLocation` | — | Path to client keystore (PEM/PKCS12) |
+| `sslTruststoreLocation` | — | Path to CA truststore |
 
 ## Headers
 
@@ -38,6 +45,34 @@ kafka:topic[?param=value&...]
 | Key | Description |
 |-----|-------------|
 | `kafka.manual.commit` | JSON object: `{topic, partition, offset}` of the consumed record |
+| `kafka.manual_commit` | `KafkaManualCommit` handle (present when `allowManualCommit=true`); call `.commit()` or `.commit_async()` to ack the offset |
+
+## Security
+
+```
+# SASL/SCRAM over TLS
+kafka:orders?securityProtocol=SASL_SSL&saslAuthType=SCRAM_SHA_512&saslUsername=user&saslPassword=pass
+
+# TLS client certificate
+kafka:orders?securityProtocol=SSL&sslKeystoreLocation=/certs/client.pem&sslTruststoreLocation=/certs/ca.pem
+```
+
+## Manual Offset Commit
+
+```rust
+let route = RouteBuilder::from("kafka:orders?brokers=localhost:9092&allowManualCommit=true")
+    .process(|exchange| Box::pin(async move {
+        // ... process exchange ...
+
+        // Commit only after successful processing
+        if let Some(mc) = exchange.extensions.get("kafka.manual_commit") {
+            let commit: KafkaManualCommit = mc.clone().downcast().unwrap();
+            commit.commit_async().await?;
+        }
+        Ok(exchange)
+    }))
+    .build()?;
+```
 
 ## Quick Start
 
@@ -74,9 +109,7 @@ cargo run -p kafka-example
 KAFKA_BROKERS=localhost:9092 cargo test -p camel-component-kafka -- --ignored
 ```
 
-## Known Limitations (Phase 2)
+## Known Limitations
 
-- SSL/SASL authentication not supported
 - Batch consumption mode not implemented
-- Manual offset commit (beyond metadata storage) is Phase 2
 - Multiple parallel consumers (`consumersCount`) not implemented

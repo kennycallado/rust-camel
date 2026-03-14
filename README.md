@@ -2,7 +2,7 @@
 
 A Rust integration framework inspired by [Apache Camel](https://camel.apache.org/), built on [Tower](https://docs.rs/tower).
 
-> **Status:** Pre-release (`0.1.0`). APIs will change.
+> **Status:** Pre-release (`0.4.0`). APIs will change.
 
 ## Overview
 
@@ -15,16 +15,15 @@ Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `kafka`, `
 ```rust
 use camel_api::{CamelError, Value};
 use camel_builder::RouteBuilder;
+use camel_component_log::LogComponent;
+use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
-use camel_log::LogComponent;
-use camel_timer::TimerComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt::init();
 
     let mut ctx = CamelContext::new();
-
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
@@ -36,9 +35,8 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(route)?;
     ctx.start().await?;
 
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|e| CamelError::Io(e.to_string()))?;
+    println!("Press Ctrl+C to stop.");
+    tokio::signal::ctrl_c().await.ok();
 
     ctx.stop().await?;
     Ok(())
@@ -350,21 +348,24 @@ log_level = "ERROR"
 ### Loading Configuration
 
 ```rust
-use camel_config::CamelConfig;
+use camel_api::CamelError;
+use camel_component_log::LogComponent;
+use camel_component_timer::TimerComponent;
+use camel_config::{CamelConfig, discover_routes};
 use camel_core::CamelContext;
-use camel_timer::TimerComponent;
-use camel_log::LogComponent;
 
 // Load configuration
-let config = CamelConfig::from_file("Camel.toml")?;
+let config = CamelConfig::from_file("Camel.toml")
+    .map_err(|e| CamelError::Config(e.to_string()))?;
 
 // Create context and register components
 let mut ctx = CamelContext::new();
 ctx.register_component(TimerComponent::new());
 ctx.register_component(LogComponent::new());
 
-// Load routes from discovered files
-let routes = config.load_routes()?;
+// Discover and load routes from config patterns
+let routes = discover_routes(&config.routes)
+    .map_err(|e| CamelError::Config(e.to_string()))?;
 for route in routes {
     ctx.add_route_definition(route)?;
 }

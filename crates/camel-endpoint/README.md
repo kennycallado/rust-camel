@@ -12,6 +12,7 @@ This crate is used internally by components to parse their configuration from UR
 
 - URI parsing with scheme, path, and query parameters
 - `UriComponents` struct for easy access to URI parts
+- `UriConfig` derive macro for declarative, typed component configuration
 - Error handling for malformed URIs
 
 ## Installation
@@ -36,6 +37,28 @@ assert_eq!(components.scheme, "timer");
 assert_eq!(components.path, "tick");
 assert_eq!(components.params.get("period"), Some(&"1000".to_string()));
 assert_eq!(components.params.get("delay"), Some(&"500".to_string()));
+```
+
+## Declarative Config with `UriConfig`
+
+The `#[derive(UriConfig)]` macro generates typed config structs from URI query parameters:
+
+```rust
+use camel_endpoint::UriConfig;
+
+#[derive(UriConfig)]
+pub struct TimerConfig {
+    pub period: u64,         // ?period=1000
+    #[uri(default = "0")]
+    pub delay: u64,          // ?delay=500  (optional, default 0)
+    #[uri(rename = "repeatCount")]
+    pub repeat_count: Option<u64>,
+}
+
+// Parse directly from a URI
+let config = TimerConfig::from_uri("timer:tick?period=1000&delay=200").unwrap();
+assert_eq!(config.period, 1000);
+assert_eq!(config.delay, 200);
 ```
 
 ## URI Format
