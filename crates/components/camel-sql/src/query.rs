@@ -14,6 +14,8 @@ pub enum ParamSlot {
     Named(String),
     /// IN clause parameter (:#in:name) — expanded to multiple $N placeholders
     InClause(String),
+    /// Dynamic expression parameter (:#${expr}) — resolved from body/header/property paths
+    Expression(String),
 }
 
 /// A parsed query template with fragments and parameter slots.
@@ -38,6 +40,7 @@ pub struct PreparedQuery {
 ///
 /// Token types (using `#` as default placeholder):
 /// - `:#in:name` → InClause("name") — IN clause expansion
+/// - `:#${expr}` → Expression("expr") — dynamic expression (body.field, header.name, property.key)
 /// - `:#name` → Named("name") — named parameter (name is alphanumeric + underscore)
 /// - `#` (standalone) → Positional(N) — positional parameter (N increments per positional)
 ///
@@ -58,17 +61,37 @@ pub fn parse_query_template(
     let chars: Vec<char> = template.chars().collect();
     let mut i = 0usize;
     let mut last_param_end = 0usize;
+    let mut in_literal = false;
 
     while i < chars.len() {
-        if chars[i] == placeholder {
+        // Handle string literals
+        if chars[i] == '\'' {
+            // Handle escaped quote '' inside literal
+            if in_literal && i + 1 < chars.len() && chars[i + 1] == '\'' {
+                i += 2;
+                continue;
+            }
+            in_literal = !in_literal;
+            i += 1;
+            continue;
+        }
+
+        // Only process placeholder when not inside a string literal
+        if !in_literal && chars[i] == placeholder {
             // Check if preceded by ':'
             if i > 0 && chars[i - 1] == ':' {
-                // Named or InClause parameter
+                // Named, Expression, or InClause parameter
                 // Check if followed by 'in:' for InClause
                 // Pattern: :#in:name
                 //          ^  ^^^^
                 //          |  check these chars after #
                 let is_in_clause = check_in_prefix(&chars, i + 1);
+                // Check for expression syntax :#${expr}
+                // Pattern: :#${expr}
+                //          ^  ^^
+                //          |  check $ and { after #
+                let is_expression =
+                    i + 2 < chars.len() && chars[i + 1] == '$' && chars[i + 2] == '{';
 
                 if is_in_clause {
                     // InClause parameter - extract name after ':#in:'
@@ -89,6 +112,34 @@ pub fn parse_query_template(
                     params.push(ParamSlot::InClause(name));
                     last_param_end = name_end;
                     i = name_end;
+                } else if is_expression {
+                    // Expression parameter - extract content between { and }
+                    // i is at '#', so $ is at i + 1, { is at i + 2
+                    let brace_start = i + 2;
+                    if let Some(brace_end) = find_matching_brace(&chars, brace_start) {
+                        // Extract expression content (between { and })
+                        let expr_content: String =
+                            chars[(brace_start + 1)..brace_end].iter().collect();
+
+                        if expr_content.is_empty() {
+                            return Err(CamelError::ProcessorError(format!(
+                                "Empty expression at position {}",
+                                i
+                            )));
+                        }
+
+                        // Fragment ends at ':' (position i-1)
+                        fragments.push(chars[last_param_end..(i - 1)].iter().collect());
+
+                        params.push(ParamSlot::Expression(expr_content));
+                        last_param_end = brace_end + 1;
+                        i = brace_end + 1;
+                    } else {
+                        return Err(CamelError::ProcessorError(format!(
+                            "Unclosed expression at position {}",
+                            i
+                        )));
+                    }
                 } else {
                     // Named parameter - extract name after ':#'
                     let name_start = i + 1;
@@ -156,6 +207,16 @@ fn extract_param_name(chars: &[char], start: usize) -> (String, usize) {
     }
 
     (name, i)
+}
+
+/// Finds the closing brace matching an opening brace at `start` (0-indexed into chars).
+/// Returns the index of `}` or None if not found.
+fn find_matching_brace(chars: &[char], start: usize) -> Option<usize> {
+    // Simple scan for matching } (SQL expressions won't have nested braces)
+    chars[start..]
+        .iter()
+        .position(|&c| c == '}')
+        .map(|p| start + p)
 }
 
 /// Resolves parameter values from the exchange and builds the final SQL.
@@ -227,15 +288,23 @@ pub fn resolve_params(
 
                 let arr = value.as_array().ok_or_else(|| {
                     CamelError::ProcessorError(format!(
-                        "IN clause parameter '{}' must be an array, got {:?}",
-                        name, value
+                        "IN clause parameter '{}' must be an array, got type {}",
+                        name,
+                        match &value {
+                            serde_json::Value::Null => "null",
+                            serde_json::Value::Bool(_) => "bool",
+                            serde_json::Value::Number(_) => "number",
+                            serde_json::Value::String(_) => "string",
+                            serde_json::Value::Array(_) => "array",
+                            serde_json::Value::Object(_) => "object",
+                        }
                     ))
                 })?;
 
                 if arr.is_empty() {
-                    // Empty IN clause - output empty to let the parentheses in the template
-                    // create "IN ()" which is syntactically valid but matches nothing
-                    // (no additional output needed - template already has parentheses)
+                    // Empty IN clause - emit NULL to produce valid SQL like "IN (NULL)"
+                    // which matches nothing (no bindings needed for NULL literal)
+                    sql_parts.push("NULL".to_string());
                 } else {
                     let placeholders: Vec<String> = arr
                         .iter()
@@ -250,6 +319,12 @@ pub fn resolve_params(
                     sql_parts.push(placeholders.join(", "));
                     bindings.extend(arr.iter().cloned());
                 }
+            }
+            ParamSlot::Expression(expr) => {
+                let value = resolve_expression_param(expr, body_json, &exchange.input, exchange)?;
+                sql_parts.push(format!("${}", placeholder_num));
+                placeholder_num += 1;
+                bindings.push(value);
             }
         }
     }
@@ -294,9 +369,59 @@ fn resolve_named_param(
     )))
 }
 
-/// Returns true if the SQL starts with "SELECT" (case-insensitive, after trimming whitespace).
+/// Resolves an expression parameter (:#${expr}) from body/header/property paths.
+/// The expr is a dot-separated path like `body.field`, `header.name`, `property.key`.
+fn resolve_expression_param(
+    expr: &str,
+    body_json: Option<&serde_json::Value>,
+    message: &camel_api::Message,
+    exchange: &Exchange,
+) -> Result<serde_json::Value, CamelError> {
+    let parts: Vec<&str> = expr.splitn(2, '.').collect();
+    match parts.as_slice() {
+        ["body", field] => {
+            // Look up field in body JSON object
+            body_json
+                .and_then(|v| v.as_object())
+                .and_then(|obj| obj.get(*field))
+                .cloned()
+                .ok_or_else(|| {
+                    CamelError::ProcessorError(format!(
+                        "Expression '{}': field '{}' not found in body (note: nested field access is not supported; use a flat body structure or pass the value via header/property)",
+                        expr, field
+                    ))
+                })
+        }
+        ["header", name] => message.header(name).cloned().ok_or_else(|| {
+            CamelError::ProcessorError(format!(
+                "Expression '{}': header '{}' not found",
+                expr, name
+            ))
+        }),
+        ["property", key] => exchange.property(key).cloned().ok_or_else(|| {
+            CamelError::ProcessorError(format!(
+                "Expression '{}': property '{}' not found",
+                expr, key
+            ))
+        }),
+        _ => Err(CamelError::ProcessorError(format!(
+            "Unknown expression syntax: '{}'. Use body.<field>, header.<name>, or property.<key>",
+            expr
+        ))),
+    }
+}
+
+/// Returns true if the SQL is a read-only query (SELECT, TABLE, SHOW, EXPLAIN).
+///
+/// Note: `WITH` (CTEs) is intentionally excluded because writeable CTEs
+/// (`WITH ... UPDATE/INSERT/DELETE`) also start with `WITH`. Users should
+/// write read-only CTEs starting with `SELECT` or use explicit subqueries.
 pub fn is_select_query(sql: &str) -> bool {
-    sql.trim().to_uppercase().starts_with("SELECT")
+    let upper = sql.trim().to_uppercase();
+    upper.starts_with("SELECT")
+        || upper.starts_with("TABLE")
+        || upper.starts_with("SHOW")
+        || upper.starts_with("EXPLAIN")
 }
 
 #[cfg(test)]
@@ -441,6 +566,14 @@ mod tests {
     fn test_is_select() {
         assert!(is_select_query("SELECT * FROM t"));
         assert!(is_select_query("  select * from t"));
+        // WITH is NOT treated as SELECT because writeable CTEs (WITH ... UPDATE/DELETE) exist
+        assert!(!is_select_query("WITH cte AS (SELECT 1) SELECT * FROM cte"));
+        assert!(!is_select_query(
+            "WITH cte AS (UPDATE t SET x = 1 RETURNING *) SELECT * FROM cte"
+        ));
+        assert!(is_select_query("TABLE users"));
+        assert!(is_select_query("SHOW TABLES"));
+        assert!(is_select_query("EXPLAIN SELECT * FROM t"));
         assert!(!is_select_query("INSERT INTO t VALUES (1)"));
         assert!(!is_select_query("UPDATE t SET x = 1"));
         assert!(!is_select_query("DELETE FROM t"));
@@ -508,14 +641,69 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_in_clause() {
+    fn test_parse_expression_param() {
+        let tpl = parse_query_template("select * from t where id = :#${body.id}", '#').unwrap();
+        assert_eq!(tpl.params.len(), 1);
+        assert!(matches!(&tpl.params[0], ParamSlot::Expression(e) if e == "body.id"));
+    }
+
+    #[test]
+    fn test_resolve_expression_from_body() {
+        let tpl = parse_query_template("select * from t where id = :#${body.id}", '#').unwrap();
+        let msg = Message::new(Body::Json(serde_json::json!({"id": 42})));
+        let ex = Exchange::new(msg);
+        let prepared = resolve_params(&tpl, &ex).unwrap();
+        assert_eq!(prepared.sql, "select * from t where id = $1");
+        assert_eq!(prepared.bindings[0], serde_json::json!(42));
+    }
+
+    #[test]
+    fn test_resolve_expression_from_header() {
+        let tpl =
+            parse_query_template("select * from t where name = :#${header.name}", '#').unwrap();
+        let mut msg = Message::default();
+        msg.set_header("name", serde_json::json!("alice"));
+        let ex = Exchange::new(msg);
+        let prepared = resolve_params(&tpl, &ex).unwrap();
+        assert_eq!(prepared.bindings[0], serde_json::json!("alice"));
+    }
+
+    #[test]
+    fn test_resolve_expression_from_property() {
+        let tpl =
+            parse_query_template("select * from t where k = :#${property.myKey}", '#').unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.set_property("myKey", serde_json::json!(99));
+        let prepared = resolve_params(&tpl, &ex).unwrap();
+        assert_eq!(prepared.bindings[0], serde_json::json!(99));
+    }
+
+    #[test]
+    fn test_parse_hash_in_string_literal() {
+        // # inside a string literal should NOT be treated as a parameter
+        let tpl =
+            parse_query_template("select * from t where x = '#literal' and id = #", '#').unwrap();
+        assert_eq!(tpl.params.len(), 1);
+        assert!(matches!(tpl.params[0], ParamSlot::Positional(0)));
+    }
+
+    #[test]
+    fn test_parse_escaped_quote_in_literal() {
+        // '' inside a string literal is an escaped quote, not end of literal
+        let tpl =
+            parse_query_template("select * from t where x = 'it''s' and id = #", '#').unwrap();
+        assert_eq!(tpl.params.len(), 1);
+        assert!(matches!(tpl.params[0], ParamSlot::Positional(0)));
+    }
+
+    #[test]
+    fn test_empty_in_clause_produces_null() {
         let tpl = parse_query_template("select * from t where id in (:#in:ids)", '#').unwrap();
         let mut msg = Message::default();
         msg.set_header("ids", serde_json::json!([]));
         let ex = Exchange::new(msg);
-
         let prepared = resolve_params(&tpl, &ex).unwrap();
-        assert_eq!(prepared.sql, "select * from t where id in ()");
+        assert_eq!(prepared.sql, "select * from t where id in (NULL)");
         assert!(prepared.bindings.is_empty());
     }
 }

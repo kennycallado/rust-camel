@@ -22,6 +22,8 @@ tower = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
+bytes = { workspace = true }
+async-stream = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

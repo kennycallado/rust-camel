@@ -42,8 +42,13 @@ pub struct SqlConfig {
 
     // Query
     pub query: String,
+    /// Path to a file containing the SQL query (populated when URI starts with `sql:file:...`)
+    pub source_path: Option<String>,
     pub output_type: SqlOutputType,
     pub placeholder: char,
+    /// Statement separator used when `use_message_body_for_sql` is true and body contains multiple statements.
+    /// Default: `;` (per Apache Camel spec).
+    // TODO: used for multi-statement body splitting (future)
     pub separator: char,
     pub noop: bool,
 
@@ -83,6 +88,17 @@ impl SqlConfig {
                 components.scheme
             )));
         }
+
+        // Detect file-based query
+        let (query, source_path) = if components.path.starts_with("file:") {
+            let file_path = components.path.trim_start_matches("file:").to_string();
+            let contents = std::fs::read_to_string(&file_path).map_err(|e| {
+                CamelError::Config(format!("Failed to read SQL file '{}': {}", file_path, e))
+            })?;
+            (contents.trim().to_string(), Some(file_path))
+        } else {
+            (components.path.clone(), None)
+        };
 
         // Extract required db_url
         let db_url = components
@@ -135,13 +151,14 @@ impl SqlConfig {
             max_lifetime_secs: get_u64("maxLifetimeSecs", 1800),
 
             // Query
-            query: components.path,
+            query,
+            source_path,
             output_type: get_param("outputType")
                 .map(|s| s.parse())
                 .transpose()?
                 .unwrap_or(SqlOutputType::SelectList),
             placeholder: get_char("placeholder", '#'),
-            separator: get_char("separator", ','),
+            separator: get_char("separator", ';'),
             noop: get_bool("noop", false),
 
             // Consumer
@@ -178,7 +195,7 @@ mod tests {
         assert_eq!(c.max_lifetime_secs, 1800);
         assert_eq!(c.output_type, SqlOutputType::SelectList);
         assert_eq!(c.placeholder, '#');
-        assert_eq!(c.separator, ',');
+        assert_eq!(c.separator, ';');
         assert!(!c.noop);
         assert_eq!(c.delay_ms, 500);
         assert_eq!(c.initial_delay_ms, 1000);
@@ -296,5 +313,42 @@ mod tests {
             SqlOutputType::StreamList
         );
         assert!("Invalid".parse::<SqlOutputType>().is_err());
+    }
+
+    #[test]
+    fn test_config_file_not_found() {
+        let result = SqlConfig::from_uri(
+            "sql:file:/nonexistent/path/query.sql?db_url=postgres://localhost/test",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("Failed to read SQL file") || msg.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_config_file_query() {
+        use std::io::Write;
+        let unique_name = format!(
+            "test_sql_query_{}.sql",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let mut tmp = std::env::temp_dir();
+        tmp.push(unique_name);
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            writeln!(f, "SELECT * FROM users").unwrap();
+        }
+        let uri = format!(
+            "sql:file:{}?db_url=postgres://localhost/test",
+            tmp.display()
+        );
+        let c = SqlConfig::from_uri(&uri).unwrap();
+        assert_eq!(c.query, "SELECT * FROM users");
+        assert_eq!(c.source_path, Some(tmp.to_string_lossy().into_owned()));
+        std::fs::remove_file(&tmp).ok();
     }
 }

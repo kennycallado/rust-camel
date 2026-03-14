@@ -6,6 +6,7 @@
 //!
 //! Run with: `cargo test -p camel-component-sql -- --ignored`
 
+use camel_api::CamelError;
 use camel_api::Value;
 use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
@@ -23,7 +24,7 @@ use testcontainers_modules::postgres::Postgres;
 /// This must be called before any database connections are made.
 fn install_sqlx_drivers() {
     // This is safe to call multiple times
-    let _ = sqlx::any::install_default_drivers();
+    sqlx::any::install_default_drivers();
 }
 
 async fn setup_postgres_container() -> ContainerAsync<Postgres> {
@@ -758,6 +759,85 @@ async fn test_consumer_empty_result() {
     assert!(
         exchanges.is_empty(),
         "Consumer should not send exchanges for empty result set when routeEmptyResultSet=false"
+    );
+}
+
+// ===========================================================================
+// Consumer onConsumeFailed tests
+// ===========================================================================
+
+/// Test 11: Consumer onConsumeFailed - Verify failure query executes when downstream processing fails.
+///
+/// Setup:
+/// - A table with one row to consume.
+/// - A `failed_rows` table to record rows that failed processing.
+/// - A consumer route **without** a global error handler so that pipeline
+///   errors propagate as `Err` back to `send_and_wait`, triggering
+///   `onConsumeFailed`.
+/// - A `.process()` step that always returns `Err` to simulate downstream
+///   failure.
+///
+/// Assert: `failed_rows` has at least one row after the consumer runs,
+/// confirming that `onConsumeFailed` executed the configured SQL.
+#[tokio::test]
+#[ignore = "Requires Docker"]
+async fn test_consumer_on_consume_failed() {
+    let container = setup_postgres_container().await;
+    let conn_str = get_connection_string(&container).await;
+    let pool = create_pool(&conn_str).await;
+
+    // Source table with one row to consume.
+    setup_test_table(&pool, "test_on_consume_failed_src").await;
+    sqlx::query(
+        "INSERT INTO test_on_consume_failed_src (id, name, value) VALUES (1, 'WillFail', 42)",
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to insert test data");
+
+    // Failure-tracking table.
+    sqlx::query("CREATE TABLE IF NOT EXISTS failed_rows (id INTEGER, name VARCHAR(255))")
+        .execute(&pool)
+        .await
+        .expect("Failed to create failed_rows table");
+
+    // No global error handler — pipeline errors reach send_and_wait as Err.
+    let mut ctx = CamelContext::new();
+    ctx.register_component(SqlComponent::new());
+
+    let sql_uri = format!(
+        "sql:SELECT * FROM test_on_consume_failed_src?db_url={}&delay=100&initialDelay=50\
+         &onConsumeFailed=INSERT INTO failed_rows (id, name) VALUES (:#id, :#name)",
+        conn_str
+    );
+
+    let consumer_route = RouteBuilder::from(sql_uri.as_str())
+        // Always fail — simulates downstream processing error.
+        .process(|_ex| async move {
+            Err::<_, CamelError>(CamelError::ProcessorError(
+                "simulated downstream failure".into(),
+            ))
+        })
+        .route_id("sql-on-consume-failed-test")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(consumer_route).unwrap();
+    ctx.start().await.unwrap();
+
+    // Give the consumer time to poll and trigger the failure path.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ctx.stop().await.unwrap();
+
+    // Verify onConsumeFailed query ran and inserted into failed_rows.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM failed_rows")
+        .fetch_one(&pool)
+        .await
+        .expect("Failed to count failed_rows");
+
+    assert!(
+        count >= 1,
+        "onConsumeFailed should have inserted at least one row into failed_rows"
     );
 }
 

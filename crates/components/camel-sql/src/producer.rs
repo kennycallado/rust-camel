@@ -4,18 +4,20 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use bytes::Bytes;
 use serde_json::json;
 use sqlx::AnyPool;
 use sqlx::any::AnyRow;
 use sqlx::pool::PoolOptions;
 use tokio::sync::OnceCell;
 use tower::Service;
+use tracing::{debug, error, warn};
 
 use crate::config::{SqlConfig, SqlOutputType};
 use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
-use camel_api::{Body, CamelError, Exchange, Message};
+use camel_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
 
 #[derive(Clone)]
 pub struct SqlProducer {
@@ -75,6 +77,7 @@ impl Service<Exchange> for SqlProducer {
                         .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
                         .max_lifetime(Duration::from_secs(config.max_lifetime_secs));
                     opts.connect(&config.db_url).await.map_err(|e| {
+                        error!("Failed to connect to database: {}", e);
                         CamelError::EndpointCreationFailed(format!(
                             "Failed to connect to database: {}",
                             e
@@ -82,7 +85,10 @@ impl Service<Exchange> for SqlProducer {
                     })
                 })
                 .await
-                .map_err(|e: CamelError| e.clone())?;
+                .map_err(|e: CamelError| {
+                    error!("Pool initialization failed: {}", e);
+                    e.clone()
+                })?;
 
             // Resolve query string
             let query_str = Self::resolve_query_source(&exchange, &config);
@@ -91,7 +97,36 @@ impl Service<Exchange> for SqlProducer {
             let template = parse_query_template(&query_str, config.placeholder)?;
 
             // Resolve parameters
-            let prepared = resolve_params(&template, &exchange)?;
+            let mut prepared = resolve_params(&template, &exchange)?;
+
+            // Fix 3: Implement CamelSql.Parameters header override
+            if let Some(params_value) = exchange.input.header(headers::PARAMETERS) {
+                if let Some(arr) = params_value.as_array() {
+                    if arr.len() != prepared.bindings.len() {
+                        warn!(
+                            expected = prepared.bindings.len(),
+                            got = arr.len(),
+                            header = headers::PARAMETERS,
+                            "Parameter count mismatch — SQL has {} placeholders but header provides {} values",
+                            prepared.bindings.len(),
+                            arr.len()
+                        );
+                    }
+                    debug!(
+                        "Overriding bindings from {} header with {} parameters",
+                        headers::PARAMETERS,
+                        arr.len()
+                    );
+                    prepared.bindings = arr.clone();
+                } else {
+                    warn!(
+                        header = headers::PARAMETERS,
+                        "Header is present but not a JSON array — ignoring parameter override"
+                    );
+                }
+            }
+
+            debug!("Executing SQL: {}", prepared.sql);
 
             // Execute based on mode
             if config.batch {
@@ -114,38 +149,93 @@ async fn execute_select(
     config: &SqlConfig,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
-    let mut query = sqlx::query(&prepared.sql);
-    query = bind_json_values(query, &prepared.bindings);
-
-    let rows: Vec<AnyRow> = query
-        .fetch_all(pool)
-        .await
-        .map_err(|e| CamelError::ProcessorError(format!("Query execution failed: {}", e)))?;
-
-    let count = rows.len();
-
-    // Convert rows to JSON
-    let json_rows: Vec<serde_json::Value> = rows
-        .iter()
-        .map(row_to_json)
-        .collect::<Result<Vec<_>, _>>()?;
-
     match config.output_type {
         SqlOutputType::SelectOne => {
+            // fetch_all and take first row
+            let mut query = sqlx::query(&prepared.sql);
+            query = bind_json_values(query, &prepared.bindings);
+
+            let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
+                error!("Query execution failed: {}", e);
+                CamelError::ProcessorError(format!("Query execution failed: {}", e))
+            })?;
+
+            let count = rows.len();
+            let json_rows: Vec<serde_json::Value> = rows
+                .iter()
+                .map(row_to_json)
+                .collect::<Result<Vec<_>, _>>()?;
+
             if let Some(first_row) = json_rows.into_iter().next() {
                 exchange.input.body = Body::Json(first_row);
             } else {
                 exchange.input.body = Body::Empty;
             }
+            debug!("SelectOne returned {} row", if count > 0 { 1 } else { 0 });
+            exchange
+                .input
+                .set_header(headers::ROW_COUNT, serde_json::json!(count));
         }
-        SqlOutputType::SelectList | SqlOutputType::StreamList => {
+        SqlOutputType::SelectList => {
+            // fetch_all for list output
+            let mut query = sqlx::query(&prepared.sql);
+            query = bind_json_values(query, &prepared.bindings);
+
+            let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
+                error!("Query execution failed: {}", e);
+                CamelError::ProcessorError(format!("Query execution failed: {}", e))
+            })?;
+
+            let count = rows.len();
+            let json_rows: Vec<serde_json::Value> = rows
+                .iter()
+                .map(row_to_json)
+                .collect::<Result<Vec<_>, _>>()?;
+
             exchange.input.body = Body::Json(serde_json::Value::Array(json_rows));
+            debug!("SelectList returned {} rows", count);
+            exchange
+                .input
+                .set_header(headers::ROW_COUNT, serde_json::json!(count));
+        }
+        SqlOutputType::StreamList => {
+            // Use fetch() for true streaming - avoids loading all rows into memory
+            use futures::TryStreamExt;
+
+            let pool_clone = pool.clone();
+            let sql_str = prepared.sql.clone();
+            let bindings = prepared.bindings.clone();
+
+            // Build the stream that reads rows on demand and serializes to NDJSON bytes
+            let byte_stream = async_stream::try_stream! {
+                let mut q = sqlx::query(&sql_str);
+                q = bind_json_values(q, &bindings);
+                let mut rows = q.fetch(&pool_clone);
+                while let Some(row) = rows.try_next().await.map_err(|e| {
+                    CamelError::ProcessorError(format!("Query execution failed: {}", e))
+                })? {
+                    let json_val = row_to_json(&row).map_err(|e| {
+                        CamelError::ProcessorError(format!("JSON serialization failed: {}", e))
+                    })?;
+                    let mut bytes = serde_json::to_vec(&json_val)
+                        .map_err(|e| CamelError::ProcessorError(format!("JSON serialization failed: {}", e)))?;
+                    bytes.push(b'\n');
+                    yield Bytes::from(bytes);
+                }
+            };
+
+            exchange.input.body = Body::Stream(StreamBody {
+                stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(byte_stream)))),
+                metadata: StreamMetadata {
+                    content_type: Some("application/x-ndjson".to_string()),
+                    size_hint: None,
+                    origin: None,
+                },
+            });
+            debug!("StreamList: created lazy stream (rows fetched on demand)");
+            // Note: ROW_COUNT not set for StreamList since row count is unknown until exhausted
         }
     }
-
-    exchange
-        .input
-        .set_header(headers::ROW_COUNT, serde_json::json!(count));
 
     Ok(())
 }
@@ -160,12 +250,23 @@ async fn execute_modify(
     let mut query = sqlx::query(&prepared.sql);
     query = bind_json_values(query, &prepared.bindings);
 
-    let result = query
-        .execute(pool)
-        .await
-        .map_err(|e| CamelError::ProcessorError(format!("Query execution failed: {}", e)))?;
+    let result = query.execute(pool).await.map_err(|e| {
+        error!("Query execution failed: {}", e);
+        CamelError::ProcessorError(format!("Query execution failed: {}", e))
+    })?;
 
     let rows_affected = result.rows_affected();
+
+    // Fix 4: Implement expected_update_count validation
+    if let Some(expected) = config.expected_update_count
+        && rows_affected as i64 != expected
+    {
+        error!("Expected {} rows affected, got {}", expected, rows_affected);
+        return Err(CamelError::ProcessorError(format!(
+            "Expected {} rows affected, got {}",
+            expected, rows_affected
+        )));
+    }
 
     exchange
         .input
@@ -176,6 +277,8 @@ async fn execute_modify(
     } else {
         exchange.input.body = Body::Json(json!({ "rowsAffected": rows_affected }));
     }
+
+    debug!("Modify query affected {} rows", rows_affected);
 
     Ok(())
 }
@@ -206,14 +309,21 @@ async fn execute_batch(
     // Parse template from config query
     let template = parse_query_template(&config.query, config.placeholder)?;
 
+    // Fix 2: Batch operations must be wrapped in a transaction
+    let mut tx = pool.begin().await.map_err(|e| {
+        error!("Failed to begin transaction: {}", e);
+        CamelError::ProcessorError(format!("Failed to begin transaction: {}", e))
+    })?;
+
     let mut total_rows_affected: u64 = 0;
 
-    for params_array in batch_data {
+    for (batch_idx, params_array) in batch_data.into_iter().enumerate() {
         // Each item must be an array of parameters
         params_array.as_array().ok_or_else(|| {
-            CamelError::ProcessorError(
-                "Each batch item must be a JSON array of parameters".to_string(),
-            )
+            CamelError::ProcessorError(format!(
+                "Batch item at index {} must be a JSON array of parameters",
+                batch_idx
+            ))
         })?;
 
         // Create a temporary exchange with the params as body for resolution
@@ -223,20 +333,50 @@ async fn execute_batch(
         // Resolve parameters for this batch item
         let prepared = resolve_params(&template, &temp_exchange)?;
 
-        // Execute
+        // Execute against transaction
         let mut query = sqlx::query(&prepared.sql);
         query = bind_json_values(query, &prepared.bindings);
 
-        let result = query.execute(pool).await.map_err(|e| {
+        let result = query.execute(&mut *tx).await.map_err(|e| {
+            error!("Batch query execution failed at index {}: {}", batch_idx, e);
             CamelError::ProcessorError(format!("Batch query execution failed: {}", e))
         })?;
+
+        // Validate expected_update_count per batch item
+        if let Some(expected) = config.expected_update_count
+            && result.rows_affected() as i64 != expected
+        {
+            error!(
+                "Batch item {}: expected {} rows affected, got {}",
+                batch_idx,
+                expected,
+                result.rows_affected()
+            );
+            return Err(CamelError::ProcessorError(format!(
+                "Batch item {}: expected {} rows affected, got {}",
+                batch_idx,
+                expected,
+                result.rows_affected()
+            )));
+        }
 
         total_rows_affected += result.rows_affected();
     }
 
+    // Commit the transaction
+    tx.commit().await.map_err(|e| {
+        error!("Failed to commit transaction: {}", e);
+        CamelError::ProcessorError(format!("Failed to commit transaction: {}", e))
+    })?;
+
     exchange.input.set_header(
         headers::UPDATE_COUNT,
         serde_json::json!(total_rows_affected),
+    );
+
+    debug!(
+        "Batch execution completed, total rows affected: {}",
+        total_rows_affected
     );
 
     Ok(())
@@ -334,7 +474,7 @@ mod tests {
     #[test]
     fn test_bind_json_number_f64() {
         let query = sqlx::query("SELECT ?");
-        let values = vec![serde_json::json!(3.14159)];
+        let values = vec![serde_json::json!(std::f64::consts::PI)];
         let _bound = bind_json_values(query, &values);
     }
 
@@ -368,5 +508,61 @@ mod tests {
             serde_json::Value::Null,
         ];
         let _bound = bind_json_values(query, &values);
+    }
+
+    // Test for Fix 4: expected_update_count config field presence
+    #[test]
+    fn test_expected_update_count_validation() {
+        // Test that expected_update_count is parsed from URI
+        let config = SqlConfig::from_uri(
+            "sql:update t set x=1?db_url=postgres://localhost/test&expectedUpdateCount=5",
+        )
+        .unwrap();
+        assert_eq!(config.expected_update_count, Some(5));
+
+        // Test default (no expected_update_count)
+        let config_default = test_config();
+        assert_eq!(config_default.expected_update_count, None);
+
+        // Test negative value (should parse)
+        let config_neg = SqlConfig::from_uri(
+            "sql:update t set x=1?db_url=postgres://localhost/test&expectedUpdateCount=-1",
+        )
+        .unwrap();
+        assert_eq!(config_neg.expected_update_count, Some(-1));
+    }
+
+    // Test for Fix 3: parameters header override logic
+    #[test]
+    fn test_parameters_header_override_logic() {
+        // Create a PreparedQuery manually
+        let mut prepared = PreparedQuery {
+            sql: "SELECT * FROM t WHERE id = $1".to_string(),
+            bindings: vec![serde_json::json!(42)],
+        };
+
+        // Simulate the header override logic
+        let header_params = serde_json::json!([99, "extra"]);
+        if let Some(arr) = header_params.as_array() {
+            prepared.bindings = arr.clone();
+        }
+
+        // Verify bindings were overridden
+        assert_eq!(prepared.bindings.len(), 2);
+        assert_eq!(prepared.bindings[0], serde_json::json!(99));
+        assert_eq!(prepared.bindings[1], serde_json::json!("extra"));
+
+        // Test with non-array header (should not override)
+        let mut prepared2 = PreparedQuery {
+            sql: "SELECT * FROM t WHERE id = $1".to_string(),
+            bindings: vec![serde_json::json!(42)],
+        };
+        let header_non_array = serde_json::json!({"not": "an array"});
+        if let Some(arr) = header_non_array.as_array() {
+            prepared2.bindings = arr.clone();
+        }
+        // Should remain unchanged
+        assert_eq!(prepared2.bindings.len(), 1);
+        assert_eq!(prepared2.bindings[0], serde_json::json!(42));
     }
 }

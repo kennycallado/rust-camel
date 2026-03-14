@@ -7,14 +7,14 @@ use sqlx::AnyPool;
 use sqlx::any::AnyPoolOptions;
 use sqlx::any::AnyRow;
 use tokio::sync::OnceCell;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use camel_api::{Body, CamelError, Exchange, Message};
 use camel_component::{ConcurrencyModel, Consumer, ConsumerContext};
 
 use crate::config::SqlConfig;
 use crate::headers;
-use crate::query::{parse_query_template, resolve_params};
+use crate::query::{QueryTemplate, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
 
 pub struct SqlConsumer {
@@ -32,15 +32,13 @@ impl SqlConsumer {
         &self,
         pool: &AnyPool,
         context: &ConsumerContext,
+        template: &QueryTemplate,
     ) -> Result<(), CamelError> {
-        // Parse the query template
-        let template = parse_query_template(&self.config.query, self.config.placeholder)?;
-
         // Create an empty exchange for parameter resolution (consumer has no input)
         let empty_exchange = Exchange::new(Message::default());
 
         // Resolve parameters
-        let prepared = resolve_params(&template, &empty_exchange)?;
+        let prepared = resolve_params(template, &empty_exchange)?;
 
         // Build and execute the query
         let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
@@ -73,10 +71,10 @@ impl SqlConsumer {
                 // Create exchange with the row as JSON body
                 let mut msg = Message::new(Body::Json(row_json.clone()));
 
-                // Set individual column headers
+                // Set individual column headers with CamelSql. prefix per Apache Camel convention
                 if let Some(obj) = row_json.as_object() {
                     for (key, value) in obj {
-                        msg.set_header(key.clone(), value.clone());
+                        msg.set_header(format!("CamelSql.{}", key), value.clone());
                     }
                 }
 
@@ -110,8 +108,17 @@ impl SqlConsumer {
 
             let exchange = Exchange::new(msg);
 
-            // Send (fire-and-forget for batch mode)
-            context.send(exchange).await?;
+            // Send and wait for result, then run post-processing with Null row
+            let result = context.send_and_wait(exchange).await;
+            if let Err(e) = self
+                .handle_post_processing(pool, &result, &JsonValue::Null)
+                .await
+            {
+                error!(error = %e, "Post-processing failed for batch");
+                if self.config.break_batch_on_consume_fail {
+                    return Err(e);
+                }
+            }
         }
 
         // Execute on_consume_batch_complete if configured
@@ -162,16 +169,31 @@ impl SqlConsumer {
         let template = parse_query_template(query_str, self.config.placeholder)?;
 
         // Create a temporary exchange with the row as body for parameter resolution
-        let temp_exchange = Exchange::new(Message::new(Body::Json(row_json.clone())));
+        // Populate CamelSql.* headers so named params can reference them
+        let mut temp_msg = Message::new(Body::Json(row_json.clone()));
+        if let Some(obj) = row_json.as_object() {
+            for (key, value) in obj {
+                temp_msg.set_header(format!("CamelSql.{}", key), value.clone());
+            }
+        }
+        let temp_exchange = Exchange::new(temp_msg);
 
         // Resolve parameters
         let prepared = resolve_params(&template, &temp_exchange)?;
 
         // Build and execute the query
         let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
-        query.execute(pool).await.map_err(|e| {
+        let result = query.execute(pool).await.map_err(|e| {
             CamelError::ProcessorError(format!("Post-query execution failed: {}", e))
         })?;
+
+        // Warn if 0 rows affected (the row may not have been marked correctly)
+        if result.rows_affected() == 0 {
+            warn!(
+                query = query_str,
+                "Post-processing query affected 0 rows — the row may not have been marked correctly"
+            );
+        }
 
         Ok(())
     }
@@ -200,7 +222,18 @@ impl Consumer for SqlConsumer {
             })
             .await?;
 
-        // Step 2: Initial delay before starting polling
+        // Warn if no onConsume configured
+        if self.config.on_consume.is_none() {
+            warn!(
+                "SQL consumer started without onConsume configured — consumed rows will not be marked/deleted"
+            );
+        }
+
+        // Step 2: Parse query template once (avoid re-parsing every poll)
+        let template = parse_query_template(&self.config.query, self.config.placeholder)
+            .map_err(|e| CamelError::Config(format!("Invalid query template: {}", e)))?;
+
+        // Step 3: Initial delay before starting polling
         if self.config.initial_delay_ms > 0 {
             tokio::select! {
                 _ = context.cancelled() => {
@@ -211,7 +244,7 @@ impl Consumer for SqlConsumer {
             }
         }
 
-        // Step 3: Polling loop
+        // Step 4: Polling loop
         loop {
             tokio::select! {
                 _ = context.cancelled() => {
@@ -219,7 +252,7 @@ impl Consumer for SqlConsumer {
                     break;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(self.config.delay_ms)) => {
-                    if let Err(e) = self.poll_database(pool, &context).await {
+                    if let Err(e) = self.poll_database(pool, &context, &template).await {
                         error!(error = %e, "SQL consumer poll failed");
                     }
                 }
@@ -234,6 +267,9 @@ impl Consumer for SqlConsumer {
     }
 
     fn concurrency_model(&self) -> ConcurrencyModel {
+        // Sequential is correct for SQL consumers: concurrent polls would fetch
+        // duplicate rows. The design doc mentioned SharedState (which doesn't exist
+        // in this runtime) — Sequential is the correct equivalent.
         ConcurrencyModel::Sequential
     }
 }

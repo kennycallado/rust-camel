@@ -3,35 +3,40 @@ use sqlx::any::AnyArguments;
 use sqlx::any::AnyRow;
 use sqlx::query::Query;
 use sqlx::{Any, Column, Row};
+use tracing::warn;
 
 /// Converts a database row to a JSON object.
 ///
 /// Iterates columns and extracts values by trying types in order:
-/// i64, i32, f64, String, bool, Option<String>.
+/// Option<i64>, Option<i32>, Option<f64>, Option<bool>, Option<String>.
+/// SQL NULLs are properly represented as JSON null.
 pub(crate) fn row_to_json(row: &AnyRow) -> Result<serde_json::Value, CamelError> {
     let mut map = serde_json::Map::new();
 
     for (i, column) in row.columns().iter().enumerate() {
         let name = column.name().to_string();
 
-        let value = if let Ok(v) = row.try_get::<i64, _>(i) {
+        let value = if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(i) {
             serde_json::Value::Number(v.into())
-        } else if let Ok(v) = row.try_get::<i32, _>(i) {
+        } else if let Ok(Some(v)) = row.try_get::<Option<i32>, _>(i) {
             serde_json::Value::Number(v.into())
-        } else if let Ok(v) = row.try_get::<f64, _>(i) {
+        } else if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(i) {
             serde_json::Number::from_f64(v)
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null)
-        } else if let Ok(v) = row.try_get::<String, _>(i) {
-            serde_json::Value::String(v)
-        } else if let Ok(v) = row.try_get::<bool, _>(i) {
+        } else if let Ok(Some(v)) = row.try_get::<Option<bool>, _>(i) {
             serde_json::Value::Bool(v)
-        } else if let Ok(v) = row.try_get::<Option<String>, _>(i) {
-            match v {
-                Some(s) => serde_json::Value::String(s),
-                None => serde_json::Value::Null,
-            }
+        } else if let Ok(Some(v)) = row.try_get::<Option<String>, _>(i) {
+            serde_json::Value::String(v)
+        } else if matches!(row.try_get::<Option<String>, _>(i), Ok(None)) {
+            // Confirmed SQL NULL — no warning needed
+            serde_json::Value::Null
         } else {
+            // Truly undecodable — log a warning
+            warn!(
+                column = column.name(),
+                "Could not decode column value, falling back to null"
+            );
             serde_json::Value::Null
         };
 
