@@ -7,10 +7,10 @@ use camel_core::route::RouteDefinition;
 use camel_otel::{OtelConfig, OtelService};
 use tracing::Level;
 use tracing_subscriber::Layer;
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::filter::filter_fn;
 
 impl CamelConfig {
     /// Load routes from config file and return them (without adding to context yet)
@@ -103,57 +103,57 @@ impl CamelConfig {
             };
 
         // Layer 3b: camel_tracer file output (JSON or Plain)
-        let file_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
-            if config.enabled
-                && let Some(ref file_config) = config.outputs.file
-                && file_config.enabled
-            {
-                let file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&file_config.path)
-                    .map_err(|e| {
-                        CamelError::Config(format!(
-                            "Failed to open trace file '{}': {}",
-                            file_config.path, e
-                        ))
-                    })?;
+        let file_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = if config
+            .enabled
+            && let Some(ref file_config) = config.outputs.file
+            && file_config.enabled
+        {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&file_config.path)
+                .map_err(|e| {
+                    CamelError::Config(format!(
+                        "Failed to open trace file '{}': {}",
+                        file_config.path, e
+                    ))
+                })?;
 
-                match file_config.format {
-                    OutputFormat::Json => Some(
-                        tracing_subscriber::fmt::layer()
-                            .json()
-                            .with_span_events(FmtSpan::CLOSE)
-                            .with_writer(std::sync::Mutex::new(file))
-                            .with_target(true)
-                            .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
-                            .boxed(),
-                    ),
-                    OutputFormat::Plain => Some(
-                        tracing_subscriber::fmt::layer()
-                            .with_span_events(FmtSpan::CLOSE)
-                            .with_writer(std::sync::Mutex::new(file))
-                            .with_target(true)
-                            .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
-                            .boxed(),
-                    ),
-                }
-            } else {
-                None
-            };
+            match file_config.format {
+                OutputFormat::Json => Some(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_span_events(FmtSpan::CLOSE)
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_target(true)
+                        .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
+                        .boxed(),
+                ),
+                OutputFormat::Plain => Some(
+                    tracing_subscriber::fmt::layer()
+                        .with_span_events(FmtSpan::CLOSE)
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_target(true)
+                        .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
+                        .boxed(),
+                ),
+            }
+        } else {
+            None
+        };
 
         // Layer 4: tracing-opentelemetry bridge — only when OTel is active
         #[cfg(feature = "otel")]
-        let otel_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
-            if otel_active {
-                Some(
-                    tracing_opentelemetry::layer()
-                        .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
-                        .boxed(),
-                )
-            } else {
-                None
-            };
+        let otel_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = if otel_active
+        {
+            Some(
+                tracing_opentelemetry::layer()
+                    .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
+                    .boxed(),
+            )
+        } else {
+            None
+        };
         #[cfg(not(feature = "otel"))]
         let _ = otel_active; // suppress unused variable warning
 

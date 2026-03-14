@@ -5,8 +5,8 @@ use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::{
-    split_body_json_array, split_body_lines, AggregationStrategy as SplitAggregation,
-    SplitterConfig,
+    AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
+    split_body_lines,
 };
 use camel_api::{CamelError, CircuitBreakerConfig, IdentityProcessor};
 use camel_component::ConcurrencyModel;

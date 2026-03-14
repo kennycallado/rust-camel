@@ -185,6 +185,7 @@ fn test_span_hierarchy_parent_child() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // intentional: serializes global tracer access across tests
 async fn test_tracing_processor_records_span() {
     // Lock to serialize access to global tracer provider
     let _lock = lock_global_tracer();
@@ -397,6 +398,7 @@ fn test_extract_context_with_empty_headers() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // intentional: serializes global tracer access across tests
 async fn test_tracing_processor_chain_preserves_trace_id() {
     // Lock to serialize access to global tracer provider
     let _lock = lock_global_tracer();

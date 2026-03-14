@@ -2461,3 +2461,64 @@ async fn test_choice_short_circuits_first_match() {
         second.assert_exchange_count(0).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Test: XML body pipeline — direct:xml-in → convert_body_to(Text) → mock:xml-out
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_xml_body_pipeline() {
+    use camel_api::body::Body;
+    use camel_api::{Exchange, Message, ProducerContext};
+    use camel_component_direct::DirectComponent;
+    use tower::util::ServiceExt;
+
+    let mock = MockComponent::new();
+    let direct = DirectComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(direct);
+    ctx.register_component(mock.clone());
+
+    // Route: direct:xml-in → convert_body_to(Text) → mock:xml-out
+    let route = RouteBuilder::from("direct:xml-in")
+        .route_id("test-xml-body-pipeline")
+        .convert_body_to(camel_api::BodyType::Text)
+        .to("mock:xml-out")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    // Give the route a moment to start
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Create a producer to send an exchange with XML body
+    let producer_ctx = ProducerContext::new(ctx.route_controller().clone());
+    let registry = ctx.registry();
+    let component = registry.get("direct").unwrap();
+    let endpoint = component.create_endpoint("direct:xml-in").unwrap();
+    let producer = endpoint.create_producer(&producer_ctx).unwrap();
+    drop(registry); // Release the registry lock
+
+    // Send exchange with Body::Xml
+    let xml_content = "<root><msg>hello</msg></root>";
+    let exchange = Exchange::new(Message::new(Body::Xml(xml_content.to_string())));
+    let _ = producer.oneshot(exchange).await.unwrap();
+
+    // Wait for the exchange to be processed
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    ctx.stop().await.unwrap();
+
+    // Assert mock received 1 exchange
+    let endpoint = mock.get_endpoint("xml-out").unwrap();
+    endpoint.assert_exchange_count(1).await;
+
+    // Assert the received body is Body::Text (since we converted Xml→Text)
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert_eq!(
+        exchanges[0].input.body.as_text(),
+        Some(xml_content),
+        "Body should be converted from Xml to Text"
+    );
+}

@@ -4,7 +4,9 @@ use std::task::{Context, Poll};
 
 use tower::{Layer, Service, ServiceExt};
 
-use camel_api::error_handler::{ExceptionPolicy, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER};
+use camel_api::error_handler::{
+    ExceptionPolicy, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER,
+};
 use camel_api::{BoxProcessor, CamelError, Exchange, Value};
 
 /// Tower Layer that wraps a pipeline with error handling behaviour.
@@ -142,8 +144,14 @@ where
                         // Set redelivery headers
                         let mut ex = original.clone();
                         ex.input.set_header(HEADER_REDELIVERED, Value::Bool(true));
-                        ex.input.set_header(HEADER_REDELIVERY_COUNTER, Value::Number((attempt + 1).into()));
-                        ex.input.set_header(HEADER_REDELIVERY_MAX_COUNTER, Value::Number(backoff.max_attempts.into()));
+                        ex.input.set_header(
+                            HEADER_REDELIVERY_COUNTER,
+                            Value::Number((attempt + 1).into()),
+                        );
+                        ex.input.set_header(
+                            HEADER_REDELIVERY_MAX_COUNTER,
+                            Value::Number(backoff.max_attempts.into()),
+                        );
 
                         match inner.ready().await?.call(ex).await {
                             Ok(ex) => return Ok(ex),
@@ -152,8 +160,14 @@ where
                                     // Retries exhausted — send to handler.
                                     let mut ex = original.clone();
                                     ex.input.set_header(HEADER_REDELIVERED, Value::Bool(true));
-                                    ex.input.set_header(HEADER_REDELIVERY_COUNTER, Value::Number(backoff.max_attempts.into()));
-                                    ex.input.set_header(HEADER_REDELIVERY_MAX_COUNTER, Value::Number(backoff.max_attempts.into()));
+                                    ex.input.set_header(
+                                        HEADER_REDELIVERY_COUNTER,
+                                        Value::Number(backoff.max_attempts.into()),
+                                    );
+                                    ex.input.set_header(
+                                        HEADER_REDELIVERY_MAX_COUNTER,
+                                        Value::Number(backoff.max_attempts.into()),
+                                    );
                                     ex.set_error(_e);
                                     let handler = policy_producer.or(dlc);
                                     return send_to_handler(ex, handler).await;
@@ -395,7 +409,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_redelivery_headers_are_set() {
-        use camel_api::error_handler::{RedeliveryPolicy, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER};
+        use camel_api::error_handler::{
+            HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER,
+            RedeliveryPolicy,
+        };
 
         let inner = fail_n_times(10);
         let received = Arc::new(std::sync::Mutex::new(None));
@@ -424,9 +441,18 @@ mod tests {
         let _ = svc.oneshot(make_exchange()).await.unwrap();
 
         let ex = received.lock().unwrap().take().unwrap();
-        assert_eq!(ex.input.header(HEADER_REDELIVERED), Some(&Value::Bool(true)));
-        assert_eq!(ex.input.header(HEADER_REDELIVERY_COUNTER), Some(&Value::Number(2.into())));
-        assert_eq!(ex.input.header(HEADER_REDELIVERY_MAX_COUNTER), Some(&Value::Number(2.into())));
+        assert_eq!(
+            ex.input.header(HEADER_REDELIVERED),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            ex.input.header(HEADER_REDELIVERY_COUNTER),
+            Some(&Value::Number(2.into()))
+        );
+        assert_eq!(
+            ex.input.header(HEADER_REDELIVERY_MAX_COUNTER),
+            Some(&Value::Number(2.into()))
+        );
     }
 
     #[tokio::test]
@@ -461,7 +487,10 @@ mod tests {
         let _ = svc.oneshot(make_exchange()).await.unwrap();
         let elapsed = start.elapsed();
 
-        assert!(received.lock().unwrap().is_some(), "DLC should have received exchange");
+        assert!(
+            received.lock().unwrap().is_some(),
+            "DLC should have received exchange"
+        );
 
         assert!(
             elapsed >= Duration::from_millis(50),

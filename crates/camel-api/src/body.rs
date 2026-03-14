@@ -434,4 +434,74 @@ mod tests {
         };
         assert_ne!(make_stream(), make_stream());
     }
+
+    // XML body tests
+
+    #[test]
+    fn test_body_xml_as_xml() {
+        let xml = "<root><child>value</child></root>";
+        let body = Body::Xml(xml.to_string());
+        assert_eq!(body.as_xml(), Some(xml));
+    }
+
+    #[test]
+    fn test_body_non_xml_as_xml_returns_none() {
+        // Body::Text should return None for as_xml()
+        let body = Body::Text("<root/>".to_string());
+        assert_eq!(body.as_xml(), None);
+
+        // Body::Empty should return None
+        let body = Body::Empty;
+        assert_eq!(body.as_xml(), None);
+
+        // Body::Bytes should return None
+        let body = Body::Bytes(Bytes::from("<root/>"));
+        assert_eq!(body.as_xml(), None);
+
+        // Body::Json should return None
+        let body = Body::Json(serde_json::json!({"key": "value"}));
+        assert_eq!(body.as_xml(), None);
+    }
+
+    #[test]
+    fn test_body_xml_partial_eq() {
+        // Same XML content should be equal
+        let body1 = Body::Xml("a".to_string());
+        let body2 = Body::Xml("a".to_string());
+        assert_eq!(body1, body2);
+
+        // Different XML content should not be equal
+        let body1 = Body::Xml("a".to_string());
+        let body2 = Body::Xml("b".to_string());
+        assert_ne!(body1, body2);
+    }
+
+    #[test]
+    fn test_body_xml_not_equal_to_other_variants() {
+        // Body::Xml should not equal Body::Text even with same content
+        let xml_body = Body::Xml("x".to_string());
+        let text_body = Body::Text("x".to_string());
+        assert_ne!(xml_body, text_body);
+    }
+
+    #[test]
+    fn test_try_into_xml_from_text() {
+        let body = Body::Text("<root/>".to_string());
+        let result = body.try_into_xml();
+        assert!(matches!(result, Ok(Body::Xml(ref s)) if s == "<root/>"));
+    }
+
+    #[test]
+    fn test_try_into_xml_invalid_text() {
+        let body = Body::Text("not xml".to_string());
+        let result = body.try_into_xml();
+        assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    }
+
+    #[test]
+    fn test_body_xml_clone() {
+        let original = Body::Xml("hello".to_string());
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
 }

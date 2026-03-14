@@ -188,17 +188,13 @@ impl ContainerConfig {
             .get("autoRemove")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
-        let host = parts
-            .params
-            .get("host")
-            .cloned()
-            .or_else(|| {
-                Some(if cfg!(windows) {
-                    "npipe:////./pipe/docker_engine".to_string()
-                } else {
-                    "unix:///var/run/docker.sock".to_string()
-                })
-            });
+        let host = parts.params.get("host").cloned().or_else(|| {
+            Some(if cfg!(windows) {
+                "npipe:////./pipe/docker_engine".to_string()
+            } else {
+                "unix:///var/run/docker.sock".to_string()
+            })
+        });
 
         Ok(Self {
             operation: parts.path,
@@ -219,14 +215,11 @@ impl ContainerConfig {
     }
 
     fn docker_socket_path(&self) -> Result<&str, CamelError> {
-        let host = self
-            .host
-            .as_deref()
-            .unwrap_or(if cfg!(windows) {
-                "npipe:////./pipe/docker_engine"
-            } else {
-                "unix:///var/run/docker.sock"
-            });
+        let host = self.host.as_deref().unwrap_or(if cfg!(windows) {
+            "npipe:////./pipe/docker_engine"
+        } else {
+            "unix:///var/run/docker.sock"
+        });
 
         if host.starts_with("unix://") || host.starts_with("npipe://") {
             return Ok(host);

@@ -757,19 +757,25 @@ mod lifecycle_tests {
             }
 
             async fn stop(&mut self) -> Result<(), CamelError> {
-                self.order
-                    .lock()
-                    .unwrap()
-                    .push(self.name.clone());
+                self.order.lock().unwrap().push(self.name.clone());
                 Ok(())
             }
         }
 
         let order = Arc::new(StdMutex::new(Vec::<String>::new()));
 
-        let s1 = OrderTracker { name: "first".into(),  order: Arc::clone(&order) };
-        let s2 = OrderTracker { name: "second".into(), order: Arc::clone(&order) };
-        let s3 = OrderTracker { name: "third".into(),  order: Arc::clone(&order) };
+        let s1 = OrderTracker {
+            name: "first".into(),
+            order: Arc::clone(&order),
+        };
+        let s2 = OrderTracker {
+            name: "second".into(),
+            order: Arc::clone(&order),
+        };
+        let s3 = OrderTracker {
+            name: "third".into(),
+            order: Arc::clone(&order),
+        };
 
         let mut ctx = CamelContext::new()
             .with_lifecycle(s1)
@@ -780,7 +786,10 @@ mod lifecycle_tests {
         ctx.stop().await.unwrap();
 
         let stopped = order.lock().unwrap();
-        assert_eq!(*stopped, vec!["third", "second", "first"],
-            "services must stop in reverse insertion order");
+        assert_eq!(
+            *stopped,
+            vec!["third", "second", "first"],
+            "services must stop in reverse insertion order"
+        );
     }
 }

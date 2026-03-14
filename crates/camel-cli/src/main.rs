@@ -97,15 +97,16 @@ async fn run(
     // 1b. Apply OTel CLI overrides (--otel-endpoint and --service-name imply --otel)
     let otel_enabled = otel || otel_endpoint.is_some() || service_name.is_some();
     if otel_enabled {
-        let otel_cfg = camel_config
-            .observability
-            .otel
-            .get_or_insert(camel_config::OtelCamelConfig {
-                enabled: true,
-                endpoint: "http://localhost:4317".to_string(),
-                service_name: "rust-camel".to_string(),
-                log_level: "info".to_string(),
-            });
+        let otel_cfg =
+            camel_config
+                .observability
+                .otel
+                .get_or_insert(camel_config::OtelCamelConfig {
+                    enabled: true,
+                    endpoint: "http://localhost:4317".to_string(),
+                    service_name: "rust-camel".to_string(),
+                    log_level: "info".to_string(),
+                });
         otel_cfg.enabled = true;
         if let Some(ep) = otel_endpoint {
             otel_cfg.endpoint = ep;

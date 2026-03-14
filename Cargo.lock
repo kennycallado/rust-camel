@@ -5764,6 +5764,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xml-body"
+version = "0.4.0"
+dependencies = [
+ "camel-api",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "xxhash-rust"
 version = "0.8.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

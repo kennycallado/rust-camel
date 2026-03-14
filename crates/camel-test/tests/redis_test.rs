@@ -354,5 +354,8 @@ async fn test_redis_consumer_pubsub_mode() {
         }
     }
 
-    assert!(received, "Subscriber should have received the message within 5s");
+    assert!(
+        received,
+        "Subscriber should have received the message within 5s"
+    );
 }
