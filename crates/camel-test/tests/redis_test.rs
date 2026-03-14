@@ -320,7 +320,7 @@ async fn test_redis_consumer_pubsub_mode() {
 
     ctx.add_route_definition(consumer_route).unwrap();
 
-    let producer_route = RouteBuilder::from("timer:pub?period=200&repeatCount=1")
+    let producer_route = RouteBuilder::from("timer:pub?period=2000&repeatCount=1")
         .set_header("CamelRedis.Channel", Value::String("testchannel".into()))
         .set_header("CamelRedis.Value", Value::String("pubsub-message".into()))
         .to(format!("redis://{}?command=PUBLISH", conn_str))

@@ -144,6 +144,7 @@ async fn run(
     ctx.register_component(camel_component_container::ContainerComponent::new());
     ctx.register_component(camel_component_redis::RedisComponent::new());
     ctx.register_component(camel_component_kafka::KafkaComponent::new());
+    ctx.register_component(camel_component_sql::SqlComponent::new());
 
     // 5. Discover and load initial routes
     match camel_dsl::discover_routes(&patterns) {

@@ -36,6 +36,7 @@ camel-component-controlbus.workspace = true
 camel-component-container.workspace = true
 camel-component-redis.workspace = true
 camel-component-kafka.workspace = true
+camel-component-sql.workspace = true
 
 [features]
 default = []
