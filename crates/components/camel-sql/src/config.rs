@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use camel_api::CamelError;
-use camel_endpoint::{parse_uri, UriComponents, UriConfig};
+use camel_endpoint::{UriComponents, UriConfig, parse_uri};
 
 /// Output type for SQL query results.
 #[derive(Debug, Clone, PartialEq, Default)]

@@ -213,8 +213,13 @@ async fn test_tracing_processor_records_span() {
 
     // Create TracingProcessor wrapping IdentityProcessor
     let inner = BoxProcessor::new(IdentityProcessor);
-    let mut tracing_processor =
-        TracingProcessor::new(inner, "test-route".to_string(), 0, DetailLevel::Minimal);
+    let mut tracing_processor = TracingProcessor::new(
+        inner,
+        "test-route".to_string(),
+        0,
+        DetailLevel::Minimal,
+        None,
+    );
 
     // Process the exchange
     let result: Result<Exchange, _> = tracing_processor
@@ -423,12 +428,22 @@ async fn test_tracing_processor_chain_preserves_trace_id() {
 
     // Chain two TracingProcessors
     let processor1 = BoxProcessor::new(IdentityProcessor);
-    let mut tracer1 =
-        TracingProcessor::new(processor1, "route1".to_string(), 0, DetailLevel::Minimal);
+    let mut tracer1 = TracingProcessor::new(
+        processor1,
+        "route1".to_string(),
+        0,
+        DetailLevel::Minimal,
+        None,
+    );
 
     let processor2 = BoxProcessor::new(IdentityProcessor);
-    let mut tracer2 =
-        TracingProcessor::new(processor2, "route2".to_string(), 1, DetailLevel::Minimal);
+    let mut tracer2 = TracingProcessor::new(
+        processor2,
+        "route2".to_string(),
+        1,
+        DetailLevel::Minimal,
+        None,
+    );
 
     // Process through chain
     let result1: Result<Exchange, _> = tracer1.ready().await.unwrap().call(exchange).await;

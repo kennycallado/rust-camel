@@ -143,6 +143,16 @@ impl CamelContext {
 
     /// Configure tracing with full config.
     pub fn set_tracer_config(&mut self, config: TracerConfig) {
+        // Inject metrics collector if not already set
+        let config = if config.metrics_collector.is_none() {
+            TracerConfig {
+                metrics_collector: Some(Arc::clone(&self.metrics)),
+                ..config
+            }
+        } else {
+            config
+        };
+
         self.route_controller
             .try_lock()
             .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")

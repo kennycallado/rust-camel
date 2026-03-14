@@ -13,6 +13,7 @@ use tower::{Layer, Service, ServiceExt};
 use tracing::{error, info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::metrics::MetricsCollector;
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProducerContext,
     RouteController, RouteStatus, Value, body::Body,
@@ -197,6 +198,8 @@ pub struct DefaultRouteController {
     tracing_enabled: bool,
     /// Detail level for tracing when enabled.
     tracer_detail_level: DetailLevel,
+    /// Metrics collector for tracing processor.
+    tracer_metrics: Option<Arc<dyn MetricsCollector>>,
 }
 
 impl DefaultRouteController {
@@ -223,6 +226,7 @@ impl DefaultRouteController {
             crash_notifier: None,
             tracing_enabled: false,
             tracer_detail_level: DetailLevel::Minimal,
+            tracer_metrics: None,
         }
     }
 
@@ -241,6 +245,7 @@ impl DefaultRouteController {
             crash_notifier: None,
             tracing_enabled: false,
             tracer_detail_level: DetailLevel::Minimal,
+            tracer_metrics: None,
         }
     }
 
@@ -276,6 +281,7 @@ impl DefaultRouteController {
     pub fn set_tracer_config(&mut self, config: &TracerConfig) {
         self.tracing_enabled = config.enabled;
         self.tracer_detail_level = config.detail_level.clone();
+        self.tracer_metrics = config.metrics_collector.clone();
     }
 
     /// Resolve an `ErrorHandlerConfig` into an `ErrorHandlerLayer`.
@@ -680,6 +686,7 @@ impl DefaultRouteController {
             &route_id_for_tracing,
             self.tracing_enabled,
             self.tracer_detail_level.clone(),
+            self.tracer_metrics.clone(),
         );
 
         // Apply circuit breaker if configured
@@ -747,6 +754,7 @@ impl DefaultRouteController {
             &route_id,
             self.tracing_enabled,
             self.tracer_detail_level.clone(),
+            self.tracer_metrics.clone(),
         );
 
         if let Some(cb_config) = def.circuit_breaker {

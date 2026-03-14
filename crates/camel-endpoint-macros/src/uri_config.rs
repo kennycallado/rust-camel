@@ -1,8 +1,8 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    parse::Parse, parse::ParseStream, punctuated::Punctuated, Data, DeriveInput, Fields, Lit, Meta,
-    Token, Type, TypePath,
+    Data, DeriveInput, Fields, Lit, Meta, Token, Type, TypePath, parse::Parse, parse::ParseStream,
+    punctuated::Punctuated,
 };
 
 /// Parsed `#[uri_param]` attribute
@@ -52,7 +52,7 @@ impl Parse for UriParamAttr {
                         return Err(syn::Error::new_spanned(
                             pair.key,
                             format!("unknown attribute key: {}", key_str),
-                        ))
+                        ));
                     }
                 }
             } else {
@@ -131,7 +131,7 @@ fn is_duration_type(ty: &Type) -> bool {
     if let Type::Path(TypePath { path, .. }) = ty {
         // Handle both `Duration` and `std::time::Duration`
         let segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        
+
         // Direct "Duration" or qualified "std::time::Duration"
         segments.last().map(|s| s == "Duration").unwrap_or(false)
     } else {
@@ -420,8 +420,13 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
     #[derive(Clone)]
     enum FieldType {
         Path,
-        Param { param_name: String, default: Option<String> },
-        DurationFromMs { companion_field: String },
+        Param {
+            param_name: String,
+            default: Option<String>,
+        },
+        DurationFromMs {
+            companion_field: String,
+        },
     }
 
     let mut field_info: Vec<(syn::Ident, Type, FieldType)> = Vec::new();
@@ -441,10 +446,16 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
         if is_duration_type(&field.ty) {
             let field_name_str = field_name.to_string();
             let companion_name = format!("{}_ms", field_name_str);
-            
+
             // Check if companion field exists
             if all_field_names.contains(&companion_name) {
-                field_info.push((field_name, field_type, FieldType::DurationFromMs { companion_field: companion_name }));
+                field_info.push((
+                    field_name,
+                    field_type,
+                    FieldType::DurationFromMs {
+                        companion_field: companion_name,
+                    },
+                ));
                 continue;
             }
             // If no companion, fall through to regular handling (will use FromStr)
@@ -455,10 +466,14 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
             Ok(Some(attr)) => {
                 // This is a parameter field
                 let param_name = attr.name.clone().unwrap_or_else(|| field_name.to_string());
-                field_info.push((field_name, field_type, FieldType::Param {
-                    param_name,
-                    default: attr.default,
-                }));
+                field_info.push((
+                    field_name,
+                    field_type,
+                    FieldType::Param {
+                        param_name,
+                        default: attr.default,
+                    },
+                ));
             }
             Ok(None) => {
                 // No #[uri_param] - this is a path field (only the first one)
@@ -508,13 +523,12 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
                     }
                 }
             }
-            FieldType::Param { param_name, default } => {
-                let parsing_code = generate_param_parsing(
-                    param_name,
-                    field_name,
-                    field_type,
-                    default.as_deref(),
-                );
+            FieldType::Param {
+                param_name,
+                default,
+            } => {
+                let parsing_code =
+                    generate_param_parsing(param_name, field_name, field_type, default.as_deref());
                 bindings.push(parsing_code);
             }
             FieldType::DurationFromMs { .. } => {
@@ -526,7 +540,8 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
     // Process Duration fields second (after their companions are bound)
     for (field_name, _field_type, ftype) in &field_info {
         if let FieldType::DurationFromMs { companion_field } = ftype {
-            let companion_ident: syn::Ident = syn::Ident::new(companion_field, proc_macro2::Span::call_site());
+            let companion_ident: syn::Ident =
+                syn::Ident::new(companion_field, proc_macro2::Span::call_site());
             bindings.push(quote! {
                 let #field_name = std::time::Duration::from_millis(#companion_ident)
             });

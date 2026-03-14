@@ -17,7 +17,7 @@ use camel_api::{
     BoxProcessor, CamelError, Exchange, Message, body::Body, body::StreamBody, body::StreamMetadata,
 };
 use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
-use camel_endpoint::{parse_uri, UriConfig};
+use camel_endpoint::{UriConfig, parse_uri};
 
 // ---------------------------------------------------------------------------
 // FileExistStrategy

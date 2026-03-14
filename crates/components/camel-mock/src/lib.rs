@@ -266,7 +266,10 @@ pub struct ExchangeAssert {
 
 impl ExchangeAssert {
     fn location(&self) -> String {
-        format!("MockEndpoint '{}' exchange[{}]", self.endpoint_name, self.idx)
+        format!(
+            "MockEndpoint '{}' exchange[{}]",
+            self.endpoint_name, self.idx
+        )
     }
 
     /// Assert that the body is `Body::Text` equal to `expected`.
@@ -275,11 +278,15 @@ impl ExchangeAssert {
             Some(actual) if actual == expected => {}
             Some(actual) => panic!(
                 "{}: expected body text {:?}, got {:?}",
-                self.location(), expected, actual
+                self.location(),
+                expected,
+                actual
             ),
             None => panic!(
                 "{}: expected body text {:?}, but body is not Body::Text (got {:?})",
-                self.location(), expected, self.exchange.input.body
+                self.location(),
+                expected,
+                self.exchange.input.body
             ),
         }
         self
@@ -291,11 +298,15 @@ impl ExchangeAssert {
             camel_api::Body::Json(actual) if *actual == expected => {}
             camel_api::Body::Json(actual) => panic!(
                 "{}: expected body JSON {}, got {}",
-                self.location(), expected, actual
+                self.location(),
+                expected,
+                actual
             ),
             other => panic!(
                 "{}: expected body JSON {}, but body is not Body::Json (got {:?})",
-                self.location(), expected, other
+                self.location(),
+                expected,
+                other
             ),
         }
         self
@@ -307,11 +318,15 @@ impl ExchangeAssert {
             camel_api::Body::Bytes(actual) if actual.as_ref() == expected => {}
             camel_api::Body::Bytes(actual) => panic!(
                 "{}: expected body bytes {:?}, got {:?}",
-                self.location(), expected, actual
+                self.location(),
+                expected,
+                actual
             ),
             other => panic!(
                 "{}: expected body bytes {:?}, but body is not Body::Bytes (got {:?})",
-                self.location(), expected, other
+                self.location(),
+                expected,
+                other
             ),
         }
         self
@@ -573,11 +588,19 @@ mod tests {
         let inner = component.get_endpoint("immediate").unwrap();
 
         let mut producer = endpoint.create_producer(&ctx).unwrap();
-        producer.call(Exchange::new(Message::new("a"))).await.unwrap();
-        producer.call(Exchange::new(Message::new("b"))).await.unwrap();
+        producer
+            .call(Exchange::new(Message::new("a")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("b")))
+            .await
+            .unwrap();
 
         // Should return immediately — both exchanges already received.
-        inner.await_exchanges(2, std::time::Duration::from_millis(100)).await;
+        inner
+            .await_exchanges(2, std::time::Duration::from_millis(100))
+            .await;
     }
 
     #[tokio::test]
@@ -592,11 +615,16 @@ mod tests {
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            producer.call(Exchange::new(Message::new("delayed"))).await.unwrap();
+            producer
+                .call(Exchange::new(Message::new("delayed")))
+                .await
+                .unwrap();
         });
 
         // This should block until the spawned task delivers the exchange.
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
 
         let received = inner.get_received_exchanges().await;
         assert_eq!(received.len(), 1);
@@ -611,7 +639,9 @@ mod tests {
         let inner = component.get_endpoint("timeout").unwrap();
 
         // Nobody sends — should panic after timeout.
-        inner.await_exchanges(5, std::time::Duration::from_millis(50)).await;
+        inner
+            .await_exchanges(5, std::time::Duration::from_millis(50))
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -622,9 +652,14 @@ mod tests {
         let inner = component.get_endpoint("assert-idx").unwrap();
 
         let mut producer = endpoint.create_producer(&ctx).unwrap();
-        producer.call(Exchange::new(Message::new("hello"))).await.unwrap();
+        producer
+            .call(Exchange::new(Message::new("hello")))
+            .await
+            .unwrap();
 
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         // Should not panic — index 0 exists.
         let _assert = inner.exchange(0);
     }
@@ -638,9 +673,14 @@ mod tests {
         let inner = component.get_endpoint("oob").unwrap();
 
         let mut producer = endpoint.create_producer(&ctx).unwrap();
-        producer.call(Exchange::new(Message::new("only-one"))).await.unwrap();
+        producer
+            .call(Exchange::new(Message::new("only-one")))
+            .await
+            .unwrap();
 
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         // Only 1 exchange, index 5 should panic.
         let _assert = inner.exchange(5);
     }
@@ -652,8 +692,13 @@ mod tests {
         let endpoint = component.create_endpoint("mock:body-text-pass").unwrap();
         let inner = component.get_endpoint("body-text-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
-        producer.call(Exchange::new(Message::new("hello"))).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        producer
+            .call(Exchange::new(Message::new("hello")))
+            .await
+            .unwrap();
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         inner.exchange(0).assert_body_text("hello");
     }
 
@@ -665,8 +710,13 @@ mod tests {
         let endpoint = component.create_endpoint("mock:body-text-fail").unwrap();
         let inner = component.get_endpoint("body-text-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
-        producer.call(Exchange::new(Message::new("hello"))).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        producer
+            .call(Exchange::new(Message::new("hello")))
+            .await
+            .unwrap();
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         inner.exchange(0).assert_body_text("world");
     }
 
@@ -681,8 +731,12 @@ mod tests {
         let mut msg = Message::new("");
         msg.body = Body::Json(serde_json::json!({"key": "value"}));
         producer.call(Exchange::new(msg)).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
-        inner.exchange(0).assert_body_json(serde_json::json!({"key": "value"}));
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
+        inner
+            .exchange(0)
+            .assert_body_json(serde_json::json!({"key": "value"}));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -697,8 +751,12 @@ mod tests {
         let mut msg = Message::new("");
         msg.body = Body::Json(serde_json::json!({"key": "value"}));
         producer.call(Exchange::new(msg)).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
-        inner.exchange(0).assert_body_json(serde_json::json!({"key": "other"}));
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
+        inner
+            .exchange(0)
+            .assert_body_json(serde_json::json!({"key": "other"}));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -713,7 +771,9 @@ mod tests {
         let mut msg = Message::new("");
         msg.body = Body::Bytes(Bytes::from_static(b"binary"));
         producer.call(Exchange::new(msg)).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         inner.exchange(0).assert_body_bytes(b"binary");
     }
 
@@ -730,7 +790,9 @@ mod tests {
         let mut msg = Message::new("");
         msg.body = Body::Bytes(Bytes::from_static(b"binary"));
         producer.call(Exchange::new(msg)).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         inner.exchange(0).assert_body_bytes(b"different");
     }
 
@@ -742,10 +804,15 @@ mod tests {
         let inner = component.get_endpoint("hdr-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut msg = Message::new("body");
-        msg.headers.insert("x-key".to_string(), serde_json::json!("value"));
+        msg.headers
+            .insert("x-key".to_string(), serde_json::json!("value"));
         producer.call(Exchange::new(msg)).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
-        inner.exchange(0).assert_header("x-key", serde_json::json!("value"));
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
+        inner
+            .exchange(0)
+            .assert_header("x-key", serde_json::json!("value"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -757,10 +824,15 @@ mod tests {
         let inner = component.get_endpoint("hdr-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut msg = Message::new("body");
-        msg.headers.insert("x-key".to_string(), serde_json::json!("value"));
+        msg.headers
+            .insert("x-key".to_string(), serde_json::json!("value"));
         producer.call(Exchange::new(msg)).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
-        inner.exchange(0).assert_header("x-key", serde_json::json!("other"));
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
+        inner
+            .exchange(0)
+            .assert_header("x-key", serde_json::json!("other"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -771,9 +843,12 @@ mod tests {
         let inner = component.get_endpoint("hdr-exists-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut msg = Message::new("body");
-        msg.headers.insert("x-present".to_string(), serde_json::json!(42));
+        msg.headers
+            .insert("x-present".to_string(), serde_json::json!(42));
         producer.call(Exchange::new(msg)).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         inner.exchange(0).assert_header_exists("x-present");
     }
 
@@ -785,8 +860,13 @@ mod tests {
         let endpoint = component.create_endpoint("mock:hdr-exists-fail").unwrap();
         let inner = component.get_endpoint("hdr-exists-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
-        producer.call(Exchange::new(Message::new("body"))).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        producer
+            .call(Exchange::new(Message::new("body")))
+            .await
+            .unwrap();
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         inner.exchange(0).assert_header_exists("x-missing");
     }
 
@@ -800,7 +880,9 @@ mod tests {
         let mut ex = Exchange::new(Message::new("body"));
         ex.error = Some(camel_api::CamelError::ProcessorError("oops".to_string()));
         producer.call(ex).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         inner.exchange(0).assert_has_error();
     }
 
@@ -812,8 +894,13 @@ mod tests {
         let endpoint = component.create_endpoint("mock:has-err-fail").unwrap();
         let inner = component.get_endpoint("has-err-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
-        producer.call(Exchange::new(Message::new("body"))).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        producer
+            .call(Exchange::new(Message::new("body")))
+            .await
+            .unwrap();
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         inner.exchange(0).assert_has_error();
     }
 
@@ -824,8 +911,13 @@ mod tests {
         let endpoint = component.create_endpoint("mock:no-err-pass").unwrap();
         let inner = component.get_endpoint("no-err-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
-        producer.call(Exchange::new(Message::new("body"))).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        producer
+            .call(Exchange::new(Message::new("body")))
+            .await
+            .unwrap();
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         inner.exchange(0).assert_no_error();
     }
 
@@ -840,7 +932,9 @@ mod tests {
         let mut ex = Exchange::new(Message::new("body"));
         ex.error = Some(camel_api::CamelError::ProcessorError("oops".to_string()));
         producer.call(ex).await.unwrap();
-        inner.await_exchanges(1, std::time::Duration::from_millis(500)).await;
+        inner
+            .await_exchanges(1, std::time::Duration::from_millis(500))
+            .await;
         inner.exchange(0).assert_no_error();
     }
 }

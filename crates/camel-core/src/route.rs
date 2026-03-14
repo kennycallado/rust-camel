@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tower::Service;
@@ -7,6 +8,7 @@ use tower::ServiceExt;
 
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::metrics::MetricsCollector;
 use camel_api::{
     AggregatorConfig, BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor,
     MulticastConfig, SplitterConfig,
@@ -378,6 +380,7 @@ pub fn compose_traced_pipeline(
     route_id: &str,
     trace_enabled: bool,
     detail_level: DetailLevel,
+    metrics: Option<Arc<dyn MetricsCollector>>,
 ) -> BoxProcessor {
     if !trace_enabled {
         return compose_pipeline(processors);
@@ -397,6 +400,7 @@ pub fn compose_traced_pipeline(
                 route_id.to_string(),
                 idx,
                 detail_level.clone(),
+                metrics.clone(),
             ))
         })
         .collect();
@@ -594,7 +598,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_compose_traced_pipeline_disabled() {
-        let pipeline = compose_traced_pipeline(vec![], "test-route", false, DetailLevel::Minimal);
+        let pipeline =
+            compose_traced_pipeline(vec![], "test-route", false, DetailLevel::Minimal, None);
         // Should behave like identity
         let ex = Exchange::new(camel_api::Message::new("hello"));
         let result = tower::ServiceExt::oneshot(pipeline, ex).await;
@@ -607,7 +612,7 @@ mod tests {
 
         let step = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
         let pipeline =
-            compose_traced_pipeline(vec![step], "test-route", true, DetailLevel::Minimal);
+            compose_traced_pipeline(vec![step], "test-route", true, DetailLevel::Minimal, None);
         let ex = Exchange::new(camel_api::Message::new("hello"));
         let result = tower::ServiceExt::oneshot(pipeline, ex).await;
         assert!(result.is_ok());

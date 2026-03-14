@@ -5,13 +5,13 @@
 //! - Axis B (request streaming): POST /upload receives Body::Stream, materializes it, echoes byte count
 
 use bytes::Bytes;
-use camel_api::body::{Body, StreamBody, StreamMetadata};
 use camel_api::CamelError;
+use camel_api::body::{Body, StreamBody, StreamMetadata};
 use camel_component::{Component, ConsumerContext, ExchangeEnvelope};
 use camel_component_http::HttpComponent;
 use futures::stream;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 const PORT: u16 = 3030;
 
@@ -120,7 +120,10 @@ async fn main() -> Result<(), CamelError> {
         .map_err(|e| CamelError::Io(e.to_string()))?;
 
     println!("Response status: {}", resp.status());
-    println!("Transfer-Encoding: {:?}", resp.headers().get("transfer-encoding"));
+    println!(
+        "Transfer-Encoding: {:?}",
+        resp.headers().get("transfer-encoding")
+    );
 
     let body = resp
         .text()

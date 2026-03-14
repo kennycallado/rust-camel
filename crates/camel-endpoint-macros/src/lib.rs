@@ -1,7 +1,7 @@
 mod uri_config;
 
 use proc_macro::TokenStream;
-use syn::{parse_macro_input, DeriveInput};
+use syn::{DeriveInput, parse_macro_input};
 
 /// Derive macro for UriConfig trait implementation.
 ///

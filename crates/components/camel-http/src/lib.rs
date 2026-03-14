@@ -15,7 +15,7 @@ use camel_api::{
     body::{Body, StreamBody, StreamMetadata},
 };
 use camel_component::{Component, Consumer, Endpoint, ProducerContext};
-use camel_endpoint::{parse_uri, UriComponents, UriConfig};
+use camel_endpoint::{UriComponents, UriConfig, parse_uri};
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 
@@ -1295,9 +1295,10 @@ mod tests {
         let components = camel_endpoint::UriComponents {
             scheme: "https".to_string(),
             path: "//api.example.com/v1".to_string(),
-            params: std::collections::HashMap::from([
-                ("httpMethod".to_string(), "POST".to_string()),
-            ]),
+            params: std::collections::HashMap::from([(
+                "httpMethod".to_string(),
+                "POST".to_string(),
+            )]),
         };
         let config = HttpConfig::from_components(components).unwrap();
         assert_eq!(config.base_url, "https://api.example.com/v1");
@@ -1951,9 +1952,10 @@ mod tests {
         let components = camel_endpoint::UriComponents {
             scheme: "https".to_string(),
             path: "//0.0.0.0:8443/api".to_string(),
-            params: std::collections::HashMap::from([
-                ("maxRequestBody".to_string(), "5242880".to_string()),
-            ]),
+            params: std::collections::HashMap::from([(
+                "maxRequestBody".to_string(),
+                "5242880".to_string(),
+            )]),
         };
         let cfg = HttpServerConfig::from_components(components).unwrap();
         assert_eq!(cfg.host, "0.0.0.0");

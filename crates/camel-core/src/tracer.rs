@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -10,6 +11,7 @@ use tower::ServiceExt;
 use tracing::Instrument;
 
 use crate::config::DetailLevel;
+use camel_api::metrics::MetricsCollector;
 use camel_api::{Body, BoxProcessor, CamelError, Exchange};
 
 /// RAII guard that ensures an OTel span is ended when dropped.
@@ -49,6 +51,7 @@ pub struct TracingProcessor {
     step_id: String,
     step_index: usize,
     detail_level: DetailLevel,
+    metrics: Option<Arc<dyn MetricsCollector>>,
 }
 
 impl TracingProcessor {
@@ -58,6 +61,7 @@ impl TracingProcessor {
         route_id: String,
         step_index: usize,
         detail_level: DetailLevel,
+        metrics: Option<Arc<dyn MetricsCollector>>,
     ) -> Self {
         Self {
             inner,
@@ -65,6 +69,7 @@ impl TracingProcessor {
             step_id: format!("step-{}", step_index),
             step_index,
             detail_level,
+            metrics,
         }
     }
 
@@ -162,6 +167,8 @@ impl Service<Exchange> for TracingProcessor {
 
         let mut inner = self.inner.clone();
         let detail_level = self.detail_level.clone();
+        let metrics = self.metrics.clone();
+        let route_id = self.route_id.clone();
 
         Box::pin(
             async move {
@@ -174,12 +181,23 @@ impl Service<Exchange> for TracingProcessor {
 
                 let result = inner.ready().await?.call(exchange).await;
 
-                let duration_ms = start.elapsed().as_millis() as u64;
+                let duration = start.elapsed();
+                let duration_ms = duration.as_millis() as u64;
                 tracing::Span::current().record("duration_ms", duration_ms);
 
                 // Record duration on OTel span
                 cx.span()
                     .set_attribute(KeyValue::new("duration_ms", duration_ms as i64));
+
+                // Record metrics if collector is present
+                if let Some(ref metrics) = metrics {
+                    metrics.record_exchange_duration(&route_id, duration);
+                    metrics.increment_exchanges(&route_id);
+
+                    if let Err(e) = &result {
+                        metrics.increment_errors(&route_id, &e.to_string());
+                    }
+                }
 
                 match &result {
                     Ok(ex) => {
@@ -226,6 +244,7 @@ impl Clone for TracingProcessor {
             step_id: self.step_id.clone(),
             step_index: self.step_index,
             detail_level: self.detail_level.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -251,8 +270,13 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_processor_minimal() {
         let inner = BoxProcessor::new(IdentityProcessor);
-        let mut tracer =
-            TracingProcessor::new(inner, "test-route".to_string(), 0, DetailLevel::Minimal);
+        let mut tracer = TracingProcessor::new(
+            inner,
+            "test-route".to_string(),
+            0,
+            DetailLevel::Minimal,
+            None,
+        );
 
         let exchange = Exchange::new(Message::default());
         let result = tracer.ready().await.unwrap().call(exchange).await;
@@ -263,8 +287,13 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_processor_medium_detail() {
         let inner = BoxProcessor::new(IdentityProcessor);
-        let mut tracer =
-            TracingProcessor::new(inner, "test-route".to_string(), 0, DetailLevel::Medium);
+        let mut tracer = TracingProcessor::new(
+            inner,
+            "test-route".to_string(),
+            0,
+            DetailLevel::Medium,
+            None,
+        );
 
         let exchange = Exchange::new(Message::default());
         let result = tracer.ready().await.unwrap().call(exchange).await;
@@ -276,7 +305,7 @@ mod tests {
     async fn test_tracing_processor_full_detail() {
         let inner = BoxProcessor::new(IdentityProcessor);
         let mut tracer =
-            TracingProcessor::new(inner, "test-route".to_string(), 0, DetailLevel::Full);
+            TracingProcessor::new(inner, "test-route".to_string(), 0, DetailLevel::Full, None);
 
         let mut exchange = Exchange::new(Message::default());
         exchange
@@ -292,8 +321,13 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_processor_clone() {
         let inner = BoxProcessor::new(IdentityProcessor);
-        let tracer =
-            TracingProcessor::new(inner, "test-route".to_string(), 1, DetailLevel::Minimal);
+        let tracer = TracingProcessor::new(
+            inner,
+            "test-route".to_string(),
+            1,
+            DetailLevel::Minimal,
+            None,
+        );
 
         let mut cloned = tracer.clone();
         let exchange = Exchange::new(Message::default());
@@ -304,8 +338,13 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_processor_propagates_otel_context() {
         let inner = BoxProcessor::new(IdentityProcessor);
-        let mut tracer =
-            TracingProcessor::new(inner, "test-route".to_string(), 0, DetailLevel::Minimal);
+        let mut tracer = TracingProcessor::new(
+            inner,
+            "test-route".to_string(),
+            0,
+            DetailLevel::Minimal,
+            None,
+        );
 
         // Start with an empty exchange (default context)
         let exchange = Exchange::new(Message::default());
@@ -329,8 +368,13 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_processor_with_parent_context() {
         let inner = BoxProcessor::new(IdentityProcessor);
-        let mut tracer =
-            TracingProcessor::new(inner, "test-route".to_string(), 0, DetailLevel::Minimal);
+        let mut tracer = TracingProcessor::new(
+            inner,
+            "test-route".to_string(),
+            0,
+            DetailLevel::Minimal,
+            None,
+        );
 
         // Create a parent span context
         let trace_id = TraceId::from_hex("12345678901234567890123456789012").unwrap();
@@ -392,6 +436,7 @@ mod tests {
             "test-route".to_string(),
             0,
             DetailLevel::Minimal,
+            None,
         );
 
         let exchange = Exchange::new(Message::default());
@@ -411,7 +456,8 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_processor_span_name_format() {
         let inner = BoxProcessor::new(IdentityProcessor);
-        let tracer = TracingProcessor::new(inner, "my-route".to_string(), 5, DetailLevel::Minimal);
+        let tracer =
+            TracingProcessor::new(inner, "my-route".to_string(), 5, DetailLevel::Minimal, None);
 
         // Span name should be "route_id/step_id"
         assert_eq!(tracer.span_name(), "my-route/step-5");
@@ -421,12 +467,22 @@ mod tests {
     async fn test_tracing_processor_chained_propagation() {
         // Test that multiple processors in a chain properly propagate context
         let processor1 = BoxProcessor::new(IdentityProcessor);
-        let mut tracer1 =
-            TracingProcessor::new(processor1, "route1".to_string(), 0, DetailLevel::Minimal);
+        let mut tracer1 = TracingProcessor::new(
+            processor1,
+            "route1".to_string(),
+            0,
+            DetailLevel::Minimal,
+            None,
+        );
 
         let processor2 = BoxProcessor::new(IdentityProcessor);
-        let mut tracer2 =
-            TracingProcessor::new(processor2, "route2".to_string(), 1, DetailLevel::Minimal);
+        let mut tracer2 = TracingProcessor::new(
+            processor2,
+            "route2".to_string(),
+            1,
+            DetailLevel::Minimal,
+            None,
+        );
 
         let exchange = Exchange::new(Message::default());
         let result1 = tracer1.ready().await.unwrap().call(exchange).await;
