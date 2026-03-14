@@ -8,7 +8,7 @@ A Rust integration framework inspired by [Apache Camel](https://camel.apache.org
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`.
+Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `kafka`, `redis`, `sql`, `container`.
 
 ## Quick Example
 
@@ -53,24 +53,35 @@ cargo run -p hello-world
 
 | Crate | Description |
 |-------|-------------|
-| `camel-api` | Core types: `Exchange`, `Message`, `CamelError`, `BoxProcessor`, `ProcessorFn` |
+| `camel-api` | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn` |
 | `camel-core` | Runtime: `CamelContext`, `Route`, `RouteDefinition`, `SequentialPipeline` |
 | `camel-config` | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns |
 | `camel-builder` | Fluent `RouteBuilder` API |
 | `camel-component` | `Component`, `Endpoint`, `Consumer` traits |
 | `camel-processor` | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody` + Tower `Layer` types |
-| `camel-endpoint` | Endpoint URI parsing utilities |
+| `camel-endpoint` | Endpoint URI parsing utilities; `UriConfig` derive macro for typed component config |
+| `camel-endpoint-macros` | Proc-macro crate backing `#[derive(UriConfig)]` |
+| `camel-bean` | Bean/Registry system for dependency injection and business logic integration |
+| `camel-bean-macros` | Proc-macro crate for `#[bean]` attribute |
+| `camel-dsl` | YAML DSL: load and run routes from `.yaml` files |
+| `camel-health` | Health check types and endpoint support |
 | `camel-timer` | Timer source component |
 | `camel-log` | Log sink component |
 | `camel-direct` | In-memory synchronous component |
-| `camel-mock` | Test component with assertions on received exchanges |
+| `camel-mock` | Test component with assertions on received exchanges (`await_exchanges`, `ExchangeAssert`) |
 | `camel-test` | Integration test harness |
 | `camel-controlbus` | Control routes dynamically from within routes |
+| `camel-http` | HTTP producer (client) and HTTP consumer (server, native streaming) |
+| `camel-file` | File producer and consumer |
+| `camel-kafka` | Kafka producer and consumer with SSL/SASL and manual commit |
+| `camel-redis` | Redis producer and consumer |
+| `camel-sql` | SQL producer (query/insert/update) with streaming result support |
+| `camel-container` | Docker container producer/consumer via `bollard` |
 | `camel-language-api` | Language trait API: `Language`, `Expression`, `Predicate` |
 | `camel-language-simple` | Simple Language: `${header.x}`, `${body}`, operators |
 | `camel-language-rhai` | Rhai scripting language for full expression power |
-| `camel-bean` | Bean/Registry system for dependency injection and business logic integration |
 | `camel-prometheus` | Prometheus metrics exporter with /metrics endpoint |
+| `camel-otel` | OpenTelemetry tracing and metrics exporter |
 
 ## Building & Testing
 
@@ -96,6 +107,9 @@ Run an example:
  cargo run -p aggregator
  cargo run -p bean-demo
  cargo run -p circuit-breaker
+cargo run -p config-basic
+cargo run -p config-profiles
+cargo run -p container-example
 cargo run -p content-based-routing
 cargo run -p controlbus
 cargo run -p error-handling
@@ -104,16 +118,26 @@ cargo run -p file-polling
 cargo run -p hello-world
 cargo run -p http-client
 cargo run -p http-server
+cargo run -p http-streaming
+cargo run -p kafka-example
+cargo run -p language-rhai
+cargo run -p language-simple
 cargo run -p lazy-route
 cargo run -p log-eip
 cargo run -p metrics-demo
 cargo run -p multicast
 cargo run -p multi-route-direct
+cargo run -p otel-demo
 cargo run -p pipeline-concurrency
+cargo run -p prometheus-demo
 cargo run -p showcase
 cargo run -p splitter
+cargo run -p sql-example
+cargo run -p sql-streaming
 cargo run -p transform-pipeline
 cargo run -p wiretap
+cargo run -p xml-body
+cargo run -p yaml-dsl
 ```
 
 ## Security Features
