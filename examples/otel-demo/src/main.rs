@@ -1,6 +1,6 @@
 //! OpenTelemetry demo for rust-camel.
 //!
-//! Demonstrates integration of OpenTelemetry tracing and metrics with rust-camel.
+//! Demonstrates integration of OpenTelemetry tracing, metrics, and logs with rust-camel.
 //!
 //! # Requirements
 //!
@@ -20,15 +20,16 @@
 //! # What it does
 //!
 //! - Creates a timer that fires every 5 seconds
-//! - Logs each tick
+//! - Logs each tick (logs exported via OTLP log bridge)
 //! - Makes an HTTP GET request to httpbin.org/get
-//! - All exchanges are traced and metrics are exported via OTLP
+//! - All exchanges are traced and route-level metrics are recorded automatically
 //!
-//! # Architecture
+//! # OTel Features Demonstrated
 //!
-//! This example uses the manual context setup pattern. For production, prefer
-//! `CamelConfig::configure_context()` which installs a unified subscriber with
-//! 4 layers including the tracing-opentelemetry bridge.
+//! - **Traces**: Distributed tracing via OTLP span exporter
+//! - **Metrics**: Route-level metrics (duration, exchanges, errors) auto-recorded
+//! - **Logs**: Log bridge exports `tracing` logs via OTLP
+//! - **Auto-registration**: `OtelService.as_metrics_collector()` enables metrics
 
 use camel_api::Value;
 use camel_api::body::Body;
@@ -47,13 +48,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let otel_config = OtelConfig::new("http://localhost:4317", "rust-camel-otel-demo");
 
     // Create the OpenTelemetry service
-    // OtelService manages global TracerProvider and MeterProvider only.
-    // Note: For the tracing-opentelemetry bridge layer, use CamelConfig::configure_context()
-    // with the `otel` feature enabled, which installs a unified 4-layer subscriber.
+    // OtelService manages:
+    // - Global TracerProvider (spans exported via OTLP)
+    // - Global MeterProvider (metrics exported via OTLP)
+    // - Global LoggerProvider + Log bridge (logs exported via OTLP)
+    // - as_metrics_collector() for automatic route metrics
     let otel_service = OtelService::new(otel_config);
 
-    // Build CamelContext with the OtelService as a lifecycle service
-    // The OtelService will be started before routes and stopped after routes
+    // Build CamelContext with the OtelService as a lifecycle service.
+    // with_lifecycle() auto-registers the metrics collector from OtelService.
     let mut ctx = CamelContext::new()
         .with_lifecycle(otel_service)
         .with_tracer_config(TracerConfig {
@@ -66,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 file: None,
             },
+            ..Default::default()
         });
 
     // Register required components
@@ -93,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to("https://httpbin.org/get?allowPrivateIps=false")
         .process(|exchange| {
             Box::pin(async move {
-                // Log the response
+                // Log the response - this log is exported via OTLP log bridge
                 if let Some(status) = exchange.input.header("CamelHttpResponseCode") {
                     tracing::info!("HTTP response status: {:?}", status);
                 }
@@ -110,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Demo running! Timer firing every 5 seconds.");
     tracing::info!("Making HTTP requests to https://httpbin.org/get");
-    tracing::info!("OpenTelemetry data being exported to localhost:4317");
+    tracing::info!("Traces, metrics, and logs exported to localhost:4317");
     tracing::info!("");
     tracing::info!("Press Ctrl+C to stop, or wait 30 seconds for auto-shutdown.");
 
@@ -121,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.stop().await?;
 
     tracing::info!("OpenTelemetry demo complete.");
-    tracing::info!("Check http://localhost:3000 for traces and metrics in Grafana.");
+    tracing::info!("Check http://localhost:3000 for traces, metrics, and logs in Grafana.");
 
     Ok(())
 }

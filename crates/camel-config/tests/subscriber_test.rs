@@ -23,6 +23,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
                     },
                     file: None,
                 },
+                ..Default::default()
             },
             otel: if otel_enabled {
                 Some(OtelCamelConfig {

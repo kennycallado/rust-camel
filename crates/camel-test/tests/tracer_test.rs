@@ -89,6 +89,7 @@ fn test_tracer_file_output_invalid_path_returns_error() {
                         format: OutputFormat::Json,
                     }),
                 },
+                ..Default::default()
             },
             otel: None,
         },

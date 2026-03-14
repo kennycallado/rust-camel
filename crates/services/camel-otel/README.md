@@ -4,9 +4,15 @@ OpenTelemetry integration for rust-camel.
 
 ## Overview
 
-Implements `Lifecycle` and `MetricsCollector` traits to export traces, metrics, and logs to any OTLP-compatible backend (e.g., Grafana LGTM, Jaeger, Tempo, Prometheus via OTLP).
+Implements `Lifecycle` and `MetricsCollector` traits to export **traces, metrics, and logs** to any OTLP-compatible backend (e.g., Grafana LGTM, Jaeger, Tempo, Prometheus via OTLP).
 
-`OtelService` initializes the global `TracerProvider` and `MeterProvider` on start and shuts them down gracefully on stop. W3C `traceparent` / `tracestate` headers are propagated automatically in HTTP and Kafka components via optional feature flags.
+`OtelService` initializes the global `TracerProvider`, `MeterProvider`, and `LoggerProvider` on start and shuts them down gracefully on stop. W3C `traceparent` / `tracestate` headers are propagated automatically in HTTP and Kafka components via optional feature flags.
+
+**Features:**
+- **Traces**: Distributed tracing via OTLP span exporter
+- **Metrics**: Route-level metrics (duration, exchanges, errors) automatically recorded
+- **Logs**: Log bridge exports `tracing` logs via OTLP
+- **Auto-registration**: `OtelService.as_metrics_collector()` enables automatic metrics collection
 
 ## Quick Start
 
@@ -21,10 +27,10 @@ let ctx = CamelContext::new()
     ));
 
 ctx.start().await?;
-// Traces and metrics exported to OTLP backend
+// Traces, metrics, and logs exported to OTLP backend
 
 ctx.stop().await?;
-// Providers flushed and shut down
+// All providers flushed and shut down
 ```
 
 ### Default Configuration
@@ -55,11 +61,15 @@ let ctx = CamelContext::new().with_lifecycle(OtelService::new(config));
 
 `OtelService` implements the `Lifecycle` trait, which follows Apache Camel's Service pattern:
 
-- Initializes global `TracerProvider` and `MeterProvider` when `CamelContext.start()` is called
-- Flushes and shuts down providers when `CamelContext.stop()` is called
+- Initializes global `TracerProvider`, `MeterProvider`, and `LoggerProvider` when `CamelContext.start()` is called
+- Installs `OpenTelemetryTracingBridge` to export logs via OTLP
+- Exposes `as_metrics_collector()` for automatic metrics registration
+- Flushes and shuts down all providers when `CamelContext.stop()` is called
 - Exposes `status()` reflecting `Stopped` / `Started` / `Failed` states
 
 ## Metrics Exported
+
+Route-level metrics are recorded automatically by `TracingProcessor`:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -68,6 +78,16 @@ let ctx = CamelContext::new().with_lifecycle(OtelService::new(config));
 | `camel.exchange.duration.seconds` | Histogram | `route.id` | Exchange processing duration |
 | `camel.queue.depth` | UpDownCounter | `route.id` | Current queue depth |
 | `camel.circuit.breaker.state` | UpDownCounter | `route.id` | Circuit breaker state (0=closed, 1=open, 2=half_open) |
+
+## Log Bridge
+
+The `OpenTelemetryTracingBridge` is installed automatically when `OtelService` starts. All `tracing` logs are exported via OTLP to your backend.
+
+```rust
+// These logs are automatically exported via OTLP
+tracing::info!("Processing exchange");
+tracing::warn!(route_id = "my-route", "Something unusual happened");
+```
 
 ## W3C Propagation
 
@@ -87,12 +107,24 @@ camel-component-kafka = { workspace = true, features = ["otel"] }
 ```
 OtelService (Lifecycle trait)
     ↓
-    ├── Initializes global TracerProvider (OTLP span exporter, batch)
-    ├── Initializes global MeterProvider (OTLP metric exporter, 60s periodic reader)
+    ├── TracerProvider (OTLP span exporter, batch)
+    ├── MeterProvider (OTLP metric exporter, 60s periodic reader)
+    ├── LoggerProvider (OTLP log exporter, batch)
+    │       ↓
+    │   OpenTelemetryTracingBridge (log → OTLP)
+    ├── OtelMetrics (implements MetricsCollector)
+    │       ↓
+    │   as_metrics_collector() → auto-registered with CamelContext
     └── propagation.rs (W3C inject/extract used by camel-http and camel-kafka)
 ```
 
 **Note:** Uses `Lifecycle` trait (not `Service`) to avoid confusion with `tower::Service`.
+
+## Hot-reload Compatibility
+
+**OTel configuration is NOT hot-reloadable.** Changes to endpoint, service name, or sampler require process restart. This is standard practice in OpenTelemetry implementations.
+
+Route hot-reload via `ArcSwap` continues to work independently.
 
 ## Local Dev Backend
 
@@ -100,7 +132,7 @@ OtelService (Lifecycle trait)
 docker run -p 3000:3000 -p 4317:4317 -p 4318:4318 grafana/otel-lgtm
 ```
 
-Then open `http://localhost:3000` to view traces and metrics in Grafana.
+Then open `http://localhost:3000` to view traces, metrics, and logs in Grafana.
 
 Run the bundled demo:
 
