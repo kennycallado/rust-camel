@@ -646,6 +646,7 @@ impl Consumer for HttpConsumer {
                                     Body::Empty => bytes::Bytes::new(),
                                     Body::Bytes(b) => b,
                                     Body::Text(s) => bytes::Bytes::from(s.into_bytes()),
+                                    Body::Xml(s) => bytes::Bytes::from(s.into_bytes()),
                                     Body::Json(v) => bytes::Bytes::from(v.to_string().into_bytes()),
                                     Body::Stream(_) => {
                                         // Materialize stream for HTTP response

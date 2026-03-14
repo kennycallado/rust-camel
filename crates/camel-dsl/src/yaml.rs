@@ -357,10 +357,11 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 "text" => BodyTypeDef::Text,
                 "json" => BodyTypeDef::Json,
                 "bytes" => BodyTypeDef::Bytes,
+                "xml" => BodyTypeDef::Xml,
                 "empty" => BodyTypeDef::Empty,
                 other => {
                     return Err(CamelError::RouteError(format!(
-                        "unknown convert_body_to target: '{}'. Expected: text, json, bytes, empty",
+                        "unknown convert_body_to target: '{}'. Expected: text, json, bytes, xml, empty",
                         other
                     )));
                 }

@@ -30,6 +30,7 @@ fn body_type_name(body: &Body) -> &'static str {
         Body::Bytes(_) => "bytes",
         Body::Text(_) => "text",
         Body::Json(_) => "json",
+        Body::Xml(_) => "xml",
         Body::Stream(_) => "stream",
     }
 }

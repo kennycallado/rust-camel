@@ -208,8 +208,8 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 
 | Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
 | -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| SQL: `StreamList` output real                                        | SQL postmortem                         | Media — actualmente retorna `SelectList`; streaming real requiere cambio de API (AsyncRead/Stream de rows)                         |        |
-| SQL: `expectedUpdateCount` enforcement real                          | SQL postmortem                         | Baja — actualmente solo almacena el valor; debería lanzar error si el UPDATE no afecta el número esperado de filas                 |        |
+| SQL: `StreamList` output real                                        | SQL postmortem                         | Media — DONE: async_stream con sqlx::query().fetch() + Body::Stream (NDJSON)                                                       | DONE   |
+| SQL: `expectedUpdateCount` enforcement real                          | SQL postmortem                         | Baja — DONE: validación en single y batch mode, error si rows_affected != expected                                                 | DONE   |
 | SQL: `separator` configurable para IN clause                         | SQL postmortem                         | Baja — actualmente coma hardcoded; útil para dialects o listas con separador diferente                                             |        |
 | SQL: SSL/TLS vía parámetros separados (no solo en db_url)            | SQL postmortem                         | Baja — pasar opciones TLS explícitamente en lugar de encodificarlas en la URL de conexión                                          |        |
 

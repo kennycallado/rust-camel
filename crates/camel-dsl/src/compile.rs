@@ -146,6 +146,7 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
                 BodyTypeDef::Text => BodyType::Text,
                 BodyTypeDef::Json => BodyType::Json,
                 BodyTypeDef::Bytes => BodyType::Bytes,
+                BodyTypeDef::Xml => BodyType::Xml,
                 BodyTypeDef::Empty => BodyType::Empty,
             };
             Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(

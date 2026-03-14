@@ -94,6 +94,8 @@ pub enum Body {
     Text(String),
     /// JSON payload.
     Json(serde_json::Value),
+    /// XML payload (well-formed XML string; use `try_into_xml()` for validation).
+    Xml(String),
     /// Streaming payload.
     Stream(StreamBody),
 }
@@ -105,6 +107,7 @@ impl Clone for Body {
             Body::Bytes(b) => Body::Bytes(b.clone()),
             Body::Text(s) => Body::Text(s.clone()),
             Body::Json(v) => Body::Json(v.clone()),
+            Body::Xml(s) => Body::Xml(s.clone()),
             Body::Stream(s) => Body::Stream(s.clone()),
         }
     }
@@ -117,6 +120,7 @@ impl PartialEq for Body {
             (Body::Text(a), Body::Text(b)) => a == b,
             (Body::Json(a), Body::Json(b)) => a == b,
             (Body::Bytes(a), Body::Bytes(b)) => a == b,
+            (Body::Xml(a), Body::Xml(b)) => a == b,
             // Stream: two streams are never equal (single-consumption)
             _ => false,
         }
@@ -154,6 +158,12 @@ impl Body {
                     return Err(CamelError::StreamLimitExceeded(max_size));
                 }
                 Ok(Bytes::from(b))
+            }
+            Body::Xml(s) => {
+                if s.len() > max_size {
+                    return Err(CamelError::StreamLimitExceeded(max_size));
+                }
+                Ok(Bytes::from(s))
             }
             Body::Stream(s) => {
                 let mut stream_lock = s.stream.lock().await;
@@ -194,6 +204,14 @@ impl Body {
         }
     }
 
+    /// Try to get the body as an XML string.
+    pub fn as_xml(&self) -> Option<&str> {
+        match self {
+            Body::Xml(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
     /// Convert this body to `Body::Text`, consuming it.
     /// Returns `Err(TypeConversionFailed)` if the conversion is not possible.
     /// `Body::Stream` always fails — materialize with `into_bytes()` first.
@@ -213,6 +231,13 @@ impl Body {
     /// `Body::Stream` always fails — materialize with `into_bytes()` first.
     pub fn try_into_bytes_body(self) -> Result<Body, CamelError> {
         crate::body_converter::convert(self, crate::body_converter::BodyType::Bytes)
+    }
+
+    /// Convert this body to `Body::Xml`, consuming it.
+    /// Returns `Err(TypeConversionFailed)` if the conversion is not possible.
+    /// `Body::Stream` always fails — materialize with `into_bytes()` first.
+    pub fn try_into_xml(self) -> Result<Body, CamelError> {
+        crate::body_converter::convert(self, crate::body_converter::BodyType::Xml)
     }
 }
 
@@ -368,6 +393,12 @@ mod tests {
         let body = Body::Json(serde_json::json!({"key": "value"}));
         let result = body.materialize().await.unwrap();
         assert_eq!(result, Bytes::from_static(br#"{"key":"value"}"#));
+
+        // Body::Xml
+        let xml = "<root><child>value</child></root>";
+        let body = Body::Xml(xml.to_string());
+        let result = body.materialize().await.unwrap();
+        assert_eq!(result, Bytes::from(xml));
     }
 
     #[tokio::test]

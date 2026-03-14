@@ -40,6 +40,7 @@ impl KafkaProducer {
     pub fn body_to_bytes(body: &Body) -> Result<Vec<u8>, CamelError> {
         match body {
             Body::Text(s) => Ok(s.as_bytes().to_vec()),
+            Body::Xml(s) => Ok(s.as_bytes().to_vec()),
             Body::Bytes(b) => Ok(b.to_vec()),
             Body::Json(v) => Ok(serde_json::to_string(v)
                 .map_err(|e| {

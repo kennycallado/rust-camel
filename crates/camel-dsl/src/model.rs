@@ -202,6 +202,7 @@ pub enum BodyTypeDef {
     Text,
     Json,
     Bytes,
+    Xml,
     Empty,
 }
 
