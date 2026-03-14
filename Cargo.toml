@@ -47,6 +47,7 @@ members = [
     "examples/wiretap",
     "examples/multicast",
     "examples/http-server",
+    "examples/http-streaming",
     "examples/pipeline-concurrency",
     "examples/log-eip",
     "examples/lazy-route",

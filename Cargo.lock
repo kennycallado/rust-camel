@@ -565,6 +565,7 @@ dependencies = [
  "camel-component",
  "camel-endpoint",
  "camel-otel",
+ "futures",
  "http",
  "reqwest",
  "serde_json",
@@ -1994,6 +1995,21 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "http-streaming"
+version = "0.4.0"
+dependencies = [
+ "bytes",
+ "camel-api",
+ "camel-component",
+ "camel-component-http",
+ "futures",
+ "reqwest",
+ "tokio",
+ "tokio-util",
  "tracing-subscriber",
 ]
 
