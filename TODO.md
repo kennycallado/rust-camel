@@ -135,6 +135,99 @@ Resumen de lo pendiente/futuro que emergen de los planes:
 | RedeliveryPolicy: `useOriginalMessage`                               | RedeliveryPolicy design v2             | Baja — preservar mensaje original                                                                                                    |        |
 | RedeliveryPolicy: log levels configurables                           | RedeliveryPolicy design v2             | Baja — retriesExhaustedLogLevel, retryAttemptedLogLevel                                                                              |        |
 | RedeliveryPolicy: Camel.toml integration                             | RedeliveryPolicy design v2             | Baja — configuración global desde camel-config                                                                                       |        |
+| RedeliveryPolicy: `useOriginalMessage`                               | RedeliveryPolicy design v2             | Baja — preservar mensaje original antes de reintentos                                                                                |        |
+
+## DSL / Builder
+
+| Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
+| -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `onException()` shorthand en RouteBuilder                            | rust-camel_vs_apache-camel             | Media — actualmente solo se configura via `error_handler(config)`; un shorthand `.on_exception(pred).to("log:dlc")` mejoraría DX   |        |
+| `delay()` / `throttle()` DSL steps                                   | rust-camel_vs_apache-camel             | Media-baja — Delayer y Throttler EIPs expuestos como pasos del builder                                                             |        |
+| `recipientList()` DSL step                                           | rust-camel_vs_apache-camel             | Baja — lista de destinatarios dinámica calculada en runtime desde header/body                                                      |        |
+| `loop()` / `repeat()` DSL steps                                      | rust-camel_vs_apache-camel             | Baja — repetir N veces o mientras predicate sea true                                                                               |        |
+
+## EIPs faltantes
+
+| Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
+| -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| Dynamic Router EIP                                                   | rust-camel_vs_apache-camel             | Media — enrutamiento dinámico basado en estado externo o función                                                                   |        |
+| Load Balancer EIP                                                     | rust-camel_vs_apache-camel             | Media — round-robin, random, failover entre endpoints                                                                              |        |
+| Throttler EIP                                                        | rust-camel_vs_apache-camel             | Media — limitar mensajes por tiempo (rate limiting a nivel de route)                                                               |        |
+| Delayer EIP                                                          | rust-camel_vs_apache-camel             | Baja — introducir delay configurable entre pasos del pipeline                                                                      |        |
+
+## Componentes faltantes
+
+| Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
+| -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| JMS component                                                        | rust-camel_vs_apache-camel             | Alta — enterprise messaging; conector para brokers JMS-compatibles (ActiveMQ, Artemis)                                             |        |
+| AMQP component                                                       | rust-camel_vs_apache-camel             | Media — RabbitMQ, Azure Service Bus vía lapin o amqprs                                                                             |        |
+| gRPC component                                                       | rust-camel_vs_apache-camel             | Media — microservices interop vía tonic                                                                                            |        |
+| WebSocket component                                                  | rust-camel_vs_apache-camel             | Media — real-time bidireccional vía tokio-tungstenite                                                                              |        |
+| Mail component                                                       | rust-camel_vs_apache-camel             | Baja — envío/recepción de email (SMTP/IMAP)                                                                                        |        |
+| Netty component                                                      | rust-camel_vs_apache-camel             | Baja — TCP/UDP raw; probablemente tokio directo en Rust                                                                            |        |
+
+## Languages
+
+| Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
+| -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| Constant language                                                    | rust-camel_vs_apache-camel             | Baja — expresión de valor constante; útil para set_body/set_header                                                                 |        |
+| JSONPath language                                                    | rust-camel_vs_apache-camel             | Media — acceso a campos JSON con path expressions (`$.items[*].id`)                                                               |        |
+| XPath language                                                       | rust-camel_vs_apache-camel             | Baja — relevante solo si se añade soporte XML al Body                                                                              |        |
+| Tokenize language                                                    | rust-camel_vs_apache-camel             | Baja — split by token; útil en Splitter YAML DSL sin scripting                                                                     |        |
+| `camel-language-bean`: invocar métodos desde expresiones             | rust-camel_vs_apache-camel             | Baja — `bean("MyService", "method")` en predicates/expressions de YAML DSL                                                         |        |
+
+## Testing
+
+| Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
+| -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| MockEndpoint body/headers expectations                               | rust-camel_vs_apache-camel             | Media — `mock.expect_body("...")`, `mock.expect_header("key", "val")` para assertions de tests más expresivos                      |        |
+| NotifyBuilder / await conditions en camel-test                       | rust-camel_vs_apache-camel             | Media — `await_completion(n)` o `await_body(pred)` para sincronizar tests asíncronos sin sleep                                     |        |
+| Testcontainers integration en camel-test                             | rust-camel_vs_apache-camel             | Media-baja — helpers para levantar Postgres/Redis/Kafka en tests de integración de forma uniforme                                  |        |
+| Route `adviceWith` (modificar route en runtime para tests)           | rust-camel_vs_apache-camel             | Baja — interceptar o reemplazar endpoints en rutas ya construidas; útil para mocking de integración                                |        |
+
+## Security
+
+| Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
+| -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| Rate limiting                                                        | rust-camel_vs_apache-camel             | Media — limitar requests por cliente/IP; integración con Throttler EIP o tower::RateLimit                                          |        |
+| Authentication / Authorization hooks                                 | rust-camel_vs_apache-camel             | Media — middleware de authn/authz en HTTP Consumer (Bearer, API key, Basic)                                                         |        |
+| Secrets management integration                                       | rust-camel_vs_apache-camel             | Media-baja — leer secrets de Vault/AWS SSM/env sin exponerlos en `Camel.toml`                                                      |        |
+| Audit logging                                                        | rust-camel_vs_apache-camel             | Baja — log de quién hizo qué y cuándo; trazabilidad de operaciones sensibles                                                        |        |
+
+## OpenTelemetry (deferred)
+
+| Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
+| -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| OTel: Baggage propagation                                            | OTel postmortem                        | Media-baja — actualmente solo W3C trace context; baggage permite propagar key-value cross-service                                  |        |
+| OTel: métricas de route-level automáticas                            | OTel postmortem                        | Media — duración por step, errores por route; actualmente solo métricas manuales via OtelMetrics                                   |        |
+| OTel: Splitter parallel spans (cada fragment como child span)        | OTel postmortem                        | Baja — actualmente el contexto se propaga pero no se crean child spans por fragment                                                 |        |
+| OTel: sampling ratio configurable desde `Camel.toml`                | OTel postmortem                        | Baja — actualmente AlwaysOn; útil en producción para reducir overhead de tracing                                                   |        |
+| OTel: HTTP Consumer conectar contexto entrante al CamelContext       | OTel postmortem                        | Media — el consumer extrae `otel_context` del request pero no lo conecta a las rutas que procesan esa request                      |        |
+
+## SQL component (deferred)
+
+| Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
+| -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| SQL: `StreamList` output real                                        | SQL postmortem                         | Media — actualmente retorna `SelectList`; streaming real requiere cambio de API (AsyncRead/Stream de rows)                         |        |
+| SQL: `expectedUpdateCount` enforcement real                          | SQL postmortem                         | Baja — actualmente solo almacena el valor; debería lanzar error si el UPDATE no afecta el número esperado de filas                 |        |
+| SQL: `separator` configurable para IN clause                         | SQL postmortem                         | Baja — actualmente coma hardcoded; útil para dialects o listas con separador diferente                                             |        |
+| SQL: SSL/TLS vía parámetros separados (no solo en db_url)            | SQL postmortem                         | Baja — pasar opciones TLS explícitamente en lugar de encodificarlas en la URL de conexión                                          |        |
+
+## Configuration (deferred)
+
+| Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
+| -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| Config watching/hot-reload end-to-end con `Camel.toml`               | rust-camel_vs_apache-camel             | Media — `watch_debounce_ms` en Camel.toml; actualmente hardcodeado 300ms en `reload_watcher.rs:83`                                 |        |
+| Vault/secrets integration                                            | rust-camel_vs_apache-camel             | Media-baja — leer valores sensibles desde HashiCorp Vault, AWS SSM, etc. en tiempo de arranque                                     |        |
+| Per-component config en TOML                                         | rust-camel_vs_apache-camel             | Media-baja — `[components.kafka]` o `[components.sql]` en `Camel.toml` para configuración centralizada                            |        |
+
+## Core (deferred)
+
+| Ítem                                                                 | Origen                                 | Prioridad implícita                                                                                                                | Estado |
+| -------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| Lifecycle callbacks reales para Suspend/Resume                       | rust-camel_vs_apache-camel             | Media — actualmente `suspend` es alias de stop/start; implementación real requiere pausar consumer sin parar pipeline              |        |
+| JMX/Management API                                                   | rust-camel_vs_apache-camel             | Baja — API de gestión en runtime; en Rust probablemente HTTP+JSON en vez de JMX                                                    |        |
+| Clustering / HA                                                      | rust-camel_vs_apache-camel             | Baja — múltiples instancias coordinadas; requiere diseño de distributed lock/registry                                              |        |
 
 ## Log EIP — Behavior Change
 
