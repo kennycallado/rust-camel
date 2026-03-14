@@ -66,21 +66,18 @@ pub struct OtelService {
 }
 
 impl OtelService {
-    /// Create a new `OtelService` with the given configuration.
     pub fn new(config: OtelConfig) -> Self {
+        let metrics = Arc::new(OtelMetrics::new(config.service_name.clone()));
         Self {
             config,
             tracer_provider: None,
             meter_provider: None,
             logger_provider: None,
-            metrics: None,
+            metrics: Some(metrics),
             status: AtomicU8::new(STATUS_STOPPED),
         }
     }
 
-    /// Create an `OtelService` with default configuration.
-    ///
-    /// Uses `http://localhost:4317` as the endpoint and "rust-camel" as the service name.
     pub fn with_defaults() -> Self {
         Self::new(OtelConfig::new("http://localhost:4317", "rust-camel"))
     }
@@ -262,10 +259,6 @@ impl Lifecycle for OtelService {
         global::set_meter_provider(meter_provider.clone());
         self.meter_provider = Some(meter_provider);
 
-        // Create OtelMetrics for route-level metrics collection
-        let otel_metrics = Arc::new(OtelMetrics::new(self.config.service_name.clone()));
-        self.metrics = Some(Arc::clone(&otel_metrics));
-
         // Install log bridge to export tracing logs via OTel
         // Note: Log bridge is NOT hot-reloadable - requires process restart for config changes
         let logger_provider = self.build_logger_provider()?;
@@ -303,8 +296,7 @@ impl Lifecycle for OtelService {
             warn!("Error shutting down MeterProvider: {:?}", e);
         }
 
-        // Clear metrics so as_metrics_collector() returns None
-        self.metrics = None;
+        // Note: metrics collector remains available (Arc<OtelMetrics> is stateless)
 
         self.status.store(STATUS_STOPPED, Ordering::SeqCst);
 
@@ -336,6 +328,8 @@ mod tests {
         assert_eq!(service.name(), "otel");
         assert!(service.tracer_provider.is_none());
         assert!(service.meter_provider.is_none());
+        // Metrics collector is created in constructor
+        assert!(service.metrics.is_some());
     }
 
     #[test]

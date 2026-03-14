@@ -111,23 +111,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ctx.add_route_definition(route)?;
 
-    tracing::info!("Starting CamelContext with OpenTelemetry integration");
+    println!("Starting CamelContext with OpenTelemetry integration");
     ctx.start().await?;
 
-    tracing::info!("Demo running! Timer firing every 5 seconds.");
-    tracing::info!("Making HTTP requests to https://httpbin.org/get");
-    tracing::info!("Traces, metrics, and logs exported to localhost:4317");
-    tracing::info!("");
-    tracing::info!("Press Ctrl+C to stop, or wait 30 seconds for auto-shutdown.");
+    println!("Demo running! Timer firing every 5 seconds.");
+    println!("Making HTTP requests to https://httpbin.org/get");
+    println!("Traces, metrics, and logs exported to localhost:4317");
+    println!();
+    println!("Press Ctrl+C to stop, or wait 30 seconds for auto-shutdown.");
 
     // Run for 30 seconds then stop
     tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
-    tracing::info!("Shutting down...");
+    println!("Shutting down...");
     ctx.stop().await?;
 
-    tracing::info!("OpenTelemetry demo complete.");
-    tracing::info!("Check http://localhost:3000 for traces, metrics, and logs in Grafana.");
+    println!("OpenTelemetry demo complete.");
+    println!("Check http://localhost:3000 for traces, metrics, and logs in Grafana.");
 
     Ok(())
 }

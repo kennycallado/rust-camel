@@ -1,9 +1,9 @@
 //! Integration tests for OTel metrics collection.
 //!
 //! These tests verify:
-//! - OtelService exposes MetricsCollector after start
+//! - OtelService exposes MetricsCollector immediately (created in constructor)
 //! - Metrics collector can record exchanges and durations
-//! - Status transitions correctly affect metrics availability
+//! - Status transitions correctly
 
 use camel_api::{Lifecycle, ServiceStatus};
 use camel_otel::{OtelConfig, OtelService};
@@ -15,22 +15,17 @@ async fn test_otel_service_exposes_metrics_collector() {
     let config = OtelConfig::new("http://localhost:9999", "test-service");
     let mut service = OtelService::new(config);
 
-    // Before start, no metrics collector
-    assert!(service.as_metrics_collector().is_none());
+    // Metrics collector is available immediately (created in constructor)
+    let collector = service.as_metrics_collector();
+    assert!(collector.is_some());
 
-    // Start the service
-    let result = service.start().await;
+    // Verify it works
+    let metrics = collector.unwrap();
+    metrics.increment_exchanges("test-route");
+    metrics.record_exchange_duration("test-route", Duration::from_millis(100));
 
-    // After start, metrics collector is available
-    if result.is_ok() {
-        let collector = service.as_metrics_collector();
-        assert!(collector.is_some());
-
-        // Verify it works
-        let metrics = collector.unwrap();
-        metrics.increment_exchanges("test-route");
-        metrics.record_exchange_duration("test-route", Duration::from_millis(100));
-    }
+    // Start the service (needed for providers, not for metrics collector)
+    let _ = service.start().await;
 
     // Stop the service
     let _ = service.stop().await;
@@ -43,6 +38,8 @@ async fn test_otel_service_status_after_start() {
     let mut service = OtelService::new(config);
 
     assert_eq!(service.status(), ServiceStatus::Stopped);
+    // Metrics collector available even when stopped
+    assert!(service.as_metrics_collector().is_some());
 
     let _ = service.start().await;
 
@@ -52,5 +49,6 @@ async fn test_otel_service_status_after_start() {
 
     let _ = service.stop().await;
     assert_eq!(service.status(), ServiceStatus::Stopped);
-    assert!(service.as_metrics_collector().is_none());
+    // Metrics collector still available after stop
+    assert!(service.as_metrics_collector().is_some());
 }
