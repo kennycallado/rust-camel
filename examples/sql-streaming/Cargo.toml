@@ -1,0 +1,21 @@
+[package]
+name = "sql-streaming"
+description = "SQL component streaming example - StreamList with NDJSON output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-processor.workspace = true
+camel-component-sql.workspace = true
+camel-component-log.workspace = true
+camel-component-timer.workspace = true
+tokio.workspace = true
+tokio-stream = "0.1"
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+sqlx = { version = "0.8", features = ["runtime-tokio", "any", "sqlite"] }
+futures.workspace = true

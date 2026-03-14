@@ -40,6 +40,7 @@ members = [
     "examples/file-polling",
     "examples/file-pipeline",
     "examples/sql-example",
+    "examples/sql-streaming",
     "examples/http-client",
     "examples/aggregator",
     "examples/wiretap",
@@ -152,6 +153,7 @@ testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["kafka", "postgres"] }
 prometheus = "0.14"
 rand = "0.8"
+quick-xml = { version = "0.37", features = ["serialize"] }
 
 # OpenTelemetry dependencies
 opentelemetry = { version = "0.31", features = ["trace", "logs", "metrics"] }
