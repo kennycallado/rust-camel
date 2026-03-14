@@ -45,7 +45,9 @@ use camel_otel::{OtelConfig, OtelService};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create OpenTelemetry configuration
     // Points to the OTLP collector (grafana/otel-lgtm) running locally
-    let otel_config = OtelConfig::new("http://localhost:4317", "rust-camel-otel-demo");
+    // metrics_interval_ms=15000 exports metrics every 15s (default 60s is too slow for demos)
+    let otel_config = OtelConfig::new("http://localhost:4317", "rust-camel-otel-demo")
+        .with_metrics_interval_ms(15000);
 
     // Create the OpenTelemetry service
     // OtelService manages:
