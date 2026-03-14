@@ -71,6 +71,9 @@ impl Service<Exchange> for SqlProducer {
             // Get or initialize the connection pool
             let pool: &AnyPool = pool_cell
                 .get_or_try_init(|| async {
+                    // Install all compiled-in sqlx drivers so AnyPool can resolve them.
+                    // This is idempotent; safe to call multiple times.
+                    sqlx::any::install_default_drivers();
                     let opts: PoolOptions<sqlx::Any> = PoolOptions::new()
                         .max_connections(config.max_connections)
                         .min_connections(config.min_connections)
@@ -93,48 +96,51 @@ impl Service<Exchange> for SqlProducer {
             // Resolve query string
             let query_str = Self::resolve_query_source(&exchange, &config);
 
-            // Parse template
-            let template = parse_query_template(&query_str, config.placeholder)?;
-
-            // Resolve parameters
-            let mut prepared = resolve_params(&template, &exchange)?;
-
-            // Fix 3: Implement CamelSql.Parameters header override
-            if let Some(params_value) = exchange.input.header(headers::PARAMETERS) {
-                if let Some(arr) = params_value.as_array() {
-                    if arr.len() != prepared.bindings.len() {
-                        warn!(
-                            expected = prepared.bindings.len(),
-                            got = arr.len(),
-                            header = headers::PARAMETERS,
-                            "Parameter count mismatch — SQL has {} placeholders but header provides {} values",
-                            prepared.bindings.len(),
-                            arr.len()
-                        );
-                    }
-                    debug!(
-                        "Overriding bindings from {} header with {} parameters",
-                        headers::PARAMETERS,
-                        arr.len()
-                    );
-                    prepared.bindings = arr.clone();
-                } else {
-                    warn!(
-                        header = headers::PARAMETERS,
-                        "Header is present but not a JSON array — ignoring parameter override"
-                    );
-                }
-            }
-
-            debug!("Executing SQL: {}", prepared.sql);
+            debug!("Executing SQL: {}", query_str);
 
             // Execute based on mode
             if config.batch {
+                // Batch mode: execute_batch handles its own template parsing per item
                 execute_batch(pool, &config, &mut exchange).await?;
-            } else if is_select_query(&prepared.sql) {
-                execute_select(pool, &prepared, &config, &mut exchange).await?;
             } else {
-                execute_modify(pool, &prepared, &config, &mut exchange).await?;
+                // Non-batch: parse template, resolve params, apply header override
+                let template = parse_query_template(&query_str, config.placeholder)?;
+                let mut prepared = resolve_params(&template, &exchange)?;
+
+                // CamelSql.Parameters header override
+                if let Some(params_value) = exchange.input.header(headers::PARAMETERS) {
+                    if let Some(arr) = params_value.as_array() {
+                        if arr.len() != prepared.bindings.len() {
+                            warn!(
+                                expected = prepared.bindings.len(),
+                                got = arr.len(),
+                                header = headers::PARAMETERS,
+                                "Parameter count mismatch — SQL has {} placeholders but header provides {} values",
+                                prepared.bindings.len(),
+                                arr.len()
+                            );
+                        }
+                        debug!(
+                            "Overriding bindings from {} header with {} parameters",
+                            headers::PARAMETERS,
+                            arr.len()
+                        );
+                        prepared.bindings = arr.clone();
+                    } else {
+                        warn!(
+                            header = headers::PARAMETERS,
+                            "Header is present but not a JSON array — ignoring parameter override"
+                        );
+                    }
+                }
+
+                debug!("Executing SQL: {}", prepared.sql);
+
+                if is_select_query(&prepared.sql) {
+                    execute_select(pool, &prepared, &config, &mut exchange).await?;
+                } else {
+                    execute_modify(pool, &prepared, &config, &mut exchange).await?;
+                }
             }
 
             Ok(exchange)

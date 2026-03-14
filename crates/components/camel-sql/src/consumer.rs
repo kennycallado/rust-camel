@@ -86,11 +86,16 @@ impl SqlConsumer {
                 // Handle post-processing (onConsume/onConsumeFailed)
                 if let Err(e) = self.handle_post_processing(pool, &result, &row_json).await {
                     error!(error = %e, "Post-processing failed");
-                    // Continue processing other rows even if post-processing fails
-                    // unless break_batch_on_consume_fail is set
                     if self.config.break_batch_on_consume_fail {
                         return Err(e);
                     }
+                }
+
+                // If downstream processing itself failed, honour break_batch_on_consume_fail
+                if let Err(ref consume_err) = result
+                    && self.config.break_batch_on_consume_fail
+                {
+                    return Err(consume_err.clone());
                 }
             }
         } else {
@@ -118,6 +123,12 @@ impl SqlConsumer {
                 if self.config.break_batch_on_consume_fail {
                     return Err(e);
                 }
+            }
+            // If downstream processing itself failed, honour break_batch_on_consume_fail
+            if let Err(ref consume_err) = result
+                && self.config.break_batch_on_consume_fail
+            {
+                return Err(consume_err.clone());
             }
         }
 
@@ -206,6 +217,9 @@ impl Consumer for SqlConsumer {
         let pool = self
             .pool
             .get_or_try_init(|| async {
+                // Install all compiled-in sqlx drivers so AnyPool can resolve them.
+                // This is idempotent; safe to call multiple times.
+                sqlx::any::install_default_drivers();
                 AnyPoolOptions::new()
                     .max_connections(self.config.max_connections)
                     .min_connections(self.config.min_connections)

@@ -46,10 +46,6 @@ pub struct SqlConfig {
     pub source_path: Option<String>,
     pub output_type: SqlOutputType,
     pub placeholder: char,
-    /// Statement separator used when `use_message_body_for_sql` is true and body contains multiple statements.
-    /// Default: `;` (per Apache Camel spec).
-    // TODO: used for multi-statement body splitting (future)
-    pub separator: char,
     pub noop: bool,
 
     // Consumer (polling)
@@ -158,7 +154,6 @@ impl SqlConfig {
                 .transpose()?
                 .unwrap_or(SqlOutputType::SelectList),
             placeholder: get_char("placeholder", '#'),
-            separator: get_char("separator", ';'),
             noop: get_bool("noop", false),
 
             // Consumer
@@ -195,7 +190,6 @@ mod tests {
         assert_eq!(c.max_lifetime_secs, 1800);
         assert_eq!(c.output_type, SqlOutputType::SelectList);
         assert_eq!(c.placeholder, '#');
-        assert_eq!(c.separator, ';');
         assert!(!c.noop);
         assert_eq!(c.delay_ms, 500);
         assert_eq!(c.initial_delay_ms, 1000);

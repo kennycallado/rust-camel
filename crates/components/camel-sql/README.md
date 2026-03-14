@@ -23,7 +23,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-component-sql = "0.2"
+camel-component-sql = "*"
 ```
 
 ## URI Format
