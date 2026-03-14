@@ -21,6 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true, features = ["io"] }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
 opentelemetry = { workspace = true }

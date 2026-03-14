@@ -1,11 +1,21 @@
 use crate::error::CamelError;
 use bytes::{Bytes, BytesMut};
-use futures::StreamExt;
 use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
+use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::Mutex;
+use tokio_util::io::StreamReader;
 
 const DEFAULT_MATERIALIZE_LIMIT: usize = 10 * 1024 * 1024;
+
+/// A boxed [`AsyncRead`] for reading body content without materializing it into memory.
+///
+/// Returned by [`Body::into_async_read()`].
+pub type BoxAsyncRead = Pin<Box<dyn AsyncRead + Send + Unpin>>;
 
 /// Metadata associated with a stream body.
 #[derive(Debug, Clone, Default)]
@@ -79,6 +89,67 @@ impl Clone for StreamBody {
             stream: Arc::clone(&self.stream),
             metadata: self.metadata.clone(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StreamAsyncRead — adapts Body::Stream into AsyncRead
+// ---------------------------------------------------------------------------
+
+/// Private adapter that implements [`AsyncRead`] for [`Body::Stream`].
+///
+/// On the first `poll_read`, attempts a non-blocking `try_lock()` on the inner
+/// `Arc<Mutex<Option<BoxStream>>>`:
+/// - If the lock succeeds and the stream is `Some`, extracts it and creates
+///   an active [`StreamReader`].
+/// - If the stream is `None` (already consumed), returns an [`io::Error`].
+/// - If the lock is contended (extremely rare), wakes the task and returns
+///   `Poll::Pending` to retry.
+#[allow(clippy::type_complexity)]
+struct StreamAsyncRead {
+    arc: Arc<Mutex<Option<BoxStream<'static, Result<Bytes, CamelError>>>>>,
+    /// Holds the active reader after the stream is extracted on first poll.
+    reader: Option<Box<dyn AsyncRead + Send + Unpin>>,
+    /// Set to true when the stream was already consumed (prevents further reads).
+    consumed: bool,
+}
+
+impl AsyncRead for StreamAsyncRead {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.consumed {
+            return Poll::Ready(Err(io::Error::other("stream already consumed")));
+        }
+        // Lazy init: extract the stream on first poll
+        if self.reader.is_none() {
+            // Extract stream in a separate scope to avoid holding the lock while modifying self
+            let extracted = {
+                match self.arc.try_lock() {
+                    Ok(mut guard) => guard.take(),
+                    Err(_) => {
+                        // Lock contended — schedule a retry
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                }
+            };
+            // Now safe to modify self since lock is dropped
+            match extracted {
+                Some(stream) => {
+                    let mapped = stream.map_err(|e: CamelError| io::Error::other(e.to_string()));
+                    self.reader = Some(Box::new(StreamReader::new(mapped)));
+                }
+                None => {
+                    self.consumed = true;
+                    return Poll::Ready(Err(io::Error::other("stream already consumed")));
+                }
+            }
+        }
+        // Delegate to the active reader
+        Pin::new(self.reader.as_mut().unwrap()).poll_read(cx, buf)
     }
 }
 
@@ -194,6 +265,38 @@ impl Body {
     /// ```
     pub async fn materialize(self) -> Result<Bytes, CamelError> {
         self.into_bytes(DEFAULT_MATERIALIZE_LIMIT).await
+    }
+
+    /// Convert the body into an [`AsyncRead`] without materializing it into memory.
+    ///
+    /// - [`Body::Empty`] → empty reader (0 bytes)
+    /// - [`Body::Bytes`] → in-memory cursor
+    /// - [`Body::Text`] → UTF-8 bytes cursor
+    /// - [`Body::Json`] → serialized JSON bytes cursor
+    /// - [`Body::Xml`] → UTF-8 bytes cursor
+    /// - [`Body::Stream`] → streams chunk-by-chunk via [`StreamReader`];
+    ///   if the stream was already consumed, the reader returns an [`io::Error`]
+    ///   on the first read
+    pub fn into_async_read(self) -> BoxAsyncRead {
+        match self {
+            Body::Empty => Box::pin(tokio::io::empty()),
+            Body::Bytes(b) => Box::pin(std::io::Cursor::new(b)),
+            Body::Text(s) => Box::pin(std::io::Cursor::new(s.into_bytes())),
+            Body::Json(v) => match serde_json::to_vec(&v) {
+                Ok(bytes) => Box::pin(std::io::Cursor::new(bytes)) as BoxAsyncRead,
+                Err(e) => {
+                    let err = io::Error::new(io::ErrorKind::InvalidData, e.to_string());
+                    let stream = futures::stream::iter(vec![Err::<Bytes, io::Error>(err)]);
+                    Box::pin(StreamReader::new(stream)) as BoxAsyncRead
+                }
+            },
+            Body::Xml(s) => Box::pin(std::io::Cursor::new(s.into_bytes())),
+            Body::Stream(s) => Box::pin(StreamAsyncRead {
+                arc: s.stream,
+                reader: None,
+                consumed: false,
+            }),
+        }
     }
 
     /// Try to get the body as a string, converting from bytes if needed.
@@ -503,5 +606,101 @@ mod tests {
         let original = Body::Xml("hello".to_string());
         let cloned = original.clone();
         assert_eq!(original, cloned);
+    }
+
+    // ---------- into_async_read tests ----------
+
+    #[tokio::test]
+    async fn test_into_async_read_empty() {
+        use tokio::io::AsyncReadExt;
+        let body = Body::Empty;
+        let mut reader = body.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_into_async_read_bytes() {
+        use tokio::io::AsyncReadExt;
+        let body = Body::Bytes(Bytes::from("hello"));
+        let mut reader = body.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_into_async_read_text() {
+        use tokio::io::AsyncReadExt;
+        let body = Body::Text("world".to_string());
+        let mut reader = body.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"world");
+    }
+
+    #[tokio::test]
+    async fn test_into_async_read_json() {
+        use tokio::io::AsyncReadExt;
+        let body = Body::Json(serde_json::json!({"key": "val"}));
+        let mut reader = body.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(parsed["key"], "val");
+    }
+
+    #[tokio::test]
+    async fn test_into_async_read_xml() {
+        use tokio::io::AsyncReadExt;
+        let body = Body::Xml("<root/>".to_string());
+        let mut reader = body.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"<root/>");
+    }
+
+    #[tokio::test]
+    async fn test_into_async_read_stream_multichunk() {
+        use tokio::io::AsyncReadExt;
+        let chunks: Vec<Result<Bytes, CamelError>> = vec![
+            Ok(Bytes::from("foo")),
+            Ok(Bytes::from("bar")),
+            Ok(Bytes::from("baz")),
+        ];
+        let stream = futures::stream::iter(chunks);
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
+            metadata: StreamMetadata {
+                size_hint: None,
+                content_type: None,
+                origin: None,
+            },
+        });
+        let mut reader = body.into_async_read();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"foobarbaz");
+    }
+
+    #[tokio::test]
+    async fn test_into_async_read_already_consumed() {
+        use tokio::io::AsyncReadExt;
+        // Mutex holds None → stream already consumed
+        let arc: Arc<Mutex<Option<BoxStream<'static, Result<Bytes, CamelError>>>>> =
+            Arc::new(Mutex::new(None));
+        let body = Body::Stream(StreamBody {
+            stream: arc,
+            metadata: StreamMetadata {
+                size_hint: None,
+                content_type: None,
+                origin: None,
+            },
+        });
+        let mut reader = body.into_async_read();
+        let mut buf = Vec::new();
+        let result = reader.read_to_end(&mut buf).await;
+        assert!(result.is_err());
     }
 }

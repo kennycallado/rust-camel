@@ -374,10 +374,9 @@ fn has_skip_impl_attr(attrs: &[syn::Attribute]) -> bool {
     for attr in attrs {
         if let Meta::List(list) = &attr.meta
             && list.path.is_ident("uri_config")
+            && let Ok(nested) = list.parse_args::<syn::Ident>()
         {
-            if let Ok(nested) = list.parse_args::<syn::Ident>() {
-                return nested == "skip_impl";
-            }
+            return nested == "skip_impl";
         }
     }
     false
@@ -568,7 +567,7 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
         })
     };
 
-    let expanded = if skip_impl {
+    if skip_impl {
         // Generate an inherent method for parsing, user implements UriConfig manually
         quote! {
             impl #struct_name {
@@ -606,7 +605,5 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
                 }
             }
         }
-    };
-
-    expanded
+    }
 }

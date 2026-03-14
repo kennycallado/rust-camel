@@ -406,6 +406,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tower",
  "uuid",
 ]
@@ -1542,6 +1543,24 @@ dependencies = [
  "camel-core",
  "chrono",
  "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "file-streaming"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "camel-api",
+ "camel-component",
+ "camel-component-file",
+ "camel-core",
+ "futures",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
  "tracing-subscriber",
 ]
 

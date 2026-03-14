@@ -1,0 +1,24 @@
+[package]
+name = "file-streaming"
+description = "File streaming example - demonstrates zero-copy streaming writes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "file-streaming"
+path = "src/main.rs"
+
+[dependencies]
+camel-api = { workspace = true }
+camel-component = { workspace = true }
+camel-component-file = { workspace = true }
+camel-core = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+bytes = { workspace = true }
+futures = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tempfile = "3"
