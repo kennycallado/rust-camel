@@ -126,6 +126,20 @@ let route = RouteBuilder::from("direct:input")
     .unwrap();
 ```
 
+### Script Step
+
+Execute a script that can modify the Exchange in-place (headers, properties, body):
+
+```rust
+RouteBuilder::from("direct:input")
+    .script("rhai", r#"headers["tenant"] = "acme"; body = body + "_processed""#)
+    .to("log:result")
+    .route_id("script-route")
+    .build()?;
+```
+
+The language must be registered in the `CamelContext`. On error, all modifications are rolled back.
+
 ### Error Handling
 
 ```rust
@@ -209,6 +223,7 @@ let route = RouteBuilder::from("timer:tick")
 | `aggregate(config)` | Combine messages |
 | `log(msg, level)` | Log message |
 | `stop()` | Stop processing |
+| `script(language, source)` | Execute a script that can modify headers, properties, and body |
 | `error_handler(cfg)` | Set error handler |
 | `circuit_breaker(cfg)` | Set circuit breaker |
 | `concurrent(n)` | Enable concurrency |

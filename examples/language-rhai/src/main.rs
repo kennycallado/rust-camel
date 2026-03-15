@@ -17,6 +17,10 @@
 //! 3. **In-script mutation** — `set_header` / `header` within a single
 //!    evaluation shows that values written with `set_header` are visible
 //!    later in the same script (but not propagated back to the Exchange).
+//!
+//! 4. **Script step** — the `.script()` builder step uses a mutating Rhai
+//!    expression: assignment syntax (`headers["k"] = v`) propagates changes
+//!    back to the Exchange. Headers set this way are visible in subsequent steps.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -135,9 +139,19 @@ async fn main() -> Result<(), CamelError> {
                 })
             }
         })
-        // Step 4: log every message (after enrichment)
+        // Step 4: .script() — mutating Rhai expression tags the order and
+        //         appends a status suffix. Changes propagate back to the Exchange.
+        .script(
+            "rhai",
+            r#"
+            headers["processed"] = true;
+            let status = if headers["priority"] == "high" { "PRIORITY" } else { "STANDARD" };
+            body = body + " [" + status + "]";
+            "#,
+        )
+        // Step 5: log every message (after enrichment)
         .to("log:all-orders?showBody=true&showHeaders=true")
-        // Step 5: filter — only high-value orders (amount > 100) to alert log
+        // Step 6: filter — only high-value orders (amount > 100) to alert log
         .filter({
             let pred = Arc::clone(&high_value_pred);
             move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
@@ -151,6 +165,7 @@ async fn main() -> Result<(), CamelError> {
 
     println!("Rhai Language example running.");
     println!("Producing 6 orders with alternating priority/amount headers.");
+    println!("- .script() step tags each order with 'processed' header and priority suffix");
     println!("- All messages logged to 'all-orders'");
     println!("- Only amount > 100 logged to 'high-value-alert'");
     println!("Press Ctrl+C to stop early...\n");
