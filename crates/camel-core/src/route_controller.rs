@@ -384,8 +384,12 @@ impl DefaultRouteController {
         &self,
         steps: Vec<BuilderStep>,
         producer_ctx: &ProducerContext,
-        registry: &Registry,
+        registry: Arc<std::sync::Mutex<Registry>>,
     ) -> Result<Vec<BoxProcessor>, CamelError> {
+        // Lock registry for step resolution
+        let registry_guard = registry
+            .lock()
+            .expect("mutex poisoned: another thread panicked while holding this lock");
         let mut processors: Vec<BoxProcessor> = Vec::new();
         for step in steps {
             match step {
@@ -394,7 +398,7 @@ impl DefaultRouteController {
                 }
                 BuilderStep::To(uri) => {
                     let parsed = parse_uri(&uri)?;
-                    let component = registry.get_or_err(&parsed.scheme)?;
+                    let component = registry_guard.get_or_err(&parsed.scheme)?;
                     let endpoint = component.create_endpoint(&uri)?;
                     let producer = endpoint.create_producer(producer_ctx)?;
                     processors.push(producer);
@@ -439,7 +443,8 @@ impl DefaultRouteController {
                 },
                 BuilderStep::DeclarativeFilter { predicate, steps } => {
                     let predicate = self.compile_filter_predicate(&predicate)?;
-                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors =
+                        self.resolve_steps(steps, producer_ctx, registry.clone())?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
@@ -450,7 +455,7 @@ impl DefaultRouteController {
                     for when_step in whens {
                         let predicate = self.compile_filter_predicate(&when_step.predicate)?;
                         let sub_processors =
-                            self.resolve_steps(when_step.steps, producer_ctx, registry)?;
+                            self.resolve_steps(when_step.steps, producer_ctx, registry.clone())?;
                         let pipeline = compose_pipeline(sub_processors);
                         when_clauses.push(WhenClause {
                             predicate,
@@ -459,7 +464,7 @@ impl DefaultRouteController {
                     }
                     let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
                         let sub_processors =
-                            self.resolve_steps(otherwise_steps, producer_ctx, registry)?;
+                            self.resolve_steps(otherwise_steps, producer_ctx, registry.clone())?;
                         Some(compose_pipeline(sub_processors))
                     } else {
                         None
@@ -479,7 +484,8 @@ impl DefaultRouteController {
                     processors.push(BoxProcessor::new(svc));
                 }
                 BuilderStep::Split { config, steps } => {
-                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors =
+                        self.resolve_steps(steps, producer_ctx, registry.clone())?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let splitter =
                         camel_processor::splitter::SplitterService::new(config, sub_pipeline);
@@ -526,7 +532,8 @@ impl DefaultRouteController {
                         config = config.parallel_limit(limit);
                     }
 
-                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors =
+                        self.resolve_steps(steps, producer_ctx, registry.clone())?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let splitter =
                         camel_processor::splitter::SplitterService::new(config, sub_pipeline);
@@ -537,7 +544,8 @@ impl DefaultRouteController {
                     processors.push(BoxProcessor::new(svc));
                 }
                 BuilderStep::Filter { predicate, steps } => {
-                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors =
+                        self.resolve_steps(steps, producer_ctx, registry.clone())?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
@@ -548,7 +556,7 @@ impl DefaultRouteController {
                     let mut when_clauses = Vec::new();
                     for when_step in whens {
                         let sub_processors =
-                            self.resolve_steps(when_step.steps, producer_ctx, registry)?;
+                            self.resolve_steps(when_step.steps, producer_ctx, registry.clone())?;
                         let pipeline = compose_pipeline(sub_processors);
                         when_clauses.push(WhenClause {
                             predicate: when_step.predicate,
@@ -558,7 +566,7 @@ impl DefaultRouteController {
                     // Resolve otherwise branch (if present).
                     let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
                         let sub_processors =
-                            self.resolve_steps(otherwise_steps, producer_ctx, registry)?;
+                            self.resolve_steps(otherwise_steps, producer_ctx, registry.clone())?;
                         Some(compose_pipeline(sub_processors))
                     } else {
                         None
@@ -568,7 +576,7 @@ impl DefaultRouteController {
                 }
                 BuilderStep::WireTap { uri } => {
                     let parsed = parse_uri(&uri)?;
-                    let component = registry.get_or_err(&parsed.scheme)?;
+                    let component = registry_guard.get_or_err(&parsed.scheme)?;
                     let endpoint = component.create_endpoint(&uri)?;
                     let producer = endpoint.create_producer(producer_ctx)?;
                     let svc = camel_processor::WireTapService::new(producer);
@@ -579,7 +587,7 @@ impl DefaultRouteController {
                     let mut endpoints = Vec::new();
                     for step in steps {
                         let sub_processors =
-                            self.resolve_steps(vec![step], producer_ctx, registry)?;
+                            self.resolve_steps(vec![step], producer_ctx, registry.clone())?;
                         let endpoint = compose_pipeline(sub_processors);
                         endpoints.push(endpoint);
                     }
@@ -658,6 +666,60 @@ impl DefaultRouteController {
                         }
                     }
                 }
+                BuilderStep::Throttle { config, steps } => {
+                    let sub_processors =
+                        self.resolve_steps(steps, producer_ctx, registry.clone())?;
+                    let sub_pipeline = compose_pipeline(sub_processors);
+                    let svc =
+                        camel_processor::throttler::ThrottlerService::new(config, sub_pipeline);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::LoadBalance { config, steps } => {
+                    // Each top-level step in the load_balance scope becomes an independent endpoint.
+                    let mut endpoints = Vec::new();
+                    for step in steps {
+                        let sub_processors =
+                            self.resolve_steps(vec![step], producer_ctx, registry.clone())?;
+                        let endpoint = compose_pipeline(sub_processors);
+                        endpoints.push(endpoint);
+                    }
+                    let svc =
+                        camel_processor::load_balancer::LoadBalancerService::new(endpoints, config);
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::DynamicRouter { config } => {
+                    use camel_processor::dynamic_router::EndpointResolver;
+
+                    let producer_ctx_clone = producer_ctx.clone();
+                    let registry_clone = registry.clone();
+                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
+                        let parsed = match parse_uri(uri) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        let registry_guard = match registry_clone.lock() {
+                            Ok(g) => g,
+                            Err(_) => return None, // mutex poisoned
+                        };
+                        let component = match registry_guard.get_or_err(&parsed.scheme) {
+                            Ok(c) => c,
+                            Err(_) => return None,
+                        };
+                        let endpoint = match component.create_endpoint(uri) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
+                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        Some(BoxProcessor::new(producer))
+                    });
+                    let svc = camel_processor::dynamic_router::DynamicRouterService::new(
+                        config, resolver,
+                    );
+                    processors.push(BoxProcessor::new(svc));
+                }
             }
         }
         Ok(processors)
@@ -696,14 +758,9 @@ impl DefaultRouteController {
             .map(ProducerContext::new)
             .ok_or_else(|| CamelError::RouteError("RouteController self_ref not set".into()))?;
 
-        // Lock registry for step resolution
-        let registry = self
-            .registry
-            .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
-
         // Resolve steps into processors (takes ownership of steps)
-        let processors = self.resolve_steps(definition.steps, &producer_ctx, &registry)?;
+        let processors =
+            self.resolve_steps(definition.steps, &producer_ctx, self.registry.clone())?;
         let route_id_for_tracing = route_id.clone();
         let mut pipeline = compose_traced_pipeline(
             processors,
@@ -725,12 +782,14 @@ impl DefaultRouteController {
             .or_else(|| self.global_error_handler.clone());
 
         if let Some(config) = eh_config {
+            // Lock registry for error handler resolution
+            let registry = self
+                .registry
+                .lock()
+                .expect("mutex poisoned: another thread panicked while holding this lock");
             let layer = self.resolve_error_handler(config, &producer_ctx, &registry)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
         }
-
-        // Drop the lock before modifying self.routes
-        drop(registry);
 
         self.routes.insert(
             route_id.clone(),
@@ -767,12 +826,7 @@ impl DefaultRouteController {
             .map(ProducerContext::new)
             .ok_or_else(|| CamelError::RouteError("RouteController self_ref not set".into()))?;
 
-        let registry = self
-            .registry
-            .lock()
-            .expect("mutex poisoned: registry lock in compile_route_definition");
-
-        let processors = self.resolve_steps(def.steps, &producer_ctx, &registry)?;
+        let processors = self.resolve_steps(def.steps, &producer_ctx, self.registry.clone())?;
         let mut pipeline = compose_traced_pipeline(
             processors,
             &route_id,
@@ -790,11 +844,15 @@ impl DefaultRouteController {
             .error_handler
             .or_else(|| self.global_error_handler.clone());
         if let Some(config) = eh_config {
+            // Lock registry for error handler resolution
+            let registry = self
+                .registry
+                .lock()
+                .expect("mutex poisoned: registry lock in compile_route_definition");
             let layer = self.resolve_error_handler(config, &producer_ctx, &registry)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
         }
 
-        drop(registry);
         Ok(pipeline)
     }
 

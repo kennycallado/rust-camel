@@ -3,12 +3,14 @@ pub mod body;
 pub mod body_converter;
 pub mod circuit_breaker;
 pub mod declarative;
+pub mod dynamic_router;
 pub mod error;
 pub mod error_handler;
 pub mod exchange;
 pub mod filter;
 pub mod health;
 pub mod lifecycle;
+pub mod load_balancer;
 pub mod message;
 pub mod metrics;
 pub mod multicast;
@@ -17,6 +19,7 @@ pub mod producer;
 pub mod route_controller;
 pub mod splitter;
 pub mod supervision;
+pub mod throttler;
 pub mod value;
 
 // Re-export core types at crate root for convenience.
@@ -25,6 +28,7 @@ pub use body::{Body, BoxAsyncRead, StreamBody, StreamMetadata};
 pub use body_converter::{BodyType, convert as convert_body};
 pub use circuit_breaker::CircuitBreakerConfig;
 pub use declarative::{LanguageExpressionDef, ValueSourceDef};
+pub use dynamic_router::{DynamicRouterConfig, RouterExpression};
 pub use error::CamelError;
 pub use error_handler::{
     ErrorHandlerConfig, ExceptionPolicy, ExceptionPolicyBuilder, HEADER_REDELIVERED,
@@ -37,6 +41,7 @@ pub use exchange::{Exchange, ExchangePattern};
 pub use filter::FilterPredicate;
 pub use health::{HealthReport, ServiceHealth};
 pub use lifecycle::{HealthStatus, Lifecycle, ServiceStatus};
+pub use load_balancer::{LoadBalanceStrategy, LoadBalancerConfig};
 pub use message::Message;
 pub use metrics::{MetricsCollector, NoOpMetrics};
 pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
@@ -48,4 +53,5 @@ pub use splitter::{
     split_body_lines,
 };
 pub use supervision::SupervisionConfig;
+pub use throttler::{ThrottleStrategy, ThrottlerConfig};
 pub use value::{Headers, Value};

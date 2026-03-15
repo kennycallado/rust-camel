@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 ///
 /// `ProducerContext` holds references to shared infrastructure components
 /// that producers may need access to during message production.
+#[derive(Clone)]
 pub struct ProducerContext {
     route_controller: Arc<Mutex<dyn RouteController>>,
 }

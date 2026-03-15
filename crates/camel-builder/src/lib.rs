@@ -2,9 +2,12 @@ use camel_api::aggregator::AggregatorConfig;
 use camel_api::body::Body;
 use camel_api::body_converter::BodyType;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
+use camel_api::dynamic_router::{DynamicRouterConfig, RouterExpression};
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::load_balancer::LoadBalancerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::SplitterConfig;
+use camel_api::throttler::{ThrottleStrategy, ThrottlerConfig};
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProcessorFn, Value,
 };
@@ -319,6 +322,60 @@ impl RouteBuilder {
         }
     }
 
+    /// Begin a Throttle sub-pipeline. Rate limits message processing to at most
+    /// `max_requests` per `period`. Steps inside the throttle scope are only
+    /// executed when the rate limit allows.
+    ///
+    /// Returns a `ThrottleBuilder` — you cannot call `.build()` until
+    /// `.end_throttle()` closes the throttle scope (enforced by the type system).
+    pub fn throttle(self, max_requests: usize, period: std::time::Duration) -> ThrottleBuilder {
+        ThrottleBuilder {
+            parent: self,
+            config: ThrottlerConfig::new(max_requests, period),
+            steps: Vec::new(),
+        }
+    }
+
+    /// Begin a LoadBalance sub-pipeline. Distributes exchanges across multiple
+    /// endpoints using a configurable strategy (round-robin, random, weighted, failover).
+    ///
+    /// Returns a `LoadBalancerBuilder` — you cannot call `.build()` until
+    /// `.end_load_balance()` closes the load balance scope (enforced by the type system).
+    pub fn load_balance(self) -> LoadBalancerBuilder {
+        LoadBalancerBuilder {
+            parent: self,
+            config: LoadBalancerConfig::round_robin(),
+            steps: Vec::new(),
+        }
+    }
+
+    /// Add a dynamic router step that routes exchanges dynamically based on
+    /// expression evaluation at runtime.
+    ///
+    /// The expression receives the exchange and returns `Some(uri)` to route to
+    /// the next endpoint, or `None` to stop routing.
+    ///
+    /// # Example
+    /// ```ignore
+    /// RouteBuilder::from("timer:tick")
+    ///     .route_id("test-route")
+    ///     .dynamic_router(|ex| {
+    ///         ex.input.header("dest").and_then(|v| v.as_str().map(|s| s.to_string()))
+    ///     })
+    ///     .build()
+    /// ```
+    pub fn dynamic_router(self, expression: RouterExpression) -> Self {
+        self.dynamic_router_with_config(DynamicRouterConfig::new(expression))
+    }
+
+    /// Add a dynamic router step with full configuration.
+    ///
+    /// Allows customization of URI delimiter, cache size, timeout, and other options.
+    pub fn dynamic_router_with_config(mut self, config: DynamicRouterConfig) -> Self {
+        self.steps.push(BuilderStep::DynamicRouter { config });
+        self
+    }
+
     /// Consume the builder and produce a [`RouteDefinition`].
     pub fn build(self) -> Result<RouteDefinition, CamelError> {
         if self.from_uri.is_empty() {
@@ -614,6 +671,119 @@ impl StepAccumulator for MulticastBuilder {
     }
 }
 
+/// Builder for the sub-pipeline within a `.throttle()` ... `.end_throttle()` block.
+///
+/// Exposes the same step methods as `RouteBuilder` (to, process, filter, etc.)
+/// but NOT `.build()` and NOT `.throttle()` (no nested throttles).
+///
+/// Calling `.end_throttle()` packages the sub-steps into a `BuilderStep::Throttle`
+/// and returns the parent `RouteBuilder`.
+pub struct ThrottleBuilder {
+    parent: RouteBuilder,
+    config: ThrottlerConfig,
+    steps: Vec<BuilderStep>,
+}
+
+impl ThrottleBuilder {
+    /// Set the throttle strategy. Default is `Delay`.
+    ///
+    /// - `Delay`: Queue messages until capacity available
+    /// - `Reject`: Return error immediately when throttled
+    /// - `Drop`: Silently discard excess messages
+    pub fn strategy(mut self, strategy: ThrottleStrategy) -> Self {
+        self.config = self.config.strategy(strategy);
+        self
+    }
+
+    /// Close the throttle scope. Packages the accumulated sub-steps into a
+    /// `BuilderStep::Throttle` and returns the parent `RouteBuilder`.
+    pub fn end_throttle(mut self) -> RouteBuilder {
+        let step = BuilderStep::Throttle {
+            config: self.config,
+            steps: self.steps,
+        };
+        self.parent.steps.push(step);
+        self.parent
+    }
+}
+
+impl StepAccumulator for ThrottleBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
+    }
+}
+
+/// Builder for the sub-pipeline within a `.load_balance()` ... `.end_load_balance()` block.
+///
+/// Exposes the same step methods as `RouteBuilder` (to, process, filter, etc.)
+/// but NOT `.build()` and NOT `.load_balance()` (no nested load balancers).
+///
+/// Calling `.end_load_balance()` packages the sub-steps into a `BuilderStep::LoadBalance`
+/// and returns the parent `RouteBuilder`.
+pub struct LoadBalancerBuilder {
+    parent: RouteBuilder,
+    config: LoadBalancerConfig,
+    steps: Vec<BuilderStep>,
+}
+
+impl LoadBalancerBuilder {
+    /// Set the load balance strategy to round-robin (default).
+    pub fn round_robin(mut self) -> Self {
+        self.config = LoadBalancerConfig::round_robin();
+        self
+    }
+
+    /// Set the load balance strategy to random selection.
+    pub fn random(mut self) -> Self {
+        self.config = LoadBalancerConfig::random();
+        self
+    }
+
+    /// Set the load balance strategy to weighted selection.
+    ///
+    /// Each endpoint is assigned a weight that determines its probability
+    /// of being selected.
+    pub fn weighted(mut self, weights: Vec<(String, u32)>) -> Self {
+        self.config = LoadBalancerConfig::weighted(weights);
+        self
+    }
+
+    /// Set the load balance strategy to failover.
+    ///
+    /// Exchanges are sent to the first endpoint; on failure, the next endpoint
+    /// is tried.
+    pub fn failover(mut self) -> Self {
+        self.config = LoadBalancerConfig::failover();
+        self
+    }
+
+    /// Enable or disable parallel execution of endpoints.
+    ///
+    /// When enabled, all endpoints receive the exchange simultaneously.
+    /// When disabled (default), only one endpoint is selected per exchange.
+    pub fn parallel(mut self, parallel: bool) -> Self {
+        self.config = self.config.parallel(parallel);
+        self
+    }
+
+    /// Close the load balance scope. Packages the accumulated sub-steps into a
+    /// `BuilderStep::LoadBalance` and returns the parent `RouteBuilder`.
+    pub fn end_load_balance(mut self) -> RouteBuilder {
+        let step = BuilderStep::LoadBalance {
+            config: self.config,
+            steps: self.steps,
+        };
+        self.parent.steps.push(step);
+        self.parent
+    }
+}
+
+impl StepAccumulator for LoadBalancerBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -621,8 +791,10 @@ impl StepAccumulator for MulticastBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::load_balancer::LoadBalanceStrategy;
     use camel_api::{Exchange, Message};
     use camel_core::route::BuilderStep;
+    use std::sync::Arc;
     use tower::{Service, ServiceExt};
 
     #[test]
@@ -1392,6 +1564,208 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(definition.steps().len(), 2);
+        assert!(matches!(&definition.steps()[1], BuilderStep::To(uri) if uri == "mock:outer"));
+    }
+
+    // ── Throttle typestate tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_throttle_builder_typestate() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .throttle(10, std::time::Duration::from_secs(1))
+            .to("mock:result")
+            .end_throttle()
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 1);
+        assert!(matches!(
+            &definition.steps()[0],
+            BuilderStep::Throttle { .. }
+        ));
+    }
+
+    #[test]
+    fn test_throttle_builder_with_strategy() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .throttle(10, std::time::Duration::from_secs(1))
+            .strategy(ThrottleStrategy::Reject)
+            .to("mock:result")
+            .end_throttle()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Throttle { config, .. } = &definition.steps()[0] {
+            assert_eq!(config.strategy, ThrottleStrategy::Reject);
+        } else {
+            panic!("Expected Throttle step");
+        }
+    }
+
+    #[test]
+    fn test_throttle_builder_steps_collected() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .throttle(5, std::time::Duration::from_secs(1))
+            .set_header("throttled", Value::Bool(true))
+            .to("mock:throttled")
+            .end_throttle()
+            .build()
+            .unwrap();
+
+        match &definition.steps()[0] {
+            BuilderStep::Throttle { steps, .. } => {
+                assert_eq!(steps.len(), 2); // SetHeader + To
+            }
+            other => panic!("Expected Throttle, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_throttle_step_after_throttle() {
+        // Steps after end_throttle() are added to the outer pipeline, not inside throttle.
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .throttle(10, std::time::Duration::from_secs(1))
+            .to("mock:inner")
+            .end_throttle()
+            .to("mock:outer")
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 2);
+        assert!(matches!(&definition.steps()[1], BuilderStep::To(uri) if uri == "mock:outer"));
+    }
+
+    // ── LoadBalance typestate tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_load_balance_builder_typestate() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .load_balance()
+            .round_robin()
+            .to("mock:a")
+            .to("mock:b")
+            .end_load_balance()
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 1);
+        assert!(matches!(
+            &definition.steps()[0],
+            BuilderStep::LoadBalance { .. }
+        ));
+    }
+
+    #[test]
+    fn test_load_balance_builder_with_strategy() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .load_balance()
+            .random()
+            .to("mock:result")
+            .end_load_balance()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::LoadBalance { config, .. } = &definition.steps()[0] {
+            assert_eq!(config.strategy, LoadBalanceStrategy::Random);
+        } else {
+            panic!("Expected LoadBalance step");
+        }
+    }
+
+    #[test]
+    fn test_load_balance_builder_steps_collected() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .load_balance()
+            .set_header("lb", Value::Bool(true))
+            .to("mock:a")
+            .end_load_balance()
+            .build()
+            .unwrap();
+
+        match &definition.steps()[0] {
+            BuilderStep::LoadBalance { steps, .. } => {
+                assert_eq!(steps.len(), 2); // SetHeader + To
+            }
+            other => panic!("Expected LoadBalance, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_load_balance_step_after_load_balance() {
+        // Steps after end_load_balance() are added to the outer pipeline, not inside load_balance.
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .load_balance()
+            .to("mock:inner")
+            .end_load_balance()
+            .to("mock:outer")
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 2);
+        assert!(matches!(&definition.steps()[1], BuilderStep::To(uri) if uri == "mock:outer"));
+    }
+
+    // ── DynamicRouter typestate tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_dynamic_router_builder() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .dynamic_router(Arc::new(|_| Some("mock:result".to_string())))
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 1);
+        assert!(matches!(
+            &definition.steps()[0],
+            BuilderStep::DynamicRouter { .. }
+        ));
+    }
+
+    #[test]
+    fn test_dynamic_router_builder_with_config() {
+        let config = DynamicRouterConfig::new(Arc::new(|_| Some("mock:a".to_string())))
+            .max_iterations(100)
+            .cache_size(500);
+
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .dynamic_router_with_config(config)
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 1);
+        if let BuilderStep::DynamicRouter { config } = &definition.steps()[0] {
+            assert_eq!(config.max_iterations, 100);
+            assert_eq!(config.cache_size, 500);
+        } else {
+            panic!("Expected DynamicRouter step");
+        }
+    }
+
+    #[test]
+    fn test_dynamic_router_step_after_router() {
+        // Steps after dynamic_router() are added to the outer pipeline.
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .dynamic_router(Arc::new(|_| Some("mock:inner".to_string())))
+            .to("mock:outer")
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 2);
+        assert!(matches!(
+            &definition.steps()[0],
+            BuilderStep::DynamicRouter { .. }
+        ));
         assert!(matches!(&definition.steps()[1], BuilderStep::To(uri) if uri == "mock:outer"));
     }
 }

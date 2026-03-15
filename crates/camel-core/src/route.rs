@@ -148,6 +148,20 @@ pub enum BuilderStep {
     /// Script step: executes a script that can mutate the exchange.
     /// The script has access to `headers`, `properties`, and `body`.
     Script { language: String, script: String },
+    /// Throttle step: rate limiting with configurable behavior when limit exceeded.
+    Throttle {
+        config: camel_api::ThrottlerConfig,
+        steps: Vec<BuilderStep>,
+    },
+    /// LoadBalance step: distributes exchanges across multiple endpoints using a strategy.
+    LoadBalance {
+        config: camel_api::LoadBalancerConfig,
+        steps: Vec<BuilderStep>,
+    },
+    /// DynamicRouter step: routes exchanges dynamically based on expression evaluation.
+    DynamicRouter {
+        config: camel_api::DynamicRouterConfig,
+    },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -219,6 +233,15 @@ impl std::fmt::Debug for BuilderStep {
             }
             BuilderStep::Script { language, .. } => {
                 write!(f, "BuilderStep::Script {{ language: {language:?}, .. }}")
+            }
+            BuilderStep::Throttle { steps, .. } => {
+                write!(f, "BuilderStep::Throttle {{ steps: {steps:?}, .. }}")
+            }
+            BuilderStep::LoadBalance { steps, .. } => {
+                write!(f, "BuilderStep::LoadBalance {{ steps: {steps:?}, .. }}")
+            }
+            BuilderStep::DynamicRouter { .. } => {
+                write!(f, "BuilderStep::DynamicRouter {{ .. }}")
             }
         }
     }

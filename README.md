@@ -92,12 +92,15 @@ cargo test --workspace
 
 | Pattern | Builder Method | Description |
 |---------|---------------|-------------|
-| Filter | `.filter(predicate)` | Forward exchange only when predicate is true |
-| Splitter | `.split(config)` | Split one exchange into multiple fragments |
 | Aggregator | `.aggregate(config)` | Correlate and aggregate multiple exchanges |
-| WireTap | `.wire_tap(uri)` | Fire-and-forget copy to a tap endpoint |
-| Multicast | `.multicast()` | Send the same exchange to multiple endpoints |
 | Content-Based Router | `.choice()` / `.when()` | Route based on exchange content |
+| Dynamic Router | `.dynamic_router(expr)` | Expression-based routing with slip pattern |
+| Filter | `.filter(predicate)` | Forward exchange only when predicate is true |
+| Load Balancer | `.load_balance()` | Distribute across endpoints with RoundRobin/Random/Weighted/Failover |
+| Multicast | `.multicast()` | Send the same exchange to multiple endpoints |
+| Splitter | `.split(config)` | Split one exchange into multiple fragments |
+| Throttler | `.throttle(n, duration)` | Rate limiting with Delay/Reject/Drop strategies |
+| WireTap | `.wire_tap(uri)` | Fire-and-forget copy to a tap endpoint |
 
 Run an example:
 
@@ -105,37 +108,40 @@ Run an example:
  cargo run -p aggregator
  cargo run -p bean-demo
  cargo run -p circuit-breaker
-cargo run -p config-basic
-cargo run -p config-profiles
-cargo run -p container-example
-cargo run -p content-based-routing
-cargo run -p controlbus
-cargo run -p error-handling
-cargo run -p file-pipeline
-cargo run -p file-polling
-cargo run -p hello-world
-cargo run -p http-client
-cargo run -p http-server
-cargo run -p http-streaming
-cargo run -p kafka-example
-cargo run -p language-rhai
-cargo run -p language-simple
-cargo run -p lazy-route
-cargo run -p log-eip
-cargo run -p metrics-demo
-cargo run -p multicast
-cargo run -p multi-route-direct
-cargo run -p otel-demo
-cargo run -p pipeline-concurrency
-cargo run -p prometheus-demo
-cargo run -p showcase
-cargo run -p splitter
-cargo run -p sql-example
-cargo run -p sql-streaming
-cargo run -p transform-pipeline
-cargo run -p wiretap
-cargo run -p xml-body
-cargo run -p yaml-dsl
+ cargo run -p config-basic
+ cargo run -p config-profiles
+ cargo run -p container-example
+ cargo run -p content-based-routing
+ cargo run -p controlbus
+ cargo run -p dynamic-router
+ cargo run -p error-handling
+ cargo run -p file-pipeline
+ cargo run -p file-polling
+ cargo run -p hello-world
+ cargo run -p http-client
+ cargo run -p http-server
+ cargo run -p http-streaming
+ cargo run -p kafka-example
+ cargo run -p language-rhai
+ cargo run -p language-simple
+ cargo run -p lazy-route
+ cargo run -p load-balancer
+ cargo run -p log-eip
+ cargo run -p metrics-demo
+ cargo run -p multicast
+ cargo run -p multi-route-direct
+ cargo run -p otel-demo
+ cargo run -p pipeline-concurrency
+ cargo run -p prometheus-demo
+ cargo run -p showcase
+ cargo run -p splitter
+ cargo run -p sql-example
+ cargo run -p sql-streaming
+ cargo run -p throttler
+ cargo run -p transform-pipeline
+ cargo run -p wiretap
+ cargo run -p xml-body
+ cargo run -p yaml-dsl
 ```
 
 ## Security Features
