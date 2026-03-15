@@ -4,7 +4,9 @@ pub mod discovery;
 pub mod yaml;
 
 pub use config::{
-    CamelConfig, ComponentsConfig, ObservabilityConfig, OtelCamelConfig, SupervisionCamelConfig,
+    CamelConfig, ComponentsConfig, ContainerCamelConfig, FileCamelConfig, HttpCamelConfig,
+    KafkaCamelConfig, ObservabilityConfig, OtelCamelConfig, RedisCamelConfig, SqlCamelConfig,
+    SupervisionCamelConfig,
 };
 pub use discovery::{DiscoveryError, discover_routes};
 pub use yaml::{

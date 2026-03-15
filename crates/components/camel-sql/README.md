@@ -286,6 +286,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Global Configuration
+
+Configure default connection pool settings in `Camel.toml` that apply to all SQL endpoints:
+
+```toml
+[default.components.sql]
+max_connections = 5          # Maximum pool connections (default: 5)
+min_connections = 1          # Minimum pool connections (default: 1)
+idle_timeout_secs = 300      # Idle connection timeout (default: 300)
+max_lifetime_secs = 1800     # Max connection lifetime (default: 1800)
+```
+
+URI parameters always override global defaults:
+
+```rust
+// Uses global pool settings
+.to("sql:SELECT * FROM users?db_url=postgres://localhost/mydb")
+
+// Overrides maxConnections from global config
+.to("sql:SELECT * FROM users?db_url=postgres://localhost/mydb&maxConnections=10")
+```
+
+### Profile-Specific Configuration
+
+```toml
+[default.components.sql]
+max_connections = 5
+min_connections = 1
+
+[production.components.sql]
+max_connections = 20
+min_connections = 5
+idle_timeout_secs = 600
+```
+
 ## Documentation
 
 - [API Documentation](https://docs.rs/camel-component-sql)

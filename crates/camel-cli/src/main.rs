@@ -139,14 +139,44 @@ async fn run(
     ctx.register_component(camel_component_timer::TimerComponent::new());
     ctx.register_component(camel_component_log::LogComponent::new());
     ctx.register_component(camel_component_direct::DirectComponent::new());
-    ctx.register_component(camel_component_file::FileComponent::new());
+    // File component: pass global config if available
+    let file_cfg = ctx
+        .get_component_config::<camel_component_file::FileGlobalConfig>()
+        .cloned();
+    ctx.register_component(camel_component_file::FileComponent::with_optional_config(
+        file_cfg,
+    ));
     ctx.register_component(camel_component_http::HttpComponent::new());
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
-    ctx.register_component(camel_component_container::ContainerComponent::new());
-    ctx.register_component(camel_component_redis::RedisComponent::new());
-    ctx.register_component(camel_component_kafka::KafkaComponent::new());
-    ctx.register_component(camel_component_sql::SqlComponent::new());
+    // Container component: pass global config if available
+    let container_cfg = ctx
+        .get_component_config::<camel_component_container::ContainerGlobalConfig>()
+        .cloned();
+    ctx.register_component(
+        camel_component_container::ContainerComponent::with_optional_config(container_cfg),
+    );
+    // Redis component: pass global config if available
+    let redis_cfg = ctx
+        .get_component_config::<camel_component_redis::RedisConfig>()
+        .cloned();
+    ctx.register_component(camel_component_redis::RedisComponent::with_optional_config(
+        redis_cfg,
+    ));
+    // Kafka component: pass global config if available
+    let kafka_cfg = ctx
+        .get_component_config::<camel_component_kafka::KafkaConfig>()
+        .cloned();
+    ctx.register_component(camel_component_kafka::KafkaComponent::with_optional_config(
+        kafka_cfg,
+    ));
+    // SQL component: pass global config if available
+    let sql_cfg = ctx
+        .get_component_config::<camel_component_sql::SqlGlobalConfig>()
+        .cloned();
+    ctx.register_component(camel_component_sql::SqlComponent::with_optional_config(
+        sql_cfg,
+    ));
 
     // 5. Discover and load initial routes
     match camel_dsl::discover_routes(&patterns) {

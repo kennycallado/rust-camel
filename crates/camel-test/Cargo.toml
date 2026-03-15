@@ -23,6 +23,7 @@ camel-component-log.workspace = true
 camel-component-direct.workspace = true
 camel-component-file.workspace = true
 camel-component-http.workspace = true
+camel-endpoint.workspace = true
 camel-component-controlbus.workspace = true
 tokio.workspace = true
 tower.workspace = true

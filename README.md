@@ -341,9 +341,62 @@ Create a `Camel.toml` file:
 routes = ["routes/**/*.yaml"]
 log_level = "INFO"
 
+# Component defaults - apply to all endpoints
+[default.components.http]
+connect_timeout_ms = 5000
+allow_private_ips = false
+
+[default.components.kafka]
+brokers = "localhost:9092"
+group_id = "camel"
+
+[default.components.redis]
+host = "localhost"
+port = 6379
+
+[default.components.sql]
+max_connections = 5
+
+[default.components.file]
+delay_ms = 500
+
+[default.components.container]
+docker_host = "unix:///var/run/docker.sock"
+
+# Observability
+[default.observability.prometheus]
+enabled = true
+port = 9090
+
 [production]
 log_level = "ERROR"
+
+[production.components.kafka]
+brokers = "prod-kafka:9092"
+
+[production.components.redis]
+host = "prod-redis"
 ```
+
+### Component Defaults
+
+Each component supports global defaults that apply to all endpoints. URI parameters always take precedence:
+
+```rust
+// Uses global connect_timeout_ms (5000) from Camel.toml
+.to("http://api.example.com/data")
+
+// Overrides global setting with URI parameter
+.to("http://api.example.com/data?connectTimeout=10000")
+```
+
+Supported component configurations:
+- **`[components.http]`**: `connect_timeout_ms`, `response_timeout_ms`, `max_connections`, `max_body_size`, `max_request_body`, `allow_private_ips`
+- **`[components.kafka]`**: `brokers`, `group_id`, `session_timeout_ms`, `request_timeout_ms`, `auto_offset_reset`, `security_protocol`
+- **`[components.redis]`**: `host`, `port`
+- **`[components.sql]`**: `max_connections`, `min_connections`, `idle_timeout_secs`, `max_lifetime_secs`
+- **`[components.file]`**: `delay_ms`, `initial_delay_ms`, `read_timeout_ms`, `write_timeout_ms`
+- **`[components.container]`**: `docker_host`
 
 ### Loading Configuration
 
@@ -403,8 +456,47 @@ export CAMEL_ROUTES_0="custom/*.yaml"
 
 - **Profile support**: Multiple environments in one file
 - **Route discovery**: Auto-load routes from glob patterns
+- **Component defaults**: Set global defaults for HTTP, Kafka, Redis, SQL, File, Container
 - **Environment overrides**: Override any value with `CAMEL_*` prefix
 - **Deep merging**: Nested configs merge properly
+- **URI precedence**: URI parameters always override global defaults
+
+### Component Defaults
+
+Configure global defaults for all component endpoints in `Camel.toml`:
+
+```toml
+[default.components.http]
+connect_timeout_ms = 5000
+allow_private_ips = false
+
+[default.components.kafka]
+brokers = "localhost:9092"
+group_id = "my-app"
+
+[default.components.redis]
+host = "localhost"
+port = 6379
+
+[default.components.sql]
+max_connections = 10
+
+[default.components.file]
+delay_ms = 1000
+
+[default.components.container]
+docker_host = "unix:///var/run/docker.sock"
+```
+
+URI parameters always take precedence over global defaults:
+
+```rust
+// Uses global connect_timeout_ms (5000) from Camel.toml
+.to("http://api.example.com/data")
+
+// Overrides global setting with URI parameter
+.to("http://api.example.com/data?connectTimeout=10000")
+```
 
 See `docs/configuration.md` for full details.
 

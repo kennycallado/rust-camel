@@ -89,6 +89,54 @@ impl FromStr for FileExistStrategy {
 }
 
 // ---------------------------------------------------------------------------
+// FileGlobalConfig
+// ---------------------------------------------------------------------------
+
+/// Global configuration for File component.
+/// Plain Rust, no serde, with Default impl and builder methods.
+/// These are the fallback defaults when URI params are not set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileGlobalConfig {
+    pub delay_ms: u64,
+    pub initial_delay_ms: u64,
+    pub read_timeout_ms: u64,
+    pub write_timeout_ms: u64,
+}
+
+impl Default for FileGlobalConfig {
+    fn default() -> Self {
+        Self {
+            delay_ms: 500,
+            initial_delay_ms: 1_000,
+            read_timeout_ms: 30_000,
+            write_timeout_ms: 30_000,
+        }
+    }
+}
+
+impl FileGlobalConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_delay_ms(mut self, v: u64) -> Self {
+        self.delay_ms = v;
+        self
+    }
+    pub fn with_initial_delay_ms(mut self, v: u64) -> Self {
+        self.initial_delay_ms = v;
+        self
+    }
+    pub fn with_read_timeout_ms(mut self, v: u64) -> Self {
+        self.read_timeout_ms = v;
+        self
+    }
+    pub fn with_write_timeout_ms(mut self, v: u64) -> Self {
+        self.write_timeout_ms = v;
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FileConfig
 // ---------------------------------------------------------------------------
 
@@ -223,15 +271,51 @@ impl UriConfig for FileConfig {
     }
 }
 
+impl FileConfig {
+    /// Apply global config defaults. Since FileConfig uses a proc macro that bakes in
+    /// defaults, we compare Duration values against the known macro defaults to detect
+    /// "not explicitly set by user". Only overrides when current value == macro default.
+    ///
+    /// **Note**: If a user explicitly sets a URI param to its default value (e.g.,
+    /// `?delay=500`), it is indistinguishable from "not set" and will be overridden
+    /// by global config. This is a known limitation of the Duration comparison approach.
+    pub fn apply_global_defaults(&mut self, global: &FileGlobalConfig) {
+        if self.delay == Duration::from_millis(500) {
+            self.delay = Duration::from_millis(global.delay_ms);
+        }
+        if self.initial_delay == Duration::from_millis(1_000) {
+            self.initial_delay = Duration::from_millis(global.initial_delay_ms);
+        }
+        if self.read_timeout == Duration::from_millis(30_000) {
+            self.read_timeout = Duration::from_millis(global.read_timeout_ms);
+        }
+        if self.write_timeout == Duration::from_millis(30_000) {
+            self.write_timeout = Duration::from_millis(global.write_timeout_ms);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FileComponent
 // ---------------------------------------------------------------------------
 
-pub struct FileComponent;
+pub struct FileComponent {
+    config: Option<FileGlobalConfig>,
+}
 
 impl FileComponent {
     pub fn new() -> Self {
-        Self
+        Self { config: None }
+    }
+
+    pub fn with_config(config: FileGlobalConfig) -> Self {
+        Self {
+            config: Some(config),
+        }
+    }
+
+    pub fn with_optional_config(config: Option<FileGlobalConfig>) -> Self {
+        Self { config }
     }
 }
 
@@ -247,7 +331,10 @@ impl Component for FileComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let config = FileConfig::from_uri(uri)?;
+        let mut config = FileConfig::from_uri(uri)?;
+        if let Some(ref global_config) = self.config {
+            config.apply_global_defaults(global_config);
+        }
         Ok(Box::new(FileEndpoint {
             uri: uri.to_string(),
             config,
@@ -1634,5 +1721,56 @@ mod tests {
             result.is_err(),
             "expected error for already-consumed stream"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // GlobalConfig tests - apply_global_defaults behavior
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_global_config_applied_to_endpoint() {
+        // Global config with non-default values
+        let global = FileGlobalConfig::default()
+            .with_delay_ms(2000)
+            .with_initial_delay_ms(5000)
+            .with_read_timeout_ms(60_000)
+            .with_write_timeout_ms(45_000);
+        let component = FileComponent::with_config(global);
+        // URI uses no explicit delay/timeout params → macro defaults apply
+        let endpoint = component.create_endpoint("file:/tmp/inbox").unwrap();
+        // We cannot call endpoint.config directly (FileEndpoint is private),
+        // but we can test apply_global_defaults on FileConfig directly:
+        let mut config = FileConfig::from_uri("file:/tmp/inbox").unwrap();
+        let global2 = FileGlobalConfig::default()
+            .with_delay_ms(2000)
+            .with_initial_delay_ms(5000)
+            .with_read_timeout_ms(60_000)
+            .with_write_timeout_ms(45_000);
+        config.apply_global_defaults(&global2);
+        assert_eq!(config.delay, Duration::from_millis(2000));
+        assert_eq!(config.initial_delay, Duration::from_millis(5000));
+        assert_eq!(config.read_timeout, Duration::from_millis(60_000));
+        assert_eq!(config.write_timeout, Duration::from_millis(45_000));
+        // endpoint creation succeeds too
+        let _ = endpoint; // just verify create_endpoint didn't fail
+    }
+
+    #[test]
+    fn test_uri_param_wins_over_global_config() {
+        // URI explicitly sets delay=1000 (NOT the 500ms macro default)
+        let mut config =
+            FileConfig::from_uri("file:/tmp/inbox?delay=1000&initialDelay=2000").unwrap();
+        // Global config would want 3000ms delay
+        let global = FileGlobalConfig::default()
+            .with_delay_ms(3000)
+            .with_initial_delay_ms(4000);
+        config.apply_global_defaults(&global);
+        // URI value of 1000ms must be preserved (not replaced by 3000ms)
+        assert_eq!(config.delay, Duration::from_millis(1000));
+        // URI value of 2000ms must be preserved (not replaced by 4000ms)
+        assert_eq!(config.initial_delay, Duration::from_millis(2000));
+        // read_timeout was not set by URI → macro default (30000) → global wins if different
+        // (read_timeout stays at 30000 since global has same default = 30000)
+        assert_eq!(config.read_timeout, Duration::from_millis(30_000));
     }
 }

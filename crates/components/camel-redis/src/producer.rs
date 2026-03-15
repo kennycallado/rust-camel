@@ -1,5 +1,5 @@
 use crate::commands;
-use crate::config::{RedisCommand, RedisConfig};
+use crate::config::{RedisCommand, RedisEndpointConfig};
 use camel_api::{CamelError, Exchange};
 use redis::aio::MultiplexedConnection;
 use std::future::Future;
@@ -16,7 +16,7 @@ use tower::Service;
 /// on first use and reused across multiple calls.
 #[derive(Clone)]
 pub struct RedisProducer {
-    config: RedisConfig,
+    config: RedisEndpointConfig,
     /// Shared connection pool - created lazily on first use
     conn: Arc<Mutex<Option<MultiplexedConnection>>>,
 }
@@ -25,7 +25,7 @@ impl RedisProducer {
     /// Creates a new RedisProducer with the given configuration.
     ///
     /// The connection is not established until the first call to `call()`.
-    pub fn new(config: RedisConfig) -> Self {
+    pub fn new(config: RedisEndpointConfig) -> Self {
         Self {
             config,
             conn: Arc::new(Mutex::new(None)),
@@ -153,7 +153,7 @@ impl RedisProducer {
     /// Priority:
     /// 1. Header `CamelRedis.Command` if present
     /// 2. Configuration default command
-    fn resolve_command(exchange: &Exchange, config: &RedisConfig) -> RedisCommand {
+    fn resolve_command(exchange: &Exchange, config: &RedisEndpointConfig) -> RedisCommand {
         exchange
             .input
             .header("CamelRedis.Command")
@@ -259,14 +259,14 @@ mod tests {
 
     #[test]
     fn test_producer_new() {
-        let config = RedisConfig::from_uri("redis://localhost:6379").unwrap();
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
         let producer = RedisProducer::new(config);
         assert!(Arc::strong_count(&producer.conn) == 1);
     }
 
     #[test]
     fn test_producer_clone_shares_connection() {
-        let config = RedisConfig::from_uri("redis://localhost:6379").unwrap();
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
         let producer = RedisProducer::new(config);
         let producer2 = producer.clone();
 
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_resolve_command_from_config() {
-        let config = RedisConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
         let exchange = Exchange::new(Message::default());
 
         let cmd = RedisProducer::resolve_command(&exchange, &config);
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_resolve_command_from_header() {
-        let config = RedisConfig::from_uri("redis://localhost:6379?command=SET").unwrap();
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=SET").unwrap();
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Command", serde_json::json!("GET"));
         let exchange = Exchange::new(msg);
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_resolve_command_header_overrides_config() {
-        let config = RedisConfig::from_uri("redis://localhost:6379?command=SET").unwrap();
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=SET").unwrap();
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Command", serde_json::json!("INCR"));
         let exchange = Exchange::new(msg);
@@ -309,7 +309,7 @@ mod tests {
     async fn test_producer_creates_connection_on_first_call() {
         // This test requires a real Redis server, so we mark it as a pattern test
         // In CI, this would be skipped unless Redis is available
-        let config = RedisConfig::from_uri("redis://localhost:6379").unwrap();
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
         let producer = RedisProducer::new(config);
 
         // Connection should be None initially

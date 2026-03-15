@@ -128,22 +128,19 @@ impl Lifecycle for PrometheusService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn test_create_prometheus_service() {
-        let service = PrometheusService::new(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-            9090,
-        ));
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 9090);
+        let service = PrometheusService::new(addr);
         assert_eq!(service.name(), "prometheus");
     }
 
     #[tokio::test]
     async fn test_prometheus_service_status_transitions() {
-        let mut service = PrometheusService::new(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-            0,
-        ));
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        let mut service = PrometheusService::new(addr);
 
         assert_eq!(service.status(), ServiceStatus::Stopped);
 
@@ -158,10 +155,8 @@ mod tests {
     fn test_health_checker_injection() {
         use camel_api::HealthStatus;
 
-        let mut service = PrometheusService::new(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-            9090,
-        ));
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 9090);
+        let mut service = PrometheusService::new(addr);
 
         // Initially no health checker
         assert!(service.health_checker().is_none());
@@ -183,7 +178,6 @@ mod tests {
 
     #[test]
     fn test_prometheus_service_with_socket_addr() {
-        use std::net::{IpAddr, Ipv4Addr};
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9091);
         let service = PrometheusService::new(addr);
         assert_eq!(service.name(), "prometheus");

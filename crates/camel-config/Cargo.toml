@@ -16,8 +16,14 @@ camel-api.workspace = true
 camel-core.workspace = true
 camel-dsl.workspace = true
 camel-otel = { workspace = true }
-camel-prometheus = { path = "../services/camel-prometheus" }
+camel-prometheus = { workspace = true }
 camel-processor.workspace = true
+camel-component-http = { workspace = true }
+camel-component-kafka = { workspace = true }
+camel-component-redis = { workspace = true }
+camel-component-sql = { workspace = true }
+camel-component-file = { workspace = true }
+camel-component-container = { workspace = true }
 config = { workspace = true }
 glob = { workspace = true }
 serde = { workspace = true }

@@ -47,10 +47,10 @@ impl RdConsumerContext for ReadyContext {
 
 type ReadyStreamConsumer = StreamConsumer<ReadyContext>;
 
-use crate::config::KafkaConfig;
+use crate::config::KafkaEndpointConfig;
 
 pub struct KafkaConsumer {
-    config: KafkaConfig,
+    config: KafkaEndpointConfig,
     cancel_token: Option<CancellationToken>,
     task_handle: Option<JoinHandle<Result<(), CamelError>>>,
     /// Notified once the consumer has received its first partition assignment.
@@ -58,7 +58,7 @@ pub struct KafkaConsumer {
 }
 
 impl KafkaConsumer {
-    pub fn new(config: KafkaConfig) -> Self {
+    pub fn new(config: KafkaEndpointConfig) -> Self {
         Self {
             config,
             cancel_token: None,
@@ -85,8 +85,8 @@ impl Consumer for KafkaConsumer {
 
         info!(
             topic = %config.topic,
-            brokers = %config.brokers,
-            group_id = %config.group_id,
+            brokers = %config.brokers.as_deref().unwrap_or("<not set>"),
+            group_id = %config.group_id.as_deref().unwrap_or("<not set>"),
             "Starting Kafka consumer"
         );
 
@@ -190,7 +190,7 @@ pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
 }
 
 async fn run_consumer_loop(
-    config: KafkaConfig,
+    config: KafkaEndpointConfig,
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
     ready: Arc<Notify>,
@@ -209,10 +209,28 @@ async fn run_consumer_loop(
 
     let mut client_cfg = ClientConfig::new();
     client_cfg
-        .set("bootstrap.servers", &config.brokers)
-        .set("group.id", &config.group_id)
-        .set("auto.offset.reset", &config.auto_offset_reset)
-        .set("session.timeout.ms", config.session_timeout_ms.to_string())
+        .set(
+            "bootstrap.servers",
+            config.brokers.as_ref().expect("brokers must be resolved"),
+        )
+        .set(
+            "group.id",
+            config.group_id.as_ref().expect("group_id must be resolved"),
+        )
+        .set(
+            "auto.offset.reset",
+            config
+                .auto_offset_reset
+                .as_ref()
+                .expect("auto_offset_reset must be resolved"),
+        )
+        .set(
+            "session.timeout.ms",
+            config
+                .session_timeout_ms
+                .expect("session_timeout_ms must be resolved")
+                .to_string(),
+        )
         .set("enable.auto.commit", "false")
         .set("fetch.wait.max.ms", config.poll_timeout_ms.to_string());
 
@@ -284,7 +302,8 @@ async fn run_consumer_loop(
                     Ok(msg) => {
                         // Must detach before await point (BorrowedMessage not 'static)
                         let owned = msg.detach();
-                        let mut exchange = build_exchange(&owned, &config.group_id);
+                        let group_id = config.group_id.as_deref().expect("group_id must be resolved");
+                        let mut exchange = build_exchange(&owned, group_id);
 
                         if let Some(ref tx) = commit_tx {
                             // Manual commit mode: store handle in extensions, user is responsible for commit
@@ -332,8 +351,9 @@ mod tests {
     use super::*;
     use rdkafka::Timestamp;
 
-    fn make_config() -> KafkaConfig {
-        KafkaConfig::from_uri("kafka:test-topic?brokers=localhost:9092&groupId=test-group").unwrap()
+    fn make_config() -> KafkaEndpointConfig {
+        KafkaEndpointConfig::from_uri("kafka:test-topic?brokers=localhost:9092&groupId=test-group")
+            .unwrap()
     }
 
     fn make_msg(
@@ -482,7 +502,7 @@ mod tests {
         use tokio::sync::mpsc;
 
         let brokers = std::env::var("KAFKA_BROKERS").unwrap_or("localhost:9092".to_string());
-        let config = KafkaConfig::from_uri(&format!(
+        let config = KafkaEndpointConfig::from_uri(&format!(
             "kafka:test-consumer-recv?brokers={}&groupId=test-recv&autoOffsetReset=earliest",
             brokers
         ))
@@ -503,7 +523,7 @@ mod tests {
             .expect("Consumer should receive partition assignment within 30s");
 
         let prod_config =
-            KafkaConfig::from_uri(&format!("kafka:test-consumer-recv?brokers={}", brokers))
+            KafkaEndpointConfig::from_uri(&format!("kafka:test-consumer-recv?brokers={}", brokers))
                 .unwrap();
         let mut producer = crate::producer::KafkaProducer::new(prod_config).unwrap();
         let msg = camel_api::Message::new(camel_api::Body::Text("hello-kafka".to_string()));
@@ -527,7 +547,7 @@ mod tests {
         use tokio::sync::mpsc;
 
         let brokers = std::env::var("KAFKA_BROKERS").unwrap_or("localhost:9092".to_string());
-        let config = KafkaConfig::from_uri(&format!(
+        let config = KafkaEndpointConfig::from_uri(&format!(
             "kafka:test-headers?brokers={}&groupId=test-headers&autoOffsetReset=earliest",
             brokers
         ))
@@ -547,7 +567,8 @@ mod tests {
             .expect("Consumer should receive partition assignment within 30s");
 
         let prod_config =
-            KafkaConfig::from_uri(&format!("kafka:test-headers?brokers={}", brokers)).unwrap();
+            KafkaEndpointConfig::from_uri(&format!("kafka:test-headers?brokers={}", brokers))
+                .unwrap();
         let mut producer = crate::producer::KafkaProducer::new(prod_config).unwrap();
         let msg = camel_api::Message::new(camel_api::Body::Text("headers-test".to_string()));
         use tower::Service as _;
@@ -576,7 +597,7 @@ mod tests {
         use tokio::sync::mpsc;
 
         let brokers = std::env::var("KAFKA_BROKERS").unwrap_or("localhost:9092".to_string());
-        let config = KafkaConfig::from_uri(&format!(
+        let config = KafkaEndpointConfig::from_uri(&format!(
             "kafka:test-graceful-stop?brokers={}&groupId=test-stop",
             brokers
         ))

@@ -31,6 +31,55 @@ impl FromStr for SqlOutputType {
     }
 }
 
+/// Global configuration for SQL component.
+///
+/// This is a plain Rust struct (no serde) with defaults and builder methods.
+/// It holds pool configuration that can be applied as defaults to endpoints.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SqlGlobalConfig {
+    pub max_connections: u32,
+    pub min_connections: u32,
+    pub idle_timeout_secs: u64,
+    pub max_lifetime_secs: u64,
+}
+
+impl Default for SqlGlobalConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 5,
+            min_connections: 1,
+            idle_timeout_secs: 300,
+            max_lifetime_secs: 1800,
+        }
+    }
+}
+
+impl SqlGlobalConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_max_connections(mut self, value: u32) -> Self {
+        self.max_connections = value;
+        self
+    }
+
+    pub fn with_min_connections(mut self, value: u32) -> Self {
+        self.min_connections = value;
+        self
+    }
+
+    pub fn with_idle_timeout_secs(mut self, value: u64) -> Self {
+        self.idle_timeout_secs = value;
+        self
+    }
+
+    pub fn with_max_lifetime_secs(mut self, value: u64) -> Self {
+        self.max_lifetime_secs = value;
+        self
+    }
+}
+
 /// Configuration for SQL component endpoints.
 ///
 /// URI format: `sql:<query>?db_url=<url>&param1=val1&param2=val2`
@@ -39,18 +88,18 @@ impl FromStr for SqlOutputType {
 /// - `sql:SELECT * FROM users?db_url=...` - inline SQL
 /// - `sql:file:/path/to/query.sql?db_url=...` - read SQL from file
 #[derive(Debug, Clone)]
-pub struct SqlConfig {
+pub struct SqlEndpointConfig {
     // Connection
     /// Database connection URL (required).
     pub db_url: String,
-    /// Maximum connections in the pool. Default: 5.
-    pub max_connections: u32,
-    /// Minimum connections in the pool. Default: 1.
-    pub min_connections: u32,
-    /// Idle timeout in seconds. Default: 300.
-    pub idle_timeout_secs: u64,
-    /// Maximum connection lifetime in seconds. Default: 1800.
-    pub max_lifetime_secs: u64,
+    /// Maximum connections in the pool. None = use global default.
+    pub max_connections: Option<u32>,
+    /// Minimum connections in the pool. None = use global default.
+    pub min_connections: Option<u32>,
+    /// Idle timeout in seconds. None = use global default.
+    pub idle_timeout_secs: Option<u64>,
+    /// Maximum connection lifetime in seconds. None = use global default.
+    pub max_lifetime_secs: Option<u64>,
 
     // Query
     /// The SQL query (from URI path or file).
@@ -93,7 +142,31 @@ pub struct SqlConfig {
     pub use_message_body_for_sql: bool,
 }
 
-impl UriConfig for SqlConfig {
+impl SqlEndpointConfig {
+    /// Apply defaults from global config, filling None fields without overriding.
+    pub fn apply_defaults(&mut self, defaults: &SqlGlobalConfig) {
+        if self.max_connections.is_none() {
+            self.max_connections = Some(defaults.max_connections);
+        }
+        if self.min_connections.is_none() {
+            self.min_connections = Some(defaults.min_connections);
+        }
+        if self.idle_timeout_secs.is_none() {
+            self.idle_timeout_secs = Some(defaults.idle_timeout_secs);
+        }
+        if self.max_lifetime_secs.is_none() {
+            self.max_lifetime_secs = Some(defaults.max_lifetime_secs);
+        }
+    }
+
+    /// Resolve any remaining None fields with built-in defaults.
+    pub fn resolve_defaults(&mut self) {
+        let defaults = SqlGlobalConfig::default();
+        self.apply_defaults(&defaults);
+    }
+}
+
+impl UriConfig for SqlEndpointConfig {
     fn scheme() -> &'static str {
         "sql"
     }
@@ -132,23 +205,11 @@ impl UriConfig for SqlConfig {
             .ok_or_else(|| CamelError::Config("db_url parameter is required".to_string()))?
             .clone();
 
-        // Connection parameters
-        let max_connections = params
-            .get("maxConnections")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(5);
-        let min_connections = params
-            .get("minConnections")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1);
-        let idle_timeout_secs = params
-            .get("idleTimeoutSecs")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(300);
-        let max_lifetime_secs = params
-            .get("maxLifetimeSecs")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1800);
+        // Connection parameters - None when not set by URI param
+        let max_connections = params.get("maxConnections").and_then(|v| v.parse().ok());
+        let min_connections = params.get("minConnections").and_then(|v| v.parse().ok());
+        let idle_timeout_secs = params.get("idleTimeoutSecs").and_then(|v| v.parse().ok());
+        let max_lifetime_secs = params.get("maxLifetimeSecs").and_then(|v| v.parse().ok());
 
         // Query parameters
         let output_type = params
@@ -240,13 +301,15 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        let c = SqlConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        let mut c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        c.resolve_defaults();
         assert_eq!(c.query, "select 1");
         assert_eq!(c.db_url, "postgres://localhost/test");
-        assert_eq!(c.max_connections, 5);
-        assert_eq!(c.min_connections, 1);
-        assert_eq!(c.idle_timeout_secs, 300);
-        assert_eq!(c.max_lifetime_secs, 1800);
+        assert_eq!(c.max_connections, Some(5));
+        assert_eq!(c.min_connections, Some(1));
+        assert_eq!(c.idle_timeout_secs, Some(300));
+        assert_eq!(c.max_lifetime_secs, Some(1800));
         assert_eq!(c.output_type, SqlOutputType::SelectList);
         assert_eq!(c.placeholder, '#');
         assert!(!c.noop);
@@ -266,17 +329,17 @@ mod tests {
 
     #[test]
     fn test_config_wrong_scheme() {
-        assert!(SqlConfig::from_uri("redis://localhost:6379").is_err());
+        assert!(SqlEndpointConfig::from_uri("redis://localhost:6379").is_err());
     }
 
     #[test]
     fn test_config_missing_db_url() {
-        assert!(SqlConfig::from_uri("sql:select 1").is_err());
+        assert!(SqlEndpointConfig::from_uri("sql:select 1").is_err());
     }
 
     #[test]
     fn test_config_output_type_select_one() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&outputType=SelectOne",
         )
         .unwrap();
@@ -285,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_config_output_type_stream_list() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&outputType=StreamList",
         )
         .unwrap();
@@ -294,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_config_consumer_options() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:select * from t?db_url=postgres://localhost/test&delay=2000&initialDelay=500&maxMessagesPerPoll=10&onConsume=update t set done=true where id=:#id&onConsumeFailed=update t set failed=true where id=:#id&onConsumeBatchComplete=delete from t where done=true&routeEmptyResultSet=true&useIterator=false&expectedUpdateCount=1&breakBatchOnConsumeFail=true"
         ).unwrap();
         assert_eq!(c.delay_ms, 2000);
@@ -320,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_config_producer_options() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:insert into t values (#)?db_url=postgres://localhost/test&batch=true&useMessageBodyForSql=true&noop=true"
         ).unwrap();
         assert!(c.batch);
@@ -330,18 +393,18 @@ mod tests {
 
     #[test]
     fn test_config_pool_options() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&maxConnections=20&minConnections=3&idleTimeoutSecs=600&maxLifetimeSecs=3600"
         ).unwrap();
-        assert_eq!(c.max_connections, 20);
-        assert_eq!(c.min_connections, 3);
-        assert_eq!(c.idle_timeout_secs, 600);
-        assert_eq!(c.max_lifetime_secs, 3600);
+        assert_eq!(c.max_connections, Some(20));
+        assert_eq!(c.min_connections, Some(3));
+        assert_eq!(c.idle_timeout_secs, Some(600));
+        assert_eq!(c.max_lifetime_secs, Some(3600));
     }
 
     #[test]
     fn test_config_query_with_special_chars() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:select * from users where name = :#name and age > #?db_url=postgres://localhost/test",
         )
         .unwrap();
@@ -370,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_config_file_not_found() {
-        let result = SqlConfig::from_uri(
+        let result = SqlEndpointConfig::from_uri(
             "sql:file:/nonexistent/path/query.sql?db_url=postgres://localhost/test",
         );
         assert!(result.is_err());
@@ -399,9 +462,84 @@ mod tests {
             "sql:file:{}?db_url=postgres://localhost/test",
             tmp.display()
         );
-        let c = SqlConfig::from_uri(&uri).unwrap();
+        let c = SqlEndpointConfig::from_uri(&uri).unwrap();
         assert_eq!(c.query, "SELECT * FROM users");
         assert_eq!(c.source_path, Some(tmp.to_string_lossy().into_owned()));
         std::fs::remove_file(&tmp).ok();
+    }
+
+    // New tests for config contract
+    #[test]
+    fn test_pool_fields_none_when_not_set() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert_eq!(c.max_connections, None);
+        assert_eq!(c.min_connections, None);
+        assert_eq!(c.idle_timeout_secs, None);
+        assert_eq!(c.max_lifetime_secs, None);
+    }
+
+    #[test]
+    fn test_apply_defaults_fills_none() {
+        let mut c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        let global = SqlGlobalConfig {
+            max_connections: 10,
+            min_connections: 2,
+            idle_timeout_secs: 600,
+            max_lifetime_secs: 3600,
+        };
+        c.apply_defaults(&global);
+        assert_eq!(c.max_connections, Some(10));
+        assert_eq!(c.min_connections, Some(2));
+        assert_eq!(c.idle_timeout_secs, Some(600));
+        assert_eq!(c.max_lifetime_secs, Some(3600));
+    }
+
+    #[test]
+    fn test_apply_defaults_does_not_override() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&maxConnections=99&minConnections=5",
+        )
+        .unwrap();
+        let global = SqlGlobalConfig {
+            max_connections: 10,
+            min_connections: 2,
+            idle_timeout_secs: 600,
+            max_lifetime_secs: 3600,
+        };
+        c.apply_defaults(&global);
+        // URI-set values should NOT be overridden
+        assert_eq!(c.max_connections, Some(99));
+        assert_eq!(c.min_connections, Some(5));
+        // None fields should be filled from global
+        assert_eq!(c.idle_timeout_secs, Some(600));
+        assert_eq!(c.max_lifetime_secs, Some(3600));
+    }
+
+    #[test]
+    fn test_resolve_defaults_fills_remaining() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&maxConnections=7",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        assert_eq!(c.max_connections, Some(7)); // from URI
+        assert_eq!(c.min_connections, Some(1)); // from defaults
+        assert_eq!(c.idle_timeout_secs, Some(300)); // from defaults
+        assert_eq!(c.max_lifetime_secs, Some(1800)); // from defaults
+    }
+
+    #[test]
+    fn test_global_config_builder() {
+        let c = SqlGlobalConfig::default()
+            .with_max_connections(20)
+            .with_min_connections(3)
+            .with_idle_timeout_secs(600)
+            .with_max_lifetime_secs(3600);
+        assert_eq!(c.max_connections, 20);
+        assert_eq!(c.min_connections, 3);
+        assert_eq!(c.idle_timeout_secs, 600);
+        assert_eq!(c.max_lifetime_secs, 3600);
     }
 }

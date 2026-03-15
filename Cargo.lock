@@ -686,7 +686,13 @@ name = "camel-config"
 version = "0.4.0"
 dependencies = [
  "camel-api",
+ "camel-component-container",
+ "camel-component-file",
+ "camel-component-http",
+ "camel-component-kafka",
  "camel-component-log",
+ "camel-component-redis",
+ "camel-component-sql",
  "camel-component-timer",
  "camel-core",
  "camel-dsl",
@@ -898,6 +904,7 @@ dependencies = [
  "camel-component-timer",
  "camel-config",
  "camel-core",
+ "camel-endpoint",
  "camel-processor",
  "reqwest",
  "serde_json",

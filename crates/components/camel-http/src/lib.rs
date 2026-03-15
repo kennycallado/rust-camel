@@ -1,3 +1,6 @@
+pub mod config;
+pub use config::HttpConfig;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -20,7 +23,7 @@ use futures::TryStreamExt;
 use futures::stream::BoxStream;
 
 // ---------------------------------------------------------------------------
-// HttpConfig
+// HttpEndpointConfig
 // ---------------------------------------------------------------------------
 
 /// Configuration for an HTTP client (producer) endpoint.
@@ -80,7 +83,7 @@ use futures::stream::BoxStream;
 /// Only increase limits when you control both ends of the connection or when
 /// business requirements demand larger payloads.
 #[derive(Debug, Clone)]
-pub struct HttpConfig {
+pub struct HttpEndpointConfig {
     pub base_url: String,
     pub http_method: Option<String>,
     pub throw_exception_on_failure: bool,
@@ -109,7 +112,7 @@ const HTTP_CAMEL_OPTIONS: &[&str] = &[
     "maxBodySize",
 ];
 
-impl UriConfig for HttpConfig {
+impl UriConfig for HttpEndpointConfig {
     /// Returns "http" as the primary scheme (also accepts "https")
     fn scheme() -> &'static str {
         "http"
@@ -851,7 +854,7 @@ impl Component for HttpComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let config = HttpConfig::from_uri(uri)?;
+        let config = HttpEndpointConfig::from_uri(uri)?;
         let server_config = HttpServerConfig::from_uri(uri)?;
         let client = build_client(&config)?;
         Ok(Box::new(HttpEndpoint {
@@ -883,7 +886,7 @@ impl Component for HttpsComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let config = HttpConfig::from_uri(uri)?;
+        let config = HttpEndpointConfig::from_uri(uri)?;
         let server_config = HttpServerConfig::from_uri(uri)?;
         let client = build_client(&config)?;
         Ok(Box::new(HttpEndpoint {
@@ -895,7 +898,7 @@ impl Component for HttpsComponent {
     }
 }
 
-fn build_client(config: &HttpConfig) -> Result<reqwest::Client, CamelError> {
+fn build_client(config: &HttpEndpointConfig) -> Result<reqwest::Client, CamelError> {
     let mut builder = reqwest::Client::builder().connect_timeout(config.connect_timeout);
 
     if !config.follow_redirects {
@@ -913,7 +916,7 @@ fn build_client(config: &HttpConfig) -> Result<reqwest::Client, CamelError> {
 
 struct HttpEndpoint {
     uri: String,
-    config: HttpConfig,
+    config: HttpEndpointConfig,
     server_config: HttpServerConfig,
     client: reqwest::Client,
 }
@@ -939,7 +942,7 @@ impl Endpoint for HttpEndpoint {
 // SSRF Protection
 // ---------------------------------------------------------------------------
 
-fn validate_url_for_ssrf(url: &str, config: &HttpConfig) -> Result<(), CamelError> {
+fn validate_url_for_ssrf(url: &str, config: &HttpEndpointConfig) -> Result<(), CamelError> {
     let parsed = url::Url::parse(url)
         .map_err(|e| CamelError::ProcessorError(format!("Invalid URL: {}", e)))?;
 
@@ -996,12 +999,12 @@ fn validate_url_for_ssrf(url: &str, config: &HttpConfig) -> Result<(), CamelErro
 
 #[derive(Clone)]
 struct HttpProducer {
-    config: Arc<HttpConfig>,
+    config: Arc<HttpEndpointConfig>,
     client: reqwest::Client,
 }
 
 impl HttpProducer {
-    fn resolve_method(exchange: &Exchange, config: &HttpConfig) -> String {
+    fn resolve_method(exchange: &Exchange, config: &HttpEndpointConfig) -> String {
         if let Some(ref method) = config.http_method {
             return method.to_uppercase();
         }
@@ -1018,7 +1021,7 @@ impl HttpProducer {
         "GET".to_string()
     }
 
-    fn resolve_url(exchange: &Exchange, config: &HttpConfig) -> String {
+    fn resolve_url(exchange: &Exchange, config: &HttpEndpointConfig) -> String {
         if let Some(uri) = exchange
             .input
             .header("CamelHttpUri")
@@ -1273,7 +1276,7 @@ mod tests {
 
     #[test]
     fn test_http_config_defaults() {
-        let config = HttpConfig::from_uri("http://localhost:8080/api").unwrap();
+        let config = HttpEndpointConfig::from_uri("http://localhost:8080/api").unwrap();
         assert_eq!(config.base_url, "http://localhost:8080/api");
         assert!(config.http_method.is_none());
         assert!(config.throw_exception_on_failure);
@@ -1286,7 +1289,7 @@ mod tests {
     #[test]
     fn test_http_config_scheme() {
         // UriConfig trait method returns "http" as primary scheme
-        assert_eq!(HttpConfig::scheme(), "http");
+        assert_eq!(HttpEndpointConfig::scheme(), "http");
     }
 
     #[test]
@@ -1300,14 +1303,14 @@ mod tests {
                 "POST".to_string(),
             )]),
         };
-        let config = HttpConfig::from_components(components).unwrap();
+        let config = HttpEndpointConfig::from_components(components).unwrap();
         assert_eq!(config.base_url, "https://api.example.com/v1");
         assert_eq!(config.http_method, Some("POST".to_string()));
     }
 
     #[test]
     fn test_http_config_with_options() {
-        let config = HttpConfig::from_uri(
+        let config = HttpEndpointConfig::from_uri(
             "https://api.example.com/v1?httpMethod=PUT&throwExceptionOnFailure=false&followRedirects=true&connectTimeout=5000&responseTimeout=10000"
         ).unwrap();
         assert_eq!(config.base_url, "https://api.example.com/v1");
@@ -1321,13 +1324,13 @@ mod tests {
     #[test]
     fn test_http_config_ok_status_range() {
         let config =
-            HttpConfig::from_uri("http://localhost/api?okStatusCodeRange=200-204").unwrap();
+            HttpEndpointConfig::from_uri("http://localhost/api?okStatusCodeRange=200-204").unwrap();
         assert_eq!(config.ok_status_code_range, (200, 204));
     }
 
     #[test]
     fn test_http_config_wrong_scheme() {
-        let result = HttpConfig::from_uri("file:/tmp");
+        let result = HttpEndpointConfig::from_uri("file:/tmp");
         assert!(result.is_err());
     }
 
@@ -1775,7 +1778,7 @@ mod tests {
     async fn test_non_camel_query_params_are_forwarded() {
         // This test verifies Bug #3 fix: non-Camel options should be forwarded
         // We'll test the config parsing, not the actual HTTP call
-        let config = HttpConfig::from_uri(
+        let config = HttpEndpointConfig::from_uri(
             "http://example.com/api?apiKey=secret123&httpMethod=GET&token=abc456",
         )
         .unwrap();
@@ -1833,7 +1836,7 @@ mod tests {
 
     #[test]
     fn test_ssrf_config_defaults() {
-        let config = HttpConfig::from_uri("http://example.com/api").unwrap();
+        let config = HttpEndpointConfig::from_uri("http://example.com/api").unwrap();
         assert!(
             !config.allow_private_ips,
             "Private IPs should be blocked by default"
@@ -1846,7 +1849,8 @@ mod tests {
 
     #[test]
     fn test_ssrf_config_allow_private_ips() {
-        let config = HttpConfig::from_uri("http://example.com/api?allowPrivateIps=true").unwrap();
+        let config =
+            HttpEndpointConfig::from_uri("http://example.com/api?allowPrivateIps=true").unwrap();
         assert!(
             config.allow_private_ips,
             "Private IPs should be allowed when explicitly set"
@@ -1855,9 +1859,10 @@ mod tests {
 
     #[test]
     fn test_ssrf_config_blocked_hosts() {
-        let config =
-            HttpConfig::from_uri("http://example.com/api?blockedHosts=evil.com,malware.net")
-                .unwrap();
+        let config = HttpEndpointConfig::from_uri(
+            "http://example.com/api?blockedHosts=evil.com,malware.net",
+        )
+        .unwrap();
         assert_eq!(config.blocked_hosts, vec!["evil.com", "malware.net"]);
     }
 

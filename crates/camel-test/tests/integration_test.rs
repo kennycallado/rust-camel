@@ -975,10 +975,11 @@ async fn test_http_component_registration_and_endpoint_creation() {
 
 #[tokio::test]
 async fn test_http_query_params_forwarding_config() {
-    use camel_component_http::HttpConfig;
+    use camel_component_http::HttpEndpointConfig;
+    use camel_endpoint::UriConfig;
 
     // Verify config parsing forwards non-Camel query params
-    let config = HttpConfig::from_uri(
+    let config = HttpEndpointConfig::from_uri(
         "http://api.example.com/v1/users?apiKey=secret123&httpMethod=GET&token=abc456",
     )
     .unwrap();

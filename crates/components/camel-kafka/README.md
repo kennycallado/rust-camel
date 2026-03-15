@@ -109,6 +109,43 @@ cargo run -p kafka-example
 KAFKA_BROKERS=localhost:9092 cargo test -p camel-component-kafka -- --ignored
 ```
 
+## Global Configuration
+
+Configure default Kafka settings in `Camel.toml` that apply to all Kafka endpoints:
+
+```toml
+[default.components.kafka]
+brokers = "localhost:9092"           # Bootstrap servers (default: localhost:9092)
+group_id = "camel"                   # Consumer group ID (default: camel)
+session_timeout_ms = 45000           # Consumer session timeout (default: 45000)
+request_timeout_ms = 30000           # Producer request timeout (default: 30000)
+auto_offset_reset = "latest"         # Offset reset policy (default: latest)
+security_protocol = "plaintext"      # Security protocol (default: plaintext)
+```
+
+URI parameters always override global defaults:
+
+```rust
+// Uses global brokers (localhost:9092) but overrides groupId
+.to("kafka:orders?groupId=my-service")
+
+// Overrides both global settings
+.to("kafka:orders?brokers=prod-kafka:9092&groupId=my-service")
+```
+
+### Profile-Specific Configuration
+
+```toml
+[default.components.kafka]
+brokers = "localhost:9092"
+group_id = "camel-dev"
+
+[production.components.kafka]
+brokers = "kafka-prod-1:9092,kafka-prod-2:9092"
+group_id = "camel-prod"
+security_protocol = "SASL_SSL"
+```
+
 ## Known Limitations
 
 - Batch consumption mode not implemented

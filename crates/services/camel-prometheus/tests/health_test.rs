@@ -4,10 +4,6 @@ use std::time::Duration;
 use camel_api::Lifecycle;
 use camel_prometheus::PrometheusService;
 
-fn bind_addr(port: u16) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)
-}
-
 async fn wait_for_server(port: u16, timeout_ms: u64) -> Result<(), String> {
     let start = std::time::Instant::now();
     let client = reqwest::Client::new();
@@ -32,7 +28,8 @@ async fn wait_for_server(port: u16, timeout_ms: u64) -> Result<(), String> {
 
 #[tokio::test]
 async fn test_healthz_endpoint() {
-    let mut service = PrometheusService::new(bind_addr(0));
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+    let mut service = PrometheusService::new(addr);
     service.start().await.unwrap();
     let port = service.port();
 
@@ -49,7 +46,8 @@ async fn test_healthz_endpoint() {
 
 #[tokio::test]
 async fn test_readyz_endpoint_healthy() {
-    let mut service = PrometheusService::new(bind_addr(0));
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+    let mut service = PrometheusService::new(addr);
     service.start().await.unwrap();
     let port = service.port();
 
@@ -70,7 +68,8 @@ async fn test_readyz_endpoint_healthy() {
 
 #[tokio::test]
 async fn test_health_endpoint() {
-    let mut service = PrometheusService::new(bind_addr(0));
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+    let mut service = PrometheusService::new(addr);
     service.start().await.unwrap();
     let port = service.port();
 

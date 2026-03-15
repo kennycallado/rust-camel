@@ -4,10 +4,6 @@ use std::time::Duration;
 use camel_core::context::CamelContext;
 use camel_prometheus::PrometheusService;
 
-fn bind_addr(port: u16) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)
-}
-
 async fn wait_for_server(port: u16, timeout_ms: u64) -> Result<(), String> {
     let start = std::time::Instant::now();
     let client = reqwest::Client::new();
@@ -32,7 +28,8 @@ async fn wait_for_server(port: u16, timeout_ms: u64) -> Result<(), String> {
 
 #[tokio::test]
 async fn test_health_with_context() {
-    let prometheus = PrometheusService::new(bind_addr(0));
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+    let prometheus = PrometheusService::new(addr);
     let port_accessor = prometheus.port_accessor();
 
     let mut ctx = CamelContext::new().with_lifecycle(prometheus);

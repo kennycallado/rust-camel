@@ -14,6 +14,70 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+impl From<&crate::config::HttpCamelConfig> for camel_component_http::HttpConfig {
+    fn from(c: &crate::config::HttpCamelConfig) -> Self {
+        camel_component_http::HttpConfig {
+            connect_timeout_ms: c.connect_timeout_ms,
+            response_timeout_ms: c.response_timeout_ms,
+            max_connections: c.max_connections,
+            max_body_size: c.max_body_size,
+            max_request_body: c.max_request_body,
+            allow_private_ips: c.allow_private_ips,
+        }
+    }
+}
+
+impl From<&crate::config::KafkaCamelConfig> for camel_component_kafka::KafkaConfig {
+    fn from(c: &crate::config::KafkaCamelConfig) -> Self {
+        camel_component_kafka::KafkaConfig {
+            brokers: c.brokers.clone(),
+            group_id: c.group_id.clone(),
+            session_timeout_ms: c.session_timeout_ms,
+            request_timeout_ms: c.request_timeout_ms,
+            auto_offset_reset: c.auto_offset_reset.clone(),
+            security_protocol: c.security_protocol.clone(),
+        }
+    }
+}
+
+impl From<&crate::config::RedisCamelConfig> for camel_component_redis::RedisConfig {
+    fn from(c: &crate::config::RedisCamelConfig) -> Self {
+        camel_component_redis::RedisConfig {
+            host: c.host.clone(),
+            port: c.port,
+        }
+    }
+}
+
+impl From<&crate::config::SqlCamelConfig> for camel_component_sql::SqlGlobalConfig {
+    fn from(c: &crate::config::SqlCamelConfig) -> Self {
+        camel_component_sql::SqlGlobalConfig::default()
+            .with_max_connections(c.max_connections)
+            .with_min_connections(c.min_connections)
+            .with_idle_timeout_secs(c.idle_timeout_secs)
+            .with_max_lifetime_secs(c.max_lifetime_secs)
+    }
+}
+
+impl From<&crate::config::FileCamelConfig> for camel_component_file::FileGlobalConfig {
+    fn from(c: &crate::config::FileCamelConfig) -> Self {
+        camel_component_file::FileGlobalConfig::default()
+            .with_delay_ms(c.delay_ms)
+            .with_initial_delay_ms(c.initial_delay_ms)
+            .with_read_timeout_ms(c.read_timeout_ms)
+            .with_write_timeout_ms(c.write_timeout_ms)
+    }
+}
+
+impl From<&crate::config::ContainerCamelConfig>
+    for camel_component_container::ContainerGlobalConfig
+{
+    fn from(c: &crate::config::ContainerCamelConfig) -> Self {
+        camel_component_container::ContainerGlobalConfig::default()
+            .with_docker_host(c.docker_host.clone())
+    }
+}
+
 impl CamelConfig {
     /// Load routes from config file and return them (without adding to context yet)
     /// This allows components to be registered before routes are resolved
@@ -87,21 +151,69 @@ impl CamelConfig {
             ctx = ctx.with_lifecycle(otel_service);
         }
 
-        // Prometheus
-        if let Some(ref prom) = config.observability.prometheus {
-            if prom.enabled {
-                let addr: std::net::SocketAddr = format!("{}:{}", prom.host, prom.port)
-                    .parse()
-                    .map_err(|_| {
-                        CamelError::Config(format!(
-                            "Invalid prometheus bind address: {}:{}",
-                            prom.host, prom.port
-                        ))
-                    })?;
-                let prom_service = camel_prometheus::PrometheusService::new(addr);
-                ctx = ctx.with_lifecycle(prom_service);
-            }
+        // Prometheus — replaces loose metrics_enabled / metrics_port
+        if let Some(ref prom) = config.observability.prometheus
+            && prom.enabled
+        {
+            let addr: std::net::SocketAddr = format!("{}:{}", prom.host, prom.port)
+                .parse()
+                .map_err(|_| {
+                    CamelError::Config(format!(
+                        "Invalid prometheus bind address: {}:{}",
+                        prom.host, prom.port
+                    ))
+                })?;
+            let prom_service = camel_prometheus::PrometheusService::new(addr);
+            ctx = ctx.with_lifecycle(prom_service);
         }
+
+        let http_config: camel_component_http::HttpConfig = config
+            .components
+            .http
+            .as_ref()
+            .map(camel_component_http::HttpConfig::from)
+            .unwrap_or_default();
+        ctx.set_component_config(http_config);
+
+        let kafka_config: camel_component_kafka::KafkaConfig = config
+            .components
+            .kafka
+            .as_ref()
+            .map(camel_component_kafka::KafkaConfig::from)
+            .unwrap_or_default();
+        ctx.set_component_config(kafka_config);
+
+        let redis_config: camel_component_redis::RedisConfig = config
+            .components
+            .redis
+            .as_ref()
+            .map(camel_component_redis::RedisConfig::from)
+            .unwrap_or_default();
+        ctx.set_component_config(redis_config);
+
+        let sql_config: camel_component_sql::SqlGlobalConfig = config
+            .components
+            .sql
+            .as_ref()
+            .map(camel_component_sql::SqlGlobalConfig::from)
+            .unwrap_or_default();
+        ctx.set_component_config(sql_config);
+
+        let file_config: camel_component_file::FileGlobalConfig = config
+            .components
+            .file
+            .as_ref()
+            .map(camel_component_file::FileGlobalConfig::from)
+            .unwrap_or_default();
+        ctx.set_component_config(file_config);
+
+        let container_config: camel_component_container::ContainerGlobalConfig = config
+            .components
+            .container
+            .as_ref()
+            .map(camel_component_container::ContainerGlobalConfig::from)
+            .unwrap_or_default();
+        ctx.set_component_config(container_config);
 
         ctx.set_tracer_config(tracer_config);
         Ok(ctx)
@@ -228,5 +340,24 @@ fn parse_log_level(s: &str) -> Level {
         "warn" | "warning" => Level::WARN,
         "error" => Level::ERROR,
         _ => Level::INFO,
+    }
+}
+
+#[cfg(test)]
+mod configure_context_smoke_tests {
+    use super::*;
+    use config::FileFormat;
+
+    #[test]
+    fn test_configure_context_empty_config() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str("", FileFormat::Toml))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+        // configure_context compiles and runs without error on empty config
+        let result = CamelConfig::configure_context(&cfg);
+        assert!(result.is_ok());
     }
 }

@@ -1,3 +1,4 @@
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -36,6 +37,7 @@ pub struct CamelContext {
     languages: SharedLanguageRegistry,
     shutdown_timeout: std::time::Duration,
     services: Vec<Box<dyn Lifecycle>>,
+    component_configs: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
 impl CamelContext {
@@ -76,6 +78,7 @@ impl CamelContext {
             languages,
             shutdown_timeout: std::time::Duration::from_secs(30),
             services: Vec::new(),
+            component_configs: HashMap::new(),
         }
     }
 
@@ -119,6 +122,7 @@ impl CamelContext {
             languages,
             shutdown_timeout: std::time::Duration::from_secs(30),
             services: Vec::new(),
+            component_configs: HashMap::new(),
         }
     }
 
@@ -380,6 +384,19 @@ impl CamelContext {
             services,
             ..Default::default()
         }
+    }
+
+    /// Store a component config. Overwrites any previously stored config of the same type.
+    pub fn set_component_config<T: 'static + Send + Sync>(&mut self, config: T) {
+        self.component_configs
+            .insert(TypeId::of::<T>(), Box::new(config));
+    }
+
+    /// Retrieve a stored component config by type. Returns None if not stored.
+    pub fn get_component_config<T: 'static + Send + Sync>(&self) -> Option<&T> {
+        self.component_configs
+            .get(&TypeId::of::<T>())
+            .and_then(|b| b.downcast_ref::<T>())
     }
 }
 
@@ -801,5 +818,37 @@ mod lifecycle_tests {
             vec!["third", "second", "first"],
             "services must stop in reverse insertion order"
         );
+    }
+}
+
+#[cfg(test)]
+mod config_registry_tests {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct MyConfig {
+        value: u32,
+    }
+
+    #[test]
+    fn test_set_and_get_component_config() {
+        let mut ctx = CamelContext::new();
+        ctx.set_component_config(MyConfig { value: 42 });
+        let got = ctx.get_component_config::<MyConfig>();
+        assert_eq!(got, Some(&MyConfig { value: 42 }));
+    }
+
+    #[test]
+    fn test_get_missing_config_returns_none() {
+        let ctx = CamelContext::new();
+        assert!(ctx.get_component_config::<MyConfig>().is_none());
+    }
+
+    #[test]
+    fn test_set_overwrites_previous_config() {
+        let mut ctx = CamelContext::new();
+        ctx.set_component_config(MyConfig { value: 1 });
+        ctx.set_component_config(MyConfig { value: 2 });
+        assert_eq!(ctx.get_component_config::<MyConfig>().unwrap().value, 2);
     }
 }

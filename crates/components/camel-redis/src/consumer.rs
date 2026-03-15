@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::config::{RedisCommand, RedisConfig};
+use crate::config::{RedisCommand, RedisEndpointConfig};
 
 /// Mode of operation for the Redis consumer.
 #[derive(Debug, Clone)]
@@ -31,7 +31,7 @@ pub enum RedisConsumerMode {
 
 /// Redis consumer implementation supporting both Pub/Sub and Queue modes.
 pub struct RedisConsumer {
-    config: RedisConfig,
+    config: RedisEndpointConfig,
     mode: RedisConsumerMode,
     /// Cancellation token for graceful shutdown
     cancel_token: Option<CancellationToken>,
@@ -46,7 +46,7 @@ impl RedisConsumer {
     /// - SUBSCRIBE → PubSub with channels
     /// - PSUBSCRIBE → PubSub with patterns
     /// - BLPOP/BRPOP → Queue mode
-    pub fn new(config: RedisConfig) -> Self {
+    pub fn new(config: RedisEndpointConfig) -> Self {
         let mode = match &config.command {
             RedisCommand::Subscribe => RedisConsumerMode::PubSub {
                 channels: config.channels.clone(),
@@ -160,7 +160,7 @@ impl Consumer for RedisConsumer {
 /// channels and/or patterns. Messages are converted to Exchanges and sent
 /// through the consumer context.
 async fn run_pubsub_consumer(
-    config: RedisConfig,
+    config: RedisEndpointConfig,
     channels: Vec<String>,
     patterns: Vec<String>,
     ctx: ConsumerContext,
@@ -226,7 +226,7 @@ async fn run_pubsub_consumer(
 /// Creates a dedicated connection and performs blocking list pop operations.
 /// Items are converted to Exchanges and sent through the consumer context.
 async fn run_queue_consumer(
-    config: RedisConfig,
+    config: RedisEndpointConfig,
     key: String,
     timeout: u64,
     ctx: ConsumerContext,
@@ -340,10 +340,10 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
 
-    fn create_test_config(command: RedisCommand) -> RedisConfig {
-        RedisConfig {
-            host: "localhost".to_string(),
-            port: 6379,
+    fn create_test_config(command: RedisCommand) -> RedisEndpointConfig {
+        RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6379),
             command,
             channels: vec!["test".to_string()],
             key: Some("test-queue".to_string()),

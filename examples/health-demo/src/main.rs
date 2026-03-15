@@ -1,10 +1,11 @@
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
 use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
 use camel_prometheus::PrometheusService;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tracing::info;
 
 #[tokio::main]
@@ -20,10 +21,8 @@ async fn main() -> Result<(), CamelError> {
     );
 
     // Create Prometheus service with dynamic port allocation
-    let prometheus = PrometheusService::new(SocketAddr::new(
-        IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-        9090,
-    ));
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 9090);
+    let prometheus = PrometheusService::new(addr);
 
     // Create CamelContext with the prometheus service
     let mut ctx = CamelContext::new().with_lifecycle(prometheus);

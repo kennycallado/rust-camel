@@ -234,6 +234,41 @@ let consumer = RouteBuilder::from("redis://localhost:6379?command=BLPOP&key=jobs
     .build()?;
 ```
 
+## Global Configuration
+
+Configure default Redis connection settings in `Camel.toml` that apply to all Redis endpoints:
+
+```toml
+[default.components.redis]
+host = "localhost"       # Redis host (default: localhost)
+port = 6379              # Redis port (default: 6379)
+```
+
+URI parameters always override global defaults:
+
+```rust
+// Uses global host/port (localhost:6379)
+.to("redis://?command=GET")
+
+// Overrides port from global config
+.to("redis://:6380?command=GET")
+
+// Full override with different host
+.to("redis://redis-prod:6379?command=GET")
+```
+
+### Profile-Specific Configuration
+
+```toml
+[default.components.redis]
+host = "localhost"
+port = 6379
+
+[production.components.redis]
+host = "redis-prod.internal"
+port = 6379
+```
+
 ## Documentation
 
 - [API Documentation](https://docs.rs/camel-component-redis)

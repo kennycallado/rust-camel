@@ -217,6 +217,45 @@ let route = RouteBuilder::from("direct:resilient")
     .build()?;
 ```
 
+## Global Configuration
+
+Configure default HTTP settings in `Camel.toml` that apply to all HTTP endpoints:
+
+```toml
+[default.components.http]
+connect_timeout_ms = 5000        # Connection timeout (default: 30000)
+response_timeout_ms = 30000      # Response timeout (default: none)
+max_connections = 100            # Max concurrent connections (default: 100)
+max_body_size = 10485760         # Max response body size, 10MB (default: 10MB)
+max_request_body = 2097152       # Max request body for server, 2MB (default: 2MB)
+allow_private_ips = false        # Allow requests to private IPs (default: false)
+```
+
+URI parameters always override global defaults:
+
+```rust
+// Uses global connect_timeout_ms (5000) but overrides allowPrivateIps
+.to("http://api.example.com?allowPrivateIps=true")
+
+// Overrides both global settings
+.to("http://api.example.com?connectTimeout=10000&allowPrivateIps=true")
+```
+
+### Profile-Specific Configuration
+
+```toml
+[default.components.http]
+connect_timeout_ms = 30000
+
+[production.components.http]
+connect_timeout_ms = 5000   # Faster fail in production
+allow_private_ips = false
+
+[development.components.http]
+connect_timeout_ms = 60000  # More lenient in dev
+allow_private_ips = true    # Allow internal services in dev
+```
+
 ## SSRF Protection
 
 By default, the HTTP client blocks requests to private IP addresses for security. To allow:

@@ -5,18 +5,18 @@ use camel_api::{BoxProcessor, CamelError};
 use camel_component::{Consumer, Endpoint, ProducerContext};
 use sqlx::AnyPool;
 
-use crate::config::SqlConfig;
+use crate::config::SqlEndpointConfig;
 use crate::consumer::SqlConsumer;
 use crate::producer::SqlProducer;
 
 pub(crate) struct SqlEndpoint {
     uri: String,
-    pub(crate) config: SqlConfig,
+    pub(crate) config: SqlEndpointConfig,
     pub(crate) pool: Arc<OnceCell<AnyPool>>,
 }
 
 impl SqlEndpoint {
-    pub fn new(uri: String, config: SqlConfig) -> Self {
+    pub fn new(uri: String, config: SqlEndpointConfig) -> Self {
         Self {
             uri,
             config,

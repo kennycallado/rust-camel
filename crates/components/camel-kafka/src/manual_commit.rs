@@ -1,6 +1,6 @@
 //! Manual Kafka offset commit API.
 //!
-//! When `KafkaConfig::allow_manual_commit` is true, the consumer creates a
+//! When `KafkaEndpointConfig::allow_manual_commit` is true, the consumer creates a
 //! `KafkaManualCommit` per message and stores it in `exchange.extensions`
 //! under the key `"kafka.manual_commit"`.  User processors retrieve it via
 //! `exchange.get_extension::<KafkaManualCommit>("kafka.manual_commit")`.

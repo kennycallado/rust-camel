@@ -4,10 +4,6 @@ use std::time::{Duration, Instant};
 use camel_api::Lifecycle;
 use camel_prometheus::PrometheusService;
 
-fn bind_addr(port: u16) -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port)
-}
-
 /// Wait for the Prometheus server to become available with retry mechanism.
 ///
 /// Polls the /metrics endpoint until it responds or timeout is reached.
@@ -40,7 +36,8 @@ async fn wait_for_server(port: u16, timeout_ms: u64) -> Result<(), String> {
 #[tokio::test]
 async fn test_prometheus_service_lifecycle() {
     // Use port 0 to let OS assign an available port (avoids port conflicts)
-    let mut service = PrometheusService::new(bind_addr(0));
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+    let mut service = PrometheusService::new(addr);
 
     assert_eq!(service.name(), "prometheus");
 
@@ -106,7 +103,8 @@ async fn test_prometheus_service_lifecycle() {
 #[tokio::test]
 async fn test_prometheus_service_bind_error() {
     // Start first service on port 0 (OS assigns available port)
-    let mut service1 = PrometheusService::new(bind_addr(0));
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+    let mut service1 = PrometheusService::new(addr);
     service1
         .start()
         .await
@@ -119,7 +117,8 @@ async fn test_prometheus_service_bind_error() {
         .expect("First server should start");
 
     // Try to start second service on the same port - should fail
-    let mut service2 = PrometheusService::new(bind_addr(port));
+    let addr2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port);
+    let mut service2 = PrometheusService::new(addr2);
     let result = service2.start().await;
 
     assert!(
@@ -147,7 +146,8 @@ async fn test_prometheus_service_with_context() {
     use camel_core::context::CamelContext;
 
     // Create service and get port accessor before moving service to context
-    let prometheus = PrometheusService::new(bind_addr(0));
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+    let prometheus = PrometheusService::new(addr);
     let port_accessor = prometheus.port_accessor();
     let metrics = prometheus.as_metrics_collector().unwrap();
 
@@ -185,7 +185,8 @@ async fn test_prometheus_service_with_context() {
 async fn test_prometheus_service_multiple_start_stop_cycles() {
     // Verify that we can start/stop multiple times with different ports
     for i in 0..3 {
-        let mut service = PrometheusService::new(bind_addr(0));
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+        let mut service = PrometheusService::new(addr);
         service
             .start()
             .await

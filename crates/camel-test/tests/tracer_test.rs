@@ -73,8 +73,6 @@ fn test_tracer_file_output_invalid_path_returns_error() {
         timeout_ms: 5000,
         components: ComponentsConfig::default(),
         observability: ObservabilityConfig {
-            metrics_enabled: false,
-            metrics_port: 9090,
             tracer: TracerConfig {
                 enabled: true,
                 detail_level: DetailLevel::Minimal,
@@ -92,6 +90,7 @@ fn test_tracer_file_output_invalid_path_returns_error() {
                 ..Default::default()
             },
             otel: None,
+            prometheus: None,
         },
         supervision: None,
     };
