@@ -14,6 +14,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+#[cfg(feature = "http")]
 impl From<&crate::config::HttpCamelConfig> for camel_component_http::HttpConfig {
     fn from(c: &crate::config::HttpCamelConfig) -> Self {
         camel_component_http::HttpConfig {
@@ -27,6 +28,7 @@ impl From<&crate::config::HttpCamelConfig> for camel_component_http::HttpConfig 
     }
 }
 
+#[cfg(feature = "kafka")]
 impl From<&crate::config::KafkaCamelConfig> for camel_component_kafka::KafkaConfig {
     fn from(c: &crate::config::KafkaCamelConfig) -> Self {
         camel_component_kafka::KafkaConfig {
@@ -40,6 +42,7 @@ impl From<&crate::config::KafkaCamelConfig> for camel_component_kafka::KafkaConf
     }
 }
 
+#[cfg(feature = "redis")]
 impl From<&crate::config::RedisCamelConfig> for camel_component_redis::RedisConfig {
     fn from(c: &crate::config::RedisCamelConfig) -> Self {
         camel_component_redis::RedisConfig {
@@ -49,6 +52,7 @@ impl From<&crate::config::RedisCamelConfig> for camel_component_redis::RedisConf
     }
 }
 
+#[cfg(feature = "sql")]
 impl From<&crate::config::SqlCamelConfig> for camel_component_sql::SqlGlobalConfig {
     fn from(c: &crate::config::SqlCamelConfig) -> Self {
         camel_component_sql::SqlGlobalConfig::default()
@@ -59,6 +63,7 @@ impl From<&crate::config::SqlCamelConfig> for camel_component_sql::SqlGlobalConf
     }
 }
 
+#[cfg(feature = "file")]
 impl From<&crate::config::FileCamelConfig> for camel_component_file::FileGlobalConfig {
     fn from(c: &crate::config::FileCamelConfig) -> Self {
         camel_component_file::FileGlobalConfig::default()
@@ -69,6 +74,7 @@ impl From<&crate::config::FileCamelConfig> for camel_component_file::FileGlobalC
     }
 }
 
+#[cfg(feature = "container")]
 impl From<&crate::config::ContainerCamelConfig>
     for camel_component_container::ContainerGlobalConfig
 {
@@ -106,7 +112,17 @@ impl CamelConfig {
 
         // Build context with optional supervision
         let mut ctx = if let Some(ref sup) = config.supervision {
-            CamelContext::with_supervision(sup.clone().into_supervision_config())
+            if let Some(path) = config.runtime_journal_path.as_deref() {
+                CamelContext::with_supervision_and_metrics_and_runtime_journal_path(
+                    sup.clone().into_supervision_config(),
+                    std::sync::Arc::new(camel_api::NoOpMetrics),
+                    path.to_string(),
+                )
+            } else {
+                CamelContext::with_supervision(sup.clone().into_supervision_config())
+            }
+        } else if let Some(path) = config.runtime_journal_path.as_deref() {
+            CamelContext::new_with_runtime_journal_path(path.to_string())
         } else {
             CamelContext::new()
         };
@@ -167,53 +183,71 @@ impl CamelConfig {
             ctx = ctx.with_lifecycle(prom_service);
         }
 
-        let http_config: camel_component_http::HttpConfig = config
-            .components
-            .http
-            .as_ref()
-            .map(camel_component_http::HttpConfig::from)
-            .unwrap_or_default();
-        ctx.set_component_config(http_config);
+        #[cfg(feature = "http")]
+        {
+            let http_config: camel_component_http::HttpConfig = config
+                .components
+                .http
+                .as_ref()
+                .map(camel_component_http::HttpConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(http_config);
+        }
 
-        let kafka_config: camel_component_kafka::KafkaConfig = config
-            .components
-            .kafka
-            .as_ref()
-            .map(camel_component_kafka::KafkaConfig::from)
-            .unwrap_or_default();
-        ctx.set_component_config(kafka_config);
+        #[cfg(feature = "kafka")]
+        {
+            let kafka_config: camel_component_kafka::KafkaConfig = config
+                .components
+                .kafka
+                .as_ref()
+                .map(camel_component_kafka::KafkaConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(kafka_config);
+        }
 
-        let redis_config: camel_component_redis::RedisConfig = config
-            .components
-            .redis
-            .as_ref()
-            .map(camel_component_redis::RedisConfig::from)
-            .unwrap_or_default();
-        ctx.set_component_config(redis_config);
+        #[cfg(feature = "redis")]
+        {
+            let redis_config: camel_component_redis::RedisConfig = config
+                .components
+                .redis
+                .as_ref()
+                .map(camel_component_redis::RedisConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(redis_config);
+        }
 
-        let sql_config: camel_component_sql::SqlGlobalConfig = config
-            .components
-            .sql
-            .as_ref()
-            .map(camel_component_sql::SqlGlobalConfig::from)
-            .unwrap_or_default();
-        ctx.set_component_config(sql_config);
+        #[cfg(feature = "sql")]
+        {
+            let sql_config: camel_component_sql::SqlGlobalConfig = config
+                .components
+                .sql
+                .as_ref()
+                .map(camel_component_sql::SqlGlobalConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(sql_config);
+        }
 
-        let file_config: camel_component_file::FileGlobalConfig = config
-            .components
-            .file
-            .as_ref()
-            .map(camel_component_file::FileGlobalConfig::from)
-            .unwrap_or_default();
-        ctx.set_component_config(file_config);
+        #[cfg(feature = "file")]
+        {
+            let file_config: camel_component_file::FileGlobalConfig = config
+                .components
+                .file
+                .as_ref()
+                .map(camel_component_file::FileGlobalConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(file_config);
+        }
 
-        let container_config: camel_component_container::ContainerGlobalConfig = config
-            .components
-            .container
-            .as_ref()
-            .map(camel_component_container::ContainerGlobalConfig::from)
-            .unwrap_or_default();
-        ctx.set_component_config(container_config);
+        #[cfg(feature = "container")]
+        {
+            let container_config: camel_component_container::ContainerGlobalConfig = config
+                .components
+                .container
+                .as_ref()
+                .map(camel_component_container::ContainerGlobalConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(container_config);
+        }
 
         ctx.set_tracer_config(tracer_config);
         Ok(ctx)

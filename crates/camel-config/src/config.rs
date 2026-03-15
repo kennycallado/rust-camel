@@ -15,6 +15,12 @@ pub struct CamelConfig {
     #[serde(default)]
     pub watch: bool,
 
+    /// Optional stable runtime journal path for CQRS event durability/replay.
+    ///
+    /// When unset, runtime durability/replay is disabled and runtime state is ephemeral.
+    #[serde(default)]
+    pub runtime_journal_path: Option<String>,
+
     #[serde(default = "default_log_level")]
     pub log_level: String,
 
@@ -851,9 +857,10 @@ port = 9091
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "http"))]
 mod http_from_tests {
     use crate::config::HttpCamelConfig;
+    use camel_component_http;
 
     #[test]
     fn test_http_camel_config_to_http_config() {

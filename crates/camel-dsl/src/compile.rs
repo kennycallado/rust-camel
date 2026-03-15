@@ -8,7 +8,15 @@ use camel_api::splitter::{
     AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
     split_body_lines,
 };
-use camel_api::{CamelError, CircuitBreakerConfig, IdentityProcessor};
+use camel_api::{
+    CamelError, CanonicalRouteSpec, CircuitBreakerConfig, IdentityProcessor,
+    canonical_contract_rejection_reason,
+    runtime::{
+        CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
+        CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
+        CanonicalWhenSpec,
+    },
+};
 use camel_component::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{ConvertBodyTo, LogLevel, StopService};
@@ -49,6 +57,30 @@ pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinit
     }
 
     Ok(definition)
+}
+
+pub fn compile_declarative_route_to_canonical(
+    route: DeclarativeRoute,
+) -> Result<CanonicalRouteSpec, CamelError> {
+    let circuit_breaker = route.circuit_breaker.map(|cb| CanonicalCircuitBreakerSpec {
+        failure_threshold: cb.failure_threshold,
+        open_duration_ms: cb.open_duration_ms,
+    });
+    let steps = route
+        .steps
+        .into_iter()
+        .map(compile_declarative_step_to_canonical)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let spec = CanonicalRouteSpec {
+        route_id: route.route_id,
+        from: route.from,
+        steps,
+        circuit_breaker,
+        version: camel_api::CANONICAL_CONTRACT_VERSION,
+    };
+    spec.validate_contract()?;
+    Ok(spec)
 }
 
 fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerConfig, CamelError> {
@@ -156,6 +188,149 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
         DeclarativeStep::Bean(BeanStepDef { name, method }) => {
             Ok(BuilderStep::Bean { name, method })
         }
+    }
+}
+
+fn compile_declarative_step_to_canonical(
+    step: DeclarativeStep,
+) -> Result<CanonicalStepSpec, CamelError> {
+    match step {
+        DeclarativeStep::To(ToStepDef { uri }) => Ok(CanonicalStepSpec::To { uri }),
+        DeclarativeStep::Stop => Ok(CanonicalStepSpec::Stop),
+        DeclarativeStep::Log(LogStepDef { message, .. }) => Ok(CanonicalStepSpec::Log {
+            message: compile_log_message(message)?,
+        }),
+        DeclarativeStep::WireTap(WireTapStepDef { uri }) => Ok(CanonicalStepSpec::WireTap { uri }),
+        DeclarativeStep::Script(ScriptStepDef { expression }) => {
+            Ok(CanonicalStepSpec::Script { expression })
+        }
+        DeclarativeStep::Filter(def) => Ok(CanonicalStepSpec::Filter {
+            predicate: def.predicate,
+            steps: compile_declarative_steps_to_canonical(def.steps)?,
+        }),
+        DeclarativeStep::Choice(ChoiceStepDef { whens, otherwise }) => {
+            let mut canonical_whens = Vec::with_capacity(whens.len());
+            for when in whens {
+                canonical_whens.push(CanonicalWhenSpec {
+                    predicate: when.predicate,
+                    steps: compile_declarative_steps_to_canonical(when.steps)?,
+                });
+            }
+            let otherwise = match otherwise {
+                Some(steps) => Some(compile_declarative_steps_to_canonical(steps)?),
+                None => None,
+            };
+            Ok(CanonicalStepSpec::Choice {
+                whens: canonical_whens,
+                otherwise,
+            })
+        }
+        DeclarativeStep::Split(def) => compile_split_step_to_canonical(def),
+        DeclarativeStep::Aggregate(def) => compile_aggregate_step_to_canonical(def),
+        other => {
+            let step_name = declarative_step_name(&other);
+            let detail = canonical_contract_rejection_reason(step_name)
+                .unwrap_or("not included in canonical v1");
+            Err(CamelError::RouteError(format!(
+                "canonical v1 does not support step `{step_name}`: {detail}"
+            )))
+        }
+    }
+}
+
+fn compile_declarative_steps_to_canonical(
+    steps: Vec<DeclarativeStep>,
+) -> Result<Vec<CanonicalStepSpec>, CamelError> {
+    steps
+        .into_iter()
+        .map(compile_declarative_step_to_canonical)
+        .collect()
+}
+
+fn compile_split_step_to_canonical(def: SplitStepDef) -> Result<CanonicalStepSpec, CamelError> {
+    let expression = match def.expression {
+        SplitExpressionDef::BodyLines => CanonicalSplitExpressionSpec::BodyLines,
+        SplitExpressionDef::BodyJsonArray => CanonicalSplitExpressionSpec::BodyJsonArray,
+        SplitExpressionDef::Language(expr) => CanonicalSplitExpressionSpec::Language(expr),
+    };
+    let aggregation = match def.aggregation {
+        SplitAggregationDef::LastWins => CanonicalSplitAggregationSpec::LastWins,
+        SplitAggregationDef::CollectAll => CanonicalSplitAggregationSpec::CollectAll,
+        SplitAggregationDef::Original => CanonicalSplitAggregationSpec::Original,
+    };
+    Ok(CanonicalStepSpec::Split {
+        expression,
+        aggregation,
+        parallel: def.parallel,
+        parallel_limit: def.parallel_limit,
+        stop_on_exception: def.stop_on_exception,
+        steps: compile_declarative_steps_to_canonical(def.steps)?,
+    })
+}
+
+fn compile_aggregate_step_to_canonical(
+    def: AggregateStepDef,
+) -> Result<CanonicalStepSpec, CamelError> {
+    if def.completion_timeout_ms.is_some() {
+        return Err(CamelError::RouteError(
+            "aggregate.completion_timeout_ms is not yet implemented".to_string(),
+        ));
+    }
+
+    if def.completion_predicate.is_some() {
+        return Err(CamelError::RouteError(
+            "aggregate.completion_predicate is not yet implemented".to_string(),
+        ));
+    }
+
+    let strategy = match def.strategy {
+        AggregateStrategyDef::CollectAll => CanonicalAggregateStrategySpec::CollectAll,
+    };
+
+    Ok(CanonicalStepSpec::Aggregate {
+        config: CanonicalAggregateSpec {
+            header: def.header,
+            completion_size: def.completion_size,
+            strategy,
+            max_buckets: def.max_buckets,
+            bucket_ttl_ms: def.bucket_ttl_ms,
+        },
+    })
+}
+
+fn compile_log_message(message: ValueSourceDef) -> Result<String, CamelError> {
+    match message {
+        ValueSourceDef::Literal(value) => Ok(match value {
+            serde_json::Value::String(text) => text,
+            other => other.to_string(),
+        }),
+        ValueSourceDef::Expression(LanguageExpressionDef { language, source }) => {
+            if language != "simple" {
+                return Err(CamelError::RouteError(format!(
+                    "canonical v1 only supports log expressions in simple language; got `{language}`"
+                )));
+            }
+            Ok(source)
+        }
+    }
+}
+
+fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
+    match step {
+        DeclarativeStep::To(_) => "to",
+        DeclarativeStep::Log(_) => "log",
+        DeclarativeStep::SetHeader(_) => "set_header",
+        DeclarativeStep::SetBody(_) => "set_body",
+        DeclarativeStep::Filter(_) => "filter",
+        DeclarativeStep::Choice(_) => "choice",
+        DeclarativeStep::Split(_) => "split",
+        DeclarativeStep::Aggregate(_) => "aggregate",
+        DeclarativeStep::WireTap(_) => "wire_tap",
+        DeclarativeStep::Multicast(_) => "multicast",
+        DeclarativeStep::Stop => "stop",
+        DeclarativeStep::Script(_) => "script",
+        DeclarativeStep::ConvertBodyTo(_) => "convert_body_to",
+        DeclarativeStep::Bean(_) => "bean",
     }
 }
 

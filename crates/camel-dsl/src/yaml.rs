@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use camel_api::CamelError;
+use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
-use crate::compile::compile_declarative_route;
+use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical};
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
@@ -55,6 +55,13 @@ pub fn parse_yaml(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
     parse_yaml_to_declarative(yaml)?
         .into_iter()
         .map(compile_declarative_route)
+        .collect()
+}
+
+pub fn parse_yaml_to_canonical(yaml: &str) -> Result<Vec<CanonicalRouteSpec>, CamelError> {
+    parse_yaml_to_declarative(yaml)?
+        .into_iter()
+        .map(compile_declarative_route_to_canonical)
         .collect()
 }
 
@@ -615,6 +622,95 @@ routes:
         assert!(!routes[0].auto_startup);
         assert_eq!(routes[0].startup_order, 7);
         assert_eq!(routes[0].steps.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_yaml_to_canonical_supports_to_log_stop_subset() {
+        let yaml = r#"
+routes:
+  - id: "canonical-v1"
+    from: "direct:start"
+    steps:
+      - to: "mock:out"
+      - log:
+          message: "hello"
+      - stop: true
+"#;
+        let routes = parse_yaml_to_canonical(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id, "canonical-v1");
+        assert_eq!(routes[0].from, "direct:start");
+        assert_eq!(routes[0].version, 1);
+        assert_eq!(routes[0].steps.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_yaml_to_canonical_supports_advanced_declarative_steps() {
+        let yaml = r#"
+routes:
+  - id: "canonical-v1-advanced"
+    from: "direct:start"
+    circuit_breaker:
+      failure_threshold: 4
+      open_duration_ms: 750
+    steps:
+      - filter:
+          simple: "${header.kind} == 'A'"
+          steps:
+            - to: "mock:filtered"
+      - choice:
+          when:
+            - simple: "${header.kind} == 'A'"
+              steps:
+                - to: "mock:a"
+          otherwise:
+            - to: "mock:other"
+      - split:
+          expression: body_lines
+          aggregation: collect_all
+          steps:
+            - to: "mock:split"
+      - aggregate:
+          header: "orderId"
+          completion_size: 2
+      - wire_tap: "mock:tap"
+      - script:
+          language: "simple"
+          source: "${body}"
+"#;
+
+        let routes = parse_yaml_to_canonical(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id, "canonical-v1-advanced");
+        assert_eq!(routes[0].steps.len(), 6);
+        let cb = routes[0]
+            .circuit_breaker
+            .as_ref()
+            .expect("circuit breaker should be present");
+        assert_eq!(cb.failure_threshold, 4);
+        assert_eq!(cb.open_duration_ms, 750);
+    }
+
+    #[test]
+    fn test_parse_yaml_to_canonical_rejects_unsupported_steps() {
+        let yaml = r#"
+routes:
+  - id: "canonical-v1-unsupported"
+    from: "direct:start"
+    steps:
+      - set_header:
+          key: "k"
+          value: "v"
+"#;
+        let err = parse_yaml_to_canonical(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("canonical v1 does not support step `set_header`"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.contains("out-of-scope"),
+            "expected explicit canonical subset reason, got: {err}"
+        );
     }
 
     #[test]

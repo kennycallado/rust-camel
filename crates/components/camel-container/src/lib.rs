@@ -1364,7 +1364,7 @@ mod tests {
         let config =
             ContainerConfig::from_uri("container:run?image=nginx&ports=8080:80/tcp,5353:53/udp")
                 .unwrap();
-        let (exposed, bindings) = config.parse_ports().unwrap();
+        let (exposed, _bindings) = config.parse_ports().unwrap();
 
         assert!(exposed.contains_key("80/tcp"));
         assert!(exposed.contains_key("53/udp"));
@@ -1404,46 +1404,8 @@ mod tests {
         assert!(config.parse_env().is_none());
     }
 
-    mod test_helpers {
-        use async_trait::async_trait;
-        use camel_api::CamelError;
-
-        /// A no-op route controller for testing purposes.
-        pub struct NullRouteController;
-
-        #[async_trait]
-        impl camel_api::RouteController for NullRouteController {
-            async fn start_route(&mut self, _: &str) -> Result<(), CamelError> {
-                Ok(())
-            }
-            async fn stop_route(&mut self, _: &str) -> Result<(), CamelError> {
-                Ok(())
-            }
-            async fn restart_route(&mut self, _: &str) -> Result<(), CamelError> {
-                Ok(())
-            }
-            async fn suspend_route(&mut self, _: &str) -> Result<(), CamelError> {
-                Ok(())
-            }
-            async fn resume_route(&mut self, _: &str) -> Result<(), CamelError> {
-                Ok(())
-            }
-            fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
-                None
-            }
-            async fn start_all_routes(&mut self) -> Result<(), CamelError> {
-                Ok(())
-            }
-            async fn stop_all_routes(&mut self) -> Result<(), CamelError> {
-                Ok(())
-            }
-        }
-    }
-
     use camel_api::Message;
     use std::sync::Arc;
-    use test_helpers::NullRouteController;
-    use tokio::sync::Mutex;
 
     #[tokio::test]
     async fn test_container_producer_resolves_operation_from_header() {
@@ -1464,7 +1426,7 @@ mod tests {
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:run").unwrap();
 
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
@@ -1499,7 +1461,7 @@ mod tests {
             .create_endpoint("container:list?host=unix:///nonexistent/docker.sock")
             .unwrap();
 
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let result = endpoint.create_producer(&ctx);
 
         // The producer should return an error because it cannot connect to the invalid socket
@@ -1542,7 +1504,7 @@ mod tests {
 
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:start").unwrap();
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         // Test each lifecycle operation without CamelContainerId header
@@ -1596,7 +1558,7 @@ mod tests {
 
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:stop").unwrap();
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
@@ -1651,7 +1613,7 @@ mod tests {
         // Create producer without an image in the URI
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:run").unwrap();
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
@@ -1700,7 +1662,7 @@ mod tests {
         // Create producer without an image in the URI
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:run").unwrap();
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
@@ -1783,7 +1745,7 @@ mod tests {
         // Create producer
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:run").unwrap();
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         // Run container with unique name
@@ -1994,7 +1956,7 @@ mod tests {
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:list").unwrap();
 
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         // Create exchange with list operation in header

@@ -33,11 +33,17 @@ use std::task::{Context, Poll};
 
 #[cfg(test)]
 use async_trait::async_trait;
+#[cfg(test)]
 use tokio::sync::Mutex;
 use tower::Service;
 use tracing::debug;
 
-use camel_api::{Body, BoxProcessor, CamelError, Exchange, RouteAction, RouteStatus};
+#[cfg(test)]
+use camel_api::RouteStatus;
+use camel_api::{
+    Body, BoxProcessor, CamelError, Exchange, RouteAction, RuntimeCommand, RuntimeQuery,
+    RuntimeQueryResult,
+};
 use camel_component::{Component, Consumer, Endpoint, ProducerContext};
 use camel_endpoint::parse_uri;
 
@@ -156,11 +162,16 @@ impl Endpoint for ControlBusEndpoint {
                 "controlbus: action is required to create producer".to_string(),
             )
         })?;
+        let runtime = ctx.runtime().cloned().ok_or_else(|| {
+            CamelError::EndpointCreationFailed(
+                "controlbus: runtime handle is required in ProducerContext".to_string(),
+            )
+        })?;
 
         Ok(BoxProcessor::new(ControlBusProducer {
             route_id: self.route_id.clone(),
             action,
-            controller: ctx.route_controller().clone(),
+            runtime,
         }))
     }
 }
@@ -176,8 +187,8 @@ struct ControlBusProducer {
     route_id: Option<String>,
     /// Action to perform on the route.
     action: RouteAction,
-    /// Route controller for executing actions.
-    controller: Arc<Mutex<dyn camel_api::RouteController>>,
+    /// Runtime command/query handle.
+    runtime: Arc<dyn camel_api::RuntimeHandle>,
 }
 
 impl Service<Exchange> for ControlBusProducer {
@@ -212,62 +223,105 @@ impl Service<Exchange> for ControlBusProducer {
         };
 
         let action = self.action.clone();
-        let controller = self.controller.clone();
+        let runtime = self.runtime.clone();
+        let command_scope = format!("controlbus:{route_id}:{}", exchange.correlation_id());
 
         Box::pin(async move {
-            let mut ctrl = controller.lock().await;
-
             debug!(
                 route_id = %route_id,
                 action = ?action,
                 "ControlBus executing action"
             );
 
-            match action {
-                RouteAction::Start => {
-                    ctrl.start_route(&route_id).await?;
+            match execute_runtime_action(runtime.as_ref(), &route_id, &action, &command_scope)
+                .await?
+            {
+                Some(status) => {
+                    exchange.input.body = Body::Text(status);
+                    Ok(exchange)
                 }
-                RouteAction::Stop => {
-                    ctrl.stop_route(&route_id).await?;
-                }
-                RouteAction::Suspend => {
-                    ctrl.suspend_route(&route_id).await?;
-                }
-                RouteAction::Resume => {
-                    ctrl.resume_route(&route_id).await?;
-                }
-                RouteAction::Restart => {
-                    ctrl.restart_route(&route_id).await?;
-                }
-                RouteAction::Status => {
-                    let status = ctrl.route_status(&route_id).ok_or_else(|| {
-                        CamelError::ProcessorError(format!(
-                            "controlbus: route '{}' not found",
-                            route_id
-                        ))
-                    })?;
-                    exchange.input.body = Body::Text(format_status(&status));
-                    return Ok(exchange);
+                None => {
+                    exchange.input.body = Body::Empty;
+                    Ok(exchange)
                 }
             }
-
-            // For all actions except Status, set body to Empty
-            exchange.input.body = Body::Empty;
-            Ok(exchange)
         })
     }
 }
 
-/// Format a RouteStatus for display in the exchange body.
-fn format_status(status: &RouteStatus) -> String {
-    match status {
-        RouteStatus::Stopped => "Stopped".to_string(),
-        RouteStatus::Starting => "Starting".to_string(),
-        RouteStatus::Started => "Started".to_string(),
-        RouteStatus::Stopping => "Stopping".to_string(),
-        RouteStatus::Suspended => "Suspended".to_string(),
-        RouteStatus::Failed(msg) => format!("Failed: {}", msg),
+async fn execute_runtime_action(
+    runtime: &dyn camel_api::RuntimeHandle,
+    route_id: &str,
+    action: &RouteAction,
+    command_scope: &str,
+) -> Result<Option<String>, CamelError> {
+    match action {
+        RouteAction::Start => {
+            runtime
+                .execute(RuntimeCommand::StartRoute {
+                    route_id: route_id.to_string(),
+                    command_id: command_id(command_scope, "start"),
+                    causation_id: None,
+                })
+                .await?;
+            Ok(None)
+        }
+        RouteAction::Stop => {
+            runtime
+                .execute(RuntimeCommand::StopRoute {
+                    route_id: route_id.to_string(),
+                    command_id: command_id(command_scope, "stop"),
+                    causation_id: None,
+                })
+                .await?;
+            Ok(None)
+        }
+        RouteAction::Suspend => {
+            runtime
+                .execute(RuntimeCommand::SuspendRoute {
+                    route_id: route_id.to_string(),
+                    command_id: command_id(command_scope, "suspend"),
+                    causation_id: None,
+                })
+                .await?;
+            Ok(None)
+        }
+        RouteAction::Resume => {
+            runtime
+                .execute(RuntimeCommand::ResumeRoute {
+                    route_id: route_id.to_string(),
+                    command_id: command_id(command_scope, "resume"),
+                    causation_id: None,
+                })
+                .await?;
+            Ok(None)
+        }
+        RouteAction::Restart => {
+            runtime
+                .execute(RuntimeCommand::ReloadRoute {
+                    route_id: route_id.to_string(),
+                    command_id: command_id(command_scope, "restart"),
+                    causation_id: None,
+                })
+                .await?;
+            Ok(None)
+        }
+        RouteAction::Status => match runtime
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: route_id.to_string(),
+            })
+            .await?
+        {
+            RuntimeQueryResult::RouteStatus { status, .. } => Ok(Some(status)),
+            _ => Err(CamelError::ProcessorError(
+                "controlbus: runtime returned unexpected response for route status".to_string(),
+            )),
+        },
     }
+}
+
+fn command_id(route_id: &str, operation: &str) -> String {
+    format!("controlbus:{route_id}:{operation}")
 }
 
 // ---------------------------------------------------------------------------
@@ -280,118 +334,118 @@ mod tests {
     use camel_api::Message;
     use tower::ServiceExt;
 
-    /// A mock route controller for testing.
-    struct MockRouteController {
-        routes: std::collections::HashMap<String, RouteStatus>,
+    struct MockRuntime {
+        statuses: std::collections::HashMap<String, String>,
+        commands: Arc<Mutex<Vec<String>>>,
     }
 
-    impl MockRouteController {
+    impl MockRuntime {
         fn new() -> Self {
             Self {
-                routes: std::collections::HashMap::new(),
+                statuses: std::collections::HashMap::new(),
+                commands: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
-        fn with_route(mut self, id: &str, status: RouteStatus) -> Self {
-            self.routes.insert(id.to_string(), status);
+        fn with_status(mut self, route_id: &str, status: &str) -> Self {
+            self.statuses
+                .insert(route_id.to_string(), status.to_string());
             self
+        }
+
+        fn commands(&self) -> Arc<Mutex<Vec<String>>> {
+            Arc::clone(&self.commands)
         }
     }
 
     #[async_trait]
-    impl camel_api::RouteController for MockRouteController {
-        async fn start_route(&mut self, route_id: &str) -> Result<(), CamelError> {
-            if self.routes.contains_key(route_id) {
-                self.routes
-                    .insert(route_id.to_string(), RouteStatus::Started);
-                Ok(())
-            } else {
-                Err(CamelError::ProcessorError(format!(
-                    "route '{}' not found",
-                    route_id
-                )))
-            }
+    impl camel_api::RuntimeCommandBus for MockRuntime {
+        async fn execute(
+            &self,
+            cmd: camel_api::RuntimeCommand,
+        ) -> Result<camel_api::RuntimeCommandResult, CamelError> {
+            let marker = match cmd {
+                camel_api::RuntimeCommand::RegisterRoute { .. } => "register".to_string(),
+                camel_api::RuntimeCommand::StartRoute { route_id, .. } => {
+                    format!("start:{route_id}")
+                }
+                camel_api::RuntimeCommand::StopRoute { route_id, .. } => {
+                    format!("stop:{route_id}")
+                }
+                camel_api::RuntimeCommand::SuspendRoute { route_id, .. } => {
+                    format!("suspend:{route_id}")
+                }
+                camel_api::RuntimeCommand::ResumeRoute { route_id, .. } => {
+                    format!("resume:{route_id}")
+                }
+                camel_api::RuntimeCommand::ReloadRoute { route_id, .. } => {
+                    format!("reload:{route_id}")
+                }
+                camel_api::RuntimeCommand::FailRoute { route_id, .. } => format!("fail:{route_id}"),
+                camel_api::RuntimeCommand::RemoveRoute { route_id, .. } => {
+                    format!("remove:{route_id}")
+                }
+            };
+            self.commands.lock().await.push(marker);
+            Ok(camel_api::RuntimeCommandResult::Accepted)
         }
+    }
 
-        async fn stop_route(&mut self, route_id: &str) -> Result<(), CamelError> {
-            if self.routes.contains_key(route_id) {
-                self.routes
-                    .insert(route_id.to_string(), RouteStatus::Stopped);
-                Ok(())
-            } else {
-                Err(CamelError::ProcessorError(format!(
-                    "route '{}' not found",
-                    route_id
-                )))
+    #[async_trait]
+    impl camel_api::RuntimeQueryBus for MockRuntime {
+        async fn ask(
+            &self,
+            query: camel_api::RuntimeQuery,
+        ) -> Result<camel_api::RuntimeQueryResult, CamelError> {
+            match query {
+                camel_api::RuntimeQuery::GetRouteStatus { route_id } => {
+                    let status = self.statuses.get(&route_id).ok_or_else(|| {
+                        CamelError::ProcessorError(format!(
+                            "runtime: route '{}' not found",
+                            route_id
+                        ))
+                    })?;
+                    Ok(camel_api::RuntimeQueryResult::RouteStatus {
+                        route_id,
+                        status: status.clone(),
+                    })
+                }
+                _ => Err(CamelError::ProcessorError(
+                    "runtime: unsupported query in test".to_string(),
+                )),
             }
-        }
-
-        async fn restart_route(&mut self, route_id: &str) -> Result<(), CamelError> {
-            if self.routes.contains_key(route_id) {
-                self.routes
-                    .insert(route_id.to_string(), RouteStatus::Started);
-                Ok(())
-            } else {
-                Err(CamelError::ProcessorError(format!(
-                    "route '{}' not found",
-                    route_id
-                )))
-            }
-        }
-
-        async fn suspend_route(&mut self, route_id: &str) -> Result<(), CamelError> {
-            if self.routes.contains_key(route_id) {
-                self.routes
-                    .insert(route_id.to_string(), RouteStatus::Suspended);
-                Ok(())
-            } else {
-                Err(CamelError::ProcessorError(format!(
-                    "route '{}' not found",
-                    route_id
-                )))
-            }
-        }
-
-        async fn resume_route(&mut self, route_id: &str) -> Result<(), CamelError> {
-            if self.routes.contains_key(route_id) {
-                self.routes
-                    .insert(route_id.to_string(), RouteStatus::Started);
-                Ok(())
-            } else {
-                Err(CamelError::ProcessorError(format!(
-                    "route '{}' not found",
-                    route_id
-                )))
-            }
-        }
-
-        fn route_status(&self, route_id: &str) -> Option<RouteStatus> {
-            self.routes.get(route_id).cloned()
-        }
-
-        async fn start_all_routes(&mut self) -> Result<(), CamelError> {
-            for status in self.routes.values_mut() {
-                *status = RouteStatus::Started;
-            }
-            Ok(())
-        }
-
-        async fn stop_all_routes(&mut self) -> Result<(), CamelError> {
-            for status in self.routes.values_mut() {
-                *status = RouteStatus::Stopped;
-            }
-            Ok(())
         }
     }
 
     fn test_producer_ctx() -> ProducerContext {
-        ProducerContext::new(Arc::new(Mutex::new(MockRouteController::new())))
+        ProducerContext::new().with_runtime(Arc::new(MockRuntime::new()))
     }
 
     fn test_producer_ctx_with_route(id: &str, status: RouteStatus) -> ProducerContext {
-        ProducerContext::new(Arc::new(Mutex::new(
-            MockRouteController::new().with_route(id, status),
-        )))
+        let runtime_status = runtime_status_for(&status);
+        ProducerContext::new().with_runtime(Arc::new(
+            MockRuntime::new().with_status(id, &runtime_status),
+        ))
+    }
+
+    fn test_producer_ctx_with_runtime_status(route_id: &str, status: &str) -> ProducerContext {
+        ProducerContext::new()
+            .with_runtime(Arc::new(MockRuntime::new().with_status(route_id, status)))
+    }
+
+    fn test_producer_ctx_with_empty_runtime() -> ProducerContext {
+        ProducerContext::new().with_runtime(Arc::new(MockRuntime::new()))
+    }
+
+    fn runtime_status_for(status: &RouteStatus) -> String {
+        match status {
+            RouteStatus::Stopped => "Stopped".to_string(),
+            RouteStatus::Starting => "Starting".to_string(),
+            RouteStatus::Started => "Started".to_string(),
+            RouteStatus::Stopping => "Stopping".to_string(),
+            RouteStatus::Suspended => "Suspended".to_string(),
+            RouteStatus::Failed(msg) => format!("Failed: {msg}"),
+        }
     }
 
     #[test]
@@ -471,6 +525,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_producer_restart_maps_to_runtime_reload_command() {
+        let runtime = Arc::new(MockRuntime::new().with_status("my-route", "Started"));
+        let commands = runtime.commands();
+        let ctx = ProducerContext::new().with_runtime(runtime);
+        let comp = ControlBusComponent::new();
+        let endpoint = comp
+            .create_endpoint("controlbus:route?routeId=my-route&action=restart")
+            .unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+        assert!(matches!(result.input.body, Body::Empty));
+
+        let recorded = commands.lock().await.clone();
+        assert_eq!(recorded, vec!["reload:my-route".to_string()]);
+    }
+
+    #[tokio::test]
     async fn test_producer_status_route() {
         let ctx = test_producer_ctx_with_route("my-route", RouteStatus::Started);
         let comp = ControlBusComponent::new();
@@ -503,6 +576,40 @@ mod tests {
         if let Body::Text(status) = &result.input.body {
             assert_eq!(status, "Failed: error msg");
         }
+    }
+
+    #[tokio::test]
+    async fn test_producer_status_uses_runtime_when_available() {
+        let ctx = test_producer_ctx_with_runtime_status("runtime-route", "Started");
+        let comp = ControlBusComponent::new();
+        let endpoint = comp
+            .create_endpoint("controlbus:route?routeId=runtime-route&action=status")
+            .unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+        assert!(matches!(result.input.body, Body::Text(_)));
+        if let Body::Text(status) = &result.input.body {
+            assert_eq!(status, "Started");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_producer_status_errors_when_runtime_route_is_missing() {
+        let ctx = test_producer_ctx_with_empty_runtime();
+        let comp = ControlBusComponent::new();
+        let endpoint = comp
+            .create_endpoint("controlbus:route?routeId=my-route&action=status")
+            .unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let err = producer.oneshot(exchange).await.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "runtime miss should not fallback to controller: {err}"
+        );
     }
 
     #[tokio::test]

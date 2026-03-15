@@ -88,6 +88,13 @@ pub enum BuilderStep {
     Processor(BoxProcessor),
     /// A destination URI — resolved at start time by CamelContext.
     To(String),
+    /// A stop step that halts processing immediately.
+    Stop,
+    /// A static log step.
+    Log {
+        level: camel_processor::LogLevel,
+        message: String,
+    },
     /// Declarative set_header (literal or language-based value), resolved at route-add time.
     DeclarativeSetHeader { key: String, value: ValueSourceDef },
     /// Declarative set_body (literal or language-based value), resolved at route-add time.
@@ -169,6 +176,11 @@ impl std::fmt::Debug for BuilderStep {
         match self {
             BuilderStep::Processor(_) => write!(f, "BuilderStep::Processor(...)"),
             BuilderStep::To(uri) => write!(f, "BuilderStep::To({uri:?})"),
+            BuilderStep::Stop => write!(f, "BuilderStep::Stop"),
+            BuilderStep::Log { level, message } => write!(
+                f,
+                "BuilderStep::Log {{ level: {level:?}, message: {message:?} }}"
+            ),
             BuilderStep::DeclarativeSetHeader { key, .. } => {
                 write!(
                     f,

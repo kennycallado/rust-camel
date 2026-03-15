@@ -4,7 +4,9 @@
 //!
 //! **Requires Docker to be running.** Tests will fail if Docker is unavailable.
 //!
-//! Run with: `cargo test -p camel-component-sql -- --ignored`
+//! **Requires `integration-tests` feature to compile and run.**
+
+#![cfg(feature = "integration-tests")]
 
 use camel_api::CamelError;
 use camel_api::Value;
@@ -20,10 +22,7 @@ use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 
-/// Install sqlx default drivers for AnyPool to work with PostgreSQL.
-/// This must be called before any database connections are made.
 fn install_sqlx_drivers() {
-    // This is safe to call multiple times
     sqlx::any::install_default_drivers();
 }
 
@@ -39,7 +38,6 @@ async fn get_connection_string(container: &ContainerAsync<Postgres>) -> String {
     conn_str
 }
 
-/// Create a connection pool for direct database setup operations.
 async fn create_pool(conn_str: &str) -> AnyPool {
     install_sqlx_drivers();
     sqlx::any::AnyPoolOptions::new()
@@ -49,7 +47,6 @@ async fn create_pool(conn_str: &str) -> AnyPool {
         .expect("Failed to connect to database")
 }
 
-/// Setup a test table with some initial data.
 async fn setup_test_table(pool: &AnyPool, table_name: &str) {
     sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
         .execute(pool)
@@ -65,11 +62,6 @@ async fn setup_test_table(pool: &AnyPool, table_name: &str) {
     .expect("Failed to create table");
 }
 
-// ===========================================================================
-// Producer SELECT tests
-// ===========================================================================
-
-/// Test 1: Producer SELECT - Create table, insert data, query via producer, verify JSON body
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_producer_select() {
@@ -77,7 +69,6 @@ async fn test_producer_select() {
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
 
-    // Setup table with test data
     setup_test_table(&pool, "test_select").await;
     sqlx::query("INSERT INTO test_select (name, value) VALUES ('Alice', 100), ('Bob', 200)")
         .execute(&pool)
@@ -107,7 +98,6 @@ async fn test_producer_select() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -121,7 +111,6 @@ async fn test_producer_select() {
     let exchanges = endpoint.get_received_exchanges().await;
     let body = &exchanges[0].input.body;
 
-    // Verify the body is a JSON array with 2 elements
     let json = match body {
         Body::Json(v) => v,
         _ => panic!("Body should be JSON"),
@@ -129,12 +118,10 @@ async fn test_producer_select() {
     let arr = json.as_array().expect("Body should be a JSON array");
     assert_eq!(arr.len(), 2, "Should have 2 rows");
 
-    // Verify first row
     let first = &arr[0];
     assert_eq!(first.get("name").and_then(|v| v.as_str()), Some("Alice"));
     assert_eq!(first.get("value").and_then(|v| v.as_i64()), Some(100));
 
-    // Verify CamelSql.RowCount header
     let row_count = exchanges[0]
         .input
         .header("CamelSql.RowCount")
@@ -142,11 +129,6 @@ async fn test_producer_select() {
     assert_eq!(row_count, Some(2));
 }
 
-// ===========================================================================
-// Producer INSERT tests
-// ===========================================================================
-
-/// Test 2: Producer INSERT - Insert via producer with named params, verify row count header
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_producer_insert() {
@@ -181,7 +163,6 @@ async fn test_producer_insert() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -194,14 +175,12 @@ async fn test_producer_insert() {
 
     let exchanges = endpoint.get_received_exchanges().await;
 
-    // Verify CamelSql.UpdateCount header
     let update_count = exchanges[0]
         .input
         .header("CamelSql.UpdateCount")
         .and_then(|v| v.as_u64());
     assert_eq!(update_count, Some(1), "Should have inserted 1 row");
 
-    // Verify the row was actually inserted
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM test_insert")
         .fetch_one(&pool)
         .await
@@ -209,11 +188,6 @@ async fn test_producer_insert() {
     assert_eq!(count, 1, "Table should have 1 row");
 }
 
-// ===========================================================================
-// Producer UPDATE tests
-// ===========================================================================
-
-/// Test 3: Producer UPDATE - Update via producer, verify update count header
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_producer_update() {
@@ -252,7 +226,6 @@ async fn test_producer_update() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -265,14 +238,12 @@ async fn test_producer_update() {
 
     let exchanges = endpoint.get_received_exchanges().await;
 
-    // Verify CamelSql.UpdateCount header
     let update_count = exchanges[0]
         .input
         .header("CamelSql.UpdateCount")
         .and_then(|v| v.as_u64());
     assert_eq!(update_count, Some(1), "Should have updated 1 row");
 
-    // Verify the value was actually updated
     let value: i64 = sqlx::query_scalar("SELECT value FROM test_update WHERE name = 'Dave'")
         .fetch_one(&pool)
         .await
@@ -280,11 +251,6 @@ async fn test_producer_update() {
     assert_eq!(value, 999, "Value should be updated to 999");
 }
 
-// ===========================================================================
-// Producer DELETE tests
-// ===========================================================================
-
-/// Test 4: Producer DELETE - Delete via producer, verify update count
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_producer_delete() {
@@ -322,7 +288,6 @@ async fn test_producer_delete() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -335,14 +300,12 @@ async fn test_producer_delete() {
 
     let exchanges = endpoint.get_received_exchanges().await;
 
-    // Verify CamelSql.UpdateCount header
     let update_count = exchanges[0]
         .input
         .header("CamelSql.UpdateCount")
         .and_then(|v| v.as_u64());
     assert_eq!(update_count, Some(1), "Should have deleted 1 row");
 
-    // Verify the row was actually deleted
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM test_delete")
         .fetch_one(&pool)
         .await
@@ -350,11 +313,6 @@ async fn test_producer_delete() {
     assert_eq!(count, 1, "Table should have 1 row remaining");
 }
 
-// ===========================================================================
-// Producer SelectOne tests
-// ===========================================================================
-
-/// Test 5: Producer SelectOne - Query single row, verify single JSON object (not array)
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_producer_select_one() {
@@ -391,7 +349,6 @@ async fn test_producer_select_one() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -405,7 +362,6 @@ async fn test_producer_select_one() {
     let exchanges = endpoint.get_received_exchanges().await;
     let body = &exchanges[0].input.body;
 
-    // Verify the body is a JSON object (not array)
     let json = match body {
         Body::Json(v) => v,
         _ => panic!("Body should be JSON"),
@@ -415,11 +371,6 @@ async fn test_producer_select_one() {
     assert_eq!(json.get("value").and_then(|v| v.as_i64()), Some(700));
 }
 
-// ===========================================================================
-// Producer batch tests
-// ===========================================================================
-
-/// Test 6: Producer batch - Batch insert multiple rows
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_producer_batch() {
@@ -436,7 +387,6 @@ async fn test_producer_batch() {
     ctx.register_component(mock.clone());
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
-    // Batch body: array of arrays with params
     let batch_body = serde_json::json!([["Alice", 100], ["Bob", 200], ["Charlie", 300]]);
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
@@ -456,7 +406,6 @@ async fn test_producer_batch() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -469,14 +418,12 @@ async fn test_producer_batch() {
 
     let exchanges = endpoint.get_received_exchanges().await;
 
-    // Verify CamelSql.UpdateCount header (3 rows inserted)
     let update_count = exchanges[0]
         .input
         .header("CamelSql.UpdateCount")
         .and_then(|v| v.as_u64());
     assert_eq!(update_count, Some(3), "Should have inserted 3 rows");
 
-    // Verify the rows were actually inserted
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM test_batch")
         .fetch_one(&pool)
         .await
@@ -484,11 +431,6 @@ async fn test_producer_batch() {
     assert_eq!(count, 3, "Table should have 3 rows");
 }
 
-// ===========================================================================
-// Producer noop tests
-// ===========================================================================
-
-/// Test 7: Producer noop - Execute query but verify original body preserved
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_producer_noop() {
@@ -526,7 +468,6 @@ async fn test_producer_noop() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -539,7 +480,6 @@ async fn test_producer_noop() {
 
     let exchanges = endpoint.get_received_exchanges().await;
 
-    // Verify original body is preserved
     let body = exchanges[0].input.body.as_text();
     assert_eq!(
         body,
@@ -547,14 +487,12 @@ async fn test_producer_noop() {
         "Body should be preserved in noop mode"
     );
 
-    // Verify CamelSql.UpdateCount header is still set
     let update_count = exchanges[0]
         .input
         .header("CamelSql.UpdateCount")
         .and_then(|v| v.as_u64());
     assert_eq!(update_count, Some(1), "Update count should still be set");
 
-    // Verify the update was actually executed
     let value: i64 = sqlx::query_scalar("SELECT value FROM test_noop WHERE name = 'NoOpTest'")
         .fetch_one(&pool)
         .await
@@ -562,11 +500,6 @@ async fn test_producer_noop() {
     assert_eq!(value, 999, "Value should be updated even in noop mode");
 }
 
-// ===========================================================================
-// Consumer polling tests
-// ===========================================================================
-
-/// Test 8: Consumer polling - Start consumer, insert row, verify exchange received
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_consumer_polling() {
@@ -574,7 +507,6 @@ async fn test_consumer_polling() {
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
 
-    // Setup table with "unprocessed" rows
     setup_test_table(&pool, "test_consumer").await;
     sqlx::query("INSERT INTO test_consumer (name, value) VALUES ('ConsumerRow', 900)")
         .execute(&pool)
@@ -587,7 +519,6 @@ async fn test_consumer_polling() {
     ctx.register_component(mock.clone());
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
-    // Consumer polls the table and sends to mock:consumed
     let sql_uri = format!(
         "sql:SELECT * FROM test_consumer WHERE name = 'ConsumerRow'?db_url={}&delay=100&initialDelay=50",
         conn_str
@@ -601,11 +532,9 @@ async fn test_consumer_polling() {
     ctx.add_route_definition(consumer_route).unwrap();
     ctx.start().await.unwrap();
 
-    // Wait for consumer to poll and process
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -616,13 +545,11 @@ async fn test_consumer_polling() {
     let endpoint = mock.get_endpoint("consumed").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
 
-    // Consumer should have processed the row (potentially multiple times since it's a polling query)
     assert!(
         !exchanges.is_empty(),
         "Consumer should have received at least one exchange"
     );
 
-    // Verify the body contains the row data
     let first_exchange = &exchanges[0];
     let body = match &first_exchange.input.body {
         Body::Json(v) => v,
@@ -635,11 +562,6 @@ async fn test_consumer_polling() {
     assert_eq!(body.get("value").and_then(|v| v.as_i64()), Some(900));
 }
 
-// ===========================================================================
-// Consumer onConsume tests
-// ===========================================================================
-
-/// Test 9: Consumer onConsume - Verify post-processing query executes after successful processing
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_consumer_on_consume() {
@@ -647,7 +569,6 @@ async fn test_consumer_on_consume() {
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
 
-    // Setup tables
     setup_test_table(&pool, "test_on_consume").await;
     sqlx::query("CREATE TABLE IF NOT EXISTS processed_rows (id INTEGER, name VARCHAR(255))")
         .execute(&pool)
@@ -665,7 +586,6 @@ async fn test_consumer_on_consume() {
     ctx.register_component(mock.clone());
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
-    // Consumer with onConsume to insert into processed_rows after processing
     let sql_uri = format!(
         "sql:SELECT * FROM test_on_consume?db_url={}&delay=100&initialDelay=50&onConsume=INSERT INTO processed_rows (id, name) VALUES (:#id, :#name)",
         conn_str
@@ -679,11 +599,9 @@ async fn test_consumer_on_consume() {
     ctx.add_route_definition(consumer_route).unwrap();
     ctx.start().await.unwrap();
 
-    // Wait for consumer to poll and process
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -691,24 +609,17 @@ async fn test_consumer_on_consume() {
         }
     }
 
-    // Verify onConsume query was executed
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM processed_rows")
         .fetch_one(&pool)
         .await
         .expect("Failed to count processed_rows");
 
-    // Should have at least 1 row in processed_rows (from onConsume)
     assert!(
         count >= 1,
         "onConsume should have inserted into processed_rows"
     );
 }
 
-// ===========================================================================
-// Consumer empty result set tests
-// ===========================================================================
-
-/// Test 10: Consumer empty result - Verify no exchange sent when query returns empty and route_empty_result_set=false
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_consumer_empty_result() {
@@ -716,9 +627,7 @@ async fn test_consumer_empty_result() {
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
 
-    // Setup empty table
     setup_test_table(&pool, "test_empty").await;
-    // Don't insert any data - table is empty
 
     let mock = MockComponent::new();
     let mut ctx = CamelContext::new();
@@ -726,7 +635,6 @@ async fn test_consumer_empty_result() {
     ctx.register_component(mock.clone());
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
-    // Consumer with routeEmptyResultSet=false (default)
     let sql_uri = format!(
         "sql:SELECT * FROM test_empty?db_url={}&delay=100&initialDelay=50&routeEmptyResultSet=false",
         conn_str
@@ -740,11 +648,9 @@ async fn test_consumer_empty_result() {
     ctx.add_route_definition(consumer_route).unwrap();
     ctx.start().await.unwrap();
 
-    // Wait for multiple poll cycles
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -755,30 +661,12 @@ async fn test_consumer_empty_result() {
     let endpoint = mock.get_endpoint("consumed").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
 
-    // With routeEmptyResultSet=false, no exchanges should be sent for empty result
     assert!(
         exchanges.is_empty(),
         "Consumer should not send exchanges for empty result set when routeEmptyResultSet=false"
     );
 }
 
-// ===========================================================================
-// Consumer onConsumeFailed tests
-// ===========================================================================
-
-/// Test 11: Consumer onConsumeFailed - Verify failure query executes when downstream processing fails.
-///
-/// Setup:
-/// - A table with one row to consume.
-/// - A `failed_rows` table to record rows that failed processing.
-/// - A consumer route **without** a global error handler so that pipeline
-///   errors propagate as `Err` back to `send_and_wait`, triggering
-///   `onConsumeFailed`.
-/// - A `.process()` step that always returns `Err` to simulate downstream
-///   failure.
-///
-/// Assert: `failed_rows` has at least one row after the consumer runs,
-/// confirming that `onConsumeFailed` executed the configured SQL.
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_consumer_on_consume_failed() {
@@ -786,7 +674,6 @@ async fn test_consumer_on_consume_failed() {
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
 
-    // Source table with one row to consume.
     setup_test_table(&pool, "test_on_consume_failed_src").await;
     sqlx::query(
         "INSERT INTO test_on_consume_failed_src (id, name, value) VALUES (1, 'WillFail', 42)",
@@ -795,13 +682,11 @@ async fn test_consumer_on_consume_failed() {
     .await
     .expect("Failed to insert test data");
 
-    // Failure-tracking table.
     sqlx::query("CREATE TABLE IF NOT EXISTS failed_rows (id INTEGER, name VARCHAR(255))")
         .execute(&pool)
         .await
         .expect("Failed to create failed_rows table");
 
-    // No global error handler — pipeline errors reach send_and_wait as Err.
     let mut ctx = CamelContext::new();
     ctx.register_component(SqlComponent::new());
 
@@ -812,7 +697,6 @@ async fn test_consumer_on_consume_failed() {
     );
 
     let consumer_route = RouteBuilder::from(sql_uri.as_str())
-        // Always fail — simulates downstream processing error.
         .process(|_ex| async move {
             Err::<_, CamelError>(CamelError::ProcessorError(
                 "simulated downstream failure".into(),
@@ -825,11 +709,9 @@ async fn test_consumer_on_consume_failed() {
     ctx.add_route_definition(consumer_route).unwrap();
     ctx.start().await.unwrap();
 
-    // Give the consumer time to poll and trigger the failure path.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
 
-    // Verify onConsumeFailed query ran and inserted into failed_rows.
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM failed_rows")
         .fetch_one(&pool)
         .await
@@ -841,7 +723,6 @@ async fn test_consumer_on_consume_failed() {
     );
 }
 
-/// Test 10b: Consumer with routeEmptyResultSet=true should send empty result
 #[tokio::test]
 #[ignore = "Requires Docker"]
 async fn test_consumer_empty_result_routed() {
@@ -849,9 +730,7 @@ async fn test_consumer_empty_result_routed() {
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
 
-    // Setup empty table
     setup_test_table(&pool, "test_empty_routed").await;
-    // Don't insert any data - table is empty
 
     let mock = MockComponent::new();
     let mut ctx = CamelContext::new();
@@ -859,8 +738,6 @@ async fn test_consumer_empty_result_routed() {
     ctx.register_component(mock.clone());
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
-    // Consumer with routeEmptyResultSet=true and useIterator=false (batch mode)
-    // In batch mode, an empty result set will still send an exchange with an empty array
     let sql_uri = format!(
         "sql:SELECT * FROM test_empty_routed?db_url={}&delay=100&initialDelay=50&routeEmptyResultSet=true&useIterator=false",
         conn_str
@@ -874,11 +751,9 @@ async fn test_consumer_empty_result_routed() {
     ctx.add_route_definition(consumer_route).unwrap();
     ctx.start().await.unwrap();
 
-    // Wait for multiple poll cycles
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
 
-    // Check for errors
     if let Some(error_ep) = mock.get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
@@ -889,7 +764,6 @@ async fn test_consumer_empty_result_routed() {
     let endpoint = mock.get_endpoint("consumed").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
 
-    // With routeEmptyResultSet=true, exchanges should be sent even for empty result
     assert!(
         !exchanges.is_empty(),
         "Consumer should send exchanges for empty result set when routeEmptyResultSet=true"

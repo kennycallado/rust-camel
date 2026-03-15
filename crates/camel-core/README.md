@@ -1,25 +1,42 @@
 # camel-core
 
-> Core routing engine for rust-camel
+> Core routing engine with DDD/CQRS architecture for rust-camel
 
 ## Overview
 
-`camel-core` is the heart of the rust-camel framework. It provides the `CamelContext` for managing routes, the `Registry` for component registration, and the core route execution engine. This crate orchestrates all the other components to enable message routing.
+`camel-core` is the heart of the rust-camel framework. It implements a **Domain-Driven Design** architecture with **CQRS** (Command Query Responsibility Segregation) and **Hexagonal Architecture** (Ports and Adapters).
 
-This is the main crate you'll use when building a rust-camel application. It brings together components, processors, and routes into a cohesive integration framework.
+### Architecture Layers
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Domain Layer                            │
+│   RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent        │
+│   (Pure business logic, no external dependencies)               │
+├─────────────────────────────────────────────────────────────────┤
+│                      Application Layer                          │
+│   RuntimeBus, Command Handlers, Query Handlers                  │
+│   (Orchestrates domain operations via ports)                    │
+├─────────────────────────────────────────────────────────────────┤
+│                         Ports Layer                             │
+│   RouteRepositoryPort, ProjectionStorePort, RuntimeExecutionPort│
+│   (Interfaces, no implementations)                              │
+├─────────────────────────────────────────────────────────────────┤
+│                       Adapters Layer                            │
+│   InMemory*, FileRuntimeEventJournal, RuntimeExecutionAdapter   │
+│   (Concrete implementations)                                    │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ## Features
 
 - **CamelContext**: Central context for managing routes and components
-- **Registry**: Component registry for endpoint resolution
-- **Route**: Route definitions and lifecycle management
-- **RouteController**: Start, stop, suspend, and resume routes
-- **Pipeline composition**: Tower-based middleware composition
-- **Hot-reload**: Live route updates with ArcSwap (no downtime)
+- **DDD Aggregate**: `RouteRuntimeAggregate` with state machine and optimistic locking
+- **CQRS Runtime Bus**: Separate command/query paths with projection-backed reads
+- **Event Sourcing**: Optional durable journal for crash recovery
+- **Hexagonal Architecture**: Clean separation via ports and adapters
+- **Hot-reload**: Live route updates with zero downtime
 - **Supervision**: Auto-recovery with configurable exponential backoff
-- **Tracer Integration**: Automatic message flow tracing support
-- **Health Monitoring**: Service health checks via `health_check()` method
-- **Bean Integration**: BeanRegistry support for YAML DSL bean step resolution
 
 ## Installation
 
@@ -27,7 +44,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-core = "0.2"
+camel-core = "0.4"
 ```
 
 ## Usage
@@ -37,29 +54,27 @@ camel-core = "0.2"
 ```rust
 use camel_core::CamelContext;
 use camel_builder::RouteBuilder;
+use camel_component_timer::TimerComponent;
+use camel_component_log::LogComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create the context
     let mut ctx = CamelContext::new();
 
     // Register components
-    ctx.register_component("timer", Box::new(camel_component_timer::TimerComponent::new()));
-    ctx.register_component("log", Box::new(camel_component_log::LogComponent::new()));
-    ctx.register_component("mock", Box::new(camel_component_mock::MockComponent::new()));
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(LogComponent::new());
 
     // Build and add routes
     let route = RouteBuilder::from("timer:hello?period=1000")
-        .log("Timer fired!", camel_processor::LogLevel::Info)
-        .to("mock:result")
+        .route_id("hello-route")
+        .to("log:info")
         .build()?;
 
-    ctx.add_route(route).await?;
+    ctx.add_route_definition(route)?;
 
     // Start all routes
     ctx.start().await?;
-
-    // ... run your application
 
     // Graceful shutdown
     ctx.stop().await?;
@@ -68,135 +83,144 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Route Lifecycle Management
+### Runtime Bus (CQRS)
+
+Control routes via the runtime bus:
 
 ```rust
-// Start a specific route
-ctx.start_route("my-route").await?;
+use camel_api::RuntimeCommand;
 
-// Suspend a route (pauses consumer intake, allows in-flight exchanges to complete)
-ctx.suspend_route("my-route").await?;
+// Start a route
+ctx.runtime().execute(RuntimeCommand::StartRoute {
+    route_id: "my-route".into(),
+    command_id: "cmd-start-1".into(),
+    causation_id: None,
+}).await?;
 
-// Resume a suspended route (restarts consumer intake)
-ctx.resume_route("my-route").await?;
-
-// Stop a route
-ctx.stop_route("my-route").await?;
-
-// Check route status
-let status = ctx.route_status("my-route");
+// Query route status (reads from projection)
+let status = ctx.runtime_route_status("my-route").await?;
+println!("Status: {:?}", status);
 ```
+
+### Optional Durability
+
+Enable file-backed event journal for runtime state recovery across restarts:
+
+```rust
+// With durability
+let ctx = CamelContext::new_with_runtime_journal_path(".camel/runtime.jsonl");
+
+// Events are persisted and replayed on startup
+```
+
+## Core Types
+
+### Domain Layer
+
+| Type | Description |
+|------|-------------|
+| `RouteRuntimeAggregate` | DDD aggregate with lifecycle state and version |
+| `RouteRuntimeState` | Enum: Registered, Starting, Started, Suspended, Stopping, Stopped, Failed |
+| `RouteLifecycleCommand` | Domain commands: Start, Stop, Suspend, Resume, Reload, Fail |
+| `RuntimeEvent` | Domain events: RouteStarted, RouteStopped, RouteFailed, etc. |
+
+### Ports Layer
+
+| Port | Purpose |
+|------|---------|
+| `RouteRepositoryPort` | Load/save aggregates |
+| `ProjectionStorePort` | Read/write route status projections |
+| `RuntimeExecutionPort` | Execute side effects on route controller |
+| `EventPublisherPort` | Publish domain events |
+| `RuntimeEventJournalPort` | Durable event persistence |
+| `CommandDedupPort` | Idempotent command handling |
+| `RuntimeUnitOfWorkPort` | Atomic aggregate + projection + event persistence |
+
+### Adapters Layer
+
+| Adapter | Implements |
+|---------|------------|
+| `InMemoryRouteRepository` | RouteRepositoryPort |
+| `InMemoryProjectionStore` | ProjectionStorePort |
+| `InMemoryRuntimeStore` | Combined in-memory implementation |
+| `FileRuntimeEventJournal` | RuntimeEventJournalPort |
+| `RuntimeExecutionAdapter` | RuntimeExecutionPort |
 
 ## Health Monitoring
 
-CamelContext provides a `health_check()` method to monitor the status of all registered services.
-
-### Usage
-
 ```rust
-use camel_core::context::CamelContext;
 use camel_api::{HealthStatus, ServiceStatus};
 
-let ctx = CamelContext::new();
-
-// Add services (they implement the Lifecycle trait)
-// ctx.with_lifecycle(prometheus_service);
-
-// Check health of all services
 let report = ctx.health_check();
 
 match report.status {
-    HealthStatus::Healthy => println!("All services are healthy"),
+    HealthStatus::Healthy => println!("All services healthy"),
     HealthStatus::Unhealthy => {
         for service in &report.services {
-            if service.status != ServiceStatus::Started {
-                println!("Service {} is {:?}", service.name, service.status);
-            }
+            println!("{}: {:?}", service.name, service.status);
         }
     }
 }
 ```
 
-### Integration with Prometheus
+## Hot-Reload System
 
-When using `camel-prometheus`, the health check is automatically exposed via HTTP endpoints:
-- `/healthz` - Kubernetes liveness probe
-- `/readyz` - Kubernetes readiness probe (returns 503 if unhealthy)
-- `/health` - Detailed JSON health report
-
-See the `camel-prometheus` crate for Kubernetes integration examples.
-
-## Core Types
-
-| Type | Description |
-|------|-------------|
-| `CamelContext` | Main context for route management |
-| `Registry` | Component and endpoint registry |
-| `Route` | A configured route |
-| `RouteDefinition` | Route builder output |
-| `RouteController` | Lifecycle management trait |
-| `SupervisingRouteController` | Auto-recovery with exponential backoff for crashed consumers |
-| `DefaultRouteController` | Default implementation with optional BeanRegistry (`with_beans()`) |
-
-## Architecture
-
-```
-┌─────────────────────────────────────┐
-│           CamelContext              │
-│  ┌─────────────────────────────┐   │
-│  │         Registry            │   │
-│  │  ┌───────┐ ┌───────┐       │   │
-│  │  │Timer  │ │ Log   │  ...  │   │
-│  │  │Comp   │ │ Comp  │       │   │
-│  │  └───────┘ └───────┘       │   │
-│  └─────────────────────────────┘   │
-│  ┌─────────────────────────────┐   │
-│  │         Routes              │   │
-│  │  Route 1  │  Route 2  │ ...│   │
-│  └─────────────────────────────┘   │
-└─────────────────────────────────────┘
-```
-
-## Advanced Features
-
-### SupervisingRouteController
-
-Wraps any route controller with automatic recovery using configurable exponential backoff. When a consumer crashes, it automatically restarts after a delay that increases with each failure.
-
-### Hot-reload System
-
-Live route updates without service restart using `ArcSwap` and `ReloadCoordinator`. Update route definitions at runtime with zero downtime.
-
-### ControlBus Integration
-
-Dynamic route lifecycle management via the control bus pattern. Start, stop, suspend, and resume routes programmatically.
-
-### Bean Integration
-
-Use `DefaultRouteController::with_beans()` to enable bean step resolution in YAML DSL routes:
+Live route updates without service restart:
 
 ```rust
-use camel_core::DefaultRouteController;
-use camel_bean::BeanRegistry;
+use camel_core::reload_watcher::{watch_and_reload, resolve_watch_dirs};
 
-let mut bean_registry = BeanRegistry::new();
-bean_registry.register("orderService", OrderService);
+let handle = ctx.runtime_execution_handle();
+let patterns = vec!["routes/*.yaml".to_string()];
+let watch_dirs = resolve_watch_dirs(&patterns);
 
-let controller = DefaultRouteController::with_beans(bean_registry);
-// Pass controller to CamelContext::with_controller()
+watch_and_reload(
+    watch_dirs,
+    handle,
+    || camel_dsl::discover_routes(&patterns)
+        .map_err(|e| CamelError::RouteError(e.to_string())),
+    Some(cancel_token),
+).await?;
 ```
 
-See `examples/bean-demo` for a complete example.
+## Supervision
+
+`SupervisingRouteController` wraps any controller with automatic crash recovery:
+
+```rust
+use camel_core::SupervisingRouteController;
+use camel_api::supervision::SupervisionConfig;
+
+let config = SupervisionConfig {
+    initial_delay_ms: 1000,
+    backoff_multiplier: 2.0,
+    max_delay_ms: 60000,
+    max_attempts: 5,
+};
+
+let ctx = CamelContext::with_supervision(config);
+```
+
+## Architecture Tests
+
+The crate includes hexagonal architecture boundary tests to ensure clean separation:
+
+```bash
+cargo test -p camel-core --test hexagonal_architecture_boundaries_test
+```
+
+Tests verify:
+- Domain layer has no infrastructure dependencies
+- Application layer depends only on ports and domain
+- Ports layer has no adapter dependencies
+- Runtime side effects flow through `RuntimeExecutionPort`
 
 ## Documentation
 
 - [API Documentation](https://docs.rs/camel-core)
-- [Repository](https://github.com/kennycallado/rust-camel)
+- [DDD/CQRS Report](./DDD_CQRS_GO_NO_GO_REPORT.md)
+- [Facade V1 Contract](./DDD_CQRS_FACADE_V1_CONTRACT.md)
 
 ## License
 
 Apache-2.0
-
-## Contributing
-
-Contributions are welcome! Please see the [main repository](https://github.com/kennycallado/rust-camel) for details.

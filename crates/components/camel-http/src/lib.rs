@@ -1238,40 +1238,9 @@ mod tests {
     use camel_api::Message;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::Mutex;
-
-    // NullRouteController for testing
-    struct NullRouteController;
-    #[async_trait::async_trait]
-    impl camel_api::RouteController for NullRouteController {
-        async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
-            None
-        }
-        async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-    }
 
     fn test_producer_ctx() -> ProducerContext {
-        ProducerContext::new(Arc::new(Mutex::new(NullRouteController)))
+        ProducerContext::new()
     }
 
     #[test]

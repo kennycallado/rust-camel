@@ -1,4 +1,4 @@
-use camel_api::aggregator::AggregatorConfig;
+use camel_api::aggregator::{AggregationStrategy, AggregatorConfig, CompletionCondition};
 use camel_api::body::Body;
 use camel_api::body_converter::BodyType;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
@@ -9,13 +9,17 @@ use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::SplitterConfig;
 use camel_api::throttler::{ThrottleStrategy, ThrottlerConfig};
 use camel_api::{
-    BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProcessorFn, Value,
+    BoxProcessor, CamelError, CanonicalRouteSpec, Exchange, FilterPredicate, IdentityProcessor,
+    ProcessorFn, Value,
+    runtime::{
+        CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
+        CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
+        CanonicalWhenSpec,
+    },
 };
 use camel_component::ConcurrencyModel;
-use camel_core::route::{BuilderStep, RouteDefinition, WhenStep};
-use camel_processor::{
-    ConvertBodyTo, DynamicSetHeader, LogLevel, MapBody, SetBody, SetHeader, StopService,
-};
+use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition, WhenStep};
+use camel_processor::{ConvertBodyTo, DynamicSetHeader, LogLevel, MapBody, SetBody, SetHeader};
 
 /// Shared step-accumulation methods for all builder types.
 ///
@@ -105,8 +109,7 @@ pub trait StepAccumulator: Sized {
     /// Can be used at any point in the route: directly on RouteBuilder,
     /// inside `.filter()`, inside `.split()`, etc.
     fn stop(mut self) -> Self {
-        self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(StopService)));
+        self.steps_mut().push(BuilderStep::Stop);
         self
     }
 
@@ -114,10 +117,10 @@ pub trait StepAccumulator: Sized {
     ///
     /// The message will be logged when an exchange passes through this step.
     fn log(mut self, message: impl Into<String>, level: LogLevel) -> Self {
-        use camel_processor::LogProcessor;
-        let svc = LogProcessor::new(level, message.into());
-        self.steps_mut()
-            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self.steps_mut().push(BuilderStep::Log {
+            level,
+            message: message.into(),
+        });
         self
     }
 
@@ -417,6 +420,186 @@ impl RouteBuilder {
             definition
         };
         Ok(definition)
+    }
+
+    /// Compile this builder route into canonical v1 spec.
+    pub fn build_canonical(self) -> Result<CanonicalRouteSpec, CamelError> {
+        if self.from_uri.is_empty() {
+            return Err(CamelError::RouteError(
+                "route must have a 'from' URI".to_string(),
+            ));
+        }
+        let route_id = self.route_id.ok_or_else(|| {
+            CamelError::RouteError(
+                "route must have a 'route_id' — call .route_id(\"name\") on the builder"
+                    .to_string(),
+            )
+        })?;
+
+        let steps = canonicalize_steps(self.steps)?;
+        let circuit_breaker = self
+            .circuit_breaker_config
+            .map(canonicalize_circuit_breaker);
+
+        let spec = CanonicalRouteSpec {
+            route_id,
+            from: self.from_uri,
+            steps,
+            circuit_breaker,
+            version: camel_api::CANONICAL_CONTRACT_VERSION,
+        };
+        spec.validate_contract()?;
+        Ok(spec)
+    }
+}
+
+fn canonicalize_steps(steps: Vec<BuilderStep>) -> Result<Vec<CanonicalStepSpec>, CamelError> {
+    let mut canonical = Vec::with_capacity(steps.len());
+    for step in steps {
+        canonical.push(canonicalize_step(step)?);
+    }
+    Ok(canonical)
+}
+
+fn canonicalize_step(step: BuilderStep) -> Result<CanonicalStepSpec, CamelError> {
+    match step {
+        BuilderStep::To(uri) => Ok(CanonicalStepSpec::To { uri }),
+        BuilderStep::Log { message, .. } => Ok(CanonicalStepSpec::Log { message }),
+        BuilderStep::Stop => Ok(CanonicalStepSpec::Stop),
+        BuilderStep::WireTap { uri } => Ok(CanonicalStepSpec::WireTap { uri }),
+        BuilderStep::DeclarativeScript { expression } => {
+            Ok(CanonicalStepSpec::Script { expression })
+        }
+        BuilderStep::DeclarativeFilter { predicate, steps } => Ok(CanonicalStepSpec::Filter {
+            predicate,
+            steps: canonicalize_steps(steps)?,
+        }),
+        BuilderStep::DeclarativeChoice { whens, otherwise } => {
+            let mut canonical_whens = Vec::with_capacity(whens.len());
+            for DeclarativeWhenStep { predicate, steps } in whens {
+                canonical_whens.push(CanonicalWhenSpec {
+                    predicate,
+                    steps: canonicalize_steps(steps)?,
+                });
+            }
+            let otherwise = match otherwise {
+                Some(steps) => Some(canonicalize_steps(steps)?),
+                None => None,
+            };
+            Ok(CanonicalStepSpec::Choice {
+                whens: canonical_whens,
+                otherwise,
+            })
+        }
+        BuilderStep::DeclarativeSplit {
+            expression,
+            aggregation,
+            parallel,
+            parallel_limit,
+            stop_on_exception,
+            steps,
+        } => Ok(CanonicalStepSpec::Split {
+            expression: CanonicalSplitExpressionSpec::Language(expression),
+            aggregation: canonicalize_split_aggregation(aggregation)?,
+            parallel,
+            parallel_limit,
+            stop_on_exception,
+            steps: canonicalize_steps(steps)?,
+        }),
+        BuilderStep::Aggregate { config } => Ok(CanonicalStepSpec::Aggregate {
+            config: canonicalize_aggregate(config)?,
+        }),
+        other => {
+            let step_name = canonical_step_name(&other);
+            let detail = camel_api::canonical_contract_rejection_reason(step_name)
+                .unwrap_or("not included in canonical v1");
+            Err(CamelError::RouteError(format!(
+                "canonical v1 does not support step `{step_name}`: {detail}"
+            )))
+        }
+    }
+}
+
+fn canonicalize_split_aggregation(
+    strategy: camel_api::splitter::AggregationStrategy,
+) -> Result<CanonicalSplitAggregationSpec, CamelError> {
+    match strategy {
+        camel_api::splitter::AggregationStrategy::LastWins => {
+            Ok(CanonicalSplitAggregationSpec::LastWins)
+        }
+        camel_api::splitter::AggregationStrategy::CollectAll => {
+            Ok(CanonicalSplitAggregationSpec::CollectAll)
+        }
+        camel_api::splitter::AggregationStrategy::Custom(_) => Err(CamelError::RouteError(
+            "canonical v1 does not support custom split aggregation".to_string(),
+        )),
+        camel_api::splitter::AggregationStrategy::Original => {
+            Ok(CanonicalSplitAggregationSpec::Original)
+        }
+    }
+}
+
+fn canonicalize_aggregate(config: AggregatorConfig) -> Result<CanonicalAggregateSpec, CamelError> {
+    let completion_size = match config.completion {
+        CompletionCondition::Size(size) => Some(size),
+        CompletionCondition::Predicate(_) => {
+            return Err(CamelError::RouteError(
+                "canonical v1 does not support aggregate predicate completion".to_string(),
+            ));
+        }
+    };
+    let strategy = match config.strategy {
+        AggregationStrategy::CollectAll => CanonicalAggregateStrategySpec::CollectAll,
+        AggregationStrategy::Custom(_) => {
+            return Err(CamelError::RouteError(
+                "canonical v1 does not support custom aggregate strategy".to_string(),
+            ));
+        }
+    };
+    let bucket_ttl_ms = config
+        .bucket_ttl
+        .map(|ttl| u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX));
+
+    Ok(CanonicalAggregateSpec {
+        header: config.header_name,
+        completion_size,
+        strategy,
+        max_buckets: config.max_buckets,
+        bucket_ttl_ms,
+    })
+}
+
+fn canonicalize_circuit_breaker(config: CircuitBreakerConfig) -> CanonicalCircuitBreakerSpec {
+    CanonicalCircuitBreakerSpec {
+        failure_threshold: config.failure_threshold,
+        open_duration_ms: u64::try_from(config.open_duration.as_millis()).unwrap_or(u64::MAX),
+    }
+}
+
+fn canonical_step_name(step: &BuilderStep) -> &'static str {
+    match step {
+        BuilderStep::Processor(_) => "processor",
+        BuilderStep::To(_) => "to",
+        BuilderStep::Stop => "stop",
+        BuilderStep::Log { .. } => "log",
+        BuilderStep::DeclarativeSetHeader { .. } => "set_header",
+        BuilderStep::DeclarativeSetBody { .. } => "set_body",
+        BuilderStep::DeclarativeFilter { .. } => "filter",
+        BuilderStep::DeclarativeChoice { .. } => "choice",
+        BuilderStep::DeclarativeScript { .. } => "script",
+        BuilderStep::DeclarativeSplit { .. } => "split",
+        BuilderStep::Split { .. } => "split",
+        BuilderStep::Aggregate { .. } => "aggregate",
+        BuilderStep::Filter { .. } => "filter",
+        BuilderStep::Choice { .. } => "choice",
+        BuilderStep::WireTap { .. } => "wire_tap",
+        BuilderStep::Multicast { .. } => "multicast",
+        BuilderStep::DeclarativeLog { .. } => "log",
+        BuilderStep::Bean { .. } => "bean",
+        BuilderStep::Script { .. } => "script",
+        BuilderStep::Throttle { .. } => "throttle",
+        BuilderStep::LoadBalance { .. } => "load_balancer",
+        BuilderStep::DynamicRouter { .. } => "dynamic_router",
     }
 }
 

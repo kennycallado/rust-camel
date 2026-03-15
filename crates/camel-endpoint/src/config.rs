@@ -259,8 +259,10 @@ mod derive_tests {
     #[test]
     fn test_bool_without_default_provided_works() {
         let config = FeatureConfig::from_uri("feature:test?enabled=true").unwrap();
+        assert_eq!(config.feature_name, "test");
         assert!(config.enabled);
         let config = FeatureConfig::from_uri("feature:test?enabled=false").unwrap();
+        assert_eq!(config.feature_name, "test");
         assert!(!config.enabled);
     }
 
@@ -331,8 +333,10 @@ mod derive_tests {
     #[test]
     fn test_enum_valid_value_works() {
         let config = EnumConfig::from_uri("enumtest:foo?mode=alpha").unwrap();
+        assert_eq!(config.path, "foo");
         assert_eq!(config.mode, TestEnum::Alpha);
         let config = EnumConfig::from_uri("enumtest:foo?mode=beta").unwrap();
+        assert_eq!(config.path, "foo");
         assert_eq!(config.mode, TestEnum::Beta);
     }
 
@@ -385,6 +389,8 @@ mod derive_tests {
             SchedulerConfig::from_uri("scheduler:cleanup?initial_delay_ms=2000&interval_ms=3000")
                 .unwrap();
         assert_eq!(config.task_name, "cleanup");
+        assert_eq!(config.initial_delay_ms, 2000);
+        assert_eq!(config.interval_ms, 3000);
         assert_eq!(config.initial_delay, std::time::Duration::from_millis(2000));
         assert_eq!(config.interval, std::time::Duration::from_millis(3000));
     }
@@ -393,6 +399,8 @@ mod derive_tests {
     fn test_multiple_duration_defaults() {
         let config = SchedulerConfig::from_uri("scheduler:cleanup").unwrap();
         assert_eq!(config.task_name, "cleanup");
+        assert_eq!(config.initial_delay_ms, 5000);
+        assert_eq!(config.interval_ms, 10000);
         assert_eq!(config.initial_delay, std::time::Duration::from_millis(5000));
         assert_eq!(config.interval, std::time::Duration::from_millis(10000));
     }

@@ -33,14 +33,12 @@ async fn main() -> Result<(), CamelError> {
     let routes = camel_config::discover_routes(&config.routes)
         .map_err(|e| CamelError::Config(e.to_string()))?;
 
+    let route_count = routes.len();
     for route in routes {
         ctx.add_route_definition(route)?;
     }
 
-    println!(
-        "Starting context with {} routes...",
-        ctx.route_controller().lock().await.route_count()
-    );
+    println!("Starting context with {} routes...", route_count);
 
     ctx.start().await?;
 

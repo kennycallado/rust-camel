@@ -11,10 +11,9 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use camel_api::{
-    CamelError, Exchange, Message, RouteController, RouteStatus,
+    CamelError, Exchange, Message,
     body::{Body, StreamBody, StreamMetadata},
     producer::ProducerContext,
 };
@@ -23,37 +22,6 @@ use camel_component_file::FileComponent;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 use tracing::info;
-
-// Minimal RouteController for standalone producer usage
-struct NullRouteController;
-
-#[async_trait]
-impl RouteController for NullRouteController {
-    async fn start_route(&mut self, _: &str) -> Result<(), CamelError> {
-        Ok(())
-    }
-    async fn stop_route(&mut self, _: &str) -> Result<(), CamelError> {
-        Ok(())
-    }
-    async fn restart_route(&mut self, _: &str) -> Result<(), CamelError> {
-        Ok(())
-    }
-    async fn suspend_route(&mut self, _: &str) -> Result<(), CamelError> {
-        Ok(())
-    }
-    async fn resume_route(&mut self, _: &str) -> Result<(), CamelError> {
-        Ok(())
-    }
-    fn route_status(&self, _: &str) -> Option<RouteStatus> {
-        None
-    }
-    async fn start_all_routes(&mut self) -> Result<(), CamelError> {
-        Ok(())
-    }
-    async fn stop_all_routes(&mut self) -> Result<(), CamelError> {
-        Ok(())
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -86,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let write_uri = format!("file:{out_path}?fileName=output.txt");
     let component = FileComponent::new();
     let endpoint = component.create_endpoint(&write_uri)?;
-    let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+    let ctx = ProducerContext::new();
     let producer = endpoint.create_producer(&ctx)?;
 
     let exchange = Exchange::new(Message::new(body));

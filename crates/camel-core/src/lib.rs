@@ -58,25 +58,55 @@
 //! //! Configuration types for the Tracer EIP live in `camel-core` rather than `camel-config`
 //! //! to avoid a circular dependency — `camel-config` depends on `camel-core`.
 //!
+pub mod adapters;
+pub mod application;
 pub mod config;
 pub mod context;
+pub mod domain;
+pub mod ports;
 pub mod registry;
-pub mod reload;
-pub mod reload_watcher;
-pub mod route;
-pub mod route_controller;
-pub mod supervising_route_controller;
 pub mod tracer;
 
+pub mod route {
+    pub use crate::domain::route::*;
+}
+
+pub mod route_controller {
+    pub use crate::adapters::route_controller::*;
+}
+
+pub mod supervising_route_controller {
+    pub use crate::adapters::supervising_route_controller::*;
+}
+
+pub mod reload {
+    pub(crate) use crate::adapters::reload::*;
+}
+
+pub mod reload_watcher {
+    pub use crate::adapters::reload_watcher::*;
+}
+
+pub use adapters::{
+    FileRuntimeEventJournal, InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore,
+    InMemoryRouteRepository, InMemoryRuntimeStore, RuntimeExecutionAdapter,
+};
+pub use application::runtime_bus::RuntimeBus;
 pub use config::{
     DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
 };
 pub use context::CamelContext;
+pub use domain::{RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent};
+pub use ports::{
+    CommandDedupPort, EventPublisherPort, ProjectionStorePort, RouteRepositoryPort,
+    RouteStatusProjection, RuntimeEventJournalPort, RuntimeExecutionPort, RuntimeUnitOfWorkPort,
+};
 pub use registry::Registry;
 pub use route::{Route, RouteDefinition};
-pub use route_controller::{DefaultRouteController, RouteControllerInternal};
+pub use route_controller::DefaultRouteController;
 pub use supervising_route_controller::SupervisingRouteController;
 pub use tracer::TracingProcessor;
 
 // Re-export route controller types from camel-api (they live there to avoid cyclic dependencies).
+pub use camel_api::CamelError;
 pub use camel_api::{RouteAction, RouteController, RouteStatus};

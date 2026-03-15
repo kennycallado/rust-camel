@@ -149,34 +149,46 @@ async fn run(
     ctx.register_component(camel_component_http::HttpComponent::new());
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
-    // Container component: pass global config if available
-    let container_cfg = ctx
-        .get_component_config::<camel_component_container::ContainerGlobalConfig>()
-        .cloned();
-    ctx.register_component(
-        camel_component_container::ContainerComponent::with_optional_config(container_cfg),
-    );
-    // Redis component: pass global config if available
-    let redis_cfg = ctx
-        .get_component_config::<camel_component_redis::RedisConfig>()
-        .cloned();
-    ctx.register_component(camel_component_redis::RedisComponent::with_optional_config(
-        redis_cfg,
-    ));
-    // Kafka component: pass global config if available
-    let kafka_cfg = ctx
-        .get_component_config::<camel_component_kafka::KafkaConfig>()
-        .cloned();
-    ctx.register_component(camel_component_kafka::KafkaComponent::with_optional_config(
-        kafka_cfg,
-    ));
-    // SQL component: pass global config if available
-    let sql_cfg = ctx
-        .get_component_config::<camel_component_sql::SqlGlobalConfig>()
-        .cloned();
-    ctx.register_component(camel_component_sql::SqlComponent::with_optional_config(
-        sql_cfg,
-    ));
+
+    #[cfg(feature = "container")]
+    {
+        let container_cfg = ctx
+            .get_component_config::<camel_component_container::ContainerGlobalConfig>()
+            .cloned();
+        ctx.register_component(
+            camel_component_container::ContainerComponent::with_optional_config(container_cfg),
+        );
+    }
+
+    #[cfg(feature = "redis")]
+    {
+        let redis_cfg = ctx
+            .get_component_config::<camel_component_redis::RedisConfig>()
+            .cloned();
+        ctx.register_component(camel_component_redis::RedisComponent::with_optional_config(
+            redis_cfg,
+        ));
+    }
+
+    #[cfg(feature = "kafka")]
+    {
+        let kafka_cfg = ctx
+            .get_component_config::<camel_component_kafka::KafkaConfig>()
+            .cloned();
+        ctx.register_component(camel_component_kafka::KafkaComponent::with_optional_config(
+            kafka_cfg,
+        ));
+    }
+
+    #[cfg(feature = "sql")]
+    {
+        let sql_cfg = ctx
+            .get_component_config::<camel_component_sql::SqlGlobalConfig>()
+            .cloned();
+        ctx.register_component(camel_component_sql::SqlComponent::with_optional_config(
+            sql_cfg,
+        ));
+    }
 
     // 5. Discover and load initial routes
     match camel_dsl::discover_routes(&patterns) {
@@ -209,7 +221,7 @@ async fn run(
     // 8. Optionally start file watcher in background
     let watcher_shutdown = CancellationToken::new();
     if watch_enabled {
-        let ctrl = ctx.route_controller().clone();
+        let ctrl = ctx.runtime_execution_handle();
         let watch_patterns = patterns.clone();
         let watcher_token = watcher_shutdown.clone();
         tokio::spawn(async move {

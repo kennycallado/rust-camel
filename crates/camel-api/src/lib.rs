@@ -17,6 +17,7 @@ pub mod multicast;
 pub mod processor;
 pub mod producer;
 pub mod route_controller;
+pub mod runtime;
 pub mod splitter;
 pub mod supervision;
 pub mod throttler;
@@ -48,6 +49,14 @@ pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
 pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn};
 pub use producer::ProducerContext;
 pub use route_controller::{RouteAction, RouteController, RouteStatus};
+pub use runtime::{
+    CANONICAL_CONTRACT_DECLARATIVE_ONLY_STEPS, CANONICAL_CONTRACT_EXCLUDED_DECLARATIVE_STEPS,
+    CANONICAL_CONTRACT_NAME, CANONICAL_CONTRACT_RUST_ONLY_STEPS,
+    CANONICAL_CONTRACT_SUPPORTED_STEPS, CANONICAL_CONTRACT_VERSION, CanonicalRouteSpec,
+    RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult, RuntimeEvent, RuntimeHandle,
+    RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult, canonical_contract_rejection_reason,
+    canonical_contract_supports_step,
+};
 pub use splitter::{
     AggregationStrategy, SplitExpression, SplitterConfig, split_body, split_body_json_array,
     split_body_lines,

@@ -7,6 +7,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
     CamelConfig {
         routes: vec![],
         watch: false,
+        runtime_journal_path: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: ComponentsConfig::default(),

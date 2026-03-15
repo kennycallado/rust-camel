@@ -6,13 +6,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{CamelError, MetricsCollector, RouteController, RouteStatus, SupervisionConfig};
+use camel_api::{
+    CamelError, MetricsCollector, RouteController, RuntimeCommand, RuntimeHandle, RuntimeQuery,
+    RuntimeQueryResult, SupervisionConfig,
+};
 
 use crate::registry::Registry;
 use crate::route::RouteDefinition;
@@ -35,6 +39,13 @@ pub struct SupervisingRouteController {
     crash_rx: Option<tokio::sync::mpsc::Receiver<CrashNotification>>,
     /// Optional metrics collector.
     metrics: Option<Arc<dyn MetricsCollector>>,
+}
+
+static SUPERVISION_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_supervision_command_id(op: &str, route_id: &str) -> String {
+    let seq = SUPERVISION_COMMAND_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("supervision:{op}:{route_id}:{seq}")
 }
 
 impl SupervisingRouteController {
@@ -68,11 +79,31 @@ impl SupervisingRouteController {
         self.metrics = Some(metrics);
         self
     }
+
+    fn ensure_supervision_loop_started(&mut self) {
+        self.inner.set_crash_notifier(self.crash_tx.clone());
+
+        if self.crash_rx.is_none() {
+            return;
+        }
+
+        let rx = self
+            .crash_rx
+            .take()
+            .expect("crash_rx checked as Some above");
+        let config = self.config.clone();
+        let metrics = self.metrics.clone();
+        let runtime = self.inner.runtime_handle_for_supervision();
+        tokio::spawn(async move {
+            supervision_loop(rx, runtime, config, metrics).await;
+        });
+    }
 }
 
 #[async_trait::async_trait]
 impl RouteController for SupervisingRouteController {
     async fn start_route(&mut self, route_id: &str) -> Result<(), CamelError> {
+        self.ensure_supervision_loop_started();
         self.inner.start_route(route_id).await
     }
 
@@ -92,31 +123,9 @@ impl RouteController for SupervisingRouteController {
         self.inner.resume_route(route_id).await
     }
 
-    fn route_status(&self, route_id: &str) -> Option<RouteStatus> {
-        self.inner.route_status(route_id)
-    }
-
     async fn start_all_routes(&mut self) -> Result<(), CamelError> {
-        // Set up crash notification before starting routes
-        self.inner.set_crash_notifier(self.crash_tx.clone());
-
-        // Start all routes via inner controller
-        self.inner.start_all_routes().await?;
-
-        // Take the receiver and spawn supervision loop
-        if let Some(rx) = self.crash_rx.take() {
-            if let Some(controller_ref) = self.inner.self_ref_for_supervision() {
-                let config = self.config.clone();
-                let metrics = self.metrics.clone();
-                tokio::spawn(async move {
-                    supervision_loop(rx, controller_ref, config, metrics).await;
-                });
-            } else {
-                warn!("SupervisingRouteController: self_ref not set, supervision loop not started");
-            }
-        }
-
-        Ok(())
+        self.ensure_supervision_loop_started();
+        self.inner.start_all_routes().await
     }
 
     async fn stop_all_routes(&mut self) -> Result<(), CamelError> {
@@ -150,12 +159,24 @@ impl RouteControllerInternal for SupervisingRouteController {
         self.inner.set_self_ref(self_ref)
     }
 
+    fn set_runtime_handle(&mut self, runtime: Arc<dyn RuntimeHandle>) {
+        self.inner.set_runtime_handle(runtime)
+    }
+
     fn route_count(&self) -> usize {
         self.inner.route_count()
     }
 
     fn route_ids(&self) -> Vec<String> {
         self.inner.route_ids()
+    }
+
+    fn auto_startup_route_ids(&self) -> Vec<String> {
+        self.inner.auto_startup_route_ids()
+    }
+
+    fn shutdown_route_ids(&self) -> Vec<String> {
+        self.inner.shutdown_route_ids()
     }
 
     fn set_tracer_config(&mut self, config: &crate::config::TracerConfig) {
@@ -174,6 +195,7 @@ impl RouteControllerInternal for SupervisingRouteController {
     }
 
     async fn start_route_reload(&mut self, route_id: &str) -> Result<(), camel_api::CamelError> {
+        self.ensure_supervision_loop_started();
         self.inner.start_route(route_id).await
     }
 
@@ -188,7 +210,7 @@ impl RouteControllerInternal for SupervisingRouteController {
 /// Tracks attempt counts per route and respects `max_attempts` from config.
 async fn supervision_loop(
     mut rx: tokio::sync::mpsc::Receiver<CrashNotification>,
-    controller: Arc<Mutex<dyn RouteController>>,
+    runtime: Option<Arc<dyn RuntimeHandle>>,
     config: SupervisionConfig,
     _metrics: Option<Arc<dyn MetricsCollector>>,
 ) {
@@ -254,30 +276,128 @@ async fn supervision_loop(
         // Sleep before restart
         tokio::time::sleep(delay).await;
 
-        // Check current status before restarting
-        let mut ctrl = controller.lock().await;
-        match ctrl.route_status(&route_id) {
-            Some(RouteStatus::Failed(_)) => {
-                // Route is still failed — proceed with restart
-                match ctrl.restart_route(&route_id).await {
-                    Ok(()) => {
-                        info!(route_id = %route_id, "Route restarted successfully");
-                        // Record restart time instead of resetting attempts
-                        // The counter will be reset on next crash if route ran long enough
-                        last_restart_time.insert(route_id.clone(), Instant::now());
-                    }
-                    Err(e) => {
-                        error!(route_id = %route_id, error = %e, "Failed to restart route");
-                    }
-                }
+        let Some(runtime) = &runtime else {
+            warn!(
+                route_id = %route_id,
+                "Runtime handle unavailable, supervision restart skipped"
+            );
+            currently_restarting.remove(&route_id);
+            continue;
+        };
+
+        // If runtime lifecycle has already been intentionally transitioned to a
+        // non-running state, supervision must not revive it.
+        let pre_status = match runtime
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: route_id.clone(),
+            })
+            .await
+        {
+            Ok(RuntimeQueryResult::RouteStatus { status, .. }) => status,
+            Ok(other) => {
+                warn!(
+                    route_id = %route_id,
+                    ?other,
+                    "Unexpected runtime query result, skipping supervision restart"
+                );
+                currently_restarting.remove(&route_id);
+                continue;
             }
-            Some(status) => {
-                // Route was manually stopped/suspended — skip restart
-                warn!(route_id = %route_id, ?status, "Route no longer failed, skipping supervision restart");
+            Err(err) => {
+                warn!(
+                    route_id = %route_id,
+                    error = %err,
+                    "Runtime status query failed, skipping supervision restart"
+                );
+                currently_restarting.remove(&route_id);
+                continue;
+            }
+        };
+
+        if matches!(pre_status.as_str(), "Registered" | "Stopped") {
+            warn!(
+                route_id = %route_id,
+                status = %pre_status,
+                "Runtime lifecycle is non-running; supervision restart skipped"
+            );
+            attempts.remove(&route_id);
+            currently_restarting.remove(&route_id);
+            continue;
+        }
+
+        // Record crash in runtime state first so the read-model remains authoritative
+        // for subsequent restart decisions.
+        if let Err(err) = runtime
+            .execute(RuntimeCommand::FailRoute {
+                route_id: route_id.clone(),
+                error: error.clone(),
+                command_id: next_supervision_command_id("fail", &route_id),
+                causation_id: None,
+            })
+            .await
+        {
+            warn!(
+                route_id = %route_id,
+                error = %err,
+                "Failed to persist crash state in runtime before restart check"
+            );
+        }
+
+        // Check current status before restarting using runtime read-model only.
+        let should_restart = match runtime
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: route_id.clone(),
+            })
+            .await
+        {
+            Ok(RuntimeQueryResult::RouteStatus { status, .. }) if status == "Failed" => true,
+            Ok(RuntimeQueryResult::RouteStatus { status, .. }) => {
+                warn!(
+                    route_id = %route_id,
+                    status = %status,
+                    "Route no longer failed in runtime projection, skipping supervision restart"
+                );
                 attempts.remove(&route_id);
+                false
             }
-            None => {
-                warn!(route_id = %route_id, "Route not found during supervision restart");
+            Ok(other) => {
+                warn!(
+                    route_id = %route_id,
+                    ?other,
+                    "Unexpected runtime query result, skipping supervision restart"
+                );
+                false
+            }
+            Err(err) => {
+                warn!(
+                    route_id = %route_id,
+                    error = %err,
+                    "Runtime status query failed, skipping supervision restart"
+                );
+                false
+            }
+        };
+
+        if should_restart {
+            let restart_result = runtime
+                .execute(RuntimeCommand::ReloadRoute {
+                    route_id: route_id.clone(),
+                    command_id: next_supervision_command_id("reload", &route_id),
+                    causation_id: None,
+                })
+                .await
+                .map(|_| ());
+
+            match restart_result {
+                Ok(()) => {
+                    info!(route_id = %route_id, "Route restarted successfully");
+                    // Record restart time instead of resetting attempts.
+                    // The counter will be reset on next crash if route ran long enough.
+                    last_restart_time.insert(route_id.clone(), Instant::now());
+                }
+                Err(e) => {
+                    error!(route_id = %route_id, error = %e, "Failed to restart route");
+                }
             }
         }
 
@@ -291,11 +411,35 @@ async fn supervision_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::{InMemoryRuntimeStore, RuntimeExecutionAdapter};
+    use crate::application::runtime_bus::RuntimeBus;
     use async_trait::async_trait;
+    use camel_api::RuntimeQueryBus;
     use camel_component::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
+
+    async fn attach_runtime_bus(
+        controller: &StdArc<Mutex<dyn RouteControllerInternal>>,
+    ) -> StdArc<RuntimeBus> {
+        let store = InMemoryRuntimeStore::default();
+        let runtime = StdArc::new(
+            RuntimeBus::new(
+                StdArc::new(store.clone()),
+                StdArc::new(store.clone()),
+                StdArc::new(store.clone()),
+                StdArc::new(store.clone()),
+            )
+            .with_uow(StdArc::new(store))
+            .with_execution(StdArc::new(RuntimeExecutionAdapter::new(StdArc::clone(
+                controller,
+            )))),
+        );
+        let runtime_handle: StdArc<dyn RuntimeHandle> = runtime.clone();
+        controller.lock().await.set_runtime_handle(runtime_handle);
+        runtime
+    }
 
     /// A consumer that crashes on first call, then blocks indefinitely.
     struct CrashThenBlockConsumer {
@@ -392,11 +536,16 @@ mod tests {
             .try_lock()
             .unwrap()
             .set_self_ref(StdArc::clone(&controller) as StdArc<Mutex<dyn RouteController>>);
+        let runtime = attach_runtime_bus(&controller).await;
 
         // Add a route
         let def = crate::route::RouteDefinition::new("crash-then-block:test", vec![])
             .with_route_id("crash-route");
         controller.try_lock().unwrap().add_route(def).unwrap();
+        runtime
+            .bootstrap_register_route("crash-route".to_string())
+            .await
+            .unwrap();
 
         // Start all routes
         controller.lock().await.start_all_routes().await.unwrap();
@@ -412,13 +561,18 @@ mod tests {
             count
         );
 
-        // Verify route is now started
-        let status = controller.lock().await.route_status("crash-route").unwrap();
-        assert!(
-            matches!(status, RouteStatus::Started),
-            "expected Started, got {:?}",
-            status
-        );
+        // Verify runtime projection reports Started.
+        let status = match runtime
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: "crash-route".into(),
+            })
+            .await
+            .unwrap()
+        {
+            RuntimeQueryResult::RouteStatus { status, .. } => status,
+            other => panic!("unexpected query result: {other:?}"),
+        };
+        assert_eq!(status, "Started");
     }
 
     #[tokio::test]
@@ -481,27 +635,33 @@ mod tests {
             .try_lock()
             .unwrap()
             .set_self_ref(StdArc::clone(&controller) as StdArc<Mutex<dyn RouteController>>);
+        let runtime = attach_runtime_bus(&controller).await;
 
         let def = crate::route::RouteDefinition::new("always-crash:test", vec![])
             .with_route_id("always-crash-route");
         controller.try_lock().unwrap().add_route(def).unwrap();
+        runtime
+            .bootstrap_register_route("always-crash-route".to_string())
+            .await
+            .unwrap();
 
         controller.lock().await.start_all_routes().await.unwrap();
 
         // Wait for all attempts
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Route should be in Failed state (not restarted after max attempts)
-        let status = controller
-            .lock()
+        // Runtime projection should be in Failed state (not restarted after max attempts).
+        let status = match runtime
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: "always-crash-route".into(),
+            })
             .await
-            .route_status("always-crash-route")
-            .unwrap();
-        assert!(
-            matches!(status, RouteStatus::Failed(_)),
-            "expected Failed, got {:?}",
-            status
-        );
+            .unwrap()
+        {
+            RuntimeQueryResult::RouteStatus { status, .. } => status,
+            other => panic!("unexpected query result: {other:?}"),
+        };
+        assert_eq!(status, "Failed");
     }
 
     #[tokio::test]
@@ -609,10 +769,15 @@ mod tests {
             .try_lock()
             .unwrap()
             .set_self_ref(StdArc::clone(&controller) as StdArc<Mutex<dyn RouteController>>);
+        let runtime = attach_runtime_bus(&controller).await;
 
         let def = crate::route::RouteDefinition::new("always-crash-count:test", vec![])
             .with_route_id("give-up-route");
         controller.try_lock().unwrap().add_route(def).unwrap();
+        runtime
+            .bootstrap_register_route("give-up-route".to_string())
+            .await
+            .unwrap();
 
         controller.lock().await.start_all_routes().await.unwrap();
 
@@ -630,17 +795,18 @@ mod tests {
             count
         );
 
-        // Verify route is in Failed state (supervision gave up)
-        let status = controller
-            .lock()
+        // Verify runtime projection is in Failed state (supervision gave up).
+        let status = match runtime
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: "give-up-route".into(),
+            })
             .await
-            .route_status("give-up-route")
-            .unwrap();
-        assert!(
-            matches!(status, RouteStatus::Failed(_)),
-            "expected Failed, got {:?}",
-            status
-        );
+            .unwrap()
+        {
+            RuntimeQueryResult::RouteStatus { status, .. } => status,
+            other => panic!("unexpected query result: {other:?}"),
+        };
+        assert_eq!(status, "Failed");
     }
 
     /// Consumer that crashes on odd calls, blocks briefly then crashes on even calls.
@@ -754,10 +920,15 @@ mod tests {
             .try_lock()
             .unwrap()
             .set_self_ref(StdArc::clone(&controller) as StdArc<Mutex<dyn RouteController>>);
+        let runtime = attach_runtime_bus(&controller).await;
 
         let def = crate::route::RouteDefinition::new("crash-odd-block-even:test", vec![])
             .with_route_id("reset-attempt-route");
         controller.try_lock().unwrap().add_route(def).unwrap();
+        runtime
+            .bootstrap_register_route("reset-attempt-route".to_string())
+            .await
+            .unwrap();
 
         controller.lock().await.start_all_routes().await.unwrap();
 
@@ -779,17 +950,17 @@ mod tests {
             count
         );
 
-        // Verify route is NOT in Failed state
-        // It should be either Started or in the process of restarting
-        let status = controller
-            .lock()
+        // Verify runtime projection is NOT Failed.
+        let status = match runtime
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: "reset-attempt-route".into(),
+            })
             .await
-            .route_status("reset-attempt-route")
-            .unwrap();
-        assert!(
-            !matches!(status, RouteStatus::Failed(_)),
-            "expected route NOT to be Failed (supervision should continue due to attempt reset), got {:?}",
-            status
-        );
+            .unwrap()
+        {
+            RuntimeQueryResult::RouteStatus { status, .. } => status,
+            other => panic!("unexpected query result: {other:?}"),
+        };
+        assert_ne!(status, "Failed");
     }
 }

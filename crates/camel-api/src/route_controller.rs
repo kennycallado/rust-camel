@@ -1,8 +1,8 @@
 //! Route lifecycle management types.
 //!
 //! This module provides the [`RouteController`] trait for managing route lifecycle
-//! (start, stop, suspend, resume) and the [`RouteStatus`] and [`RouteAction`] enums
-//! for tracking and controlling route state.
+//! operations (start, stop, suspend, resume) plus [`RouteStatus`] and [`RouteAction`]
+//! enums used by runtime-facing APIs.
 
 use crate::CamelError;
 use async_trait::async_trait;
@@ -43,8 +43,8 @@ pub enum RouteAction {
 
 /// Trait for managing route lifecycle operations.
 ///
-/// Implementations of this trait provide the ability to start, stop, suspend,
-/// resume, and query the status of routes within a Camel context.
+/// Implementations provide imperative execution operations only; canonical
+/// lifecycle state is exposed via runtime query APIs.
 #[async_trait]
 pub trait RouteController: Send + Sync {
     /// Start a specific route by its ID.
@@ -81,11 +81,6 @@ pub trait RouteController: Send + Sync {
     ///
     /// Returns a `CamelError` if the route cannot be resumed.
     async fn resume_route(&mut self, route_id: &str) -> Result<(), CamelError>;
-
-    /// Get the current status of a route by its ID.
-    ///
-    /// Returns `None` if the route does not exist.
-    fn route_status(&self, route_id: &str) -> Option<RouteStatus>;
 
     /// Start all routes in the context.
     ///

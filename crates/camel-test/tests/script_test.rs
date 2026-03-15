@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use camel_api::{Exchange, Message, ProducerContext, Value};
+use camel_api::{Exchange, Message, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_direct::DirectComponent;
 use camel_component_mock::MockComponent;
@@ -381,7 +381,7 @@ async fn test_script_empty_body_handled() {
 
 /// Helper function to send an exchange to a direct endpoint.
 async fn send_to_direct(ctx: &CamelContext, endpoint_uri: &str, exchange: Exchange) {
-    let producer_ctx = ProducerContext::new(ctx.route_controller().clone());
+    let producer_ctx = ctx.producer_context();
     let registry = ctx.registry();
     let component = registry
         .get("direct")
@@ -403,7 +403,7 @@ async fn send_to_direct(ctx: &CamelContext, endpoint_uri: &str, exchange: Exchan
 /// Helper function to send an exchange to a direct endpoint, ignoring errors.
 /// Used for tests where the script is expected to throw.
 async fn send_to_direct_ignore_error(ctx: &CamelContext, endpoint_uri: &str, exchange: Exchange) {
-    let producer_ctx = ProducerContext::new(ctx.route_controller().clone());
+    let producer_ctx = ctx.producer_context();
     let registry = ctx.registry();
     let component = registry
         .get("direct")

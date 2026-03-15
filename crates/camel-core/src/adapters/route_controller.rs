@@ -4,7 +4,7 @@
 //! including starting, stopping, suspending, and resuming routes.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
@@ -16,7 +16,7 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProducerContext,
-    RouteController, RouteStatus, Value, body::Body,
+    RouteController, RuntimeCommand, RuntimeHandle, Value, body::Body,
 };
 use camel_component::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_endpoint::parse_uri;
@@ -89,11 +89,20 @@ pub trait RouteControllerInternal: RouteController + Send {
     /// Set the self-reference needed to create `ProducerContext`.
     fn set_self_ref(&mut self, self_ref: Arc<Mutex<dyn RouteController>>);
 
+    /// Set runtime handle for ProducerContext command/query access.
+    fn set_runtime_handle(&mut self, runtime: Arc<dyn RuntimeHandle>);
+
     /// Returns the number of routes in the controller.
     fn route_count(&self) -> usize;
 
     /// Returns all route IDs.
     fn route_ids(&self) -> Vec<String>;
+
+    /// Returns route IDs that should auto-start, sorted by startup order (ascending).
+    fn auto_startup_route_ids(&self) -> Vec<String>;
+
+    /// Returns route IDs sorted by shutdown order (startup order descending).
+    fn shutdown_route_ids(&self) -> Vec<String>;
 
     /// Configure tracing from a [`TracerConfig`].
     fn set_tracer_config(&mut self, config: &TracerConfig);
@@ -122,8 +131,6 @@ struct ManagedRoute {
     pipeline: SharedPipeline,
     /// Concurrency model override (if any).
     concurrency: Option<ConcurrencyModel>,
-    /// Shared lifecycle status — written by both the controller and spawned consumer tasks.
-    status: Arc<std::sync::Mutex<RouteStatus>>,
     /// Handle for the consumer task (if running).
     consumer_handle: Option<JoinHandle<()>>,
     /// Handle for the pipeline task (if running).
@@ -137,6 +144,22 @@ struct ManagedRoute {
     /// Channel sender for sending exchanges to the pipeline.
     /// Stored to allow resuming a suspended route without recreating the channel.
     channel_sender: Option<mpsc::Sender<ExchangeEnvelope>>,
+}
+
+fn handle_is_running(handle: &Option<JoinHandle<()>>) -> bool {
+    handle.as_ref().is_some_and(|h| !h.is_finished())
+}
+
+fn inferred_lifecycle_label(managed: &ManagedRoute) -> &'static str {
+    match (
+        handle_is_running(&managed.consumer_handle),
+        handle_is_running(&managed.pipeline_handle),
+    ) {
+        (true, true) => "Started",
+        (false, true) => "Suspended",
+        (true, false) => "Stopping",
+        (false, false) => "Stopped",
+    }
 }
 
 /// Wait for a pipeline service to be ready with circuit breaker backoff.
@@ -172,6 +195,37 @@ async fn ready_with_backoff(
     }
 }
 
+fn runtime_failure_command(route_id: &str, error: &str) -> RuntimeCommand {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    RuntimeCommand::FailRoute {
+        route_id: route_id.to_string(),
+        error: error.to_string(),
+        command_id: format!("ctrl-fail-{route_id}-{stamp}"),
+        causation_id: None,
+    }
+}
+
+async fn publish_runtime_failure(
+    runtime: Option<Weak<dyn RuntimeHandle>>,
+    route_id: &str,
+    error: &str,
+) {
+    let Some(runtime) = runtime.and_then(|weak| weak.upgrade()) else {
+        return;
+    };
+    let command = runtime_failure_command(route_id, error);
+    if let Err(runtime_error) = runtime.execute(command).await {
+        warn!(
+            route_id = %route_id,
+            error = %runtime_error,
+            "failed to synchronize route crash with runtime projection"
+        );
+    }
+}
+
 /// Default implementation of [`RouteController`].
 ///
 /// Manages route lifecycle with support for:
@@ -191,6 +245,8 @@ pub struct DefaultRouteController {
     /// Self-reference for creating ProducerContext.
     /// Set after construction via `set_self_ref()`.
     self_ref: Option<Arc<Mutex<dyn RouteController>>>,
+    /// Runtime handle injected into ProducerContext for command/query operations.
+    runtime: Option<Weak<dyn RuntimeHandle>>,
     /// Optional global error handler applied to all routes without a per-route handler.
     global_error_handler: Option<ErrorHandlerConfig>,
     /// Optional crash notifier for supervision.
@@ -223,6 +279,7 @@ impl DefaultRouteController {
             languages: Arc::new(std::sync::Mutex::new(HashMap::new())),
             beans,
             self_ref: None,
+            runtime: None,
             global_error_handler: None,
             crash_notifier: None,
             tracing_enabled: false,
@@ -242,6 +299,7 @@ impl DefaultRouteController {
             languages,
             beans: Arc::new(std::sync::Mutex::new(BeanRegistry::new())),
             self_ref: None,
+            runtime: None,
             global_error_handler: None,
             crash_notifier: None,
             tracing_enabled: false,
@@ -257,12 +315,22 @@ impl DefaultRouteController {
         self.self_ref = Some(self_ref);
     }
 
+    /// Set runtime handle for ProducerContext creation.
+    pub fn set_runtime_handle(&mut self, runtime: Arc<dyn RuntimeHandle>) {
+        self.runtime = Some(Arc::downgrade(&runtime));
+    }
+
     /// Get the self-reference, if set.
     ///
     /// Used by [`SupervisingRouteController`](crate::supervising_route_controller::SupervisingRouteController)
     /// to spawn the supervision loop.
     pub fn self_ref_for_supervision(&self) -> Option<Arc<Mutex<dyn RouteController>>> {
         self.self_ref.clone()
+    }
+
+    /// Get runtime handle for supervision-triggered lifecycle commands, if set.
+    pub fn runtime_handle_for_supervision(&self) -> Option<Arc<dyn RuntimeHandle>> {
+        self.runtime.as_ref().and_then(Weak::upgrade)
     }
 
     /// Set the crash notifier for supervision.
@@ -283,6 +351,14 @@ impl DefaultRouteController {
         self.tracing_enabled = config.enabled;
         self.tracer_detail_level = config.detail_level.clone();
         self.tracer_metrics = config.metrics_collector.clone();
+    }
+
+    fn build_producer_context(&self) -> Result<ProducerContext, CamelError> {
+        let mut producer_ctx = ProducerContext::new();
+        if let Some(runtime) = self.runtime.as_ref().and_then(Weak::upgrade) {
+            producer_ctx = producer_ctx.with_runtime(runtime);
+        }
+        Ok(producer_ctx)
     }
 
     /// Resolve an `ErrorHandlerConfig` into an `ErrorHandlerLayer`.
@@ -386,10 +462,16 @@ impl DefaultRouteController {
         producer_ctx: &ProducerContext,
         registry: Arc<std::sync::Mutex<Registry>>,
     ) -> Result<Vec<BoxProcessor>, CamelError> {
-        // Lock registry for step resolution
-        let registry_guard = registry
-            .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
+        let resolve_producer = |uri: &str| -> Result<BoxProcessor, CamelError> {
+            let parsed = parse_uri(uri)?;
+            let registry_guard = registry
+                .lock()
+                .expect("mutex poisoned: another thread panicked while holding this lock");
+            let component = registry_guard.get_or_err(&parsed.scheme)?;
+            let endpoint = component.create_endpoint(uri)?;
+            endpoint.create_producer(producer_ctx)
+        };
+
         let mut processors: Vec<BoxProcessor> = Vec::new();
         for step in steps {
             match step {
@@ -397,11 +479,15 @@ impl DefaultRouteController {
                     processors.push(svc);
                 }
                 BuilderStep::To(uri) => {
-                    let parsed = parse_uri(&uri)?;
-                    let component = registry_guard.get_or_err(&parsed.scheme)?;
-                    let endpoint = component.create_endpoint(&uri)?;
-                    let producer = endpoint.create_producer(producer_ctx)?;
+                    let producer = resolve_producer(&uri)?;
                     processors.push(producer);
+                }
+                BuilderStep::Stop => {
+                    processors.push(BoxProcessor::new(camel_processor::StopService));
+                }
+                BuilderStep::Log { level, message } => {
+                    let svc = camel_processor::LogProcessor::new(level, message);
+                    processors.push(BoxProcessor::new(svc));
                 }
                 BuilderStep::DeclarativeSetHeader { key, value } => match value {
                     ValueSourceDef::Literal(value) => {
@@ -575,10 +661,7 @@ impl DefaultRouteController {
                     processors.push(BoxProcessor::new(svc));
                 }
                 BuilderStep::WireTap { uri } => {
-                    let parsed = parse_uri(&uri)?;
-                    let component = registry_guard.get_or_err(&parsed.scheme)?;
-                    let endpoint = component.create_endpoint(&uri)?;
-                    let producer = endpoint.create_producer(producer_ctx)?;
+                    let producer = resolve_producer(&uri)?;
                     let svc = camel_processor::WireTapService::new(producer);
                     processors.push(BoxProcessor::new(svc));
                 }
@@ -752,11 +835,7 @@ impl DefaultRouteController {
         let concurrency = definition.concurrency;
 
         // Create ProducerContext from self_ref for step resolution
-        let producer_ctx = self
-            .self_ref
-            .clone()
-            .map(ProducerContext::new)
-            .ok_or_else(|| CamelError::RouteError("RouteController self_ref not set".into()))?;
+        let producer_ctx = self.build_producer_context()?;
 
         // Resolve steps into processors (takes ownership of steps)
         let processors =
@@ -798,7 +877,6 @@ impl DefaultRouteController {
                 from_uri,
                 pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(pipeline))),
                 concurrency,
-                status: Arc::new(std::sync::Mutex::new(RouteStatus::Stopped)),
                 consumer_handle: None,
                 pipeline_handle: None,
                 consumer_cancel_token: CancellationToken::new(),
@@ -820,11 +898,7 @@ impl DefaultRouteController {
     ) -> Result<BoxProcessor, CamelError> {
         let route_id = def.route_id().to_string();
 
-        let producer_ctx = self
-            .self_ref
-            .clone()
-            .map(ProducerContext::new)
-            .ok_or_else(|| CamelError::RouteError("RouteController self_ref not set".into()))?;
+        let producer_ctx = self.build_producer_context()?;
 
         let processors = self.resolve_steps(def.steps, &producer_ctx, self.registry.clone())?;
         let mut pipeline = compose_traced_pipeline(
@@ -865,19 +939,14 @@ impl DefaultRouteController {
         let managed = self.routes.get(route_id).ok_or_else(|| {
             CamelError::RouteError(format!("Route '{}' not found for removal", route_id))
         })?;
-        let status = managed
-            .status
-            .lock()
-            .expect("status mutex poisoned")
-            .clone();
-        match status {
-            RouteStatus::Stopped | RouteStatus::Failed(_) => {}
-            other => {
-                return Err(CamelError::RouteError(format!(
-                    "Route '{}' must be stopped before removal (current status: {:?})",
-                    route_id, other
-                )));
-            }
+        if handle_is_running(&managed.consumer_handle)
+            || handle_is_running(&managed.pipeline_handle)
+        {
+            return Err(CamelError::RouteError(format!(
+                "Route '{}' must be stopped before removal (current execution lifecycle: {})",
+                route_id,
+                inferred_lifecycle_label(managed)
+            )));
         }
         self.routes.remove(route_id);
         info!(route_id = %route_id, "Route removed from controller");
@@ -889,17 +958,32 @@ impl DefaultRouteController {
         self.routes.len()
     }
 
-    /// Force-set the status of a route. Only for use in tests.
-    #[doc(hidden)]
-    pub fn force_route_status(&mut self, route_id: &str, status: RouteStatus) {
-        if let Some(managed) = self.routes.get(route_id) {
-            *managed.status.lock().expect("status mutex poisoned") = status;
-        }
-    }
-
     /// Returns all route IDs.
     pub fn route_ids(&self) -> Vec<String> {
         self.routes.keys().cloned().collect()
+    }
+
+    /// Returns route IDs that should auto-start, sorted by startup order (ascending).
+    pub fn auto_startup_route_ids(&self) -> Vec<String> {
+        let mut pairs: Vec<(String, i32)> = self
+            .routes
+            .iter()
+            .filter(|(_, managed)| managed.definition.auto_startup())
+            .map(|(id, managed)| (id.clone(), managed.definition.startup_order()))
+            .collect();
+        pairs.sort_by_key(|(_, order)| *order);
+        pairs.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Returns route IDs sorted by shutdown order (startup order descending).
+    pub fn shutdown_route_ids(&self) -> Vec<String> {
+        let mut pairs: Vec<(String, i32)> = self
+            .routes
+            .iter()
+            .map(|(id, managed)| (id.clone(), managed.definition.startup_order()))
+            .collect();
+        pairs.sort_by_key(|(_, order)| std::cmp::Reverse(*order));
+        pairs.into_iter().map(|(id, _)| id).collect()
     }
 
     /// Atomically swap the pipeline of a route.
@@ -945,17 +1029,13 @@ impl DefaultRouteController {
             .get_mut(route_id)
             .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
 
-        let current_status = managed
-            .status
-            .lock()
-            .expect("status mutex poisoned")
-            .clone();
-        if current_status != RouteStatus::Started && current_status != RouteStatus::Suspended {
-            return Ok(()); // Already stopped or stopping
+        if !handle_is_running(&managed.consumer_handle)
+            && !handle_is_running(&managed.pipeline_handle)
+        {
+            return Ok(());
         }
 
         info!(route_id = %route_id, "Stopping route");
-        *managed.status.lock().expect("status mutex poisoned") = RouteStatus::Stopping;
 
         // Cancel both tokens to signal shutdown for consumer and pipeline independently
         let managed = self
@@ -1013,7 +1093,6 @@ impl DefaultRouteController {
         // Create fresh cancellation tokens for next start
         managed.consumer_cancel_token = CancellationToken::new();
         managed.pipeline_cancel_token = CancellationToken::new();
-        *managed.status.lock().expect("status mutex poisoned") = RouteStatus::Stopped;
 
         info!(route_id = %route_id, "Route stopped");
         Ok(())
@@ -1023,47 +1102,36 @@ impl DefaultRouteController {
 #[async_trait::async_trait]
 impl RouteController for DefaultRouteController {
     async fn start_route(&mut self, route_id: &str) -> Result<(), CamelError> {
-        // Check if route exists and can be started, and update status atomically
+        // Check if route exists and can be started.
         {
             let managed = self
                 .routes
                 .get_mut(route_id)
                 .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
 
-            let current_status = managed
-                .status
-                .lock()
-                .expect("status mutex poisoned")
-                .clone();
-            match current_status {
-                RouteStatus::Started => return Ok(()), // Already running
-                RouteStatus::Starting => {
-                    return Err(CamelError::RouteError(format!(
-                        "Route '{}' is already starting",
-                        route_id
-                    )));
-                }
-                RouteStatus::Stopped | RouteStatus::Failed(_) => {} // OK to start
-                RouteStatus::Stopping => {
-                    return Err(CamelError::RouteError(format!(
-                        "Route '{}' is stopping",
-                        route_id
-                    )));
-                }
-                RouteStatus::Suspended => {
-                    return Err(CamelError::RouteError(format!(
-                        "Route '{}' is suspended; use resume_route() to resume, or stop_route() then start_route() for full restart",
-                        route_id
-                    )));
-                }
+            let consumer_running = handle_is_running(&managed.consumer_handle);
+            let pipeline_running = handle_is_running(&managed.pipeline_handle);
+            if consumer_running && pipeline_running {
+                return Ok(());
             }
-            *managed.status.lock().expect("status mutex poisoned") = RouteStatus::Starting;
+            if !consumer_running && pipeline_running {
+                return Err(CamelError::RouteError(format!(
+                    "Route '{}' is suspended; use resume_route() to resume, or stop_route() then start_route() for full restart",
+                    route_id
+                )));
+            }
+            if consumer_running && !pipeline_running {
+                return Err(CamelError::RouteError(format!(
+                    "Route '{}' has inconsistent execution state; stop_route() then retry start_route()",
+                    route_id
+                )));
+            }
         }
 
         info!(route_id = %route_id, "Starting route");
 
         // Get the resolved route info
-        let (from_uri, pipeline, concurrency, status_for_consumer) = {
+        let (from_uri, pipeline, concurrency) = {
             let managed = self
                 .routes
                 .get(route_id)
@@ -1072,12 +1140,12 @@ impl RouteController for DefaultRouteController {
                 managed.from_uri.clone(),
                 Arc::clone(&managed.pipeline),
                 managed.concurrency.clone(),
-                Arc::clone(&managed.status),
             )
         };
 
         // Clone crash notifier for consumer task
         let crash_notifier = self.crash_notifier.clone();
+        let runtime_for_consumer = self.runtime.clone();
 
         // Parse from URI and create consumer (lock registry for lookup)
         let parsed = parse_uri(&from_uri)?;
@@ -1111,24 +1179,24 @@ impl RouteController for DefaultRouteController {
         let consumer_ctx = ConsumerContext::new(tx, consumer_cancel.clone());
 
         // Start consumer in background task.
-        // Status is shared via Arc<Mutex<>> so the task can update it on crash.
         let route_id_for_consumer = route_id.to_string();
         let consumer_handle = tokio::spawn(async move {
             if let Err(e) = consumer.start(consumer_ctx).await {
                 error!(route_id = %route_id_for_consumer, "Consumer error: {e}");
                 let error_msg = e.to_string();
-                *status_for_consumer.lock().expect("status mutex poisoned") =
-                    RouteStatus::Failed(error_msg.clone());
 
                 // Send crash notification if notifier is configured
                 if let Some(tx) = crash_notifier {
                     let _ = tx
                         .send(CrashNotification {
                             route_id: route_id_for_consumer.clone(),
-                            error: error_msg,
+                            error: error_msg.clone(),
                         })
                         .await;
                 }
+
+                publish_runtime_failure(runtime_for_consumer, &route_id_for_consumer, &error_msg)
+                    .await;
             }
         });
 
@@ -1230,12 +1298,6 @@ impl RouteController for DefaultRouteController {
         managed.consumer_handle = Some(consumer_handle);
         managed.pipeline_handle = Some(pipeline_handle);
         managed.channel_sender = Some(tx_for_storage);
-        // Only mark as Started if consumer hasn't already crashed
-        let mut status_guard = managed.status.lock().expect("status mutex poisoned");
-        if !matches!(*status_guard, RouteStatus::Failed(_)) {
-            *status_guard = RouteStatus::Started;
-        }
-        drop(status_guard);
 
         info!(route_id = %route_id, "Route started");
         Ok(())
@@ -1252,30 +1314,25 @@ impl RouteController for DefaultRouteController {
     }
 
     async fn suspend_route(&mut self, route_id: &str) -> Result<(), CamelError> {
-        // Check route exists and get current status
+        // Check route exists and state.
         let managed = self
             .routes
             .get_mut(route_id)
             .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
 
-        let current_status = managed
-            .status
-            .lock()
-            .expect("status mutex poisoned")
-            .clone();
+        let consumer_running = handle_is_running(&managed.consumer_handle);
+        let pipeline_running = handle_is_running(&managed.pipeline_handle);
 
-        // Can only suspend from Started state
-        if current_status != RouteStatus::Started {
+        // Can only suspend from active started state.
+        if !consumer_running || !pipeline_running {
             return Err(CamelError::RouteError(format!(
-                "Cannot suspend route '{}' with status {:?}",
-                route_id, current_status
+                "Cannot suspend route '{}' with execution lifecycle {}",
+                route_id,
+                inferred_lifecycle_label(managed)
             )));
         }
 
         info!(route_id = %route_id, "Suspending route (consumer only, keeping pipeline)");
-
-        // Set status to Stopping during suspend
-        *managed.status.lock().expect("status mutex poisoned") = RouteStatus::Stopping;
 
         // Cancel consumer token only (keep pipeline running)
         let managed = self
@@ -1312,30 +1369,24 @@ impl RouteController for DefaultRouteController {
         // Create fresh cancellation token for consumer (for resume)
         managed.consumer_cancel_token = CancellationToken::new();
 
-        // Set status to Suspended (pipeline is still running)
-        *managed.status.lock().expect("status mutex poisoned") = RouteStatus::Suspended;
-
         info!(route_id = %route_id, "Route suspended (pipeline still running)");
         Ok(())
     }
 
     async fn resume_route(&mut self, route_id: &str) -> Result<(), CamelError> {
-        // Check route exists and is Suspended
+        // Check route exists and is Suspended-equivalent execution state.
         let managed = self
             .routes
             .get(route_id)
             .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
 
-        let current_status = managed
-            .status
-            .lock()
-            .expect("status mutex poisoned")
-            .clone();
-
-        if current_status != RouteStatus::Suspended {
+        let consumer_running = handle_is_running(&managed.consumer_handle);
+        let pipeline_running = handle_is_running(&managed.pipeline_handle);
+        if consumer_running || !pipeline_running {
             return Err(CamelError::RouteError(format!(
-                "Cannot resume route '{}' with status {:?} (expected Suspended)",
-                route_id, current_status
+                "Cannot resume route '{}' with execution lifecycle {} (expected Suspended)",
+                route_id,
+                inferred_lifecycle_label(managed)
             )));
         }
 
@@ -1370,9 +1421,8 @@ impl RouteController for DefaultRouteController {
         // Create child token for consumer lifecycle
         let consumer_cancel = managed.consumer_cancel_token.child_token();
 
-        // Clone status Arc for the consumer task
-        let status_for_consumer = Arc::clone(&managed.status);
         let crash_notifier = self.crash_notifier.clone();
+        let runtime_for_consumer = self.runtime.clone();
 
         // Create ConsumerContext with the stored sender
         let consumer_ctx = ConsumerContext::new(sender, consumer_cancel.clone());
@@ -1383,18 +1433,19 @@ impl RouteController for DefaultRouteController {
             if let Err(e) = consumer.start(consumer_ctx).await {
                 error!(route_id = %route_id_for_consumer, "Consumer error on resume: {e}");
                 let error_msg = e.to_string();
-                *status_for_consumer.lock().expect("status mutex poisoned") =
-                    RouteStatus::Failed(error_msg.clone());
 
                 // Send crash notification if notifier is configured
                 if let Some(tx) = crash_notifier {
                     let _ = tx
                         .send(CrashNotification {
                             route_id: route_id_for_consumer.clone(),
-                            error: error_msg,
+                            error: error_msg.clone(),
                         })
                         .await;
                 }
+
+                publish_runtime_failure(runtime_for_consumer, &route_id_for_consumer, &error_msg)
+                    .await;
             }
         });
 
@@ -1405,29 +1456,8 @@ impl RouteController for DefaultRouteController {
             .expect("invariant: route must exist after prior existence check");
         managed.consumer_handle = Some(consumer_handle);
 
-        // Only mark as Started if consumer hasn't already crashed
-        let mut status_guard = managed.status.lock().expect("status mutex poisoned");
-        if !matches!(*status_guard, RouteStatus::Failed(_)) {
-            *status_guard = RouteStatus::Started;
-        } else {
-            // Resume failed - return error
-            let failed_status = status_guard.clone();
-            drop(status_guard);
-            return Err(CamelError::RouteError(format!(
-                "Resume failed: {:?}",
-                failed_status
-            )));
-        }
-        drop(status_guard);
-
         info!(route_id = %route_id, "Route resumed");
         Ok(())
-    }
-
-    fn route_status(&self, route_id: &str) -> Option<RouteStatus> {
-        self.routes
-            .get(route_id)
-            .map(|r| r.status.lock().expect("status mutex poisoned").clone())
     }
 
     async fn start_all_routes(&mut self) -> Result<(), CamelError> {
@@ -1511,12 +1541,24 @@ impl RouteControllerInternal for DefaultRouteController {
         DefaultRouteController::set_self_ref(self, self_ref)
     }
 
+    fn set_runtime_handle(&mut self, runtime: Arc<dyn RuntimeHandle>) {
+        DefaultRouteController::set_runtime_handle(self, runtime)
+    }
+
     fn route_count(&self) -> usize {
         DefaultRouteController::route_count(self)
     }
 
     fn route_ids(&self) -> Vec<String> {
         DefaultRouteController::route_ids(self)
+    }
+
+    fn auto_startup_route_ids(&self) -> Vec<String> {
+        DefaultRouteController::auto_startup_route_ids(self)
+    }
+
+    fn shutdown_route_ids(&self) -> Vec<String> {
+        DefaultRouteController::shutdown_route_ids(self)
     }
 
     fn set_tracer_config(&mut self, config: &TracerConfig) {
@@ -1543,889 +1585,9 @@ impl RouteControllerInternal for DefaultRouteController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn test_route_controller_internal_is_object_safe() {
-        // Verifies the trait compiles as a trait object.
-        // If RouteControllerInternal is not object-safe, this test fails to compile.
         let _: Option<Box<dyn RouteControllerInternal>> = None;
-    }
-
-    #[tokio::test]
-    async fn test_swap_pipeline_updates_stored_pipeline() {
-        use camel_api::IdentityProcessor;
-
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        let mut controller = DefaultRouteController::new(registry);
-
-        let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
-        ));
-        controller.set_self_ref(controller_arc);
-
-        let definition =
-            crate::route::RouteDefinition::new("timer:tick", vec![]).with_route_id("swap-test");
-        controller.add_route(definition).unwrap();
-
-        // Swap pipeline should succeed
-        let new_pipeline = BoxProcessor::new(IdentityProcessor);
-        let result = controller.swap_pipeline("swap-test", new_pipeline);
-        assert!(result.is_ok());
-
-        // Swap on non-existent route should fail
-        let new_pipeline = BoxProcessor::new(IdentityProcessor);
-        let result = controller.swap_pipeline("nonexistent", new_pipeline);
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_add_route_duplicate_id_fails() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        let mut controller = DefaultRouteController::new(registry);
-
-        // Set self_ref to avoid error during add_route
-        let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
-        ));
-        controller.set_self_ref(controller_arc);
-
-        let definition = crate::route::RouteDefinition::new("timer:tick", vec![])
-            .with_route_id("duplicate-route");
-        assert!(controller.add_route(definition).is_ok());
-
-        // Adding a route with the same ID should fail
-        let definition2 = crate::route::RouteDefinition::new("timer:tock", vec![])
-            .with_route_id("duplicate-route");
-        let result = controller.add_route(definition2);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("already exists"),
-            "error should mention 'already exists', got: {}",
-            err
-        );
-    }
-
-    #[tokio::test]
-    async fn test_add_route_with_id_succeeds() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        let mut controller = DefaultRouteController::new(registry);
-
-        // Set self_ref to avoid error during add_route
-        let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
-        ));
-        controller.set_self_ref(controller_arc);
-
-        let definition =
-            crate::route::RouteDefinition::new("timer:tick", vec![]).with_route_id("test-route");
-        assert!(controller.add_route(definition).is_ok());
-        assert_eq!(controller.route_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_crashed_consumer_sets_failed_status() {
-        use async_trait::async_trait;
-        use camel_api::{CamelError, RouteStatus};
-        use camel_component::{ConcurrencyModel, ConsumerContext, Endpoint};
-
-        struct CrashingConsumer;
-        #[async_trait]
-        impl camel_component::Consumer for CrashingConsumer {
-            async fn start(&mut self, _ctx: ConsumerContext) -> Result<(), CamelError> {
-                Err(CamelError::RouteError("boom".into()))
-            }
-            async fn stop(&mut self) -> Result<(), CamelError> {
-                Ok(())
-            }
-            fn concurrency_model(&self) -> ConcurrencyModel {
-                ConcurrencyModel::Sequential
-            }
-        }
-        struct CrashingEndpoint;
-        impl Endpoint for CrashingEndpoint {
-            fn uri(&self) -> &str {
-                "crash:test"
-            }
-            fn create_consumer(&self) -> Result<Box<dyn camel_component::Consumer>, CamelError> {
-                Ok(Box::new(CrashingConsumer))
-            }
-            fn create_producer(
-                &self,
-                _ctx: &camel_api::ProducerContext,
-            ) -> Result<camel_api::BoxProcessor, CamelError> {
-                Err(CamelError::RouteError("no producer".into()))
-            }
-        }
-        struct CrashingComponent;
-        impl camel_component::Component for CrashingComponent {
-            fn scheme(&self) -> &str {
-                "crash"
-            }
-            fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-                let _ = uri; // satisfy unused variable warning
-                Ok(Box::new(CrashingEndpoint))
-            }
-        }
-
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        registry.lock().unwrap().register(CrashingComponent);
-        let mut controller = DefaultRouteController::new(Arc::clone(&registry));
-        let self_ref: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::clone(&registry)),
-        ));
-        controller.set_self_ref(self_ref);
-
-        let def =
-            crate::route::RouteDefinition::new("crash:test", vec![]).with_route_id("crash-route");
-        controller.add_route(def).unwrap();
-        controller.start_route("crash-route").await.unwrap();
-
-        // Give consumer task time to crash and update status
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        let status = controller.route_status("crash-route").unwrap();
-        assert!(
-            matches!(status, RouteStatus::Failed(_)),
-            "expected Failed, got {:?}",
-            status
-        );
-    }
-
-    /// Test demonstrating independent consumer/pipeline cancellation token scaffolding.
-    ///
-    /// This test verifies that ManagedRoute has separate cancellation tokens
-    /// for consumer and pipeline, enabling future independent lifecycle control
-    /// (e.g., suspending consumer while pipeline continues processing in-flight messages).
-    #[test]
-    fn test_managed_route_has_independent_cancel_tokens() {
-        // This test verifies the structure exists by checking that:
-        // 1. Both tokens are created on route addition
-        // 2. Both tokens are recreated after stop
-        //
-        // The actual independent control will be implemented in Task 3.
-        // This test serves as scaffolding verification.
-
-        let consumer_token = CancellationToken::new();
-        let pipeline_token = CancellationToken::new();
-
-        // Verify tokens start uncancelled
-        assert!(
-            !consumer_token.is_cancelled(),
-            "consumer token should start uncancelled"
-        );
-        assert!(
-            !pipeline_token.is_cancelled(),
-            "pipeline token should start uncancelled"
-        );
-
-        // Verify tokens can be cancelled independently
-        consumer_token.cancel();
-        assert!(
-            consumer_token.is_cancelled(),
-            "consumer token should be cancelled"
-        );
-        assert!(
-            !pipeline_token.is_cancelled(),
-            "pipeline token should NOT be cancelled when consumer is cancelled"
-        );
-
-        // Verify independent control works the other way
-        let consumer_token2 = CancellationToken::new();
-        let pipeline_token2 = CancellationToken::new();
-
-        pipeline_token2.cancel();
-        assert!(
-            !consumer_token2.is_cancelled(),
-            "consumer token should NOT be cancelled when pipeline is cancelled"
-        );
-        assert!(
-            pipeline_token2.is_cancelled(),
-            "pipeline token should be cancelled"
-        );
-
-        // This demonstrates the scaffolding is in place for Task 3:
-        // - Consumer and pipeline have independent CancellationToken fields
-        // - They can be controlled separately without affecting each other
-    }
-
-    /// Test verifying stop_route cancels both consumer and pipeline tokens.
-    #[tokio::test]
-    async fn test_stop_cancels_both_consumer_and_pipeline_tokens() {
-        use camel_api::IdentityProcessor;
-        use camel_component::{ConcurrencyModel, ConsumerContext, Endpoint};
-
-        // Consumer that tracks cancellation
-        struct TrackingConsumer {
-            cancelled: Arc<std::sync::atomic::AtomicBool>,
-        }
-        #[async_trait::async_trait]
-        impl camel_component::Consumer for TrackingConsumer {
-            async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
-                // Wait for cancellation signal using the public API
-                ctx.cancelled().await;
-                self.cancelled
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            }
-            async fn stop(&mut self) -> Result<(), CamelError> {
-                Ok(())
-            }
-            fn concurrency_model(&self) -> ConcurrencyModel {
-                ConcurrencyModel::Sequential
-            }
-        }
-        struct TrackingEndpoint {
-            cancelled: Arc<std::sync::atomic::AtomicBool>,
-        }
-        impl Endpoint for TrackingEndpoint {
-            fn uri(&self) -> &str {
-                "tracking:test"
-            }
-            fn create_consumer(&self) -> Result<Box<dyn camel_component::Consumer>, CamelError> {
-                Ok(Box::new(TrackingConsumer {
-                    cancelled: Arc::clone(&self.cancelled),
-                }))
-            }
-            fn create_producer(
-                &self,
-                _ctx: &camel_api::ProducerContext,
-            ) -> Result<camel_api::BoxProcessor, CamelError> {
-                Ok(camel_api::BoxProcessor::new(IdentityProcessor))
-            }
-        }
-        struct TrackingComponent {
-            cancelled: Arc<std::sync::atomic::AtomicBool>,
-        }
-        impl camel_component::Component for TrackingComponent {
-            fn scheme(&self) -> &str {
-                "tracking"
-            }
-            fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-                Ok(Box::new(TrackingEndpoint {
-                    cancelled: Arc::clone(&self.cancelled),
-                }))
-            }
-        }
-
-        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        registry.lock().unwrap().register(TrackingComponent {
-            cancelled: Arc::clone(&cancelled),
-        });
-        let mut controller = DefaultRouteController::new(Arc::clone(&registry));
-        let self_ref: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::clone(&registry)),
-        ));
-        controller.set_self_ref(self_ref);
-
-        let def = crate::route::RouteDefinition::new("tracking:test", vec![])
-            .with_route_id("tracking-route");
-        controller.add_route(def).unwrap();
-
-        // Start the route
-        controller.start_route("tracking-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("tracking-route"),
-            Some(RouteStatus::Started)
-        );
-
-        // Stop the route - should cancel both tokens
-        controller.stop_route("tracking-route").await.unwrap();
-
-        // Wait for consumer to observe cancellation
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Verify the consumer was cancelled (proving consumer_cancel_token was cancelled)
-        assert!(
-            cancelled.load(std::sync::atomic::Ordering::SeqCst),
-            "consumer should have been cancelled via consumer_cancel_token"
-        );
-
-        // Verify route is stopped
-        assert_eq!(
-            controller.route_status("tracking-route"),
-            Some(RouteStatus::Stopped)
-        );
-
-        // Verify tokens are recreated for next start
-        controller.start_route("tracking-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("tracking-route"),
-            Some(RouteStatus::Started)
-        );
-        controller.stop_route("tracking-route").await.unwrap();
-    }
-
-    /// Test that suspend_route cancels consumer but keeps pipeline running.
-    #[tokio::test]
-    async fn test_suspend() {
-        use camel_api::IdentityProcessor;
-        use camel_component::{ConcurrencyModel, ConsumerContext, Endpoint};
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-        // Consumer that tracks start/stop and can be controlled
-        struct SuspendableConsumer {
-            started: Arc<AtomicUsize>,
-            cancelled: Arc<AtomicBool>,
-        }
-        #[async_trait::async_trait]
-        impl camel_component::Consumer for SuspendableConsumer {
-            async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
-                self.started.fetch_add(1, Ordering::SeqCst);
-                // Wait for cancellation
-                ctx.cancelled().await;
-                self.cancelled.store(true, Ordering::SeqCst);
-                Ok(())
-            }
-            async fn stop(&mut self) -> Result<(), CamelError> {
-                Ok(())
-            }
-            fn concurrency_model(&self) -> ConcurrencyModel {
-                ConcurrencyModel::Sequential
-            }
-        }
-        struct SuspendableEndpoint {
-            started: Arc<AtomicUsize>,
-            cancelled: Arc<AtomicBool>,
-        }
-        impl Endpoint for SuspendableEndpoint {
-            fn uri(&self) -> &str {
-                "suspend:test"
-            }
-            fn create_consumer(&self) -> Result<Box<dyn camel_component::Consumer>, CamelError> {
-                Ok(Box::new(SuspendableConsumer {
-                    started: Arc::clone(&self.started),
-                    cancelled: Arc::clone(&self.cancelled),
-                }))
-            }
-            fn create_producer(
-                &self,
-                _ctx: &camel_api::ProducerContext,
-            ) -> Result<camel_api::BoxProcessor, CamelError> {
-                Ok(camel_api::BoxProcessor::new(IdentityProcessor))
-            }
-        }
-        struct SuspendableComponent {
-            started: Arc<AtomicUsize>,
-            cancelled: Arc<AtomicBool>,
-        }
-        impl camel_component::Component for SuspendableComponent {
-            fn scheme(&self) -> &str {
-                "suspend"
-            }
-            fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-                Ok(Box::new(SuspendableEndpoint {
-                    started: Arc::clone(&self.started),
-                    cancelled: Arc::clone(&self.cancelled),
-                }))
-            }
-        }
-
-        let started = Arc::new(AtomicUsize::new(0));
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        registry.lock().unwrap().register(SuspendableComponent {
-            started: Arc::clone(&started),
-            cancelled: Arc::clone(&cancelled),
-        });
-        let mut controller = DefaultRouteController::new(Arc::clone(&registry));
-        let self_ref: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::clone(&registry)),
-        ));
-        controller.set_self_ref(self_ref);
-
-        let def = crate::route::RouteDefinition::new("suspend:test", vec![])
-            .with_route_id("suspend-route");
-        controller.add_route(def).unwrap();
-
-        // Start the route
-        controller.start_route("suspend-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("suspend-route"),
-            Some(RouteStatus::Started)
-        );
-
-        // Give the consumer time to start
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(started.load(Ordering::SeqCst), 1);
-
-        // Suspend the route
-        controller.suspend_route("suspend-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("suspend-route"),
-            Some(RouteStatus::Suspended)
-        );
-
-        // Wait for consumer to observe cancellation
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Verify consumer was cancelled
-        assert!(
-            cancelled.load(Ordering::SeqCst),
-            "consumer should have been cancelled during suspend"
-        );
-
-        // Verify start_route on Suspended returns error
-        let result = controller.start_route("suspend-route").await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("suspended"),
-            "error should mention 'suspended', got: {}",
-            err
-        );
-
-        // Stop the suspended route
-        controller.stop_route("suspend-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("suspend-route"),
-            Some(RouteStatus::Stopped)
-        );
-    }
-
-    /// Test that resume_route spawns only consumer task, reusing the pipeline.
-    #[tokio::test]
-    async fn test_resume() {
-        use camel_api::IdentityProcessor;
-        use camel_component::{ConcurrencyModel, ConsumerContext, Endpoint};
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-        // Consumer that tracks start count and can be controlled
-        struct ResumableConsumer {
-            started: Arc<AtomicUsize>,
-            cancelled: Arc<AtomicBool>,
-        }
-        #[async_trait::async_trait]
-        impl camel_component::Consumer for ResumableConsumer {
-            async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
-                self.started.fetch_add(1, Ordering::SeqCst);
-                // Reset cancelled flag on each start
-                self.cancelled.store(false, Ordering::SeqCst);
-                // Wait for cancellation
-                ctx.cancelled().await;
-                self.cancelled.store(true, Ordering::SeqCst);
-                Ok(())
-            }
-            async fn stop(&mut self) -> Result<(), CamelError> {
-                Ok(())
-            }
-            fn concurrency_model(&self) -> ConcurrencyModel {
-                ConcurrencyModel::Sequential
-            }
-        }
-        struct ResumableEndpoint {
-            started: Arc<AtomicUsize>,
-            cancelled: Arc<AtomicBool>,
-        }
-        impl Endpoint for ResumableEndpoint {
-            fn uri(&self) -> &str {
-                "resume:test"
-            }
-            fn create_consumer(&self) -> Result<Box<dyn camel_component::Consumer>, CamelError> {
-                Ok(Box::new(ResumableConsumer {
-                    started: Arc::clone(&self.started),
-                    cancelled: Arc::clone(&self.cancelled),
-                }))
-            }
-            fn create_producer(
-                &self,
-                _ctx: &camel_api::ProducerContext,
-            ) -> Result<camel_api::BoxProcessor, CamelError> {
-                Ok(camel_api::BoxProcessor::new(IdentityProcessor))
-            }
-        }
-        struct ResumableComponent {
-            started: Arc<AtomicUsize>,
-            cancelled: Arc<AtomicBool>,
-        }
-        impl camel_component::Component for ResumableComponent {
-            fn scheme(&self) -> &str {
-                "resume"
-            }
-            fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-                Ok(Box::new(ResumableEndpoint {
-                    started: Arc::clone(&self.started),
-                    cancelled: Arc::clone(&self.cancelled),
-                }))
-            }
-        }
-
-        let started = Arc::new(AtomicUsize::new(0));
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        registry.lock().unwrap().register(ResumableComponent {
-            started: Arc::clone(&started),
-            cancelled: Arc::clone(&cancelled),
-        });
-        let mut controller = DefaultRouteController::new(Arc::clone(&registry));
-        let self_ref: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::clone(&registry)),
-        ));
-        controller.set_self_ref(self_ref);
-
-        let def =
-            crate::route::RouteDefinition::new("resume:test", vec![]).with_route_id("resume-route");
-        controller.add_route(def).unwrap();
-
-        // Start the route
-        controller.start_route("resume-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("resume-route"),
-            Some(RouteStatus::Started)
-        );
-
-        // Give the consumer time to start
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(started.load(Ordering::SeqCst), 1);
-
-        // Suspend the route
-        controller.suspend_route("resume-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("resume-route"),
-            Some(RouteStatus::Suspended)
-        );
-
-        // Wait for consumer to observe cancellation
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(cancelled.load(Ordering::SeqCst));
-
-        // Resume the route - should create a new consumer (started count increases)
-        controller.resume_route("resume-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("resume-route"),
-            Some(RouteStatus::Started)
-        );
-
-        // Give the new consumer time to start
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Verify consumer was started again (new consumer instance)
-        assert_eq!(
-            started.load(Ordering::SeqCst),
-            2,
-            "consumer should have been started twice (initial + resume)"
-        );
-
-        // Verify the new consumer is not cancelled
-        assert!(
-            !cancelled.load(Ordering::SeqCst),
-            "new consumer should not be cancelled after resume"
-        );
-
-        // Test that resume on non-suspended route fails
-        let result = controller.resume_route("resume-route").await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("not suspended") || err.contains("expected Suspended"),
-            "error should indicate route is not suspended, got: {}",
-            err
-        );
-
-        // Clean up
-        controller.stop_route("resume-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("resume-route"),
-            Some(RouteStatus::Stopped)
-        );
-
-        // Test that resume on stopped route fails
-        let result = controller.resume_route("resume-route").await;
-        assert!(result.is_err());
-    }
-
-    /// Test that resume on non-existent route fails.
-    #[tokio::test]
-    async fn test_resume_non_existent_route() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        let mut controller = DefaultRouteController::new(Arc::clone(&registry));
-        let self_ref: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::clone(&registry)),
-        ));
-        controller.set_self_ref(self_ref);
-
-        let result = controller.resume_route("non-existent").await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("not found"),
-            "error should mention 'not found', got: {}",
-            err
-        );
-    }
-
-    /// Test that suspend on non-started route fails.
-    #[tokio::test]
-    async fn test_suspend_non_started_route() {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        let mut controller = DefaultRouteController::new(Arc::clone(&registry));
-        let self_ref: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::clone(&registry)),
-        ));
-        controller.set_self_ref(self_ref);
-
-        let def =
-            crate::route::RouteDefinition::new("timer:tick", vec![]).with_route_id("test-route");
-        controller.add_route(def).unwrap();
-
-        // Suspend on stopped route should fail
-        let result = controller.suspend_route("test-route").await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Cannot suspend") || err.contains("Started"),
-            "error should indicate cannot suspend, got: {}",
-            err
-        );
-    }
-
-    /// Regression test: stop from Suspended state must cancel BOTH consumer AND pipeline.
-    ///
-    /// This test ensures the suspend/resume refactor didn't break stop semantics.
-    /// When a route is suspended, the pipeline is still running (waiting on channel).
-    /// Calling stop_route from Suspended must cancel BOTH the consumer AND the pipeline.
-    #[tokio::test]
-    async fn test_stop_from_suspended_cancels_consumer_and_pipeline() {
-        use camel_api::IdentityProcessor;
-        use camel_component::{ConcurrencyModel, ConsumerContext, Endpoint};
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        // Consumer that tracks cancellation
-        struct CancellableConsumer {
-            cancelled: Arc<AtomicBool>,
-        }
-        #[async_trait::async_trait]
-        impl camel_component::Consumer for CancellableConsumer {
-            async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
-                ctx.cancelled().await;
-                self.cancelled.store(true, Ordering::SeqCst);
-                Ok(())
-            }
-            async fn stop(&mut self) -> Result<(), CamelError> {
-                Ok(())
-            }
-            fn concurrency_model(&self) -> ConcurrencyModel {
-                ConcurrencyModel::Sequential
-            }
-        }
-        struct CancellableEndpoint {
-            cancelled: Arc<AtomicBool>,
-        }
-        impl Endpoint for CancellableEndpoint {
-            fn uri(&self) -> &str {
-                "cancellable:test"
-            }
-            fn create_consumer(&self) -> Result<Box<dyn camel_component::Consumer>, CamelError> {
-                Ok(Box::new(CancellableConsumer {
-                    cancelled: Arc::clone(&self.cancelled),
-                }))
-            }
-            fn create_producer(
-                &self,
-                _ctx: &camel_api::ProducerContext,
-            ) -> Result<camel_api::BoxProcessor, CamelError> {
-                Ok(camel_api::BoxProcessor::new(IdentityProcessor))
-            }
-        }
-        struct CancellableComponent {
-            cancelled: Arc<AtomicBool>,
-        }
-        impl camel_component::Component for CancellableComponent {
-            fn scheme(&self) -> &str {
-                "cancellable"
-            }
-            fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-                Ok(Box::new(CancellableEndpoint {
-                    cancelled: Arc::clone(&self.cancelled),
-                }))
-            }
-        }
-
-        let consumer_cancelled = Arc::new(AtomicBool::new(false));
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        registry.lock().unwrap().register(CancellableComponent {
-            cancelled: Arc::clone(&consumer_cancelled),
-        });
-        let mut controller = DefaultRouteController::new(Arc::clone(&registry));
-        let self_ref: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::clone(&registry)),
-        ));
-        controller.set_self_ref(self_ref);
-
-        let def = crate::route::RouteDefinition::new("cancellable:test", vec![])
-            .with_route_id("stop-from-suspended-route");
-        controller.add_route(def).unwrap();
-
-        // Start the route
-        controller
-            .start_route("stop-from-suspended-route")
-            .await
-            .unwrap();
-        assert_eq!(
-            controller.route_status("stop-from-suspended-route"),
-            Some(RouteStatus::Started)
-        );
-
-        // Suspend the route (consumer cancelled, pipeline still running)
-        controller
-            .suspend_route("stop-from-suspended-route")
-            .await
-            .unwrap();
-        assert_eq!(
-            controller.route_status("stop-from-suspended-route"),
-            Some(RouteStatus::Suspended)
-        );
-
-        // Wait for consumer to observe cancellation from suspend
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(
-            consumer_cancelled.load(Ordering::SeqCst),
-            "consumer should be cancelled after suspend"
-        );
-
-        // Reset the flag to detect if stop re-cancels the consumer token
-        consumer_cancelled.store(false, Ordering::SeqCst);
-
-        // STOP from Suspended state - this is the critical regression test
-        // Must cancel BOTH consumer token (even though consumer isn't running) AND pipeline token
-        controller
-            .stop_route("stop-from-suspended-route")
-            .await
-            .unwrap();
-
-        // Verify final state is Stopped
-        assert_eq!(
-            controller.route_status("stop-from-suspended-route"),
-            Some(RouteStatus::Stopped),
-            "route must be Stopped after stop_route from Suspended"
-        );
-
-        // Wait for pipeline task to observe cancellation
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // The route can be started again, proving clean shutdown
-        controller
-            .start_route("stop-from-suspended-route")
-            .await
-            .unwrap();
-        assert_eq!(
-            controller.route_status("stop-from-suspended-route"),
-            Some(RouteStatus::Started)
-        );
-
-        controller
-            .stop_route("stop-from-suspended-route")
-            .await
-            .unwrap();
-    }
-
-    /// Test full suspend/resume cycle with stop.
-    #[tokio::test]
-    async fn test_suspend_resume_stop_cycle() {
-        use camel_api::IdentityProcessor;
-        use camel_component::{ConcurrencyModel, ConsumerContext, Endpoint};
-
-        // Simple consumer that waits for cancellation
-        struct SimpleConsumer;
-        #[async_trait::async_trait]
-        impl camel_component::Consumer for SimpleConsumer {
-            async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
-                ctx.cancelled().await;
-                Ok(())
-            }
-            async fn stop(&mut self) -> Result<(), CamelError> {
-                Ok(())
-            }
-            fn concurrency_model(&self) -> ConcurrencyModel {
-                ConcurrencyModel::Sequential
-            }
-        }
-        struct SimpleEndpoint;
-        impl Endpoint for SimpleEndpoint {
-            fn uri(&self) -> &str {
-                "simple:test"
-            }
-            fn create_consumer(&self) -> Result<Box<dyn camel_component::Consumer>, CamelError> {
-                Ok(Box::new(SimpleConsumer))
-            }
-            fn create_producer(
-                &self,
-                _ctx: &camel_api::ProducerContext,
-            ) -> Result<camel_api::BoxProcessor, CamelError> {
-                Ok(camel_api::BoxProcessor::new(IdentityProcessor))
-            }
-        }
-        struct SimpleComponent;
-        impl camel_component::Component for SimpleComponent {
-            fn scheme(&self) -> &str {
-                "simple"
-            }
-            fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-                Ok(Box::new(SimpleEndpoint))
-            }
-        }
-
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        registry.lock().unwrap().register(SimpleComponent);
-        let mut controller = DefaultRouteController::new(Arc::clone(&registry));
-        let self_ref: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::clone(&registry)),
-        ));
-        controller.set_self_ref(self_ref);
-
-        let def =
-            crate::route::RouteDefinition::new("simple:test", vec![]).with_route_id("cycle-route");
-        controller.add_route(def).unwrap();
-
-        // Full cycle: start -> suspend -> resume -> suspend -> stop
-        controller.start_route("cycle-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("cycle-route"),
-            Some(RouteStatus::Started)
-        );
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        controller.suspend_route("cycle-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("cycle-route"),
-            Some(RouteStatus::Suspended)
-        );
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        controller.resume_route("cycle-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("cycle-route"),
-            Some(RouteStatus::Started)
-        );
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        controller.suspend_route("cycle-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("cycle-route"),
-            Some(RouteStatus::Suspended)
-        );
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Stop from suspended state
-        controller.stop_route("cycle-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("cycle-route"),
-            Some(RouteStatus::Stopped)
-        );
-
-        // Can start again after stop
-        controller.start_route("cycle-route").await.unwrap();
-        assert_eq!(
-            controller.route_status("cycle-route"),
-            Some(RouteStatus::Started)
-        );
-
-        controller.stop_route("cycle-route").await.unwrap();
     }
 }

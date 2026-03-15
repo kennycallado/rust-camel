@@ -109,6 +109,7 @@ allow_private_ips = true  # Allow internal services in dev
 |-------|------|-------------|
 | `routes` | `[String]` | Glob patterns for route files |
 | `watch` | `bool` | Enable hot reload on file changes |
+| `runtime_journal_path` | `String?` | Optional durability flag: when set, enables local runtime journal replay |
 | `log_level` | `String` | Logging level (trace/debug/info/warn/error) |
 | `timeout_ms` | `u64` | Default operation timeout |
 | `supervision.*` | - | Retry and backoff settings |
@@ -202,6 +203,9 @@ export CAMEL_LOG_LEVEL=debug
 
 # Override watch mode
 export CAMEL_WATCH=true
+
+# Optional: enable runtime durability/replay by configuring a journal path
+export CAMEL_RUNTIME_JOURNAL_PATH=.camel/runtime-events.jsonl
 
 # Override supervision settings
 export CAMEL_SUPERVISION_INITIAL_DELAY_MS=2000

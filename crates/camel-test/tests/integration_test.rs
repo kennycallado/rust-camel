@@ -2470,7 +2470,7 @@ async fn test_choice_short_circuits_first_match() {
 #[tokio::test]
 async fn test_xml_body_pipeline() {
     use camel_api::body::Body;
-    use camel_api::{Exchange, Message, ProducerContext};
+    use camel_api::{Exchange, Message};
     use camel_component_direct::DirectComponent;
     use tower::util::ServiceExt;
 
@@ -2495,7 +2495,7 @@ async fn test_xml_body_pipeline() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Create a producer to send an exchange with XML body
-    let producer_ctx = ProducerContext::new(ctx.route_controller().clone());
+    let producer_ctx = ctx.producer_context();
     let registry = ctx.registry();
     let component = registry.get("direct").unwrap();
     let endpoint = component.create_endpoint("direct:xml-in").unwrap();

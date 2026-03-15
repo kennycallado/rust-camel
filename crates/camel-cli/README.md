@@ -129,6 +129,7 @@ See [camel-dsl](../crates/camel-dsl) for the full step reference.
 |-----|------|---------|-------------|
 | `routes` | `[String]` | `[]` | Glob patterns for route YAML files |
 | `watch` | `bool` | `false` | Enable file-watcher hot-reload |
+| `runtime_journal_path` | `String?` | disabled | Optional flag to enable local runtime durability/replay |
 | `log_level` | `String` | `"INFO"` | Tracing log level |
 | `timeout_ms` | `u64` | `5000` | Default operation timeout (ms) |
 | `components.timer.period` | `u64` | `1000` | Default timer period (ms) |

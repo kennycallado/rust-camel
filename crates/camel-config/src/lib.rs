@@ -10,5 +10,6 @@ pub use config::{
 };
 pub use discovery::{DiscoveryError, discover_routes};
 pub use yaml::{
-    YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_declarative,
+    YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_canonical,
+    parse_yaml_to_declarative,
 };

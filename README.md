@@ -10,6 +10,72 @@ rust-camel lets you define message routes between components using a fluent buil
 
 Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `kafka`, `redis`, `sql`, `container`.
 
+## Architecture
+
+rust-camel implements **Domain-Driven Design (DDD)** with **CQRS** and **Hexagonal Architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              camel-core                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         Domain Layer                                 │   │
+│  │   RouteRuntimeAggregate, RouteRuntimeState, RouteLifecycleCommand   │   │
+│  │   RuntimeEvent (internal contract, no external deps)                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                         │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                       Application Layer                              │   │
+│  │   RuntimeBus (CommandBus + QueryBus), Command Handlers, Queries     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                         │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                          Ports Layer                                 │   │
+│  │   RouteRepositoryPort, ProjectionStorePort, RuntimeExecutionPort,   │   │
+│  │   EventPublisherPort, RuntimeEventJournalPort, CommandDedupPort     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                         │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        Adapters Layer                                │   │
+│  │   InMemory* adapters, FileRuntimeEventJournal, RuntimeExecutionAdap │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **Aggregate** | `RouteRuntimeAggregate` owns route lifecycle state with optimistic locking |
+| **Projection** | `RouteStatusProjection` is the read model for queries |
+| **Command** | `RuntimeCommand` (RegisterRoute, StartRoute, StopRoute, etc.) |
+| **Query** | `RuntimeQuery` (GetRouteStatus, ListRoutes) |
+| **Event** | `RuntimeEvent` (RouteStarted, RouteStopped, RouteFailed, etc.) |
+| **Journal** | Optional durable event journal for crash recovery |
+
+### Runtime Bus
+
+```rust
+// Commands modify state
+ctx.runtime().execute(RuntimeCommand::StartRoute {
+    route_id: "my-route".into(),
+    command_id: "cmd-1".into(),
+    causation_id: None,
+}).await?;
+
+// Queries read from projections (not controller)
+let status = ctx.runtime_route_status("my-route").await?;
+```
+
+### Optional Durability
+
+```rust
+// Enable file-backed event journal for runtime state recovery
+let ctx = CamelContext::new_with_runtime_journal_path(".camel/runtime.jsonl");
+```
+
 ## Quick Example
 
 ```rust
@@ -51,8 +117,8 @@ cargo run -p hello-world
 
 | Crate | Description |
 |-------|-------------|
-| `camel-api` | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn` |
-| `camel-core` | Runtime: `CamelContext`, `Route`, `RouteDefinition`, `SequentialPipeline` |
+| `camel-api` | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent` |
+| `camel-core` | Runtime engine with DDD/CQRS: `CamelContext`, domain aggregates, ports, adapters, event journal |
 | `camel-config` | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns |
 | `camel-builder` | Fluent `RouteBuilder` API |
 | `camel-component` | `Component`, `Endpoint`, `Consumer` traits |
@@ -265,8 +331,17 @@ Control routes dynamically from code or from other routes:
 
 ```rust
 // From code:
-ctx.route_controller().lock().await.start_route("lazy-route").await?;
-ctx.route_controller().lock().await.stop_route("route-a").await?;
+let runtime = ctx.runtime();
+runtime.execute(RuntimeCommand::StartRoute {
+    route_id: "lazy-route".into(),
+    command_id: "cmd-start-lazy-route".into(),
+    causation_id: None,
+}).await?;
+runtime.execute(RuntimeCommand::StopRoute {
+    route_id: "route-a".into(),
+    command_id: "cmd-stop-route-a".into(),
+    causation_id: None,
+}).await?;
 
 // From another route (using controlbus):
 RouteBuilder::from("timer:monitor")
@@ -276,6 +351,8 @@ RouteBuilder::from("timer:monitor")
 ```
 
 See `examples/lazy-route` for a complete example.
+
+Canonical route compile support in Facade V1 is intentionally limited to `to/log/stop`.
 
 ## Error Handling
 

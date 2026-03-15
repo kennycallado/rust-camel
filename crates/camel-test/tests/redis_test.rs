@@ -3,6 +3,10 @@
 //! Uses testcontainers to spin up Redis instances for testing.
 //!
 //! **Requires Docker to be running.** Tests will fail if Docker is unavailable.
+//!
+//! **Requires `integration-tests` feature to compile and run.**
+
+#![cfg(feature = "integration-tests")]
 
 use camel_api::Value;
 use camel_api::error_handler::ErrorHandlerConfig;

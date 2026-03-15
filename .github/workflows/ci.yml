@@ -39,5 +39,7 @@ jobs:
         run: docker info
       - name: Build
         run: cargo build --workspace
+      - name: Hexagonal boundaries (camel-core)
+        run: cargo test -p camel-core --test hexagonal_architecture_boundaries_test
       - name: Test (full workspace)
         run: cargo test --workspace
