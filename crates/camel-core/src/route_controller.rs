@@ -20,9 +20,10 @@ use camel_api::{
 };
 use camel_component::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_endpoint::parse_uri;
-use camel_language_api::{Expression, Language, Predicate};
+use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::error_handler::ErrorHandlerLayer;
+use camel_processor::script_mutator::ScriptMutator;
 use camel_processor::{ChoiceService, WhenClause};
 
 use crate::config::{DetailLevel, TracerConfig};
@@ -633,6 +634,29 @@ impl DefaultRouteController {
                     });
 
                     processors.push(BoxProcessor::new(processor));
+                }
+                BuilderStep::Script { language, script } => {
+                    let lang = self.resolve_language(&language)?;
+                    match lang.create_mutating_expression(&script) {
+                        Ok(mut_expr) => {
+                            processors.push(BoxProcessor::new(ScriptMutator::new(mut_expr)));
+                        }
+                        Err(LanguageError::NotSupported {
+                            feature,
+                            language: ref lang_name,
+                        }) => {
+                            return Err(CamelError::RouteError(format!(
+                                "Language '{}' does not support {} (required for .script() step)",
+                                lang_name, feature
+                            )));
+                        }
+                        Err(e) => {
+                            return Err(CamelError::RouteError(format!(
+                                "Failed to create mutating expression for language '{}': {}",
+                                language, e
+                            )));
+                        }
+                    }
                 }
             }
         }

@@ -135,6 +135,24 @@ pub trait StepAccumulator: Sized {
             .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
     }
+
+    /// Execute a script that can modify the exchange (headers, properties, body).
+    ///
+    /// The script has access to `headers`, `properties`, and `body` variables
+    /// and can modify them with assignment syntax: `headers["k"] = v`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // ignore: requires full CamelContext setup with registered language
+    /// route.script("rhai", r#"headers["tenant"] = "acme"; body = body + "_processed""#)
+    /// ```
+    fn script(mut self, language: impl Into<String>, script: impl Into<String>) -> Self {
+        self.steps_mut().push(BuilderStep::Script {
+            language: language.into(),
+            script: script.into(),
+        });
+        self
+    }
 }
 
 /// A fluent builder for constructing routes.

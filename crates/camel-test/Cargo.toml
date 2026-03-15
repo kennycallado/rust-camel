@@ -29,6 +29,7 @@ tower.workspace = true
 
 [dev-dependencies]
 camel-config = { path = "../camel-config" }
+camel-language-rhai = { path = "../languages/camel-language-rhai" }
 serde_json.workspace = true
 tempfile = "3"
 wiremock = "0.6"

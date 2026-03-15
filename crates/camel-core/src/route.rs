@@ -145,6 +145,9 @@ pub enum BuilderStep {
     },
     /// Bean invocation step — resolved at route-add time.
     Bean { name: String, method: String },
+    /// Script step: executes a script that can mutate the exchange.
+    /// The script has access to `headers`, `properties`, and `body`.
+    Script { language: String, script: String },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -213,6 +216,9 @@ impl std::fmt::Debug for BuilderStep {
                     f,
                     "BuilderStep::Bean {{ name: {name:?}, method: {method:?} }}"
                 )
+            }
+            BuilderStep::Script { language, .. } => {
+                write!(f, "BuilderStep::Script {{ language: {language:?}, .. }}")
             }
         }
     }
