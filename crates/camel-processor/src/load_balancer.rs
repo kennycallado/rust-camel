@@ -133,7 +133,7 @@ async fn process_weighted(
 }
 
 async fn process_failover(
-    mut exchange: Exchange,
+    exchange: Exchange,
     endpoints: Vec<BoxProcessor>,
     start_index: Arc<AtomicUsize>,
 ) -> Result<Exchange, CamelError> {
@@ -144,14 +144,13 @@ async fn process_failover(
     for i in 0..len {
         let idx = (start + i) % len;
         let mut endpoint = endpoints[idx].clone();
-        match endpoint.ready().await?.call(exchange).await {
+        match endpoint.ready().await?.call(exchange.clone()).await {
             Ok(ex) => {
                 start_index.store((idx + 1) % len, Ordering::SeqCst);
                 return Ok(ex);
             }
             Err(e) => {
                 last_error = Some(e);
-                exchange = Exchange::new(camel_api::Message::new(""));
             }
         }
     }
@@ -197,6 +196,7 @@ async fn process_parallel(
 mod tests {
     use super::*;
     use camel_api::{BoxProcessorExt, Message};
+    use std::sync::Mutex;
     use tower::ServiceExt;
 
     fn counting_processor() -> (BoxProcessor, Arc<AtomicUsize>) {
@@ -261,6 +261,39 @@ mod tests {
         let _result = svc.ready().await.unwrap().call(ex).await.unwrap();
 
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_failover_preserves_original_exchange() {
+        // Capture body seen by retry endpoint to verify it's the original
+        let seen_body: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_body_clone = seen_body.clone();
+
+        let failing = BoxProcessor::from_fn(|_ex| {
+            Box::pin(async { Err(CamelError::ProcessorError("fail".into())) })
+        });
+
+        let retry = BoxProcessor::from_fn(move |ex: Exchange| {
+            let seen = seen_body_clone.clone();
+            Box::pin(async move {
+                if let Some(text) = ex.input.body.as_text() {
+                    *seen.lock().unwrap() = Some(text.to_string());
+                }
+                Ok(ex)
+            })
+        });
+
+        let config = LoadBalancerConfig::failover();
+        let mut svc = LoadBalancerService::new(vec![failing, retry], config);
+
+        let ex = Exchange::new(Message::new("original body"));
+        svc.ready().await.unwrap().call(ex).await.unwrap();
+
+        assert_eq!(
+            seen_body.lock().unwrap().as_deref(),
+            Some("original body"),
+            "retry endpoint must receive the original exchange body, not a blank one"
+        );
     }
 
     #[tokio::test]

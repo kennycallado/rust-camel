@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,11 +15,43 @@ const CAMEL_SLIP_ENDPOINT: &str = "CamelSlipEndpoint";
 
 pub type EndpointResolver = Arc<dyn Fn(&str) -> Option<BoxProcessor> + Send + Sync>;
 
+struct EndpointCache {
+    map: HashMap<String, BoxProcessor>,
+    order: VecDeque<String>,
+}
+
+impl EndpointCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&self, uri: &str) -> Option<BoxProcessor> {
+        self.map.get(uri).cloned()
+    }
+
+    /// Insert `uri -> endpoint`, evicting the oldest entry when at capacity.
+    fn insert(&mut self, uri: String, endpoint: BoxProcessor, capacity: usize) {
+        if self.map.contains_key(&uri) {
+            return;
+        }
+        if self.map.len() >= capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(&oldest);
+            }
+        }
+        self.order.push_back(uri.clone());
+        self.map.insert(uri, endpoint);
+    }
+}
+
 #[derive(Clone)]
 pub struct DynamicRouterService {
     config: DynamicRouterConfig,
     endpoint_resolver: EndpointResolver,
-    endpoint_cache: Arc<Mutex<HashMap<String, BoxProcessor>>>,
+    endpoint_cache: Arc<Mutex<EndpointCache>>,
 }
 
 impl DynamicRouterService {
@@ -27,7 +59,7 @@ impl DynamicRouterService {
         Self {
             config,
             endpoint_resolver,
-            endpoint_cache: Arc::new(Mutex::new(HashMap::new())),
+            endpoint_cache: Arc::new(Mutex::new(EndpointCache::new())),
         }
     }
 }
@@ -82,7 +114,7 @@ impl Service<Exchange> for DynamicRouterService {
 
                     let endpoint = {
                         let cache_guard = cache.lock().unwrap();
-                        cache_guard.get(uri).cloned()
+                        cache_guard.get(uri)
                     };
 
                     let endpoint = match endpoint {
@@ -103,7 +135,11 @@ impl Service<Exchange> for DynamicRouterService {
                             };
                             if config.cache_size > 0 {
                                 let mut cache_guard = cache.lock().unwrap();
-                                cache_guard.insert(uri.to_string(), e.clone());
+                                cache_guard.insert(
+                                    uri.to_string(),
+                                    e.clone(),
+                                    config.cache_size as usize,
+                                );
                             }
                             e
                         }
@@ -272,5 +308,44 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_router_cache_size_enforced() {
+        // Verify that the cache never exceeds the configured capacity.
+        let resolver_call_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = resolver_call_count.clone();
+
+        let resolver: EndpointResolver = Arc::new(move |uri: &str| {
+            if uri.starts_with("mock:") {
+                count_clone.fetch_add(1, Ordering::SeqCst);
+                Some(BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })))
+            } else {
+                None
+            }
+        });
+
+        // Cache capacity of 2; we will route through 3 distinct URIs.
+        let expr_count = Arc::new(AtomicUsize::new(0));
+        let expr_count_clone = expr_count.clone();
+        let config = DynamicRouterConfig::new(Arc::new(move |_ex: &Exchange| {
+            let n = expr_count_clone.fetch_add(1, Ordering::SeqCst);
+            match n {
+                0 => Some("mock:a".to_string()),
+                1 => Some("mock:b".to_string()),
+                2 => Some("mock:c".to_string()),
+                _ => None,
+            }
+        }))
+        .cache_size(2);
+
+        let mut svc = DynamicRouterService::new(config, resolver);
+
+        let ex = Exchange::new(Message::new("test"));
+        svc.ready().await.unwrap().call(ex).await.unwrap();
+
+        // The cache capacity is 2 so mock:a, mock:b, mock:c each required a resolver call
+        // (mock:a is evicted before mock:c is inserted). All three resolver calls must have happened.
+        assert_eq!(resolver_call_count.load(Ordering::SeqCst), 3);
     }
 }
