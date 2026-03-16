@@ -96,16 +96,24 @@ impl Service<Exchange> for ThrottlerService {
             } else {
                 match config.strategy {
                     ThrottleStrategy::Delay => {
-                        let wait_time = {
-                            let limiter = limiter.lock().unwrap();
-                            limiter.time_until_next_token()
-                        };
-                        if wait_time > Duration::ZERO {
-                            tokio::time::sleep(wait_time).await;
-                        }
-                        {
-                            let mut limiter = limiter.lock().unwrap();
-                            limiter.try_acquire();
+                        loop {
+                            let wait_time = {
+                                let limiter = limiter.lock().unwrap();
+                                limiter.time_until_next_token()
+                            };
+                            if wait_time > Duration::ZERO {
+                                tokio::time::sleep(wait_time).await;
+                            }
+                            let acquired = {
+                                let mut limiter = limiter.lock().unwrap();
+                                limiter.try_acquire()
+                            };
+                            if acquired {
+                                break;
+                            }
+                            // Yield to avoid tight spinning when concurrent tasks
+                            // wake simultaneously and contend for the same token.
+                            tokio::task::yield_now().await;
                         }
                         next.call(exchange).await
                     }
