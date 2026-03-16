@@ -14,20 +14,41 @@ Scripts have access to these variables injected from the Exchange:
 |----------|------|-------------|
 | `body` | String | Message body as text |
 | `headers` | Map | Message headers as a key-value map |
+| `properties` | Map | Exchange properties as a key-value map |
 
-## Available Functions
+## Read-only API (`create_expression` / `create_predicate`)
 
 | Function | Description |
 |----------|-------------|
 | `header("name")` | Look up a header value by name |
-| `set_header("key", value)` | Set a header; visible within the same script evaluation but **not** propagated back to the Exchange |
+| `set_header("key", value)` | Set a header visible within the same script evaluation (not propagated back) |
 | `property("name")` | Look up an exchange property by name |
-| `set_property("key", value)` | Set a property; visible within the same script evaluation but **not** propagated back to the Exchange |
+| `set_property("key", value)` | Set a property visible within the same script evaluation (not propagated back) |
 
-> **Note:** `set_header` and `set_property` allow scripts to pass values between
-> statements within a single evaluation (e.g. set a header then read it back later
-> in the same script). Changes do **not** persist after the script completes because
-> expressions receive a read-only `&Exchange` reference.
+> **Note:** `set_header` and `set_property` in read-only mode are local to the script evaluation. Changes are **not** propagated back to the Exchange.
+
+## Mutating API (`create_mutating_expression`)
+
+Use `create_mutating_expression` when you need script changes to persist back to the Exchange. The mutating engine uses **direct map assignment** instead of helper functions:
+
+```rhai
+headers["tenant"] = "acme";        // set header — propagated back
+properties["trace"] = "enabled";   // set property — propagated back
+body = "new content";              // set body — propagated back
+let v = headers["existing"];       // read header
+```
+
+Changes are applied atomically: if the script throws an error, all modifications are rolled back and the Exchange is restored to its pre-execution state.
+
+The `.script()` builder method uses this API automatically:
+
+```rust
+RouteBuilder::from("direct:input")
+    .script("rhai", r#"headers["tenant"] = "acme"; body = body + "_processed""#)
+    .to("log:result")
+    .route_id("script-example")
+    .build()?;
+```
 
 ## Usage
 

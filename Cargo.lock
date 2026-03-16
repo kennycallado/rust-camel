@@ -400,11 +400,13 @@ dependencies = [
  "chrono",
  "futures",
  "opentelemetry",
+ "quick-xml",
  "rand 0.8.5",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tower",
  "uuid",
 ]
@@ -564,6 +566,7 @@ dependencies = [
  "camel-component",
  "camel-endpoint",
  "camel-otel",
+ "futures",
  "http",
  "reqwest",
  "serde_json",
@@ -614,9 +617,11 @@ name = "camel-component-mock"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "camel-api",
  "camel-component",
  "camel-endpoint",
+ "serde_json",
  "tokio",
  "tower",
 ]
@@ -655,8 +660,6 @@ dependencies = [
  "futures",
  "serde_json",
  "sqlx",
- "testcontainers",
- "testcontainers-modules",
  "tokio",
  "tower",
  "tracing",
@@ -681,12 +684,19 @@ name = "camel-config"
 version = "0.4.0"
 dependencies = [
  "camel-api",
+ "camel-component-container",
+ "camel-component-file",
+ "camel-component-http",
+ "camel-component-kafka",
  "camel-component-log",
+ "camel-component-redis",
+ "camel-component-sql",
  "camel-component-timer",
  "camel-core",
  "camel-dsl",
  "camel-otel",
  "camel-processor",
+ "camel-prometheus",
  "config",
  "glob",
  "serde",
@@ -758,8 +768,20 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "camel-api",
+ "camel-endpoint-macros",
  "camel-util",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "camel-endpoint-macros"
+version = "0.4.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -825,9 +847,11 @@ dependencies = [
  "async-trait",
  "bytes",
  "camel-api",
+ "camel-language-api",
  "camel-support",
  "camel-util",
  "futures",
+ "rand 0.8.5",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -877,12 +901,16 @@ dependencies = [
  "camel-component-log",
  "camel-component-mock",
  "camel-component-redis",
+ "camel-component-sql",
  "camel-component-timer",
  "camel-config",
  "camel-core",
+ "camel-endpoint",
+ "camel-language-rhai",
  "camel-processor",
  "reqwest",
  "serde_json",
+ "sqlx",
  "tempfile",
  "testcontainers",
  "testcontainers-modules",
@@ -1426,6 +1454,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "dynamic-router"
+version = "0.4.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1526,6 +1567,24 @@ dependencies = [
  "camel-core",
  "chrono",
  "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "file-streaming"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "camel-api",
+ "camel-component",
+ "camel-component-file",
+ "camel-core",
+ "futures",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -1894,8 +1953,9 @@ dependencies = [
  "camel-component-log",
  "camel-component-timer",
  "camel-core",
- "chrono",
+ "camel-dsl",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1979,6 +2039,21 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "http-streaming"
+version = "0.4.0"
+dependencies = [
+ "bytes",
+ "camel-api",
+ "camel-component",
+ "camel-component-http",
+ "futures",
+ "reqwest",
+ "tokio",
+ "tokio-util",
  "tracing-subscriber",
 ]
 
@@ -2491,6 +2566,19 @@ name = "litemap"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
+
+[[package]]
+name = "load-balancer"
+version = "0.4.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "lock_api"
@@ -3246,6 +3334,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e36c2f31e0a47f9280fb347ef5e461ffcd2c52dd520d8e216b52f93b0b0d7d6"
 dependencies = [
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.37.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -4154,6 +4252,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "sql-streaming"
+version = "0.4.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-sql",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "futures",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tokio-stream",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "sqlx"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4534,6 +4651,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "throttler"
+version = "0.4.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5731,6 +5861,15 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "xml-body"
+version = "0.4.0"
+dependencies = [
+ "camel-api",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

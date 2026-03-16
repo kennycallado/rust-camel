@@ -97,15 +97,17 @@ async fn run(
     // 1b. Apply OTel CLI overrides (--otel-endpoint and --service-name imply --otel)
     let otel_enabled = otel || otel_endpoint.is_some() || service_name.is_some();
     if otel_enabled {
-        let otel_cfg = camel_config
-            .observability
-            .otel
-            .get_or_insert(camel_config::OtelCamelConfig {
-                enabled: true,
-                endpoint: "http://localhost:4317".to_string(),
-                service_name: "rust-camel".to_string(),
-                log_level: "info".to_string(),
-            });
+        let otel_cfg =
+            camel_config
+                .observability
+                .otel
+                .get_or_insert(camel_config::OtelCamelConfig {
+                    enabled: true,
+                    endpoint: "http://localhost:4317".to_string(),
+                    service_name: "rust-camel".to_string(),
+                    log_level: "info".to_string(),
+                    ..Default::default()
+                });
         otel_cfg.enabled = true;
         if let Some(ep) = otel_endpoint {
             otel_cfg.endpoint = ep;
@@ -137,14 +139,56 @@ async fn run(
     ctx.register_component(camel_component_timer::TimerComponent::new());
     ctx.register_component(camel_component_log::LogComponent::new());
     ctx.register_component(camel_component_direct::DirectComponent::new());
-    ctx.register_component(camel_component_file::FileComponent::new());
+    // File component: pass global config if available
+    let file_cfg = ctx
+        .get_component_config::<camel_component_file::FileGlobalConfig>()
+        .cloned();
+    ctx.register_component(camel_component_file::FileComponent::with_optional_config(
+        file_cfg,
+    ));
     ctx.register_component(camel_component_http::HttpComponent::new());
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
-    ctx.register_component(camel_component_container::ContainerComponent::new());
-    ctx.register_component(camel_component_redis::RedisComponent::new());
-    ctx.register_component(camel_component_kafka::KafkaComponent::new());
-    ctx.register_component(camel_component_sql::SqlComponent::new());
+
+    #[cfg(feature = "container")]
+    {
+        let container_cfg = ctx
+            .get_component_config::<camel_component_container::ContainerGlobalConfig>()
+            .cloned();
+        ctx.register_component(
+            camel_component_container::ContainerComponent::with_optional_config(container_cfg),
+        );
+    }
+
+    #[cfg(feature = "redis")]
+    {
+        let redis_cfg = ctx
+            .get_component_config::<camel_component_redis::RedisConfig>()
+            .cloned();
+        ctx.register_component(camel_component_redis::RedisComponent::with_optional_config(
+            redis_cfg,
+        ));
+    }
+
+    #[cfg(feature = "kafka")]
+    {
+        let kafka_cfg = ctx
+            .get_component_config::<camel_component_kafka::KafkaConfig>()
+            .cloned();
+        ctx.register_component(camel_component_kafka::KafkaComponent::with_optional_config(
+            kafka_cfg,
+        ));
+    }
+
+    #[cfg(feature = "sql")]
+    {
+        let sql_cfg = ctx
+            .get_component_config::<camel_component_sql::SqlGlobalConfig>()
+            .cloned();
+        ctx.register_component(camel_component_sql::SqlComponent::with_optional_config(
+            sql_cfg,
+        ));
+    }
 
     // 5. Discover and load initial routes
     match camel_dsl::discover_routes(&patterns) {
@@ -177,7 +221,7 @@ async fn run(
     // 8. Optionally start file watcher in background
     let watcher_shutdown = CancellationToken::new();
     if watch_enabled {
-        let ctrl = ctx.route_controller().clone();
+        let ctrl = ctx.runtime_execution_handle();
         let watch_patterns = patterns.clone();
         let watcher_token = watcher_shutdown.clone();
         tokio::spawn(async move {

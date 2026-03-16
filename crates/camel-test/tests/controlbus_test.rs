@@ -6,12 +6,64 @@
 
 use std::time::Duration;
 
-use camel_api::RouteStatus;
+use camel_api::{RouteStatus, RuntimeCommand};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_controlbus::ControlBusComponent;
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
+
+async fn route_status(ctx: &CamelContext, route_id: &str) -> Option<RouteStatus> {
+    match ctx
+        .runtime_route_status(route_id)
+        .await
+        .expect("runtime route status query failed")
+    {
+        Some(status) => match status.as_str() {
+            "Stopped" => Some(RouteStatus::Stopped),
+            "Starting" => Some(RouteStatus::Starting),
+            "Started" => Some(RouteStatus::Started),
+            "Stopping" => Some(RouteStatus::Stopping),
+            "Suspended" => Some(RouteStatus::Suspended),
+            "Failed" => Some(RouteStatus::Failed("failed".to_string())),
+            _ => None,
+        },
+        None => None,
+    }
+}
+
+async fn start_route(ctx: &CamelContext, route_id: &str) {
+    ctx.runtime()
+        .execute(RuntimeCommand::StartRoute {
+            route_id: route_id.to_string(),
+            command_id: format!("test:start:{route_id}"),
+            causation_id: None,
+        })
+        .await
+        .expect("failed to start route");
+}
+
+async fn suspend_route(ctx: &CamelContext, route_id: &str) {
+    ctx.runtime()
+        .execute(RuntimeCommand::SuspendRoute {
+            route_id: route_id.to_string(),
+            command_id: format!("test:suspend:{route_id}"),
+            causation_id: None,
+        })
+        .await
+        .expect("failed to suspend route");
+}
+
+async fn resume_route(ctx: &CamelContext, route_id: &str) {
+    ctx.runtime()
+        .execute(RuntimeCommand::ResumeRoute {
+            route_id: route_id.to_string(),
+            command_id: format!("test:resume:{route_id}"),
+            causation_id: None,
+        })
+        .await
+        .expect("failed to resume route");
+}
 
 // ---------------------------------------------------------------------------
 // Test 1: Route with auto_startup(false) does not start on ctx.start()
@@ -38,7 +90,7 @@ async fn test_autostartup_false_route_does_not_start() {
     ctx.start().await.unwrap();
 
     // Check route status is Stopped, not Started
-    let status = ctx.route_status("lazy-route");
+    let status = route_status(&ctx, "lazy-route").await;
     assert_eq!(
         status,
         Some(RouteStatus::Stopped),
@@ -95,7 +147,7 @@ async fn test_controlbus_starts_route() {
     ctx.add_route_definition(trigger_route).unwrap();
 
     // Before starting, lazy route should be Stopped
-    let status_before = ctx.route_status("lazy-route");
+    let status_before = route_status(&ctx, "lazy-route").await;
     assert_eq!(
         status_before,
         Some(RouteStatus::Stopped),
@@ -106,7 +158,7 @@ async fn test_controlbus_starts_route() {
     ctx.start().await.unwrap();
 
     // Trigger route should be Started
-    let trigger_status = ctx.route_status("trigger-route");
+    let trigger_status = route_status(&ctx, "trigger-route").await;
     assert_eq!(
         trigger_status,
         Some(RouteStatus::Started),
@@ -117,7 +169,7 @@ async fn test_controlbus_starts_route() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Now check that the lazy route was started by the ControlBus
-    let status_after = ctx.route_status("lazy-route");
+    let status_after = route_status(&ctx, "lazy-route").await;
     assert_eq!(
         status_after,
         Some(RouteStatus::Started),
@@ -170,7 +222,7 @@ async fn test_route_controller_starts_lazy_route() {
     // Start context - lazy route should NOT start
     ctx.start().await.unwrap();
 
-    let status = ctx.route_status("direct-lazy-route");
+    let status = route_status(&ctx, "direct-lazy-route").await;
     assert_eq!(
         status,
         Some(RouteStatus::Stopped),
@@ -178,15 +230,10 @@ async fn test_route_controller_starts_lazy_route() {
     );
 
     // Now use the RouteController directly to start the lazy route
-    ctx.route_controller()
-        .lock()
-        .await
-        .start_route("direct-lazy-route")
-        .await
-        .expect("Failed to start lazy route");
+    start_route(&ctx, "direct-lazy-route").await;
 
     // Verify the route is now started
-    let status_after = ctx.route_status("direct-lazy-route");
+    let status_after = route_status(&ctx, "direct-lazy-route").await;
     assert_eq!(
         status_after,
         Some(RouteStatus::Started),
@@ -242,7 +289,7 @@ async fn test_controlbus_stops_route() {
     ctx.start().await.unwrap();
 
     // Both routes should start
-    let auto_status = ctx.route_status("auto-route");
+    let auto_status = route_status(&ctx, "auto-route").await;
     assert_eq!(
         auto_status,
         Some(RouteStatus::Started),
@@ -253,7 +300,7 @@ async fn test_controlbus_stops_route() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Now the auto route should be stopped
-    let status_after = ctx.route_status("auto-route");
+    let status_after = route_status(&ctx, "auto-route").await;
     assert_eq!(
         status_after,
         Some(RouteStatus::Stopped),
@@ -309,15 +356,15 @@ async fn test_startup_order_respected() {
 
     // All routes should be started
     assert_eq!(
-        ctx.route_status("route-order-1"),
+        route_status(&ctx, "route-order-1").await,
         Some(RouteStatus::Started)
     );
     assert_eq!(
-        ctx.route_status("route-order-2"),
+        route_status(&ctx, "route-order-2").await,
         Some(RouteStatus::Started)
     );
     assert_eq!(
-        ctx.route_status("route-order-3"),
+        route_status(&ctx, "route-order-3").await,
         Some(RouteStatus::Started)
     );
 
@@ -370,13 +417,13 @@ async fn test_mixed_autostartup_routes() {
 
     // Auto route should be started
     assert_eq!(
-        ctx.route_status("auto-start-route"),
+        route_status(&ctx, "auto-start-route").await,
         Some(RouteStatus::Started)
     );
 
     // Lazy route should be stopped
     assert_eq!(
-        ctx.route_status("lazy-start-route"),
+        route_status(&ctx, "lazy-start-route").await,
         Some(RouteStatus::Stopped)
     );
 
@@ -425,22 +472,17 @@ async fn test_suspend_changes_status_to_suspended() {
 
     // Route should be started
     assert_eq!(
-        ctx.route_status("suspend-route"),
+        route_status(&ctx, "suspend-route").await,
         Some(RouteStatus::Started),
         "Route should be Started initially"
     );
 
     // Suspend the route
-    ctx.route_controller()
-        .lock()
-        .await
-        .suspend_route("suspend-route")
-        .await
-        .expect("Failed to suspend route");
+    suspend_route(&ctx, "suspend-route").await;
 
     // Status should be Suspended
     assert_eq!(
-        ctx.route_status("suspend-route"),
+        route_status(&ctx, "suspend-route").await,
         Some(RouteStatus::Suspended),
         "Route should be Suspended after suspend_route call"
     );
@@ -467,30 +509,20 @@ async fn test_resume_changes_status_to_started() {
     ctx.start().await.unwrap();
 
     // Suspend the route
-    ctx.route_controller()
-        .lock()
-        .await
-        .suspend_route("resume-route")
-        .await
-        .expect("Failed to suspend route");
+    suspend_route(&ctx, "resume-route").await;
 
     assert_eq!(
-        ctx.route_status("resume-route"),
+        route_status(&ctx, "resume-route").await,
         Some(RouteStatus::Suspended),
         "Route should be Suspended"
     );
 
     // Resume the route
-    ctx.route_controller()
-        .lock()
-        .await
-        .resume_route("resume-route")
-        .await
-        .expect("Failed to resume route");
+    resume_route(&ctx, "resume-route").await;
 
     // Status should be Started again
     assert_eq!(
-        ctx.route_status("resume-route"),
+        route_status(&ctx, "resume-route").await,
         Some(RouteStatus::Started),
         "Route should be Started after resume_route call"
     );
@@ -545,12 +577,7 @@ async fn test_suspend_drains_inflight_messages() {
 
     // Suspend should wait for in-flight messages to complete
     let suspend_start = std::time::Instant::now();
-    ctx.route_controller()
-        .lock()
-        .await
-        .suspend_route("drain-route")
-        .await
-        .expect("Failed to suspend route");
+    suspend_route(&ctx, "drain-route").await;
     let suspend_duration = suspend_start.elapsed();
 
     let count_after_suspend = endpoint.get_received_exchanges().await.len();
@@ -618,12 +645,7 @@ async fn test_suspend_blocks_new_intake_until_resume() {
     let count_before_suspend = endpoint.get_received_exchanges().await.len();
 
     // Suspend the route
-    ctx.route_controller()
-        .lock()
-        .await
-        .suspend_route("block-route")
-        .await
-        .expect("Failed to suspend route");
+    suspend_route(&ctx, "block-route").await;
 
     // Wait for consumer cancellation to fully take effect (avoid race window)
     tokio::time::sleep(Duration::from_millis(SETTLING_MS)).await;
@@ -646,12 +668,7 @@ async fn test_suspend_blocks_new_intake_until_resume() {
     );
 
     // Resume the route - messages should start flowing again
-    ctx.route_controller()
-        .lock()
-        .await
-        .resume_route("block-route")
-        .await
-        .expect("Failed to resume route");
+    resume_route(&ctx, "block-route").await;
 
     // Wait for messages after resume
     tokio::time::sleep(Duration::from_millis(POST_RESUME_FLOW_MS)).await;

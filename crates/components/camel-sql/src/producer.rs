@@ -13,7 +13,7 @@ use tokio::sync::OnceCell;
 use tower::Service;
 use tracing::{debug, error, warn};
 
-use crate::config::{SqlConfig, SqlOutputType};
+use crate::config::{SqlEndpointConfig, SqlOutputType};
 use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
@@ -21,12 +21,12 @@ use camel_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata}
 
 #[derive(Clone)]
 pub struct SqlProducer {
-    pub(crate) config: SqlConfig,
+    pub(crate) config: SqlEndpointConfig,
     pub(crate) pool: Arc<OnceCell<AnyPool>>,
 }
 
 impl SqlProducer {
-    pub fn new(config: SqlConfig, pool: Arc<OnceCell<AnyPool>>) -> Self {
+    pub fn new(config: SqlEndpointConfig, pool: Arc<OnceCell<AnyPool>>) -> Self {
         Self { config, pool }
     }
 
@@ -34,7 +34,7 @@ impl SqlProducer {
     /// 1. Header `CamelSql.Query`
     /// 2. Body (if `use_message_body_for_sql` is true)
     /// 3. Config query
-    pub(crate) fn resolve_query_source(exchange: &Exchange, config: &SqlConfig) -> String {
+    pub(crate) fn resolve_query_source(exchange: &Exchange, config: &SqlEndpointConfig) -> String {
         // Priority 1: Header
         if let Some(query_value) = exchange.input.header(headers::QUERY)
             && let Some(query_str) = query_value.as_str()
@@ -64,21 +64,40 @@ impl Service<Exchange> for SqlProducer {
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
-        let config = self.config.clone();
+        let mut config = self.config.clone();
         let pool_cell = Arc::clone(&self.pool);
 
         Box::pin(async move {
             // Get or initialize the connection pool
             let pool: &AnyPool = pool_cell
                 .get_or_try_init(|| async {
+                    // Defensive: ensure config is resolved even if caller didn't use create_endpoint
+                    config.resolve_defaults();
+
                     // Install all compiled-in sqlx drivers so AnyPool can resolve them.
                     // This is idempotent; safe to call multiple times.
                     sqlx::any::install_default_drivers();
                     let opts: PoolOptions<sqlx::Any> = PoolOptions::new()
-                        .max_connections(config.max_connections)
-                        .min_connections(config.min_connections)
-                        .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-                        .max_lifetime(Duration::from_secs(config.max_lifetime_secs));
+                        .max_connections(
+                            config
+                                .max_connections
+                                .expect("must be Some after resolve_defaults()"),
+                        )
+                        .min_connections(
+                            config
+                                .min_connections
+                                .expect("must be Some after resolve_defaults()"),
+                        )
+                        .idle_timeout(Duration::from_secs(
+                            config
+                                .idle_timeout_secs
+                                .expect("must be Some after resolve_defaults()"),
+                        ))
+                        .max_lifetime(Duration::from_secs(
+                            config
+                                .max_lifetime_secs
+                                .expect("must be Some after resolve_defaults()"),
+                        ));
                     opts.connect(&config.db_url).await.map_err(|e| {
                         error!("Failed to connect to database: {}", e);
                         CamelError::EndpointCreationFailed(format!(
@@ -152,7 +171,7 @@ impl Service<Exchange> for SqlProducer {
 async fn execute_select(
     pool: &AnyPool,
     prepared: &PreparedQuery,
-    config: &SqlConfig,
+    config: &SqlEndpointConfig,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
     match config.output_type {
@@ -250,7 +269,7 @@ async fn execute_select(
 async fn execute_modify(
     pool: &AnyPool,
     prepared: &PreparedQuery,
-    config: &SqlConfig,
+    config: &SqlEndpointConfig,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
     let mut query = sqlx::query(&prepared.sql);
@@ -292,7 +311,7 @@ async fn execute_modify(
 /// Executes a batch of queries from a JSON array body.
 async fn execute_batch(
     pool: &AnyPool,
-    config: &SqlConfig,
+    config: &SqlEndpointConfig,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
     // Body must be JSON array of arrays
@@ -392,11 +411,15 @@ async fn execute_batch(
 mod tests {
     use super::*;
     use camel_api::Message;
+    use camel_endpoint::UriConfig;
     use std::sync::Arc;
     use tokio::sync::OnceCell;
 
-    fn test_config() -> SqlConfig {
-        SqlConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap()
+    fn test_config() -> SqlEndpointConfig {
+        let mut c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        c.resolve_defaults();
+        c
     }
 
     #[test]
@@ -520,7 +543,7 @@ mod tests {
     #[test]
     fn test_expected_update_count_validation() {
         // Test that expected_update_count is parsed from URI
-        let config = SqlConfig::from_uri(
+        let config = SqlEndpointConfig::from_uri(
             "sql:update t set x=1?db_url=postgres://localhost/test&expectedUpdateCount=5",
         )
         .unwrap();
@@ -531,7 +554,7 @@ mod tests {
         assert_eq!(config_default.expected_update_count, None);
 
         // Test negative value (should parse)
-        let config_neg = SqlConfig::from_uri(
+        let config_neg = SqlEndpointConfig::from_uri(
             "sql:update t set x=1?db_url=postgres://localhost/test&expectedUpdateCount=-1",
         )
         .unwrap();

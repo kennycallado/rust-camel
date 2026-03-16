@@ -15,9 +15,11 @@ categories.workspace = true
 camel-api.workspace = true
 camel-component.workspace = true
 camel-endpoint.workspace = true
+serde_json.workspace = true
 tower.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+bytes.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

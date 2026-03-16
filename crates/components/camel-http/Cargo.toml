@@ -28,6 +28,7 @@ http.workspace = true
 tokio-util.workspace = true
 url = { workspace = true }
 camel-otel = { workspace = true, optional = true }
+futures = { workspace = true }
 
 [features]
 otel = ["dep:camel-otel"]

@@ -16,19 +16,17 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use camel_api::CamelError;
 
-use crate::reload::{compute_reload_actions, execute_reload_actions};
+use crate::context::RuntimeExecutionHandle;
+use crate::reload::{compute_reload_actions_from_runtime_snapshot, execute_reload_actions};
 use crate::route::RouteDefinition;
-use crate::route_controller::RouteControllerInternal;
 
 /// Watch directories and reload pipelines when YAML files change.
 ///
@@ -48,7 +46,7 @@ use crate::route_controller::RouteControllerInternal;
 /// logged as warnings and do not terminate the loop.
 pub async fn watch_and_reload<F>(
     watch_dirs: Vec<PathBuf>,
-    controller: Arc<Mutex<dyn RouteControllerInternal>>,
+    controller: RuntimeExecutionHandle,
     discover_fn: F,
     shutdown: Option<CancellationToken>,
 ) -> Result<(), CamelError>
@@ -158,11 +156,18 @@ where
             }
         };
 
-        // Compute the diff.
-        let actions = {
-            let guard = controller.lock().await;
-            compute_reload_actions(&new_defs, &*guard)
+        // Compute the diff from runtime projection route IDs only.
+        let runtime_route_ids = match controller.runtime_route_ids().await {
+            Ok(route_ids) => route_ids,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "hot-reload: failed to list runtime routes; skipping this reload cycle"
+                );
+                continue;
+            }
         };
+        let actions = compute_reload_actions_from_runtime_snapshot(&new_defs, &runtime_route_ids);
 
         if actions.is_empty() {
             tracing::debug!("hot-reload: no route changes detected");

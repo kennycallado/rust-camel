@@ -12,24 +12,31 @@ use std::time::Duration;
 use tower::Service;
 use tracing::{debug, error};
 
-use crate::config::KafkaConfig;
+use crate::config::{KafkaEndpointConfig, apply_security_config};
 
 #[derive(Clone)]
 pub struct KafkaProducer {
-    config: KafkaConfig,
+    config: KafkaEndpointConfig,
     producer: Arc<FutureProducer>,
 }
 
 impl KafkaProducer {
-    pub fn new(config: KafkaConfig) -> Result<Self, CamelError> {
-        let producer: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", &config.brokers)
-            .set("message.timeout.ms", config.request_timeout_ms.to_string())
-            .set("acks", &config.acks)
-            .create()
-            .map_err(|e| {
-                CamelError::ProcessorError(format!("Failed to create Kafka producer: {}", e))
-            })?;
+    pub fn new(config: KafkaEndpointConfig) -> Result<Self, CamelError> {
+        let brokers = config.brokers.as_ref().expect("brokers must be resolved");
+        let request_timeout_ms = config
+            .request_timeout_ms
+            .expect("request_timeout_ms must be resolved");
+
+        let mut cc = ClientConfig::new();
+        cc.set("bootstrap.servers", brokers)
+            .set("message.timeout.ms", request_timeout_ms.to_string())
+            .set("acks", &config.acks);
+
+        apply_security_config(&config, &mut cc);
+
+        let producer: FutureProducer = cc.create().map_err(|e| {
+            CamelError::ProcessorError(format!("Failed to create Kafka producer: {}", e))
+        })?;
 
         Ok(Self {
             config,
@@ -40,6 +47,7 @@ impl KafkaProducer {
     pub fn body_to_bytes(body: &Body) -> Result<Vec<u8>, CamelError> {
         match body {
             Body::Text(s) => Ok(s.as_bytes().to_vec()),
+            Body::Xml(s) => Ok(s.as_bytes().to_vec()),
             Body::Bytes(b) => Ok(b.to_vec()),
             Body::Json(v) => Ok(serde_json::to_string(v)
                 .map_err(|e| {
@@ -55,7 +63,7 @@ impl KafkaProducer {
 
     pub fn resolve_topic<'a>(
         exchange: &'a Exchange,
-        config: &'a KafkaConfig,
+        config: &'a KafkaEndpointConfig,
     ) -> Result<&'a str, CamelError> {
         // Check for header override first
         if let Some(v) = exchange.input.header("CamelKafkaTopic")
@@ -101,7 +109,11 @@ impl Service<Exchange> for KafkaProducer {
                 .header("CamelKafkaPartition")
                 .and_then(|v| v.as_i64().map(|n| n as i32));
 
-            let timeout = Duration::from_millis(config.request_timeout_ms as u64);
+            let timeout = Duration::from_millis(
+                config
+                    .request_timeout_ms
+                    .expect("request_timeout_ms must be resolved") as u64,
+            );
 
             // Inject W3C TraceContext headers for distributed tracing (otel feature only)
             #[cfg(feature = "otel")]
@@ -173,8 +185,8 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    fn make_config() -> KafkaConfig {
-        KafkaConfig::from_uri("kafka:test-topic?brokers=localhost:9092").unwrap()
+    fn make_config() -> KafkaEndpointConfig {
+        KafkaEndpointConfig::from_uri("kafka:test-topic?brokers=localhost:9092").unwrap()
     }
 
     #[test]
@@ -269,7 +281,8 @@ mod tests {
     async fn test_producer_sends_and_acks() {
         let brokers = std::env::var("KAFKA_BROKERS").unwrap_or("localhost:9092".to_string());
         let config =
-            KafkaConfig::from_uri(&format!("kafka:test-integration?brokers={}", brokers)).unwrap();
+            KafkaEndpointConfig::from_uri(&format!("kafka:test-integration?brokers={}", brokers))
+                .unwrap();
 
         let mut producer = KafkaProducer::new(config).unwrap();
         let msg = Message::new(Body::Text("integration test".to_string()));
@@ -289,7 +302,8 @@ mod tests {
     async fn test_producer_resolves_topic_from_header() {
         let brokers = std::env::var("KAFKA_BROKERS").unwrap_or("localhost:9092".to_string());
         let config =
-            KafkaConfig::from_uri(&format!("kafka:default-topic?brokers={}", brokers)).unwrap();
+            KafkaEndpointConfig::from_uri(&format!("kafka:default-topic?brokers={}", brokers))
+                .unwrap();
 
         let mut producer = KafkaProducer::new(config).unwrap();
         let mut msg = Message::new(Body::Text("test".to_string()));
@@ -309,9 +323,10 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_producer_delivery_error_on_unavailable_broker() {
-        let config =
-            KafkaConfig::from_uri("kafka:test?brokers=192.0.2.1:9092&requestTimeoutMs=3000")
-                .unwrap();
+        let config = KafkaEndpointConfig::from_uri(
+            "kafka:test?brokers=192.0.2.1:9092&requestTimeoutMs=3000",
+        )
+        .unwrap();
         let mut producer = KafkaProducer::new(config).unwrap();
         let msg = Message::new(Body::Text("test".to_string()));
         let exchange = Exchange::new(msg);

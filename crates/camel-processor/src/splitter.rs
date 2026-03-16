@@ -187,6 +187,7 @@ fn aggregate(
                 let value = match &ex.input.body {
                     Body::Text(s) => Value::String(s.clone()),
                     Body::Json(v) => v.clone(),
+                    Body::Xml(s) => Value::String(s.clone()),
                     Body::Bytes(b) => Value::String(String::from_utf8_lossy(b).into_owned()),
                     Body::Empty => Value::Null,
                     Body::Stream(s) => serde_json::json!({

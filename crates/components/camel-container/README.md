@@ -344,6 +344,32 @@ This is especially important for:
 
 Note: With `autoRemove=true` (the default), Docker will automatically remove containers when they exit naturally. The cleanup function handles cases where the application exits before containers finish.
 
+## Global Configuration
+
+Configure default Docker host in `Camel.toml` that applies to all Container endpoints:
+
+```toml
+[default.components.container]
+docker_host = "unix:///var/run/docker.sock"  # Docker daemon socket (default)
+```
+
+### Remote Docker Host
+
+```toml
+[production.components.container]
+docker_host = "tcp://docker-proxy:2375"  # TCP socket (note: only Unix sockets fully supported)
+```
+
+URI parameter `host` always overrides global default:
+
+```rust
+// Uses global docker_host
+.to("container:list")
+
+// Overrides to use different host
+.to("container:list?host=unix:///var/run/docker.sock")
+```
+
 ## Documentation
 
 - [API Documentation](https://docs.rs/camel-component-container)

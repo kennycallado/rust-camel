@@ -60,6 +60,7 @@ fn tracer_config(detail_level: DetailLevel) -> TracerConfig {
             },
             file: None,
         },
+        ..Default::default()
     }
 }
 

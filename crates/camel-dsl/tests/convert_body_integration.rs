@@ -45,13 +45,39 @@ routes:
 }
 
 #[test]
+fn yaml_convert_body_to_xml_produces_correct_step() {
+    let yaml = r#"
+routes:
+  - id: "convert-xml-route"
+    from: "direct:start"
+    steps:
+      - convert_body_to: xml
+"#;
+    let defs = parse_yaml(yaml).expect("YAML parse should succeed for xml target");
+    assert_eq!(defs.len(), 1, "expected exactly one route");
+
+    let steps = defs[0].steps();
+    assert_eq!(steps.len(), 1, "expected exactly one step");
+
+    // Verify the step compiled to a Processor wrapping ConvertBodyTo
+    match &steps[0] {
+        BuilderStep::Processor(_) => {
+            // This is the expected path - ConvertBodyTo is wrapped in a BoxProcessor
+        }
+        other => {
+            panic!("expected BuilderStep::Processor, got {:?}", other);
+        }
+    }
+}
+
+#[test]
 fn yaml_convert_body_to_unknown_target_returns_error() {
     let yaml = r#"
 routes:
   - id: "convert-unknown-route"
     from: "direct:start"
     steps:
-      - convert_body_to: xml
+      - convert_body_to: unknown_format
 "#;
     let result = parse_yaml(yaml);
     assert!(result.is_err(), "expected error for unknown target");
@@ -66,16 +92,16 @@ routes:
         err_msg
     );
     assert!(
-        err_msg.contains("xml"),
-        "error message should mention the invalid target 'xml', got: {}",
+        err_msg.contains("unknown_format"),
+        "error message should mention the invalid target 'unknown_format', got: {}",
         err_msg
     );
 }
 
 #[test]
 fn yaml_convert_body_to_all_valid_targets_parse() {
-    // Test all four valid targets: text, json, bytes, empty
-    for target in ["text", "json", "bytes", "empty"] {
+    // Test all five valid targets: text, json, bytes, xml, empty
+    for target in ["text", "json", "bytes", "xml", "empty"] {
         let yaml = format!(
             r#"
 routes:
@@ -165,6 +191,7 @@ fn declarative_step_convert_body_to_all_types_compile() {
         (BodyTypeDef::Text, "text"),
         (BodyTypeDef::Json, "json"),
         (BodyTypeDef::Bytes, "bytes"),
+        (BodyTypeDef::Xml, "xml"),
         (BodyTypeDef::Empty, "empty"),
     ] {
         let route = DeclarativeRoute {

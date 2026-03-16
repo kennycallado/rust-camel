@@ -107,6 +107,42 @@ pub const HEADER_CONTAINER_NAME: &str = "CamelContainerName";
 /// Header key for the result status of a container operation (e.g., "success").
 pub const HEADER_ACTION_RESULT: &str = "CamelContainerActionResult";
 
+// ---------------------------------------------------------------------------
+// ContainerGlobalConfig
+// ---------------------------------------------------------------------------
+
+/// Global configuration for Container component.
+/// Plain Rust, no serde, with Default impl and builder methods.
+/// These are the fallback defaults when URI params are not set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContainerGlobalConfig {
+    /// The Docker host URL (default: "unix:///var/run/docker.sock").
+    pub docker_host: String,
+}
+
+impl Default for ContainerGlobalConfig {
+    fn default() -> Self {
+        Self {
+            docker_host: "unix:///var/run/docker.sock".to_string(),
+        }
+    }
+}
+
+impl ContainerGlobalConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_docker_host(mut self, v: impl Into<String>) -> Self {
+        self.docker_host = v.into();
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ContainerConfig (endpoint configuration)
+// ---------------------------------------------------------------------------
+
 /// Configuration for the container component endpoint.
 ///
 /// This struct holds the parsed URI configuration including the operation type,
@@ -188,17 +224,8 @@ impl ContainerConfig {
             .get("autoRemove")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
-        let host = parts
-            .params
-            .get("host")
-            .cloned()
-            .or_else(|| {
-                Some(if cfg!(windows) {
-                    "npipe:////./pipe/docker_engine".to_string()
-                } else {
-                    "unix:///var/run/docker.sock".to_string()
-                })
-            });
+        // host is only set from URI param; global config defaults are applied later
+        let host = parts.params.get("host").cloned();
 
         Ok(Self {
             operation: parts.path,
@@ -218,15 +245,20 @@ impl ContainerConfig {
         })
     }
 
+    /// Apply global config defaults to this endpoint config.
+    /// Only sets values that are currently `None`.
+    fn apply_global_defaults(&mut self, global: &ContainerGlobalConfig) {
+        if self.host.is_none() {
+            self.host = Some(global.docker_host.clone());
+        }
+    }
+
     fn docker_socket_path(&self) -> Result<&str, CamelError> {
-        let host = self
-            .host
-            .as_deref()
-            .unwrap_or(if cfg!(windows) {
-                "npipe:////./pipe/docker_engine"
-            } else {
-                "unix:///var/run/docker.sock"
-            });
+        let host = self.host.as_deref().unwrap_or(if cfg!(windows) {
+            "npipe:////./pipe/docker_engine"
+        } else {
+            "unix:///var/run/docker.sock"
+        });
 
         if host.starts_with("unix://") || host.starts_with("npipe://") {
             return Ok(host);
@@ -1018,12 +1050,26 @@ fn extract_timestamp(log_line: &str) -> Option<String> {
 ///
 /// Containers created via `run` operation are tracked globally and can be
 /// cleaned up on shutdown by calling `cleanup_tracked_containers()`.
-pub struct ContainerComponent;
+pub struct ContainerComponent {
+    config: Option<ContainerGlobalConfig>,
+}
 
 impl ContainerComponent {
-    /// Creates a new container component instance.
+    /// Creates a new container component instance without global config.
     pub fn new() -> Self {
-        Self
+        Self { config: None }
+    }
+
+    /// Creates a container component with the given global config.
+    pub fn with_config(config: ContainerGlobalConfig) -> Self {
+        Self {
+            config: Some(config),
+        }
+    }
+
+    /// Creates a container component with optional global config.
+    pub fn with_optional_config(config: Option<ContainerGlobalConfig>) -> Self {
+        Self { config }
     }
 }
 
@@ -1039,7 +1085,11 @@ impl Component for ContainerComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let config = ContainerConfig::from_uri(uri)?;
+        let mut config = ContainerConfig::from_uri(uri)?;
+        // Apply global defaults if present and URI didn't set them
+        if let Some(ref global) = self.config {
+            config.apply_global_defaults(global);
+        }
         Ok(Box::new(ContainerEndpoint {
             uri: uri.to_string(),
             config,
@@ -1054,6 +1104,14 @@ impl Component for ContainerComponent {
 pub struct ContainerEndpoint {
     uri: String,
     config: ContainerConfig,
+}
+
+impl ContainerEndpoint {
+    /// Returns the Docker host configured for this endpoint.
+    /// Returns `None` if not set (for testing purposes).
+    pub fn docker_host(&self) -> Option<&str> {
+        self.config.host.as_deref()
+    }
 }
 
 impl Endpoint for ContainerEndpoint {
@@ -1085,7 +1143,48 @@ mod tests {
         let config = ContainerConfig::from_uri("container:run?image=alpine").unwrap();
         assert_eq!(config.operation, "run");
         assert_eq!(config.image.as_deref(), Some("alpine"));
-        assert_eq!(config.host.as_deref(), Some("unix:///var/run/docker.sock"));
+        // host is None by default; global config applies it later
+        assert!(config.host.is_none());
+    }
+
+    #[test]
+    fn test_global_config_applied_to_endpoint() {
+        // When global config is set and URI doesn't specify host,
+        // apply_global_defaults should set host from global config.
+        let global =
+            ContainerGlobalConfig::default().with_docker_host("unix:///custom/docker.sock");
+        let mut config = ContainerConfig::from_uri("container:run?image=alpine").unwrap();
+        assert!(
+            config.host.is_none(),
+            "URI without ?host= should leave host as None"
+        );
+        config.apply_global_defaults(&global);
+        assert_eq!(
+            config.host.as_deref(),
+            Some("unix:///custom/docker.sock"),
+            "global docker_host must be applied when URI did not set host"
+        );
+    }
+
+    #[test]
+    fn test_uri_param_wins_over_global_config() {
+        // When URI explicitly sets host param, apply_global_defaults must NOT override it.
+        let global =
+            ContainerGlobalConfig::default().with_docker_host("unix:///custom/docker.sock");
+        let mut config =
+            ContainerConfig::from_uri("container:run?image=alpine&host=unix:///override.sock")
+                .unwrap();
+        assert_eq!(
+            config.host.as_deref(),
+            Some("unix:///override.sock"),
+            "URI-set host should be parsed correctly"
+        );
+        config.apply_global_defaults(&global);
+        assert_eq!(
+            config.host.as_deref(),
+            Some("unix:///override.sock"),
+            "global config must NOT override a host already set by URI"
+        );
     }
 
     #[test]
@@ -1265,7 +1364,7 @@ mod tests {
         let config =
             ContainerConfig::from_uri("container:run?image=nginx&ports=8080:80/tcp,5353:53/udp")
                 .unwrap();
-        let (exposed, bindings) = config.parse_ports().unwrap();
+        let (exposed, _bindings) = config.parse_ports().unwrap();
 
         assert!(exposed.contains_key("80/tcp"));
         assert!(exposed.contains_key("53/udp"));
@@ -1305,46 +1404,8 @@ mod tests {
         assert!(config.parse_env().is_none());
     }
 
-    mod test_helpers {
-        use async_trait::async_trait;
-        use camel_api::CamelError;
-
-        /// A no-op route controller for testing purposes.
-        pub struct NullRouteController;
-
-        #[async_trait]
-        impl camel_api::RouteController for NullRouteController {
-            async fn start_route(&mut self, _: &str) -> Result<(), CamelError> {
-                Ok(())
-            }
-            async fn stop_route(&mut self, _: &str) -> Result<(), CamelError> {
-                Ok(())
-            }
-            async fn restart_route(&mut self, _: &str) -> Result<(), CamelError> {
-                Ok(())
-            }
-            async fn suspend_route(&mut self, _: &str) -> Result<(), CamelError> {
-                Ok(())
-            }
-            async fn resume_route(&mut self, _: &str) -> Result<(), CamelError> {
-                Ok(())
-            }
-            fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
-                None
-            }
-            async fn start_all_routes(&mut self) -> Result<(), CamelError> {
-                Ok(())
-            }
-            async fn stop_all_routes(&mut self) -> Result<(), CamelError> {
-                Ok(())
-            }
-        }
-    }
-
     use camel_api::Message;
     use std::sync::Arc;
-    use test_helpers::NullRouteController;
-    use tokio::sync::Mutex;
 
     #[tokio::test]
     async fn test_container_producer_resolves_operation_from_header() {
@@ -1365,7 +1426,7 @@ mod tests {
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:run").unwrap();
 
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
@@ -1400,7 +1461,7 @@ mod tests {
             .create_endpoint("container:list?host=unix:///nonexistent/docker.sock")
             .unwrap();
 
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let result = endpoint.create_producer(&ctx);
 
         // The producer should return an error because it cannot connect to the invalid socket
@@ -1443,7 +1504,7 @@ mod tests {
 
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:start").unwrap();
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         // Test each lifecycle operation without CamelContainerId header
@@ -1497,7 +1558,7 @@ mod tests {
 
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:stop").unwrap();
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
@@ -1552,7 +1613,7 @@ mod tests {
         // Create producer without an image in the URI
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:run").unwrap();
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
@@ -1601,7 +1662,7 @@ mod tests {
         // Create producer without an image in the URI
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:run").unwrap();
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new(""));
@@ -1684,7 +1745,7 @@ mod tests {
         // Create producer
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:run").unwrap();
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         // Run container with unique name
@@ -1895,7 +1956,7 @@ mod tests {
         let component = ContainerComponent::new();
         let endpoint = component.create_endpoint("container:list").unwrap();
 
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
         // Create exchange with list operation in header

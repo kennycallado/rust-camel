@@ -1,3 +1,4 @@
+use camel_api::{CanonicalRouteSpec, RuntimeCommand};
 use camel_config::{CamelConfig, ObservabilityConfig, OtelCamelConfig};
 use std::fs;
 use tempfile::tempdir;
@@ -64,11 +65,7 @@ routes:
     ctx.start().await.unwrap();
 
     // Verify route is loaded
-    let status = ctx
-        .route_controller()
-        .lock()
-        .await
-        .route_status("auto-loaded-route");
+    let status = ctx.runtime_route_status("auto-loaded-route").await.unwrap();
     assert!(status.is_some(), "Route should be loaded from config");
 
     ctx.stop().await.unwrap();
@@ -79,6 +76,7 @@ fn test_configure_context_with_supervision() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
+        runtime_journal_path: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -103,6 +101,7 @@ fn test_configure_context_sets_shutdown_timeout() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
+        runtime_journal_path: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -124,6 +123,7 @@ fn test_configure_context_with_valid_log_level() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
+        runtime_journal_path: None,
         log_level: "debug".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -143,6 +143,7 @@ fn test_configure_context_with_invalid_log_level() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
+        runtime_journal_path: None,
         log_level: "invalid_level".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -162,6 +163,7 @@ fn test_configure_context_with_otel_enabled_registers_lifecycle() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
+        runtime_journal_path: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -171,6 +173,7 @@ fn test_configure_context_with_otel_enabled_registers_lifecycle() {
                 endpoint: "http://localhost:4317".to_string(),
                 service_name: "test-service".to_string(),
                 log_level: "info".to_string(),
+                ..Default::default()
             }),
             ..Default::default()
         },
@@ -193,6 +196,7 @@ fn test_configure_context_without_otel_no_lifecycle() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
+        runtime_journal_path: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -208,5 +212,40 @@ fn test_configure_context_without_otel_no_lifecycle() {
     assert!(
         otel_service.is_none(),
         "OtelService should NOT be registered when otel is not configured"
+    );
+}
+
+#[tokio::test]
+async fn test_configure_context_uses_runtime_journal_path_from_config() {
+    let dir = tempdir().unwrap();
+    let journal_path = dir.path().join("config-runtime-events.jsonl");
+    let config = CamelConfig {
+        routes: vec![],
+        watch: false,
+        runtime_journal_path: Some(journal_path.to_string_lossy().to_string()),
+        log_level: "INFO".to_string(),
+        timeout_ms: 5000,
+        components: Default::default(),
+        observability: Default::default(),
+        supervision: None,
+    };
+
+    let mut ctx =
+        CamelConfig::configure_context(&config).expect("configure_context should succeed");
+    ctx.register_component(camel_component_timer::TimerComponent::new());
+
+    ctx.runtime()
+        .execute(RuntimeCommand::RegisterRoute {
+            spec: CanonicalRouteSpec::new("cfg-journal-r1", "timer:tick"),
+            command_id: "cfg-journal-c1".into(),
+            causation_id: None,
+        })
+        .await
+        .unwrap();
+
+    let data = fs::read_to_string(&journal_path).expect("journal file should be readable");
+    assert!(
+        data.contains("cfg-journal-r1"),
+        "journal file must include configured route id"
     );
 }

@@ -1,9 +1,9 @@
 //! Lazy Route Example
 //!
 //! Demonstrates a route with `auto_startup(false)` that doesn't start automatically.
-//! The route is manually started after a delay using the RouteController API.
+//! The route is manually started after a delay using the Runtime API.
 
-use camel_api::CamelError;
+use camel_api::{CamelError, RuntimeCommand};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
@@ -39,27 +39,21 @@ async fn main() -> Result<(), CamelError> {
     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
     // Check status: lazy route should be Stopped
-    let status = ctx
-        .route_controller()
-        .lock()
-        .await
-        .route_status("lazy-route");
+    let status = ctx.runtime_route_status("lazy-route").await?;
     println!("Route status before manual start: {:?}", status);
 
     // Manually start the lazy route
     println!("Starting route 'lazy-route' now...");
-    ctx.route_controller()
-        .lock()
-        .await
-        .start_route("lazy-route")
+    ctx.runtime()
+        .execute(RuntimeCommand::StartRoute {
+            route_id: "lazy-route".to_string(),
+            command_id: "manual-start-1".to_string(),
+            causation_id: None,
+        })
         .await?;
 
     // Check status: should now be Started
-    let status = ctx
-        .route_controller()
-        .lock()
-        .await
-        .route_status("lazy-route");
+    let status = ctx.runtime_route_status("lazy-route").await?;
     println!("Route status after manual start: {:?}", status);
 
     println!("Route started! Press Ctrl+C to stop.");

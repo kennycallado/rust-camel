@@ -1,16 +1,88 @@
-use crate::config::CamelConfig;
+use crate::config::{CamelConfig, OtelProtocol, OtelSampler};
 use crate::discovery::discover_routes;
 use camel_api::CamelError;
 use camel_core::CamelContext;
 use camel_core::config::OutputFormat;
 use camel_core::route::RouteDefinition;
-use camel_otel::{OtelConfig, OtelService};
+use camel_otel::{
+    OtelConfig, OtelProtocol as OtelProtocolOtel, OtelSampler as OtelSamplerOtel, OtelService,
+};
 use tracing::Level;
 use tracing_subscriber::Layer;
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::filter::filter_fn;
+
+#[cfg(feature = "http")]
+impl From<&crate::config::HttpCamelConfig> for camel_component_http::HttpConfig {
+    fn from(c: &crate::config::HttpCamelConfig) -> Self {
+        camel_component_http::HttpConfig {
+            connect_timeout_ms: c.connect_timeout_ms,
+            response_timeout_ms: c.response_timeout_ms,
+            max_connections: c.max_connections,
+            max_body_size: c.max_body_size,
+            max_request_body: c.max_request_body,
+            allow_private_ips: c.allow_private_ips,
+        }
+    }
+}
+
+#[cfg(feature = "kafka")]
+impl From<&crate::config::KafkaCamelConfig> for camel_component_kafka::KafkaConfig {
+    fn from(c: &crate::config::KafkaCamelConfig) -> Self {
+        camel_component_kafka::KafkaConfig {
+            brokers: c.brokers.clone(),
+            group_id: c.group_id.clone(),
+            session_timeout_ms: c.session_timeout_ms,
+            request_timeout_ms: c.request_timeout_ms,
+            auto_offset_reset: c.auto_offset_reset.clone(),
+            security_protocol: c.security_protocol.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "redis")]
+impl From<&crate::config::RedisCamelConfig> for camel_component_redis::RedisConfig {
+    fn from(c: &crate::config::RedisCamelConfig) -> Self {
+        camel_component_redis::RedisConfig {
+            host: c.host.clone(),
+            port: c.port,
+        }
+    }
+}
+
+#[cfg(feature = "sql")]
+impl From<&crate::config::SqlCamelConfig> for camel_component_sql::SqlGlobalConfig {
+    fn from(c: &crate::config::SqlCamelConfig) -> Self {
+        camel_component_sql::SqlGlobalConfig::default()
+            .with_max_connections(c.max_connections)
+            .with_min_connections(c.min_connections)
+            .with_idle_timeout_secs(c.idle_timeout_secs)
+            .with_max_lifetime_secs(c.max_lifetime_secs)
+    }
+}
+
+#[cfg(feature = "file")]
+impl From<&crate::config::FileCamelConfig> for camel_component_file::FileGlobalConfig {
+    fn from(c: &crate::config::FileCamelConfig) -> Self {
+        camel_component_file::FileGlobalConfig::default()
+            .with_delay_ms(c.delay_ms)
+            .with_initial_delay_ms(c.initial_delay_ms)
+            .with_read_timeout_ms(c.read_timeout_ms)
+            .with_write_timeout_ms(c.write_timeout_ms)
+    }
+}
+
+#[cfg(feature = "container")]
+impl From<&crate::config::ContainerCamelConfig>
+    for camel_component_container::ContainerGlobalConfig
+{
+    fn from(c: &crate::config::ContainerCamelConfig) -> Self {
+        camel_component_container::ContainerGlobalConfig::default()
+            .with_docker_host(c.docker_host.clone())
+    }
+}
 
 impl CamelConfig {
     /// Load routes from config file and return them (without adding to context yet)
@@ -40,7 +112,17 @@ impl CamelConfig {
 
         // Build context with optional supervision
         let mut ctx = if let Some(ref sup) = config.supervision {
-            CamelContext::with_supervision(sup.clone().into_supervision_config())
+            if let Some(path) = config.runtime_journal_path.as_deref() {
+                CamelContext::with_supervision_and_metrics_and_runtime_journal_path(
+                    sup.clone().into_supervision_config(),
+                    std::sync::Arc::new(camel_api::NoOpMetrics),
+                    path.to_string(),
+                )
+            } else {
+                CamelContext::with_supervision(sup.clone().into_supervision_config())
+            }
+        } else if let Some(path) = config.runtime_journal_path.as_deref() {
+            CamelContext::new_with_runtime_journal_path(path.to_string())
         } else {
             CamelContext::new()
         };
@@ -55,10 +137,116 @@ impl CamelConfig {
         // OtelService manages providers only — subscriber is already installed above
         if otel_enabled {
             let otel_cfg = config.observability.otel.as_ref().unwrap();
-            let otel_config = OtelConfig::new(&otel_cfg.endpoint, &otel_cfg.service_name)
-                .with_log_level(&otel_cfg.log_level);
+
+            let protocol = match otel_cfg.protocol {
+                OtelProtocol::Grpc => OtelProtocolOtel::Grpc,
+                OtelProtocol::Http => OtelProtocolOtel::HttpProtobuf,
+            };
+
+            let sampler = match &otel_cfg.sampler {
+                OtelSampler::AlwaysOn => OtelSamplerOtel::AlwaysOn,
+                OtelSampler::AlwaysOff => OtelSamplerOtel::AlwaysOff,
+                OtelSampler::Ratio => {
+                    let ratio = otel_cfg.sampler_ratio.unwrap_or(1.0).clamp(0.0, 1.0);
+                    OtelSamplerOtel::TraceIdRatioBased(ratio)
+                }
+            };
+
+            let mut otel_config = OtelConfig::new(&otel_cfg.endpoint, &otel_cfg.service_name)
+                .with_protocol(protocol)
+                .with_sampler(sampler)
+                .with_log_level(&otel_cfg.log_level)
+                .with_logs_enabled(otel_cfg.logs_enabled)
+                .with_metrics_interval_ms(otel_cfg.metrics_interval_ms);
+
+            for (key, value) in &otel_cfg.resource_attrs {
+                otel_config = otel_config.with_resource_attr(key, value);
+            }
+
             let otel_service = OtelService::new(otel_config);
             ctx = ctx.with_lifecycle(otel_service);
+        }
+
+        // Prometheus — replaces loose metrics_enabled / metrics_port
+        if let Some(ref prom) = config.observability.prometheus
+            && prom.enabled
+        {
+            let addr: std::net::SocketAddr = format!("{}:{}", prom.host, prom.port)
+                .parse()
+                .map_err(|_| {
+                    CamelError::Config(format!(
+                        "Invalid prometheus bind address: {}:{}",
+                        prom.host, prom.port
+                    ))
+                })?;
+            let prom_service = camel_prometheus::PrometheusService::new(addr);
+            ctx = ctx.with_lifecycle(prom_service);
+        }
+
+        #[cfg(feature = "http")]
+        {
+            let http_config: camel_component_http::HttpConfig = config
+                .components
+                .http
+                .as_ref()
+                .map(camel_component_http::HttpConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(http_config);
+        }
+
+        #[cfg(feature = "kafka")]
+        {
+            let kafka_config: camel_component_kafka::KafkaConfig = config
+                .components
+                .kafka
+                .as_ref()
+                .map(camel_component_kafka::KafkaConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(kafka_config);
+        }
+
+        #[cfg(feature = "redis")]
+        {
+            let redis_config: camel_component_redis::RedisConfig = config
+                .components
+                .redis
+                .as_ref()
+                .map(camel_component_redis::RedisConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(redis_config);
+        }
+
+        #[cfg(feature = "sql")]
+        {
+            let sql_config: camel_component_sql::SqlGlobalConfig = config
+                .components
+                .sql
+                .as_ref()
+                .map(camel_component_sql::SqlGlobalConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(sql_config);
+        }
+
+        #[cfg(feature = "file")]
+        {
+            let file_config: camel_component_file::FileGlobalConfig = config
+                .components
+                .file
+                .as_ref()
+                .map(camel_component_file::FileGlobalConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(file_config);
+        }
+
+        #[cfg(feature = "container")]
+        {
+            let container_config: camel_component_container::ContainerGlobalConfig = config
+                .components
+                .container
+                .as_ref()
+                .map(camel_component_container::ContainerGlobalConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(container_config);
         }
 
         ctx.set_tracer_config(tracer_config);
@@ -103,57 +291,57 @@ impl CamelConfig {
             };
 
         // Layer 3b: camel_tracer file output (JSON or Plain)
-        let file_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
-            if config.enabled
-                && let Some(ref file_config) = config.outputs.file
-                && file_config.enabled
-            {
-                let file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&file_config.path)
-                    .map_err(|e| {
-                        CamelError::Config(format!(
-                            "Failed to open trace file '{}': {}",
-                            file_config.path, e
-                        ))
-                    })?;
+        let file_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = if config
+            .enabled
+            && let Some(ref file_config) = config.outputs.file
+            && file_config.enabled
+        {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&file_config.path)
+                .map_err(|e| {
+                    CamelError::Config(format!(
+                        "Failed to open trace file '{}': {}",
+                        file_config.path, e
+                    ))
+                })?;
 
-                match file_config.format {
-                    OutputFormat::Json => Some(
-                        tracing_subscriber::fmt::layer()
-                            .json()
-                            .with_span_events(FmtSpan::CLOSE)
-                            .with_writer(std::sync::Mutex::new(file))
-                            .with_target(true)
-                            .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
-                            .boxed(),
-                    ),
-                    OutputFormat::Plain => Some(
-                        tracing_subscriber::fmt::layer()
-                            .with_span_events(FmtSpan::CLOSE)
-                            .with_writer(std::sync::Mutex::new(file))
-                            .with_target(true)
-                            .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
-                            .boxed(),
-                    ),
-                }
-            } else {
-                None
-            };
+            match file_config.format {
+                OutputFormat::Json => Some(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_span_events(FmtSpan::CLOSE)
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_target(true)
+                        .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
+                        .boxed(),
+                ),
+                OutputFormat::Plain => Some(
+                    tracing_subscriber::fmt::layer()
+                        .with_span_events(FmtSpan::CLOSE)
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_target(true)
+                        .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
+                        .boxed(),
+                ),
+            }
+        } else {
+            None
+        };
 
         // Layer 4: tracing-opentelemetry bridge — only when OTel is active
         #[cfg(feature = "otel")]
-        let otel_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
-            if otel_active {
-                Some(
-                    tracing_opentelemetry::layer()
-                        .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
-                        .boxed(),
-                )
-            } else {
-                None
-            };
+        let otel_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = if otel_active
+        {
+            Some(
+                tracing_opentelemetry::layer()
+                    .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
+                    .boxed(),
+            )
+        } else {
+            None
+        };
         #[cfg(not(feature = "otel"))]
         let _ = otel_active; // suppress unused variable warning
 
@@ -186,5 +374,24 @@ fn parse_log_level(s: &str) -> Level {
         "warn" | "warning" => Level::WARN,
         "error" => Level::ERROR,
         _ => Level::INFO,
+    }
+}
+
+#[cfg(test)]
+mod configure_context_smoke_tests {
+    use super::*;
+    use config::FileFormat;
+
+    #[test]
+    fn test_configure_context_empty_config() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str("", FileFormat::Toml))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+        // configure_context compiles and runs without error on empty config
+        let result = CamelConfig::configure_context(&cfg);
+        assert!(result.is_ok());
     }
 }

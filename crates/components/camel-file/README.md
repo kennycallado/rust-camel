@@ -9,12 +9,12 @@ The File component provides file system integration for rust-camel. It can read 
 ## Features
 
 - **Consumer**: Poll directories for new files
-- **Producer**: Write files with various strategies
+- **Producer**: Write files with various strategies, streaming directly to disk (zero-copy)
 - **File filtering**: Include/exclude patterns (regex)
 - **Post-processing**: Delete, move, or no-op after processing
 - **Recursive directory scanning**
-- **Atomic writes**: Temp file prefix support
-- **Streaming**: Zero-copy file reading via ReaderStream (lazy evaluation)
+- **Atomic writes**: Override strategy writes to a temp file then renames (panic-safe cleanup)
+- **Streaming**: Zero-copy reads (consumer) and writes (producer) via `Body::into_async_read()`
 - **Security**: Path traversal protection
 
 ## Installation
@@ -188,13 +188,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Streaming & Memory Management
 
-The File component uses lazy evaluation—files are not loaded into memory until the body is accessed. A default 10MB materialization limit prevents out-of-memory conditions when processing large files. This design allows handling files of any size (tested with 150MB+). Users can explicitly materialize with custom limits if needed.
+The File component streams data directly between the body and disk using `tokio::io::copy` — no intermediate buffers. Both consumer (reading) and producer (writing) operate without materializing the full payload in RAM, making it suitable for arbitrarily large files.
+
+## Global Configuration
+
+Configure default file polling and timeout settings in `Camel.toml` that apply to all File endpoints:
+
+```toml
+[default.components.file]
+delay_ms = 500               # Poll interval (default: 500)
+initial_delay_ms = 1000      # Initial delay before first poll (default: 1000)
+read_timeout_ms = 30000      # Read timeout (default: 30000)
+write_timeout_ms = 30000     # Write timeout (default: 30000)
+```
+
+URI parameters always override global defaults:
+
+```rust
+// Uses global delay (500ms)
+.from("file:/data/input?noop=true")
+
+// Overrides delay from global config
+.from("file:/data/input?delay=2000&noop=true")
+```
+
+### Profile-Specific Configuration
+
+```toml
+[default.components.file]
+delay_ms = 500
+
+[production.components.file]
+delay_ms = 1000         # Less frequent polling in production
+read_timeout_ms = 60000 # Longer timeout for large files
+```
+
+### Known Limitation
+
+Due to how the `#[derive(UriConfig)]` macro bakes defaults into the generated code, the global configuration uses **duration comparison**: if a URI-specified duration equals the macro's default, it will be overridden by the global config value. Explicitly setting a URI parameter to its default value (e.g., `?delay=500`) is indistinguishable from "not set" and will use the global config.
 
 ## Security
 
 The File component includes protection against path traversal attacks. Attempts to write files outside the configured directory (e.g., using `../` in the filename) will be rejected with an error.
-
-- **Memory limits**: Default 10MB limit prevents unbounded memory consumption
 
 ## Documentation
 

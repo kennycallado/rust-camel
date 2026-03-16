@@ -170,6 +170,7 @@ fn aggregate(
                 .map(|e| match e.input.body {
                     Body::Json(v) => v,
                     Body::Text(s) => serde_json::Value::String(s),
+                    Body::Xml(s) => serde_json::Value::String(s),
                     Body::Bytes(b) => {
                         serde_json::Value::String(String::from_utf8_lossy(&b).into_owned())
                     }

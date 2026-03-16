@@ -25,6 +25,27 @@ routes:
     std::fs::write(path, content).unwrap();
 }
 
+/// Helper: write a route YAML with explicit from URI and auto_startup flag.
+fn write_route_yaml_custom(
+    path: &std::path::Path,
+    route_id: &str,
+    from_uri: &str,
+    mock_name: &str,
+    auto_startup: bool,
+) {
+    let content = format!(
+        r#"
+routes:
+  - id: "{route_id}"
+    from: "{from_uri}"
+    auto_startup: {auto_startup}
+    steps:
+      - to: "mock:{mock_name}"
+"#
+    );
+    std::fs::write(path, content).unwrap();
+}
+
 #[tokio::test]
 async fn test_resolve_watch_dirs_from_glob_patterns() {
     let dir = tempdir().unwrap();
@@ -66,7 +87,7 @@ async fn test_watcher_swaps_pipeline_on_file_change() {
     assert!(v1_before > 0, "v1 should receive exchanges before swap");
 
     // Start the file watcher with a cancellation token for graceful shutdown
-    let ctrl = ctx.route_controller().clone();
+    let ctrl = ctx.runtime_execution_handle();
     let patterns_clone = vec![pattern.clone()];
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
@@ -145,7 +166,7 @@ async fn test_watcher_removes_route_on_file_deletion() {
     );
 
     // Start the file watcher
-    let ctrl = ctx.route_controller().clone();
+    let ctrl = ctx.runtime_execution_handle();
     let patterns_clone = vec![pattern.clone()];
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
@@ -192,6 +213,101 @@ async fn test_watcher_removes_route_on_file_deletion() {
     assert_eq!(
         del_count_after, del_count_final,
         "route should be stopped after file deletion — no new exchanges expected"
+    );
+
+    shutdown.cancel();
+    watcher_handle.await.ok();
+    ctx.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_watcher_restart_preserves_stopped_route_state() {
+    let dir = tempdir().unwrap();
+    let route_file = dir.path().join("route.yaml");
+
+    // Initial route is stopped by startup policy.
+    write_route_yaml_custom(
+        &route_file,
+        "stopped-restart-test",
+        "timer:tick?period=30&repeatCount=1000",
+        "stopped-v1",
+        false,
+    );
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let pattern = format!("{}/*.yaml", dir.path().display());
+    let defs = camel_dsl::discover_routes(std::slice::from_ref(&pattern)).unwrap();
+    for def in defs {
+        ctx.add_route_definition(def).unwrap();
+    }
+    ctx.start().await.unwrap();
+
+    assert_eq!(
+        ctx.runtime_route_status("stopped-restart-test")
+            .await
+            .unwrap(),
+        Some("Stopped".to_string())
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let v1_count = if let Some(ep) = mock.get_endpoint("stopped-v1") {
+        ep.get_received_exchanges().await.len()
+    } else {
+        0
+    };
+    assert_eq!(v1_count, 0, "stopped route must not process exchanges");
+
+    let ctrl = ctx.runtime_execution_handle();
+    let patterns_clone = vec![pattern.clone()];
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+    let watcher_handle = tokio::spawn(async move {
+        let dirs = resolve_watch_dirs(&patterns_clone);
+        watch_and_reload(
+            dirs,
+            ctrl,
+            move || {
+                camel_dsl::discover_routes(&patterns_clone)
+                    .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
+            },
+            Some(shutdown_clone),
+        )
+        .await
+        .ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Change from_uri to force Restart action; route must stay stopped.
+    write_route_yaml_custom(
+        &route_file,
+        "stopped-restart-test",
+        "timer:tock?period=30&repeatCount=1000",
+        "stopped-v2",
+        false,
+    );
+
+    tokio::time::sleep(Duration::from_millis(700)).await;
+
+    assert_eq!(
+        ctx.runtime_route_status("stopped-restart-test")
+            .await
+            .unwrap(),
+        Some("Stopped".to_string())
+    );
+
+    let v2_count = if let Some(ep) = mock.get_endpoint("stopped-v2") {
+        ep.get_received_exchanges().await.len()
+    } else {
+        0
+    };
+    assert_eq!(
+        v2_count, 0,
+        "restart of a stopped route must preserve stopped state"
     );
 
     shutdown.cancel();

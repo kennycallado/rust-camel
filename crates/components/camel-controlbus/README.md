@@ -15,6 +15,8 @@ This is a **producer-only** component - it can only be used as a destination (`t
 - Query route status
 - Dynamic route management from within routes
 - Support for routeId from URI or header
+- Runtime-bus execution path (no controller fallback)
+- Per-exchange command IDs for idempotent command processing
 
 ## Installation
 
@@ -115,6 +117,11 @@ let resume = RouteBuilder::from("direct:maintenance-end")
 |--------|--------------|
 | `status` | Route status: "Started", "Stopped", "Suspended", "Starting", "Stopping", "Failed: <message>" |
 | Other actions | Empty |
+
+## Runtime Notes
+
+- `controlbus` requires a runtime handle in `ProducerContext`.
+- `start/stop/suspend/resume/restart` commands are sent with unique command IDs derived from route, operation, and exchange correlation ID.
 
 ## Example: Scheduled Route Control
 

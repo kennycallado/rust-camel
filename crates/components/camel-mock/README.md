@@ -137,6 +137,32 @@ endpoint_b.assert_exchange_count(1).await;
 |--------|-------------|
 | `get_received_exchanges()` | Get all recorded exchanges |
 | `assert_exchange_count(n)` | Assert exact count (panics if mismatch) |
+| `await_exchanges(n, timeout)` | Async wait until at least `n` exchanges arrive or timeout |
+| `exchange(idx)` | Get an `ExchangeAssert` for the exchange at index `idx` |
+
+## ExchangeAssert (fluent assertions)
+
+```rust
+endpoint
+    .await_exchanges(1, Duration::from_secs(2))
+    .await;
+
+endpoint
+    .exchange(0)
+    .assert_body_text("HELLO")
+    .assert_header("x-source", json!("timer"))
+    .assert_no_error();
+```
+
+| Method | Description |
+|--------|-------------|
+| `assert_body_text(expected)` | Assert body is `Body::Text` with the given value |
+| `assert_body_json(expected)` | Assert body is `Body::Json` matching the given `serde_json::Value` |
+| `assert_body_bytes(expected)` | Assert body is `Body::Bytes` with the given bytes |
+| `assert_header(key, value)` | Assert a header equals the given JSON value |
+| `assert_header_exists(key)` | Assert a header is present |
+| `assert_has_error()` | Assert the exchange carries an error |
+| `assert_no_error()` | Assert the exchange has no error |
 
 ## Best Practices
 

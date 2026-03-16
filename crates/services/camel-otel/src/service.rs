@@ -22,17 +22,23 @@
 //! ```
 
 use async_trait::async_trait;
-use camel_api::{CamelError, Lifecycle, ServiceStatus};
+use camel_api::{CamelError, Lifecycle, MetricsCollector, ServiceStatus};
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::resource::Resource;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use tracing::warn;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
+use crate::OtelMetrics;
 use crate::config::{OtelConfig, OtelProtocol, OtelSampler};
 
 /// Status values for atomic tracking
@@ -44,27 +50,34 @@ const STATUS_FAILED: u8 = 2;
 ///
 /// This service initializes the global `TracerProvider` and `MeterProvider`
 /// on start, and shuts them down gracefully on stop.
+///
+/// # Log Bridge
+///
+/// The service also installs an `OpenTelemetryTracingBridge` to export tracing
+/// logs via OTel. Note that the log bridge is installed globally and is NOT
+/// hot-reloadable - changing OTel configuration requires a process restart.
 pub struct OtelService {
     config: OtelConfig,
     tracer_provider: Option<SdkTracerProvider>,
     meter_provider: Option<SdkMeterProvider>,
+    logger_provider: Option<SdkLoggerProvider>,
+    metrics: Option<Arc<OtelMetrics>>,
     status: AtomicU8,
 }
 
 impl OtelService {
-    /// Create a new `OtelService` with the given configuration.
     pub fn new(config: OtelConfig) -> Self {
+        let metrics = Arc::new(OtelMetrics::new(config.service_name.clone()));
         Self {
             config,
             tracer_provider: None,
             meter_provider: None,
+            logger_provider: None,
+            metrics: Some(metrics),
             status: AtomicU8::new(STATUS_STOPPED),
         }
     }
 
-    /// Create an `OtelService` with default configuration.
-    ///
-    /// Uses `http://localhost:4317` as the endpoint and "rust-camel" as the service name.
     pub fn with_defaults() -> Self {
         Self::new(OtelConfig::new("http://localhost:4317", "rust-camel"))
     }
@@ -107,6 +120,35 @@ impl OtelService {
                     CamelError::Config(format!("Failed to build HTTP metric exporter: {}", e))
                 }),
         }
+    }
+
+    /// Build the OTLP log exporter and logger provider based on the configured protocol.
+    fn build_logger_provider(&self) -> Result<SdkLoggerProvider, CamelError> {
+        let exporter = match self.config.protocol {
+            OtelProtocol::Grpc => LogExporter::builder()
+                .with_tonic()
+                .with_endpoint(&self.config.endpoint)
+                .build()
+                .map_err(|e| {
+                    self.status.store(STATUS_FAILED, Ordering::SeqCst);
+                    CamelError::Config(format!("Failed to build log exporter: {}", e))
+                })?,
+            OtelProtocol::HttpProtobuf => LogExporter::builder()
+                .with_http()
+                .with_endpoint(format!("{}/v1/logs", self.config.endpoint))
+                .build()
+                .map_err(|e| {
+                    self.status.store(STATUS_FAILED, Ordering::SeqCst);
+                    CamelError::Config(format!("Failed to build log exporter: {}", e))
+                })?,
+        };
+
+        let provider = SdkLoggerProvider::builder()
+            .with_resource(self.build_resource())
+            .with_batch_exporter(exporter)
+            .build();
+
+        Ok(provider)
     }
 
     /// Build the OpenTelemetry resource with service name and additional attributes.
@@ -206,7 +248,7 @@ impl Lifecycle for OtelService {
         };
 
         let periodic_reader = PeriodicReader::builder(metric_exporter)
-            .with_interval(Duration::from_secs(60))
+            .with_interval(Duration::from_millis(self.config.metrics_interval_ms))
             .build();
 
         let meter_provider = SdkMeterProvider::builder()
@@ -217,12 +259,29 @@ impl Lifecycle for OtelService {
         global::set_meter_provider(meter_provider.clone());
         self.meter_provider = Some(meter_provider);
 
+        // Install log bridge to export tracing logs via OTel
+        // Note: Log bridge is NOT hot-reloadable - requires process restart for config changes
+        let logger_provider = self.build_logger_provider()?;
+        let layer = OpenTelemetryTracingBridge::new(&logger_provider);
+
+        // Install as additional layer (try_init to not panic if subscriber exists)
+        let _ = tracing_subscriber::registry().with(layer).try_init();
+
+        self.logger_provider = Some(logger_provider);
+
         self.status.store(STATUS_STARTED, Ordering::SeqCst);
 
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
+        // Shutdown LoggerProvider (flushes batch exporter)
+        if let Some(provider) = self.logger_provider.take()
+            && let Err(e) = provider.shutdown()
+        {
+            warn!("Error shutting down LoggerProvider: {:?}", e);
+        }
+
         // Shutdown TracerProvider
         if let Some(provider) = self.tracer_provider.take()
             && let Err(e) = provider.shutdown()
@@ -237,9 +296,17 @@ impl Lifecycle for OtelService {
             warn!("Error shutting down MeterProvider: {:?}", e);
         }
 
+        // Note: metrics collector remains available (Arc<OtelMetrics> is stateless)
+
         self.status.store(STATUS_STOPPED, Ordering::SeqCst);
 
         Ok(())
+    }
+
+    fn as_metrics_collector(&self) -> Option<Arc<dyn MetricsCollector>> {
+        self.metrics
+            .as_ref()
+            .map(|m| Arc::clone(m) as Arc<dyn MetricsCollector>)
     }
 }
 
@@ -261,6 +328,8 @@ mod tests {
         assert_eq!(service.name(), "otel");
         assert!(service.tracer_provider.is_none());
         assert!(service.meter_provider.is_none());
+        // Metrics collector is created in constructor
+        assert!(service.metrics.is_some());
     }
 
     #[test]

@@ -4,132 +4,88 @@
 //! trait that integrates with OpenTelemetry for distributed metrics collection.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use camel_api::metrics::MetricsCollector;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
+use opentelemetry::metrics::{Counter, Histogram, UpDownCounter};
 
-/// Metric names following camel naming conventions
 mod metric_names {
-    /// Total number of exchanges processed
     pub const EXCHANGES_TOTAL: &str = "camel.exchanges.total";
-    /// Total number of errors
     pub const ERRORS_TOTAL: &str = "camel.errors.total";
-    /// Exchange processing duration in seconds
     pub const EXCHANGE_DURATION_SECONDS: &str = "camel.exchange.duration.seconds";
-    /// Current queue depth
     pub const QUEUE_DEPTH: &str = "camel.queue.depth";
-    /// Circuit breaker state (0=closed, 1=open, 2=half_open)
     pub const CIRCUIT_BREAKER_STATE: &str = "camel.circuit.breaker.state";
 }
 
-/// Attribute keys for metrics labels (using OTel semantic conventions with dots)
 mod attribute_keys {
     pub const ROUTE_ID: &str = "route.id";
     pub const ERROR_TYPE: &str = "error.type";
 }
 
-/// OpenTelemetry metrics collector for rust-camel
-///
-/// This struct implements the `MetricsCollector` trait and exports metrics
-/// via OpenTelemetry. It uses the global meter provider, so metrics will be
-/// exported according to the configured OTel pipeline.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use camel_otel::OtelMetrics;
-/// use camel_api::metrics::MetricsCollector;
-/// use std::sync::Arc;
-///
-/// let metrics = OtelMetrics::new("my-service");
-/// let collector: Arc<dyn MetricsCollector> = Arc::new(metrics);
-/// ```
-pub struct OtelMetrics {
-    meter: Meter,
+struct MetricInstruments {
     exchanges_total: Counter<u64>,
     errors_total: Counter<u64>,
     exchange_duration_seconds: Histogram<f64>,
     queue_depth: UpDownCounter<i64>,
     circuit_breaker_state: UpDownCounter<i64>,
-    /// Track previous queue depths per route for delta calculation
-    queue_depths: Mutex<HashMap<String, i64>>,
-    /// Track previous circuit breaker states per route+to_state for delta calculation
-    cb_states: Mutex<HashMap<String, i64>>,
+}
+
+/// OpenTelemetry metrics collector for rust-camel
+///
+/// Uses lazy initialization - instruments are created on first use to ensure
+/// the global meter provider is configured (by OtelService::start()) before use.
+pub struct OtelMetrics {
+    service_name: &'static str,
+    instruments: OnceLock<MetricInstruments>,
+    queue_depths: std::sync::Mutex<HashMap<String, i64>>,
+    cb_states: std::sync::Mutex<HashMap<String, i64>>,
 }
 
 impl OtelMetrics {
-    /// Creates a new `OtelMetrics` instance with metrics registered to the global meter provider.
-    ///
-    /// If called before `OtelService::start()`, this will use a no-op meter provider,
-    /// which means metrics will not be exported. This is intentional - the actual
-    /// meter provider should be configured via `OtelService` before starting.
-    ///
-    /// # Arguments
-    ///
-    /// * `service_name` - The name of the service, used as the meter name.
-    ///
-    /// # Note
-    ///
-    /// The service name is leaked to obtain a `'static` lifetime, which is required
-    /// by the OpenTelemetry API. This is a small, one-time memory leak per unique
-    /// service name.
     pub fn new(service_name: impl Into<String>) -> Self {
-        // Box::leak to get 'static str - this is intentional and common for OTel
         let service_name: &'static str = Box::leak(service_name.into().into_boxed_str());
-        let meter = global::meter(service_name);
-
-        // Create counters
-        let exchanges_total = meter
-            .u64_counter(metric_names::EXCHANGES_TOTAL)
-            .with_description("Total number of exchanges processed")
-            .with_unit("{exchange}")
-            .build();
-
-        let errors_total = meter
-            .u64_counter(metric_names::ERRORS_TOTAL)
-            .with_description("Total number of errors")
-            .with_unit("{error}")
-            .build();
-
-        // Create histogram for duration
-        let exchange_duration_seconds = meter
-            .f64_histogram(metric_names::EXCHANGE_DURATION_SECONDS)
-            .with_description("Exchange processing duration in seconds")
-            .with_unit("s")
-            .build();
-
-        // Create up-down counters for gauges
-        let queue_depth = meter
-            .i64_up_down_counter(metric_names::QUEUE_DEPTH)
-            .with_description("Current queue depth")
-            .with_unit("{item}")
-            .build();
-
-        let circuit_breaker_state = meter
-            .i64_up_down_counter(metric_names::CIRCUIT_BREAKER_STATE)
-            .with_description("Circuit breaker state (0=closed, 1=open, 2=half_open)")
-            .with_unit("{state}")
-            .build();
-
         Self {
-            meter,
-            exchanges_total,
-            errors_total,
-            exchange_duration_seconds,
-            queue_depth,
-            circuit_breaker_state,
-            queue_depths: Mutex::new(HashMap::new()),
-            cb_states: Mutex::new(HashMap::new()),
+            service_name,
+            instruments: OnceLock::new(),
+            queue_depths: std::sync::Mutex::new(HashMap::new()),
+            cb_states: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
-    /// Returns a reference to the underlying OpenTelemetry meter
-    pub fn meter(&self) -> &Meter {
-        &self.meter
+    fn instruments(&self) -> &MetricInstruments {
+        self.instruments.get_or_init(|| {
+            let meter = global::meter(self.service_name);
+            MetricInstruments {
+                exchanges_total: meter
+                    .u64_counter(metric_names::EXCHANGES_TOTAL)
+                    .with_description("Total number of exchanges processed")
+                    .with_unit("{exchange}")
+                    .build(),
+                errors_total: meter
+                    .u64_counter(metric_names::ERRORS_TOTAL)
+                    .with_description("Total number of errors")
+                    .with_unit("{error}")
+                    .build(),
+                exchange_duration_seconds: meter
+                    .f64_histogram(metric_names::EXCHANGE_DURATION_SECONDS)
+                    .with_description("Exchange processing duration in seconds")
+                    .with_unit("s")
+                    .build(),
+                queue_depth: meter
+                    .i64_up_down_counter(metric_names::QUEUE_DEPTH)
+                    .with_description("Current queue depth")
+                    .with_unit("{item}")
+                    .build(),
+                circuit_breaker_state: meter
+                    .i64_up_down_counter(metric_names::CIRCUIT_BREAKER_STATE)
+                    .with_description("Circuit breaker state (0=closed, 1=open, 2=half_open)")
+                    .with_unit("{state}")
+                    .build(),
+            }
+        })
     }
 }
 
@@ -146,7 +102,8 @@ impl MetricsCollector for OtelMetrics {
             attribute_keys::ROUTE_ID,
             route_id.to_string(),
         )];
-        self.exchange_duration_seconds
+        self.instruments()
+            .exchange_duration_seconds
             .record(duration_secs, &attributes);
     }
 
@@ -155,7 +112,7 @@ impl MetricsCollector for OtelMetrics {
             KeyValue::new(attribute_keys::ROUTE_ID, route_id.to_string()),
             KeyValue::new(attribute_keys::ERROR_TYPE, error_type.to_string()),
         ];
-        self.errors_total.add(1, &attributes);
+        self.instruments().errors_total.add(1, &attributes);
     }
 
     fn increment_exchanges(&self, route_id: &str) {
@@ -163,49 +120,44 @@ impl MetricsCollector for OtelMetrics {
             attribute_keys::ROUTE_ID,
             route_id.to_string(),
         )];
-        self.exchanges_total.add(1, &attributes);
+        self.instruments().exchanges_total.add(1, &attributes);
     }
 
     fn set_queue_depth(&self, route_id: &str, depth: usize) {
-        // UpDownCounter accumulates deltas, not absolute values.
-        // Track previous value per route and compute the delta to emulate SET semantics.
         let depth_i64 = depth as i64;
         let mut map = self.queue_depths.lock().unwrap();
         let prev = map.insert(route_id.to_string(), depth_i64).unwrap_or(0);
         let delta = depth_i64 - prev;
-        drop(map); // Release lock before recording
+        drop(map);
 
         let attributes = [KeyValue::new(
             attribute_keys::ROUTE_ID,
             route_id.to_string(),
         )];
-        self.queue_depth.add(delta, &attributes);
+        self.instruments().queue_depth.add(delta, &attributes);
     }
 
     fn record_circuit_breaker_change(&self, route_id: &str, _from: &str, to: &str) {
-        // Circuit breaker states are mutually exclusive — a route is only ever in ONE state.
-        // Map state names to numeric values (matching Prometheus implementation).
         let to_value = match to.to_lowercase().as_str() {
             "closed" => 0i64,
             "open" => 1i64,
             "half_open" | "halfopen" => 2i64,
-            _ => return, // Unknown state - skip recording
+            _ => return,
         };
 
-        // UpDownCounter accumulates deltas, not absolute values.
-        // Track a single value per route (the current state value) and compute delta.
-        // Use only route_id as the key since states are mutually exclusive.
         let mut map = self.cb_states.lock().unwrap();
         let prev = map.insert(route_id.to_string(), to_value).unwrap_or(0);
         let delta = to_value - prev;
-        drop(map); // Release lock before recording
+        drop(map);
 
         let attributes = [KeyValue::new(
             attribute_keys::ROUTE_ID,
             route_id.to_string(),
         )];
 
-        self.circuit_breaker_state.add(delta, &attributes);
+        self.instruments()
+            .circuit_breaker_state
+            .add(delta, &attributes);
     }
 }
 
@@ -217,24 +169,20 @@ mod tests {
     #[test]
     fn test_create_otel_metrics() {
         let metrics = OtelMetrics::new("test-service");
-        // Verify meter is accessible
-        let _ = metrics.meter();
+        // Instruments are created lazily
+        let _ = metrics.instruments();
     }
 
     #[test]
     fn test_default_implementation() {
         let metrics = OtelMetrics::default();
-        // Verify meter is accessible
-        let _ = metrics.meter();
+        let _ = metrics.instruments();
     }
 
     #[test]
     fn test_metrics_with_noop_provider() {
-        // When no OTel provider is configured, the global meter provider returns a no-op
-        // This test verifies that all methods work without panicking
         let metrics = OtelMetrics::new("test-service");
 
-        // All methods should execute without panicking
         metrics.increment_exchanges("test-route");
         metrics.increment_exchanges("test-route");
         metrics.increment_exchanges("other-route");

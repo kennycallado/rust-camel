@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tower::Service;
@@ -7,6 +8,7 @@ use tower::ServiceExt;
 
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::metrics::MetricsCollector;
 use camel_api::{
     AggregatorConfig, BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor,
     MulticastConfig, SplitterConfig,
@@ -86,6 +88,13 @@ pub enum BuilderStep {
     Processor(BoxProcessor),
     /// A destination URI — resolved at start time by CamelContext.
     To(String),
+    /// A stop step that halts processing immediately.
+    Stop,
+    /// A static log step.
+    Log {
+        level: camel_processor::LogLevel,
+        message: String,
+    },
     /// Declarative set_header (literal or language-based value), resolved at route-add time.
     DeclarativeSetHeader { key: String, value: ValueSourceDef },
     /// Declarative set_body (literal or language-based value), resolved at route-add time.
@@ -143,6 +152,23 @@ pub enum BuilderStep {
     },
     /// Bean invocation step — resolved at route-add time.
     Bean { name: String, method: String },
+    /// Script step: executes a script that can mutate the exchange.
+    /// The script has access to `headers`, `properties`, and `body`.
+    Script { language: String, script: String },
+    /// Throttle step: rate limiting with configurable behavior when limit exceeded.
+    Throttle {
+        config: camel_api::ThrottlerConfig,
+        steps: Vec<BuilderStep>,
+    },
+    /// LoadBalance step: distributes exchanges across multiple endpoints using a strategy.
+    LoadBalance {
+        config: camel_api::LoadBalancerConfig,
+        steps: Vec<BuilderStep>,
+    },
+    /// DynamicRouter step: routes exchanges dynamically based on expression evaluation.
+    DynamicRouter {
+        config: camel_api::DynamicRouterConfig,
+    },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -150,6 +176,11 @@ impl std::fmt::Debug for BuilderStep {
         match self {
             BuilderStep::Processor(_) => write!(f, "BuilderStep::Processor(...)"),
             BuilderStep::To(uri) => write!(f, "BuilderStep::To({uri:?})"),
+            BuilderStep::Stop => write!(f, "BuilderStep::Stop"),
+            BuilderStep::Log { level, message } => write!(
+                f,
+                "BuilderStep::Log {{ level: {level:?}, message: {message:?} }}"
+            ),
             BuilderStep::DeclarativeSetHeader { key, .. } => {
                 write!(
                     f,
@@ -211,6 +242,18 @@ impl std::fmt::Debug for BuilderStep {
                     f,
                     "BuilderStep::Bean {{ name: {name:?}, method: {method:?} }}"
                 )
+            }
+            BuilderStep::Script { language, .. } => {
+                write!(f, "BuilderStep::Script {{ language: {language:?}, .. }}")
+            }
+            BuilderStep::Throttle { steps, .. } => {
+                write!(f, "BuilderStep::Throttle {{ steps: {steps:?}, .. }}")
+            }
+            BuilderStep::LoadBalance { steps, .. } => {
+                write!(f, "BuilderStep::LoadBalance {{ steps: {steps:?}, .. }}")
+            }
+            BuilderStep::DynamicRouter { .. } => {
+                write!(f, "BuilderStep::DynamicRouter {{ .. }}")
             }
         }
     }
@@ -378,6 +421,7 @@ pub fn compose_traced_pipeline(
     route_id: &str,
     trace_enabled: bool,
     detail_level: DetailLevel,
+    metrics: Option<Arc<dyn MetricsCollector>>,
 ) -> BoxProcessor {
     if !trace_enabled {
         return compose_pipeline(processors);
@@ -397,6 +441,7 @@ pub fn compose_traced_pipeline(
                 route_id.to_string(),
                 idx,
                 detail_level.clone(),
+                metrics.clone(),
             ))
         })
         .collect();
@@ -594,7 +639,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_compose_traced_pipeline_disabled() {
-        let pipeline = compose_traced_pipeline(vec![], "test-route", false, DetailLevel::Minimal);
+        let pipeline =
+            compose_traced_pipeline(vec![], "test-route", false, DetailLevel::Minimal, None);
         // Should behave like identity
         let ex = Exchange::new(camel_api::Message::new("hello"));
         let result = tower::ServiceExt::oneshot(pipeline, ex).await;
@@ -607,7 +653,7 @@ mod tests {
 
         let step = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
         let pipeline =
-            compose_traced_pipeline(vec![step], "test-route", true, DetailLevel::Minimal);
+            compose_traced_pipeline(vec![step], "test-route", true, DetailLevel::Minimal, None);
         let ex = Exchange::new(camel_api::Message::new("hello"));
         let result = tower::ServiceExt::oneshot(pipeline, ex).await;
         assert!(result.is_ok());

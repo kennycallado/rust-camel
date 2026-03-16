@@ -20,6 +20,7 @@
 - **Circuit Breaker**: Resilience pattern implementation
 - **Error Handler**: Centralized error handling
 - **Stop**: Stop processing immediately
+- **Script**: Execute mutating expressions via `ScriptMutator`; changes to headers, properties, and body propagate back with atomic rollback on error
 - **Stream Handling**: Processors that consume streams replace the body with a JSON placeholder `{"placeholder": true}`
 
 ## Installation
@@ -94,6 +95,7 @@ let route = RouteBuilder::from("timer:tick")
 | `CircuitBreakerLayer` | Fault tolerance |
 | `ErrorHandlerLayer` | Error handling |
 | `StopService` | Stop processing |
+| `ScriptMutator` | Execute mutating scripts that modify Exchange headers, properties, or body |
 
 ## Documentation
 

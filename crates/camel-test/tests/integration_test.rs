@@ -975,10 +975,11 @@ async fn test_http_component_registration_and_endpoint_creation() {
 
 #[tokio::test]
 async fn test_http_query_params_forwarding_config() {
-    use camel_component_http::HttpConfig;
+    use camel_component_http::HttpEndpointConfig;
+    use camel_endpoint::UriConfig;
 
     // Verify config parsing forwards non-Camel query params
-    let config = HttpConfig::from_uri(
+    let config = HttpEndpointConfig::from_uri(
         "http://api.example.com/v1/users?apiKey=secret123&httpMethod=GET&token=abc456",
     )
     .unwrap();
@@ -2460,4 +2461,117 @@ async fn test_choice_short_circuits_first_match() {
     if let Some(second) = mock.get_endpoint("second") {
         second.assert_exchange_count(0).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test: XML body pipeline — direct:xml-in → convert_body_to(Text) → mock:xml-out
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_xml_body_pipeline() {
+    use camel_api::body::Body;
+    use camel_api::{Exchange, Message};
+    use camel_component_direct::DirectComponent;
+    use tower::util::ServiceExt;
+
+    let mock = MockComponent::new();
+    let direct = DirectComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(direct);
+    ctx.register_component(mock.clone());
+
+    // Route: direct:xml-in → convert_body_to(Text) → mock:xml-out
+    let route = RouteBuilder::from("direct:xml-in")
+        .route_id("test-xml-body-pipeline")
+        .convert_body_to(camel_api::BodyType::Text)
+        .to("mock:xml-out")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    // Give the route a moment to start
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Create a producer to send an exchange with XML body
+    let producer_ctx = ctx.producer_context();
+    let registry = ctx.registry();
+    let component = registry.get("direct").unwrap();
+    let endpoint = component.create_endpoint("direct:xml-in").unwrap();
+    let producer = endpoint.create_producer(&producer_ctx).unwrap();
+    drop(registry); // Release the registry lock
+
+    // Send exchange with Body::Xml
+    let xml_content = "<root><msg>hello</msg></root>";
+    let exchange = Exchange::new(Message::new(Body::Xml(xml_content.to_string())));
+    let _ = producer.oneshot(exchange).await.unwrap();
+
+    // Wait for the exchange to be processed
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    ctx.stop().await.unwrap();
+
+    // Assert mock received 1 exchange
+    let endpoint = mock.get_endpoint("xml-out").unwrap();
+    endpoint.assert_exchange_count(1).await;
+
+    // Assert the received body is Body::Text (since we converted Xml→Text)
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert_eq!(
+        exchanges[0].input.body.as_text(),
+        Some(xml_content),
+        "Body should be converted from Xml to Text"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: New mock assertion API — reference migration example
+// ---------------------------------------------------------------------------
+
+/// Demonstrates the new `await_exchanges` + `ExchangeAssert` API.
+///
+/// This is the reference example for migrating away from the old pattern:
+///
+/// ```
+/// // OLD (fragile — fixed sleep):
+/// tokio::time::sleep(Duration::from_millis(200)).await;
+/// let received = mock.get_received_exchanges().await;
+/// assert_eq!(received.len(), 3);
+/// assert_eq!(received[0].input.body.as_text(), Some("timer://tick tick #1"));
+///
+/// // NEW (reliable — Notify-based):
+/// ep.await_exchanges(3, Duration::from_millis(2000)).await;
+/// ep.exchange(0).assert_body_text("timer://tick tick #1");
+/// ```
+///
+/// Timer body format: `"timer://<name> tick #<n>"` (e.g. `"timer://tick tick #1"`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_mock_new_assertion_api() {
+    use std::time::Duration;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
+        .route_id("test-mock-new-assertion-api")
+        .to("mock:assert-api-result")
+        .build()
+        .unwrap();
+
+    ctx.add_route_definition(route).unwrap();
+    ctx.start().await.unwrap();
+
+    let ep = mock.get_endpoint("assert-api-result").unwrap();
+
+    // Wait for exactly 3 exchanges — no sleep needed.
+    ep.await_exchanges(3, Duration::from_millis(2000)).await;
+
+    // Timer body format: "timer://<name> tick #<n>"
+    ep.exchange(0).assert_body_text("timer://tick tick #1");
+    ep.exchange(1).assert_body_text("timer://tick tick #2");
+    ep.exchange(2).assert_body_text("timer://tick tick #3");
+
+    ctx.stop().await.unwrap();
 }

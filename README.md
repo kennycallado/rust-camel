@@ -2,29 +2,94 @@
 
 A Rust integration framework inspired by [Apache Camel](https://camel.apache.org/), built on [Tower](https://docs.rs/tower).
 
-> **Status:** Pre-release (`0.1.0`). APIs will change.
+> **Status:** Pre-release (`0.4.0`). APIs will change.
 
 ## Overview
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`.
+Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `kafka`, `redis`, `sql`, `container`.
+
+## Architecture
+
+rust-camel implements **Domain-Driven Design (DDD)** with **CQRS** and **Hexagonal Architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              camel-core                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         Domain Layer                                 │   │
+│  │   RouteRuntimeAggregate, RouteRuntimeState, RouteLifecycleCommand   │   │
+│  │   RuntimeEvent (internal contract, no external deps)                │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                         │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                       Application Layer                              │   │
+│  │   RuntimeBus (CommandBus + QueryBus), Command Handlers, Queries     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                         │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                          Ports Layer                                 │   │
+│  │   RouteRepositoryPort, ProjectionStorePort, RuntimeExecutionPort,   │   │
+│  │   EventPublisherPort, RuntimeEventJournalPort, CommandDedupPort     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                         │
+│                                    ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                        Adapters Layer                                │   │
+│  │   InMemory* adapters, FileRuntimeEventJournal, RuntimeExecutionAdap │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **Aggregate** | `RouteRuntimeAggregate` owns route lifecycle state with optimistic locking |
+| **Projection** | `RouteStatusProjection` is the read model for queries |
+| **Command** | `RuntimeCommand` (RegisterRoute, StartRoute, StopRoute, etc.) |
+| **Query** | `RuntimeQuery` (GetRouteStatus, ListRoutes) |
+| **Event** | `RuntimeEvent` (RouteStarted, RouteStopped, RouteFailed, etc.) |
+| **Journal** | Optional durable event journal for crash recovery |
+
+### Runtime Bus
+
+```rust
+// Commands modify state
+ctx.runtime().execute(RuntimeCommand::StartRoute {
+    route_id: "my-route".into(),
+    command_id: "cmd-1".into(),
+    causation_id: None,
+}).await?;
+
+// Queries read from projections (not controller)
+let status = ctx.runtime_route_status("my-route").await?;
+```
+
+### Optional Durability
+
+```rust
+// Enable file-backed event journal for runtime state recovery
+let ctx = CamelContext::new_with_runtime_journal_path(".camel/runtime.jsonl");
+```
 
 ## Quick Example
 
 ```rust
 use camel_api::{CamelError, Value};
 use camel_builder::RouteBuilder;
+use camel_component_log::LogComponent;
+use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
-use camel_log::LogComponent;
-use camel_timer::TimerComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt::init();
 
     let mut ctx = CamelContext::new();
-
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
@@ -36,9 +101,8 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(route)?;
     ctx.start().await?;
 
-    tokio::signal::ctrl_c()
-        .await
-        .map_err(|e| CamelError::Io(e.to_string()))?;
+    println!("Press Ctrl+C to stop.");
+    tokio::signal::ctrl_c().await.ok();
 
     ctx.stop().await?;
     Ok(())
@@ -53,24 +117,35 @@ cargo run -p hello-world
 
 | Crate | Description |
 |-------|-------------|
-| `camel-api` | Core types: `Exchange`, `Message`, `CamelError`, `BoxProcessor`, `ProcessorFn` |
-| `camel-core` | Runtime: `CamelContext`, `Route`, `RouteDefinition`, `SequentialPipeline` |
+| `camel-api` | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent` |
+| `camel-core` | Runtime engine with DDD/CQRS: `CamelContext`, domain aggregates, ports, adapters, event journal |
 | `camel-config` | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns |
 | `camel-builder` | Fluent `RouteBuilder` API |
 | `camel-component` | `Component`, `Endpoint`, `Consumer` traits |
 | `camel-processor` | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody` + Tower `Layer` types |
-| `camel-endpoint` | Endpoint URI parsing utilities |
+| `camel-endpoint` | Endpoint URI parsing utilities; `UriConfig` derive macro for typed component config |
+| `camel-endpoint-macros` | Proc-macro crate backing `#[derive(UriConfig)]` |
+| `camel-bean` | Bean/Registry system for dependency injection and business logic integration |
+| `camel-bean-macros` | Proc-macro crate for `#[bean]` attribute |
+| `camel-dsl` | YAML DSL: load and run routes from `.yaml` files |
+| `camel-health` | Health check types and endpoint support |
 | `camel-timer` | Timer source component |
 | `camel-log` | Log sink component |
 | `camel-direct` | In-memory synchronous component |
-| `camel-mock` | Test component with assertions on received exchanges |
+| `camel-mock` | Test component with assertions on received exchanges (`await_exchanges`, `ExchangeAssert`) |
 | `camel-test` | Integration test harness |
 | `camel-controlbus` | Control routes dynamically from within routes |
+| `camel-http` | HTTP producer (client) and HTTP consumer (server, native streaming) |
+| `camel-file` | File producer and consumer |
+| `camel-kafka` | Kafka producer and consumer with SSL/SASL and manual commit |
+| `camel-redis` | Redis producer and consumer |
+| `camel-sql` | SQL producer (query/insert/update) with streaming result support |
+| `camel-container` | Docker container producer/consumer via `bollard` |
 | `camel-language-api` | Language trait API: `Language`, `Expression`, `Predicate` |
 | `camel-language-simple` | Simple Language: `${header.x}`, `${body}`, operators |
 | `camel-language-rhai` | Rhai scripting language for full expression power |
-| `camel-bean` | Bean/Registry system for dependency injection and business logic integration |
 | `camel-prometheus` | Prometheus metrics exporter with /metrics endpoint |
+| `camel-otel` | OpenTelemetry tracing and metrics exporter |
 
 ## Building & Testing
 
@@ -83,12 +158,15 @@ cargo test --workspace
 
 | Pattern | Builder Method | Description |
 |---------|---------------|-------------|
-| Filter | `.filter(predicate)` | Forward exchange only when predicate is true |
-| Splitter | `.split(config)` | Split one exchange into multiple fragments |
 | Aggregator | `.aggregate(config)` | Correlate and aggregate multiple exchanges |
-| WireTap | `.wire_tap(uri)` | Fire-and-forget copy to a tap endpoint |
-| Multicast | `.multicast()` | Send the same exchange to multiple endpoints |
 | Content-Based Router | `.choice()` / `.when()` | Route based on exchange content |
+| Dynamic Router | `.dynamic_router(expr)` | Expression-based routing with slip pattern |
+| Filter | `.filter(predicate)` | Forward exchange only when predicate is true |
+| Load Balancer | `.load_balance()` | Distribute across endpoints with RoundRobin/Random/Weighted/Failover |
+| Multicast | `.multicast()` | Send the same exchange to multiple endpoints |
+| Splitter | `.split(config)` | Split one exchange into multiple fragments |
+| Throttler | `.throttle(n, duration)` | Rate limiting with Delay/Reject/Drop strategies |
+| WireTap | `.wire_tap(uri)` | Fire-and-forget copy to a tap endpoint |
 
 Run an example:
 
@@ -96,24 +174,40 @@ Run an example:
  cargo run -p aggregator
  cargo run -p bean-demo
  cargo run -p circuit-breaker
-cargo run -p content-based-routing
-cargo run -p controlbus
-cargo run -p error-handling
-cargo run -p file-pipeline
-cargo run -p file-polling
-cargo run -p hello-world
-cargo run -p http-client
-cargo run -p http-server
-cargo run -p lazy-route
-cargo run -p log-eip
-cargo run -p metrics-demo
-cargo run -p multicast
-cargo run -p multi-route-direct
-cargo run -p pipeline-concurrency
-cargo run -p showcase
-cargo run -p splitter
-cargo run -p transform-pipeline
-cargo run -p wiretap
+ cargo run -p config-basic
+ cargo run -p config-profiles
+ cargo run -p container-example
+ cargo run -p content-based-routing
+ cargo run -p controlbus
+ cargo run -p dynamic-router
+ cargo run -p error-handling
+ cargo run -p file-pipeline
+ cargo run -p file-polling
+ cargo run -p hello-world
+ cargo run -p http-client
+ cargo run -p http-server
+ cargo run -p http-streaming
+ cargo run -p kafka-example
+ cargo run -p language-rhai
+ cargo run -p language-simple
+ cargo run -p lazy-route
+ cargo run -p load-balancer
+ cargo run -p log-eip
+ cargo run -p metrics-demo
+ cargo run -p multicast
+ cargo run -p multi-route-direct
+ cargo run -p otel-demo
+ cargo run -p pipeline-concurrency
+ cargo run -p prometheus-demo
+ cargo run -p showcase
+ cargo run -p splitter
+ cargo run -p sql-example
+ cargo run -p sql-streaming
+ cargo run -p throttler
+ cargo run -p transform-pipeline
+ cargo run -p wiretap
+ cargo run -p xml-body
+ cargo run -p yaml-dsl
 ```
 
 ## Security Features
@@ -237,8 +331,17 @@ Control routes dynamically from code or from other routes:
 
 ```rust
 // From code:
-ctx.route_controller().lock().await.start_route("lazy-route").await?;
-ctx.route_controller().lock().await.stop_route("route-a").await?;
+let runtime = ctx.runtime();
+runtime.execute(RuntimeCommand::StartRoute {
+    route_id: "lazy-route".into(),
+    command_id: "cmd-start-lazy-route".into(),
+    causation_id: None,
+}).await?;
+runtime.execute(RuntimeCommand::StopRoute {
+    route_id: "route-a".into(),
+    command_id: "cmd-stop-route-a".into(),
+    causation_id: None,
+}).await?;
 
 // From another route (using controlbus):
 RouteBuilder::from("timer:monitor")
@@ -248,6 +351,8 @@ RouteBuilder::from("timer:monitor")
 ```
 
 See `examples/lazy-route` for a complete example.
+
+Canonical route compile support in Facade V1 is intentionally limited to `to/log/stop`.
 
 ## Error Handling
 
@@ -319,28 +424,84 @@ Create a `Camel.toml` file:
 routes = ["routes/**/*.yaml"]
 log_level = "INFO"
 
+# Component defaults - apply to all endpoints
+[default.components.http]
+connect_timeout_ms = 5000
+allow_private_ips = false
+
+[default.components.kafka]
+brokers = "localhost:9092"
+group_id = "camel"
+
+[default.components.redis]
+host = "localhost"
+port = 6379
+
+[default.components.sql]
+max_connections = 5
+
+[default.components.file]
+delay_ms = 500
+
+[default.components.container]
+docker_host = "unix:///var/run/docker.sock"
+
+# Observability
+[default.observability.prometheus]
+enabled = true
+port = 9090
+
 [production]
 log_level = "ERROR"
+
+[production.components.kafka]
+brokers = "prod-kafka:9092"
+
+[production.components.redis]
+host = "prod-redis"
 ```
+
+### Component Defaults
+
+Each component supports global defaults that apply to all endpoints. URI parameters always take precedence:
+
+```rust
+// Uses global connect_timeout_ms (5000) from Camel.toml
+.to("http://api.example.com/data")
+
+// Overrides global setting with URI parameter
+.to("http://api.example.com/data?connectTimeout=10000")
+```
+
+Supported component configurations:
+- **`[components.http]`**: `connect_timeout_ms`, `response_timeout_ms`, `max_connections`, `max_body_size`, `max_request_body`, `allow_private_ips`
+- **`[components.kafka]`**: `brokers`, `group_id`, `session_timeout_ms`, `request_timeout_ms`, `auto_offset_reset`, `security_protocol`
+- **`[components.redis]`**: `host`, `port`
+- **`[components.sql]`**: `max_connections`, `min_connections`, `idle_timeout_secs`, `max_lifetime_secs`
+- **`[components.file]`**: `delay_ms`, `initial_delay_ms`, `read_timeout_ms`, `write_timeout_ms`
+- **`[components.container]`**: `docker_host`
 
 ### Loading Configuration
 
 ```rust
-use camel_config::CamelConfig;
+use camel_api::CamelError;
+use camel_component_log::LogComponent;
+use camel_component_timer::TimerComponent;
+use camel_config::{CamelConfig, discover_routes};
 use camel_core::CamelContext;
-use camel_timer::TimerComponent;
-use camel_log::LogComponent;
 
 // Load configuration
-let config = CamelConfig::from_file("Camel.toml")?;
+let config = CamelConfig::from_file("Camel.toml")
+    .map_err(|e| CamelError::Config(e.to_string()))?;
 
 // Create context and register components
 let mut ctx = CamelContext::new();
 ctx.register_component(TimerComponent::new());
 ctx.register_component(LogComponent::new());
 
-// Load routes from discovered files
-let routes = config.load_routes()?;
+// Discover and load routes from config patterns
+let routes = discover_routes(&config.routes)
+    .map_err(|e| CamelError::Config(e.to_string()))?;
 for route in routes {
     ctx.add_route_definition(route)?;
 }
@@ -378,8 +539,47 @@ export CAMEL_ROUTES_0="custom/*.yaml"
 
 - **Profile support**: Multiple environments in one file
 - **Route discovery**: Auto-load routes from glob patterns
+- **Component defaults**: Set global defaults for HTTP, Kafka, Redis, SQL, File, Container
 - **Environment overrides**: Override any value with `CAMEL_*` prefix
 - **Deep merging**: Nested configs merge properly
+- **URI precedence**: URI parameters always override global defaults
+
+### Component Defaults
+
+Configure global defaults for all component endpoints in `Camel.toml`:
+
+```toml
+[default.components.http]
+connect_timeout_ms = 5000
+allow_private_ips = false
+
+[default.components.kafka]
+brokers = "localhost:9092"
+group_id = "my-app"
+
+[default.components.redis]
+host = "localhost"
+port = 6379
+
+[default.components.sql]
+max_connections = 10
+
+[default.components.file]
+delay_ms = 1000
+
+[default.components.container]
+docker_host = "unix:///var/run/docker.sock"
+```
+
+URI parameters always take precedence over global defaults:
+
+```rust
+// Uses global connect_timeout_ms (5000) from Camel.toml
+.to("http://api.example.com/data")
+
+// Overrides global setting with URI parameter
+.to("http://api.example.com/data?connectTimeout=10000")
+```
 
 See `docs/configuration.md` for full details.
 

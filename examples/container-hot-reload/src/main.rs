@@ -81,7 +81,7 @@ async fn main() -> Result<(), CamelError> {
     println!("[3] Context started — watching Docker events");
     println!();
 
-    let ctrl = ctx.route_controller().clone();
+    let ctrl = ctx.runtime_execution_handle();
     let watch_patterns = patterns.clone();
     let shutdown = CancellationToken::new();
     let shutdown_watcher = shutdown.clone();

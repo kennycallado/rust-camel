@@ -1,11 +1,16 @@
+use std::fmt;
+use std::sync::Arc;
+
 use serde::Deserialize;
+
+use camel_api::metrics::MetricsCollector;
 
 /// Configuration for the Tracer EIP (Enterprise Integration Pattern).
 ///
 /// This struct defines how message tracing should be performed throughout
 /// Camel routes. Use `CamelContext::set_tracer_config` to apply configuration
 /// programmatically, or configure via `Camel.toml` as shown in the module documentation.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 pub struct TracerConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -15,6 +20,25 @@ pub struct TracerConfig {
 
     #[serde(default)]
     pub outputs: TracerOutputs,
+
+    /// Metrics collector for recording route-level metrics.
+    /// Not serializable - injected at runtime.
+    #[serde(skip)]
+    pub metrics_collector: Option<Arc<dyn MetricsCollector>>,
+}
+
+impl fmt::Debug for TracerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TracerConfig")
+            .field("enabled", &self.enabled)
+            .field("detail_level", &self.detail_level)
+            .field("outputs", &self.outputs)
+            .field(
+                "metrics_collector",
+                &self.metrics_collector.as_ref().map(|_| "MetricsCollector"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

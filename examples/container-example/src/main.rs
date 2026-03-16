@@ -16,7 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_container::{cleanup_tracked_containers, ContainerComponent, HEADER_CONTAINER_NAME};
+use camel_component_container::{
+    ContainerComponent, HEADER_CONTAINER_NAME, cleanup_tracked_containers,
+};
 use camel_component_direct::DirectComponent;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
@@ -93,9 +95,9 @@ async fn main() -> Result<(), CamelError> {
     tokio::signal::ctrl_c().await.ok();
     println!("\nStopping...");
     ctx.stop().await?;
-    
+
     // Cleanup any tracked containers that are still running
     cleanup_tracked_containers().await;
-    
+
     Ok(())
 }

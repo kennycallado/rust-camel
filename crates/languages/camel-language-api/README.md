@@ -13,6 +13,8 @@
 | `Language` | Factory that produces `Expression` and `Predicate` instances from scripts |
 | `Expression` | Evaluates a script against an `Exchange`, returning a `serde_json::Value` |
 | `Predicate` | Evaluates a script against an `Exchange`, returning a `bool` |
+| `MutatingExpression` | Evaluates a script against a `&mut Exchange`, propagating changes back |
+| `MutatingPredicate` | Like `Predicate` but receives `&mut Exchange`; reserved for future use |
 
 ## Error Handling
 
@@ -21,6 +23,8 @@ All operations return `Result<_, LanguageError>` with variants:
 - `EvalError` — runtime evaluation failure
 - `UnknownVariable` — referenced variable not found
 - `NotFound` — language not registered
+- `AlreadyRegistered` — language already registered under this name
+- `NotSupported` — language does not implement mutating expressions/predicates
 
 ## Usage
 

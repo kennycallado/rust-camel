@@ -61,12 +61,10 @@ async fn main() -> Result<(), CamelError> {
     .await
     .expect("Failed to insert seed data 1");
 
-    sqlx::query(
-        "INSERT INTO users (name, email, processed) VALUES ('Bob', 'bob@example.com', 0)",
-    )
-    .execute(&pool)
-    .await
-    .expect("Failed to insert seed data 2");
+    sqlx::query("INSERT INTO users (name, email, processed) VALUES ('Bob', 'bob@example.com', 0)")
+        .execute(&pool)
+        .await
+        .expect("Failed to insert seed data 2");
 
     println!("Created 'users' table with 2 seed rows.\n");
 
@@ -151,12 +149,11 @@ async fn main() -> Result<(), CamelError> {
     // Step 6: Show final state
     // -------------------------------------------------------------------------
     println!("\nFinal database state:");
-    let rows: Vec<(i64, String, String, i64)> = sqlx::query_as(
-        "SELECT id, name, email, processed FROM users ORDER BY id",
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("Failed to fetch final state");
+    let rows: Vec<(i64, String, String, i64)> =
+        sqlx::query_as("SELECT id, name, email, processed FROM users ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("Failed to fetch final state");
 
     for (id, name, email, processed) in rows {
         println!(

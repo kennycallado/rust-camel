@@ -69,12 +69,11 @@ fn test_tracer_file_output_invalid_path_returns_error() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
+        runtime_journal_path: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: ComponentsConfig::default(),
         observability: ObservabilityConfig {
-            metrics_enabled: false,
-            metrics_port: 9090,
             tracer: TracerConfig {
                 enabled: true,
                 detail_level: DetailLevel::Minimal,
@@ -89,8 +88,10 @@ fn test_tracer_file_output_invalid_path_returns_error() {
                         format: OutputFormat::Json,
                     }),
                 },
+                ..Default::default()
             },
             otel: None,
+            prometheus: None,
         },
         supervision: None,
     };

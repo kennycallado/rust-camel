@@ -25,11 +25,11 @@ async fn main() -> Result<(), CamelError> {
     // Discover and load routes from configuration
     let routes = discover_routes(&config.routes).map_err(|e| CamelError::Config(e.to_string()))?;
 
+    let route_count = routes.len();
     for route in routes {
         ctx.add_route_definition(route)?;
     }
 
-    let route_count = ctx.route_controller().lock().await.route_count();
     println!(
         "Starting context with {} routes from config...",
         route_count

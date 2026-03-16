@@ -7,12 +7,11 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
     CamelConfig {
         routes: vec![],
         watch: false,
+        runtime_journal_path: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: ComponentsConfig::default(),
         observability: ObservabilityConfig {
-            metrics_enabled: false,
-            metrics_port: 9090,
             tracer: TracerConfig {
                 enabled: true,
                 detail_level: DetailLevel::Minimal,
@@ -23,6 +22,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
                     },
                     file: None,
                 },
+                ..Default::default()
             },
             otel: if otel_enabled {
                 Some(OtelCamelConfig {
@@ -30,10 +30,12 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
                     endpoint: "http://localhost:9999".to_string(),
                     service_name: "test".to_string(),
                     log_level: "INFO".to_string(),
+                    ..Default::default()
                 })
             } else {
                 None
             },
+            prometheus: None,
         },
         supervision: None,
     }

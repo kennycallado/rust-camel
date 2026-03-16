@@ -1,0 +1,4 @@
+- from: timer:hot-reload?period=1000
+  route_id: hot-reload-route
+  steps:
+    - to: log:info?showHeaders=true

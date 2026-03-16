@@ -1,12 +1,13 @@
 use std::str::FromStr;
 
 use camel_api::CamelError;
-use camel_endpoint::parse_uri;
+use camel_endpoint::{UriComponents, UriConfig, parse_uri};
 
 /// Output type for SQL query results.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum SqlOutputType {
     /// Return all rows as a list.
+    #[default]
     SelectList,
     /// Return a single row (first result).
     SelectOne,
@@ -30,147 +31,266 @@ impl FromStr for SqlOutputType {
     }
 }
 
-/// Configuration for SQL component endpoints.
-#[derive(Debug, Clone)]
-pub struct SqlConfig {
-    // Connection
-    pub db_url: String,
+/// Global configuration for SQL component.
+///
+/// This is a plain Rust struct (no serde) with defaults and builder methods.
+/// It holds pool configuration that can be applied as defaults to endpoints.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SqlGlobalConfig {
     pub max_connections: u32,
     pub min_connections: u32,
     pub idle_timeout_secs: u64,
     pub max_lifetime_secs: u64,
+}
+
+impl Default for SqlGlobalConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 5,
+            min_connections: 1,
+            idle_timeout_secs: 300,
+            max_lifetime_secs: 1800,
+        }
+    }
+}
+
+impl SqlGlobalConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_max_connections(mut self, value: u32) -> Self {
+        self.max_connections = value;
+        self
+    }
+
+    pub fn with_min_connections(mut self, value: u32) -> Self {
+        self.min_connections = value;
+        self
+    }
+
+    pub fn with_idle_timeout_secs(mut self, value: u64) -> Self {
+        self.idle_timeout_secs = value;
+        self
+    }
+
+    pub fn with_max_lifetime_secs(mut self, value: u64) -> Self {
+        self.max_lifetime_secs = value;
+        self
+    }
+}
+
+/// Configuration for SQL component endpoints.
+///
+/// URI format: `sql:<query>?db_url=<url>&param1=val1&param2=val2`
+///
+/// The query can be inline SQL or a file reference with `file:` prefix:
+/// - `sql:SELECT * FROM users?db_url=...` - inline SQL
+/// - `sql:file:/path/to/query.sql?db_url=...` - read SQL from file
+#[derive(Debug, Clone)]
+pub struct SqlEndpointConfig {
+    // Connection
+    /// Database connection URL (required).
+    pub db_url: String,
+    /// Maximum connections in the pool. None = use global default.
+    pub max_connections: Option<u32>,
+    /// Minimum connections in the pool. None = use global default.
+    pub min_connections: Option<u32>,
+    /// Idle timeout in seconds. None = use global default.
+    pub idle_timeout_secs: Option<u64>,
+    /// Maximum connection lifetime in seconds. None = use global default.
+    pub max_lifetime_secs: Option<u64>,
 
     // Query
+    /// The SQL query (from URI path or file).
     pub query: String,
-    /// Path to a file containing the SQL query (populated when URI starts with `sql:file:...`)
+    /// Path to the file containing the SQL query (when using `file:` prefix).
     pub source_path: Option<String>,
+    /// Output type for query results. Default: SelectList.
     pub output_type: SqlOutputType,
+    /// Placeholder character for parameters. Default: '#'.
     pub placeholder: char,
+    /// If true, don't execute the query (dry run). Default: false.
     pub noop: bool,
 
     // Consumer (polling)
+    /// Delay between polls in milliseconds. Default: 500.
     pub delay_ms: u64,
+    /// Initial delay before first poll in milliseconds. Default: 1000.
     pub initial_delay_ms: u64,
+    /// Maximum messages per poll.
     pub max_messages_per_poll: Option<i32>,
+    /// SQL to execute after consuming each message.
     pub on_consume: Option<String>,
+    /// SQL to execute if consumption fails.
     pub on_consume_failed: Option<String>,
+    /// SQL to execute after consuming a batch.
     pub on_consume_batch_complete: Option<String>,
+    /// Route empty result sets. Default: false.
     pub route_empty_result_set: bool,
+    /// Use iterator for results. Default: true.
     pub use_iterator: bool,
+    /// Expected number of rows affected.
     pub expected_update_count: Option<i64>,
+    /// Break batch on consume failure. Default: false.
     pub break_batch_on_consume_fail: bool,
 
     // Producer
+    /// Enable batch mode. Default: false.
     pub batch: bool,
+    /// Use message body for SQL. Default: false.
     pub use_message_body_for_sql: bool,
 }
 
-impl SqlConfig {
-    /// Parse configuration from a Camel-style URI.
-    ///
-    /// URI format: `sql:<query>?db_url=<url>&param1=val1&param2=val2`
-    ///
-    /// # Errors
-    ///
-    /// Returns `CamelError::InvalidUri` if the scheme is not "sql".
-    /// Returns `CamelError::Config` if `db_url` parameter is missing.
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
-        let components = parse_uri(uri)?;
+impl SqlEndpointConfig {
+    /// Apply defaults from global config, filling None fields without overriding.
+    pub fn apply_defaults(&mut self, defaults: &SqlGlobalConfig) {
+        if self.max_connections.is_none() {
+            self.max_connections = Some(defaults.max_connections);
+        }
+        if self.min_connections.is_none() {
+            self.min_connections = Some(defaults.min_connections);
+        }
+        if self.idle_timeout_secs.is_none() {
+            self.idle_timeout_secs = Some(defaults.idle_timeout_secs);
+        }
+        if self.max_lifetime_secs.is_none() {
+            self.max_lifetime_secs = Some(defaults.max_lifetime_secs);
+        }
+    }
 
+    /// Resolve any remaining None fields with built-in defaults.
+    pub fn resolve_defaults(&mut self) {
+        let defaults = SqlGlobalConfig::default();
+        self.apply_defaults(&defaults);
+    }
+}
+
+impl UriConfig for SqlEndpointConfig {
+    fn scheme() -> &'static str {
+        "sql"
+    }
+
+    fn from_uri(uri: &str) -> Result<Self, CamelError> {
+        let parts = parse_uri(uri)?;
+        Self::from_components(parts)
+    }
+
+    fn from_components(parts: UriComponents) -> Result<Self, CamelError> {
         // Validate scheme
-        if components.scheme != "sql" {
+        if parts.scheme != Self::scheme() {
             return Err(CamelError::InvalidUri(format!(
-                "Expected scheme 'sql', got '{}'",
-                components.scheme
+                "expected scheme '{}' but got '{}'",
+                Self::scheme(),
+                parts.scheme
             )));
         }
 
-        // Detect file-based query
-        let (query, source_path) = if components.path.starts_with("file:") {
-            let file_path = components.path.trim_start_matches("file:").to_string();
+        let params = &parts.params;
+
+        // Handle file: prefix for query
+        let (query, source_path) = if parts.path.starts_with("file:") {
+            let file_path = parts.path.trim_start_matches("file:").to_string();
             let contents = std::fs::read_to_string(&file_path).map_err(|e| {
                 CamelError::Config(format!("Failed to read SQL file '{}': {}", file_path, e))
             })?;
             (contents.trim().to_string(), Some(file_path))
         } else {
-            (components.path.clone(), None)
+            (parts.path.clone(), None)
         };
 
-        // Extract required db_url
-        let db_url = components
-            .params
+        // Required parameter: db_url
+        let db_url = params
             .get("db_url")
             .ok_or_else(|| CamelError::Config("db_url parameter is required".to_string()))?
             .clone();
 
-        // Helper functions for parameter extraction
-        let get_param = |name: &str| -> Option<&String> { components.params.get(name) };
+        // Connection parameters - None when not set by URI param
+        let max_connections = params.get("maxConnections").and_then(|v| v.parse().ok());
+        let min_connections = params.get("minConnections").and_then(|v| v.parse().ok());
+        let idle_timeout_secs = params.get("idleTimeoutSecs").and_then(|v| v.parse().ok());
+        let max_lifetime_secs = params.get("maxLifetimeSecs").and_then(|v| v.parse().ok());
 
-        let get_u32 = |name: &str, default: u32| -> u32 {
-            get_param(name)
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default)
-        };
+        // Query parameters
+        let output_type = params
+            .get("outputType")
+            .map(|s| s.parse())
+            .transpose()?
+            .unwrap_or_default();
+        let placeholder = params
+            .get("placeholder")
+            .filter(|v| !v.is_empty())
+            .map(|v| v.chars().next().unwrap())
+            .unwrap_or('#');
+        let noop = params
+            .get("noop")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        let get_u64 = |name: &str, default: u64| -> u64 {
-            get_param(name)
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default)
-        };
+        // Consumer parameters
+        let delay_ms = params
+            .get("delay")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500);
+        let initial_delay_ms = params
+            .get("initialDelay")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
+        let max_messages_per_poll = params
+            .get("maxMessagesPerPoll")
+            .and_then(|v| v.parse().ok());
+        let on_consume = params.get("onConsume").cloned();
+        let on_consume_failed = params.get("onConsumeFailed").cloned();
+        let on_consume_batch_complete = params.get("onConsumeBatchComplete").cloned();
+        let route_empty_result_set = params
+            .get("routeEmptyResultSet")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let use_iterator = params
+            .get("useIterator")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        let expected_update_count = params
+            .get("expectedUpdateCount")
+            .and_then(|v| v.parse().ok());
+        let break_batch_on_consume_fail = params
+            .get("breakBatchOnConsumeFail")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        let get_i32 = |name: &str| -> Option<i32> { get_param(name).and_then(|v| v.parse().ok()) };
+        // Producer parameters
+        let batch = params
+            .get("batch")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let use_message_body_for_sql = params
+            .get("useMessageBodyForSql")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        let get_i64 = |name: &str| -> Option<i64> { get_param(name).and_then(|v| v.parse().ok()) };
-
-        let get_bool = |name: &str, default: bool| -> bool {
-            get_param(name)
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(default)
-        };
-
-        let get_char = |name: &str, default: char| -> char {
-            get_param(name)
-                .filter(|v| !v.is_empty())
-                .map(|v| v.chars().next().unwrap())
-                .unwrap_or(default)
-        };
-
-        let get_string = |name: &str| -> Option<String> { get_param(name).cloned() };
-
-        // Build config with defaults
-        Ok(SqlConfig {
-            // Connection
+        Ok(Self {
             db_url,
-            max_connections: get_u32("maxConnections", 5),
-            min_connections: get_u32("minConnections", 1),
-            idle_timeout_secs: get_u64("idleTimeoutSecs", 300),
-            max_lifetime_secs: get_u64("maxLifetimeSecs", 1800),
-
-            // Query
+            max_connections,
+            min_connections,
+            idle_timeout_secs,
+            max_lifetime_secs,
             query,
             source_path,
-            output_type: get_param("outputType")
-                .map(|s| s.parse())
-                .transpose()?
-                .unwrap_or(SqlOutputType::SelectList),
-            placeholder: get_char("placeholder", '#'),
-            noop: get_bool("noop", false),
-
-            // Consumer
-            delay_ms: get_u64("delay", 500),
-            initial_delay_ms: get_u64("initialDelay", 1000),
-            max_messages_per_poll: get_i32("maxMessagesPerPoll"),
-            on_consume: get_string("onConsume"),
-            on_consume_failed: get_string("onConsumeFailed"),
-            on_consume_batch_complete: get_string("onConsumeBatchComplete"),
-            route_empty_result_set: get_bool("routeEmptyResultSet", false),
-            use_iterator: get_bool("useIterator", true),
-            expected_update_count: get_i64("expectedUpdateCount"),
-            break_batch_on_consume_fail: get_bool("breakBatchOnConsumeFail", false),
-
-            // Producer
-            batch: get_bool("batch", false),
-            use_message_body_for_sql: get_bool("useMessageBodyForSql", false),
+            output_type,
+            placeholder,
+            noop,
+            delay_ms,
+            initial_delay_ms,
+            max_messages_per_poll,
+            on_consume,
+            on_consume_failed,
+            on_consume_batch_complete,
+            route_empty_result_set,
+            use_iterator,
+            expected_update_count,
+            break_batch_on_consume_fail,
+            batch,
+            use_message_body_for_sql,
         })
     }
 }
@@ -181,13 +301,15 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        let c = SqlConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        let mut c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        c.resolve_defaults();
         assert_eq!(c.query, "select 1");
         assert_eq!(c.db_url, "postgres://localhost/test");
-        assert_eq!(c.max_connections, 5);
-        assert_eq!(c.min_connections, 1);
-        assert_eq!(c.idle_timeout_secs, 300);
-        assert_eq!(c.max_lifetime_secs, 1800);
+        assert_eq!(c.max_connections, Some(5));
+        assert_eq!(c.min_connections, Some(1));
+        assert_eq!(c.idle_timeout_secs, Some(300));
+        assert_eq!(c.max_lifetime_secs, Some(1800));
         assert_eq!(c.output_type, SqlOutputType::SelectList);
         assert_eq!(c.placeholder, '#');
         assert!(!c.noop);
@@ -207,17 +329,17 @@ mod tests {
 
     #[test]
     fn test_config_wrong_scheme() {
-        assert!(SqlConfig::from_uri("redis://localhost:6379").is_err());
+        assert!(SqlEndpointConfig::from_uri("redis://localhost:6379").is_err());
     }
 
     #[test]
     fn test_config_missing_db_url() {
-        assert!(SqlConfig::from_uri("sql:select 1").is_err());
+        assert!(SqlEndpointConfig::from_uri("sql:select 1").is_err());
     }
 
     #[test]
     fn test_config_output_type_select_one() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&outputType=SelectOne",
         )
         .unwrap();
@@ -226,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_config_output_type_stream_list() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&outputType=StreamList",
         )
         .unwrap();
@@ -235,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_config_consumer_options() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:select * from t?db_url=postgres://localhost/test&delay=2000&initialDelay=500&maxMessagesPerPoll=10&onConsume=update t set done=true where id=:#id&onConsumeFailed=update t set failed=true where id=:#id&onConsumeBatchComplete=delete from t where done=true&routeEmptyResultSet=true&useIterator=false&expectedUpdateCount=1&breakBatchOnConsumeFail=true"
         ).unwrap();
         assert_eq!(c.delay_ms, 2000);
@@ -261,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_config_producer_options() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:insert into t values (#)?db_url=postgres://localhost/test&batch=true&useMessageBodyForSql=true&noop=true"
         ).unwrap();
         assert!(c.batch);
@@ -271,18 +393,18 @@ mod tests {
 
     #[test]
     fn test_config_pool_options() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&maxConnections=20&minConnections=3&idleTimeoutSecs=600&maxLifetimeSecs=3600"
         ).unwrap();
-        assert_eq!(c.max_connections, 20);
-        assert_eq!(c.min_connections, 3);
-        assert_eq!(c.idle_timeout_secs, 600);
-        assert_eq!(c.max_lifetime_secs, 3600);
+        assert_eq!(c.max_connections, Some(20));
+        assert_eq!(c.min_connections, Some(3));
+        assert_eq!(c.idle_timeout_secs, Some(600));
+        assert_eq!(c.max_lifetime_secs, Some(3600));
     }
 
     #[test]
     fn test_config_query_with_special_chars() {
-        let c = SqlConfig::from_uri(
+        let c = SqlEndpointConfig::from_uri(
             "sql:select * from users where name = :#name and age > #?db_url=postgres://localhost/test",
         )
         .unwrap();
@@ -311,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_config_file_not_found() {
-        let result = SqlConfig::from_uri(
+        let result = SqlEndpointConfig::from_uri(
             "sql:file:/nonexistent/path/query.sql?db_url=postgres://localhost/test",
         );
         assert!(result.is_err());
@@ -340,9 +462,84 @@ mod tests {
             "sql:file:{}?db_url=postgres://localhost/test",
             tmp.display()
         );
-        let c = SqlConfig::from_uri(&uri).unwrap();
+        let c = SqlEndpointConfig::from_uri(&uri).unwrap();
         assert_eq!(c.query, "SELECT * FROM users");
         assert_eq!(c.source_path, Some(tmp.to_string_lossy().into_owned()));
         std::fs::remove_file(&tmp).ok();
+    }
+
+    // New tests for config contract
+    #[test]
+    fn test_pool_fields_none_when_not_set() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert_eq!(c.max_connections, None);
+        assert_eq!(c.min_connections, None);
+        assert_eq!(c.idle_timeout_secs, None);
+        assert_eq!(c.max_lifetime_secs, None);
+    }
+
+    #[test]
+    fn test_apply_defaults_fills_none() {
+        let mut c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        let global = SqlGlobalConfig {
+            max_connections: 10,
+            min_connections: 2,
+            idle_timeout_secs: 600,
+            max_lifetime_secs: 3600,
+        };
+        c.apply_defaults(&global);
+        assert_eq!(c.max_connections, Some(10));
+        assert_eq!(c.min_connections, Some(2));
+        assert_eq!(c.idle_timeout_secs, Some(600));
+        assert_eq!(c.max_lifetime_secs, Some(3600));
+    }
+
+    #[test]
+    fn test_apply_defaults_does_not_override() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&maxConnections=99&minConnections=5",
+        )
+        .unwrap();
+        let global = SqlGlobalConfig {
+            max_connections: 10,
+            min_connections: 2,
+            idle_timeout_secs: 600,
+            max_lifetime_secs: 3600,
+        };
+        c.apply_defaults(&global);
+        // URI-set values should NOT be overridden
+        assert_eq!(c.max_connections, Some(99));
+        assert_eq!(c.min_connections, Some(5));
+        // None fields should be filled from global
+        assert_eq!(c.idle_timeout_secs, Some(600));
+        assert_eq!(c.max_lifetime_secs, Some(3600));
+    }
+
+    #[test]
+    fn test_resolve_defaults_fills_remaining() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&maxConnections=7",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        assert_eq!(c.max_connections, Some(7)); // from URI
+        assert_eq!(c.min_connections, Some(1)); // from defaults
+        assert_eq!(c.idle_timeout_secs, Some(300)); // from defaults
+        assert_eq!(c.max_lifetime_secs, Some(1800)); // from defaults
+    }
+
+    #[test]
+    fn test_global_config_builder() {
+        let c = SqlGlobalConfig::default()
+            .with_max_connections(20)
+            .with_min_connections(3)
+            .with_idle_timeout_secs(600)
+            .with_max_lifetime_secs(3600);
+        assert_eq!(c.max_connections, 20);
+        assert_eq!(c.min_connections, 3);
+        assert_eq!(c.idle_timeout_secs, 600);
+        assert_eq!(c.max_lifetime_secs, 3600);
     }
 }

@@ -18,8 +18,34 @@ detail_level = "minimal"
 enabled = true
 format = "json"
 
+# Component defaults - shared across all profiles
+[default.components.http]
+connect_timeout_ms = 30000
+allow_private_ips = false
+
+[default.components.kafka]
+brokers = "localhost:9092"
+group_id = "camel"
+
+# Development profile - more verbose, local services
 [development]
 log_level = "DEBUG"
 
+[development.components.http]
+allow_private_ips = true  # Allow internal services in dev
+
+[development.components.kafka]
+brokers = "localhost:9092"
+
+# Production profile - stricter settings, remote services
 [production]
-log_level = "ERROR"
+log_level = "WARN"
+
+[production.components.http]
+connect_timeout_ms = 5000   # Faster fail in production
+allow_private_ips = false
+
+[production.components.kafka]
+brokers = "prod-kafka:9092"
+group_id = "camel-prod"
+session_timeout_ms = 60000

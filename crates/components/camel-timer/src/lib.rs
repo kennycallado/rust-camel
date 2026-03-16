@@ -6,7 +6,7 @@ use tracing::debug;
 
 use camel_api::{BoxProcessor, CamelError, Exchange, Message};
 use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
-use camel_endpoint::parse_uri;
+use camel_endpoint::UriConfig;
 
 // ---------------------------------------------------------------------------
 // TimerConfig
@@ -15,53 +15,31 @@ use camel_endpoint::parse_uri;
 /// Configuration parsed from a timer URI.
 ///
 /// Format: `timer:name?period=1000&delay=0&repeatCount=0`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, UriConfig)]
+#[uri_scheme = "timer"]
 pub struct TimerConfig {
     /// Timer name (the path portion of the URI).
     pub name: String,
+
     /// Interval between ticks (milliseconds). Default: 1000.
+    #[allow(dead_code)] // Used by macro-generated Duration conversion
+    #[uri_param(name = "period", default = "1000")]
+    period_ms: u64,
+
+    /// Converted Duration for period.
     pub period: Duration,
+
     /// Initial delay before the first tick (milliseconds). Default: 0.
+    #[allow(dead_code)] // Used by macro-generated Duration conversion
+    #[uri_param(name = "delay", default = "0")]
+    delay_ms: u64,
+
+    /// Converted Duration for delay.
     pub delay: Duration,
+
     /// Maximum number of ticks. `None` means infinite.
+    #[uri_param(name = "repeatCount")]
     pub repeat_count: Option<u32>,
-}
-
-impl TimerConfig {
-    /// Parse a timer URI into a config.
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
-        let parts = parse_uri(uri)?;
-        if parts.scheme != "timer" {
-            return Err(CamelError::InvalidUri(format!(
-                "expected scheme 'timer', got '{}'",
-                parts.scheme
-            )));
-        }
-
-        let period = parts
-            .params
-            .get("period")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(1000);
-
-        let delay = parts
-            .params
-            .get("delay")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        let repeat_count = parts
-            .params
-            .get("repeatCount")
-            .and_then(|v| v.parse::<u32>().ok());
-
-        Ok(Self {
-            name: parts.path,
-            period: Duration::from_millis(period),
-            delay: Duration::from_millis(delay),
-            repeat_count,
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,40 +222,7 @@ mod tests {
 
     #[test]
     fn test_timer_endpoint_no_producer() {
-        use std::sync::Arc;
-        use tokio::sync::Mutex;
-
-        // NullRouteController for testing
-        struct NullRouteController;
-        #[async_trait::async_trait]
-        impl camel_api::RouteController for NullRouteController {
-            async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-                Ok(())
-            }
-            async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-                Ok(())
-            }
-            async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-                Ok(())
-            }
-            async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-                Ok(())
-            }
-            async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-                Ok(())
-            }
-            fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
-                None
-            }
-            async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-                Ok(())
-            }
-            async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-                Ok(())
-            }
-        }
-
-        let ctx = ProducerContext::new(Arc::new(Mutex::new(NullRouteController)));
+        let ctx = ProducerContext::new();
         let component = TimerComponent::new();
         let endpoint = component.create_endpoint("timer:tick").unwrap();
         let producer = endpoint.create_producer(&ctx);
@@ -332,12 +277,7 @@ mod tests {
         let ctx = ConsumerContext::new(tx, token.clone());
 
         let mut consumer = TimerConsumer {
-            config: TimerConfig {
-                name: "cancel-test".to_string(),
-                period: Duration::from_millis(50),
-                delay: Duration::from_millis(0),
-                repeat_count: None,
-            },
+            config: TimerConfig::from_uri("timer:cancel-test?period=50").unwrap(),
         };
 
         let handle = tokio::spawn(async move {

@@ -1,0 +1,19 @@
+[package]
+name = "http-streaming"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "http-streaming"
+path = "src/main.rs"
+
+[dependencies]
+camel-api = { workspace = true }
+camel-component-http = { workspace = true }
+camel-component = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+tracing-subscriber = { workspace = true }

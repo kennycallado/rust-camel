@@ -1,3 +1,6 @@
+pub mod config;
+pub use config::HttpConfig;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -9,12 +12,18 @@ use tokio::sync::RwLock;
 use tower::Service;
 use tracing::debug;
 
-use camel_api::{BoxProcessor, CamelError, Exchange, body::Body};
+use axum::body::BodyDataStream;
+use camel_api::{
+    BoxProcessor, CamelError, Exchange,
+    body::{Body, StreamBody, StreamMetadata},
+};
 use camel_component::{Component, Consumer, Endpoint, ProducerContext};
-use camel_endpoint::parse_uri;
+use camel_endpoint::{UriComponents, UriConfig, parse_uri};
+use futures::TryStreamExt;
+use futures::stream::BoxStream;
 
 // ---------------------------------------------------------------------------
-// HttpConfig
+// HttpEndpointConfig
 // ---------------------------------------------------------------------------
 
 /// Configuration for an HTTP client (producer) endpoint.
@@ -74,7 +83,7 @@ use camel_endpoint::parse_uri;
 /// Only increase limits when you control both ends of the connection or when
 /// business requirements demand larger payloads.
 #[derive(Debug, Clone)]
-pub struct HttpConfig {
+pub struct HttpEndpointConfig {
     pub base_url: String,
     pub http_method: Option<String>,
     pub throw_exception_on_failure: bool,
@@ -90,9 +99,32 @@ pub struct HttpConfig {
     pub max_body_size: usize,
 }
 
-impl HttpConfig {
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
+/// Camel options that should NOT be forwarded as HTTP query params
+const HTTP_CAMEL_OPTIONS: &[&str] = &[
+    "httpMethod",
+    "throwExceptionOnFailure",
+    "okStatusCodeRange",
+    "followRedirects",
+    "connectTimeout",
+    "responseTimeout",
+    "allowPrivateIps",
+    "blockedHosts",
+    "maxBodySize",
+];
+
+impl UriConfig for HttpEndpointConfig {
+    /// Returns "http" as the primary scheme (also accepts "https")
+    fn scheme() -> &'static str {
+        "http"
+    }
+
+    fn from_uri(uri: &str) -> Result<Self, CamelError> {
         let parts = parse_uri(uri)?;
+        Self::from_components(parts)
+    }
+
+    fn from_components(parts: UriComponents) -> Result<Self, CamelError> {
+        // Validate scheme - accept both http and https
         if parts.scheme != "http" && parts.scheme != "https" {
             return Err(CamelError::InvalidUri(format!(
                 "expected scheme 'http' or 'https', got '{}'",
@@ -100,6 +132,8 @@ impl HttpConfig {
             )));
         }
 
+        // Construct base_url from scheme + path
+        // e.g., "http://localhost:8080/api" from scheme "http" and path "//localhost:8080/api"
         let base_url = format!("{}:{}", parts.scheme, parts.path);
 
         let http_method = parts.params.get("httpMethod").cloned();
@@ -110,6 +144,7 @@ impl HttpConfig {
             .map(|v| v != "false")
             .unwrap_or(true);
 
+        // Parse status code range from "start-end" format (e.g., "200-299")
         let ok_status_code_range = parts
             .params
             .get("okStatusCodeRange")
@@ -145,6 +180,7 @@ impl HttpConfig {
             .map(|v| v == "true")
             .unwrap_or(false); // Default: block private IPs
 
+        // Parse comma-separated blocked hosts
         let blocked_hosts = parts
             .params
             .get("blockedHosts")
@@ -157,31 +193,18 @@ impl HttpConfig {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(10 * 1024 * 1024); // Default: 10MB
 
-        // CAMEL_OPTIONS: params that are consumed by Camel,        // Any remaining params should be forwarded as HTTP query params
-        let camel_options = [
-            "httpMethod",
-            "throwExceptionOnFailure",
-            "okStatusCodeRange",
-            "followRedirects",
-            "connectTimeout",
-            "responseTimeout",
-            "allowPrivateIps",
-            "blockedHosts",
-            "maxBodySize",
-        ];
-
+        // Collect remaining params (not Camel options) as query params
         let query_params: HashMap<String, String> = parts
             .params
             .into_iter()
-            .filter(|(k, _)| !camel_options.contains(&k.as_str()))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .filter(|(k, _)| !HTTP_CAMEL_OPTIONS.contains(&k.as_str()))
             .collect();
 
         Ok(Self {
             base_url,
             http_method,
             throw_exception_on_failure,
-            ok_status_code_range: (ok_status_code_range.0, ok_status_code_range.1),
+            ok_status_code_range,
             follow_redirects,
             connect_timeout,
             response_timeout,
@@ -212,9 +235,19 @@ pub struct HttpServerConfig {
     pub max_response_body: usize,
 }
 
-impl HttpServerConfig {
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
+impl UriConfig for HttpServerConfig {
+    /// Returns "http" as the primary scheme (also accepts "https")
+    fn scheme() -> &'static str {
+        "http"
+    }
+
+    fn from_uri(uri: &str) -> Result<Self, CamelError> {
         let parts = parse_uri(uri)?;
+        Self::from_components(parts)
+    }
+
+    fn from_components(parts: UriComponents) -> Result<Self, CamelError> {
+        // Validate scheme - accept both http and https
         if parts.scheme != "http" && parts.scheme != "https" {
             return Err(CamelError::InvalidUri(format!(
                 "expected scheme 'http' or 'https', got '{}'",
@@ -240,20 +273,22 @@ impl HttpServerConfig {
         }
         .to_string();
 
-        // Parse host:port
+        // Parse host:port from authority
         let (host, port) = if let Some(colon) = authority.rfind(':') {
             let port_str = &authority[colon + 1..];
             match port_str.parse::<u16>() {
                 Ok(p) => (authority[..colon].to_string(), p),
                 Err(_) => {
                     return Err(CamelError::InvalidUri(format!(
-                        "invalid port '{}' in URI '{}'",
-                        port_str, uri
+                        "invalid port '{}' in authority",
+                        port_str
                     )));
                 }
             }
         } else {
-            (authority.to_string(), 80)
+            // Default port based on scheme: 443 for https, 80 for http
+            let default_port = if parts.scheme == "https" { 443 } else { 80 };
+            (authority.to_string(), default_port)
         };
 
         let max_request_body = parts
@@ -282,23 +317,28 @@ impl HttpServerConfig {
 // RequestEnvelope / HttpReply
 // ---------------------------------------------------------------------------
 
+/// Body de la respuesta HTTP: bytes ya materializados o stream lazy.
+pub(crate) enum HttpReplyBody {
+    Bytes(bytes::Bytes),
+    Stream(BoxStream<'static, Result<bytes::Bytes, CamelError>>),
+}
+
 /// An inbound HTTP request sent from the Axum dispatch handler to an
 /// `HttpConsumer` receive loop.
-pub struct RequestEnvelope {
-    pub method: String,
-    pub path: String,
-    pub query: String,
-    pub headers: http::HeaderMap,
-    pub body: bytes::Bytes,
-    pub reply_tx: tokio::sync::oneshot::Sender<HttpReply>,
+pub(crate) struct RequestEnvelope {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) query: String,
+    pub(crate) headers: http::HeaderMap,
+    pub(crate) body: StreamBody,
+    pub(crate) reply_tx: tokio::sync::oneshot::Sender<HttpReply>,
 }
 
 /// The HTTP response that `HttpConsumer` sends back to the Axum handler.
-#[derive(Debug, Clone)]
-pub struct HttpReply {
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-    pub body: bytes::Bytes,
+pub(crate) struct HttpReply {
+    pub(crate) status: u16,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: HttpReplyBody,
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +346,8 @@ pub struct HttpReply {
 // ---------------------------------------------------------------------------
 
 /// Maps URL path → channel sender for the consumer that owns that path.
-pub type DispatchTable = Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<RequestEnvelope>>>>;
+pub(crate) type DispatchTable =
+    Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<RequestEnvelope>>>>;
 
 /// Handle to a running Axum server on one port.
 struct ServerHandle {
@@ -331,7 +372,7 @@ impl ServerRegistry {
 
     /// Returns the `DispatchTable` for `port`, spawning a new Axum server if
     /// none is running on that port yet.
-    pub async fn get_or_spawn(
+    pub(crate) async fn get_or_spawn(
         &'static self,
         host: &str,
         port: u16,
@@ -422,16 +463,38 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
     let query = req.uri().query().unwrap_or("").to_string();
     let headers = req.headers().clone();
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), state.max_request_body).await {
-        Ok(b) => b,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(AxumBody::empty())
-                .expect(
-                    "Response::builder() with a known-valid status code and body is infallible",
-                );
-        }
+    // Check Content-Length against limit BEFORE opening the stream
+    let content_length: Option<u64> = headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok());
+
+    if let Some(len) = content_length
+        && len > state.max_request_body as u64
+    {
+        return Response::builder()
+            .status(StatusCode::PAYLOAD_TOO_LARGE)
+            .body(AxumBody::from("Request body exceeds configured limit"))
+            .expect("infallible");
+    }
+
+    // Build StreamBody from Axum body WITHOUT materializing
+    let content_type = headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let data_stream: BodyDataStream = req.into_body().into_data_stream();
+    let mapped_stream = data_stream.map_err(|e| CamelError::Io(e.to_string()));
+    let boxed: BoxStream<'static, Result<bytes::Bytes, CamelError>> = Box::pin(mapped_stream);
+
+    let stream_body = StreamBody {
+        stream: Arc::new(tokio::sync::Mutex::new(Some(boxed))),
+        metadata: StreamMetadata {
+            size_hint: content_length,
+            content_type,
+            origin: None,
+        },
     };
 
     // Look up handler for this path
@@ -439,12 +502,11 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         let table = state.dispatch.read().await;
         table.get(&path).cloned()
     };
-
     let Some(sender) = sender else {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(AxumBody::from("No consumer registered for this path"))
-            .expect("Response::builder() with a known-valid status code and body is infallible");
+            .expect("infallible");
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<HttpReply>();
@@ -453,7 +515,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         path,
         query,
         headers,
-        body: body_bytes,
+        body: stream_body,
         reply_tx,
     };
 
@@ -461,7 +523,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         return Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .body(AxumBody::from("Consumer unavailable"))
-            .expect("Response::builder() with a known-valid status code and body is infallible");
+            .expect("infallible");
     }
 
     match reply_rx.await {
@@ -472,14 +534,22 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
             for (k, v) in &reply.headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }
-            builder
-                .body(AxumBody::from(reply.body))
-                .unwrap_or_else(|_| {
+            match reply.body {
+                HttpReplyBody::Bytes(b) => builder.body(AxumBody::from(b)).unwrap_or_else(|_| {
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(AxumBody::from("Invalid response headers from consumer"))
-                        .expect("Response::builder() with a known-valid status code and body is infallible")
-                })
+                        .expect("infallible")
+                }),
+                HttpReplyBody::Stream(stream) => builder
+                    .body(AxumBody::from_stream(stream))
+                    .unwrap_or_else(|_| {
+                        Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(AxumBody::from("Invalid response headers from consumer"))
+                            .expect("infallible")
+                    }),
+            }
         }
         Err(_) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -524,7 +594,7 @@ impl Consumer for HttpConsumer {
 
         let path = self.config.path.clone();
         let cancel_token = ctx.cancel_token();
-        let max_response_body = self.config.max_response_body;
+        let _max_response_body = self.config.max_response_body;
 
         loop {
             tokio::select! {
@@ -555,13 +625,9 @@ impl Consumer for HttpConsumer {
                         }
                     }
 
-                    // Body: Try to convert to text if UTF-8, otherwise keep as bytes
-                    if !envelope.body.is_empty() {
-                        match std::str::from_utf8(&envelope.body) {
-                            Ok(text) => msg.body = Body::Text(text.to_string()),
-                            Err(_) => msg.body = Body::Bytes(envelope.body.clone()),
-                        }
-                    }
+                    // Body: always arrives as Body::Stream (native streaming)
+                    // Routes can call into_bytes() if they need to materialize
+                    msg.body = Body::Stream(envelope.body);
 
                     #[allow(unused_mut)]
                     let mut exchange = Exchange::new(msg);
@@ -615,7 +681,7 @@ impl Consumer for HttpConsumer {
                             let _ = reply_tx.send(HttpReply {
                                 status: 503,
                                 headers: vec![],
-                                body: bytes::Bytes::from("Service Unavailable"),
+                                body: HttpReplyBody::Bytes(bytes::Bytes::from("Service Unavailable")),
                             });
                             return;
                         }
@@ -642,17 +708,29 @@ impl Consumer for HttpConsumer {
                                     .map(|s| s as u16)
                                     .unwrap_or(200);
 
-                                let body_bytes = match out.input.body {
-                                    Body::Empty => bytes::Bytes::new(),
-                                    Body::Bytes(b) => b,
-                                    Body::Text(s) => bytes::Bytes::from(s.into_bytes()),
-                                    Body::Json(v) => bytes::Bytes::from(v.to_string().into_bytes()),
-                                    Body::Stream(_) => {
-                                        // Materialize stream for HTTP response
-                                        match out.input.body.into_bytes(max_response_body).await {
-                                            Ok(b) => b,
-                                            Err(e) => {
-                                                debug!(error = %e, "Failed to materialize stream body for HTTP reply");
+                                let reply_body: HttpReplyBody = match out.input.body {
+                                    Body::Empty => HttpReplyBody::Bytes(bytes::Bytes::new()),
+                                    Body::Bytes(b) => HttpReplyBody::Bytes(b),
+                                    Body::Text(s) => HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())),
+                                    Body::Xml(s) => HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())),
+                                    Body::Json(v) => HttpReplyBody::Bytes(bytes::Bytes::from(
+                                        v.to_string().into_bytes(),
+                                    )),
+                                    Body::Stream(s) => {
+                                        match s.stream.lock().await.take() {
+                                            Some(stream) => HttpReplyBody::Stream(stream),
+                                            None => {
+                                                tracing::error!(
+                                                    "Body::Stream already consumed before HTTP reply — returning 500"
+                                                );
+                                                let error_reply = HttpReply {
+                                                    status: 500,
+                                                    headers: vec![],
+                                                    body: HttpReplyBody::Bytes(bytes::Bytes::new()),
+                                                };
+                                                if reply_tx.send(error_reply).is_err() {
+                                                    debug!("reply_tx dropped before error reply could be sent");
+                                                }
                                                 return;
                                             }
                                         }
@@ -714,7 +792,7 @@ impl Consumer for HttpConsumer {
                                 HttpReply {
                                     status,
                                     headers: resp_headers,
-                                    body: body_bytes,
+                                    body: reply_body,
                                 }
                             }
                             Err(e) => {
@@ -722,7 +800,7 @@ impl Consumer for HttpConsumer {
                                 HttpReply {
                                     status: 500,
                                     headers: vec![],
-                                    body: bytes::Bytes::from("Internal Server Error"),
+                                    body: HttpReplyBody::Bytes(bytes::Bytes::from("Internal Server Error")),
                                 }
                             }
                         };
@@ -776,7 +854,7 @@ impl Component for HttpComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let config = HttpConfig::from_uri(uri)?;
+        let config = HttpEndpointConfig::from_uri(uri)?;
         let server_config = HttpServerConfig::from_uri(uri)?;
         let client = build_client(&config)?;
         Ok(Box::new(HttpEndpoint {
@@ -808,7 +886,7 @@ impl Component for HttpsComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let config = HttpConfig::from_uri(uri)?;
+        let config = HttpEndpointConfig::from_uri(uri)?;
         let server_config = HttpServerConfig::from_uri(uri)?;
         let client = build_client(&config)?;
         Ok(Box::new(HttpEndpoint {
@@ -820,7 +898,7 @@ impl Component for HttpsComponent {
     }
 }
 
-fn build_client(config: &HttpConfig) -> Result<reqwest::Client, CamelError> {
+fn build_client(config: &HttpEndpointConfig) -> Result<reqwest::Client, CamelError> {
     let mut builder = reqwest::Client::builder().connect_timeout(config.connect_timeout);
 
     if !config.follow_redirects {
@@ -838,7 +916,7 @@ fn build_client(config: &HttpConfig) -> Result<reqwest::Client, CamelError> {
 
 struct HttpEndpoint {
     uri: String,
-    config: HttpConfig,
+    config: HttpEndpointConfig,
     server_config: HttpServerConfig,
     client: reqwest::Client,
 }
@@ -864,7 +942,7 @@ impl Endpoint for HttpEndpoint {
 // SSRF Protection
 // ---------------------------------------------------------------------------
 
-fn validate_url_for_ssrf(url: &str, config: &HttpConfig) -> Result<(), CamelError> {
+fn validate_url_for_ssrf(url: &str, config: &HttpEndpointConfig) -> Result<(), CamelError> {
     let parsed = url::Url::parse(url)
         .map_err(|e| CamelError::ProcessorError(format!("Invalid URL: {}", e)))?;
 
@@ -921,12 +999,12 @@ fn validate_url_for_ssrf(url: &str, config: &HttpConfig) -> Result<(), CamelErro
 
 #[derive(Clone)]
 struct HttpProducer {
-    config: Arc<HttpConfig>,
+    config: Arc<HttpEndpointConfig>,
     client: reqwest::Client,
 }
 
 impl HttpProducer {
-    fn resolve_method(exchange: &Exchange, config: &HttpConfig) -> String {
+    fn resolve_method(exchange: &Exchange, config: &HttpEndpointConfig) -> String {
         if let Some(ref method) = config.http_method {
             return method.to_uppercase();
         }
@@ -943,7 +1021,7 @@ impl HttpProducer {
         "GET".to_string()
     }
 
-    fn resolve_url(exchange: &Exchange, config: &HttpConfig) -> String {
+    fn resolve_url(exchange: &Exchange, config: &HttpEndpointConfig) -> String {
         if let Some(uri) = exchange
             .input
             .header("CamelHttpUri")
@@ -1160,45 +1238,14 @@ mod tests {
     use camel_api::Message;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::Mutex;
-
-    // NullRouteController for testing
-    struct NullRouteController;
-    #[async_trait::async_trait]
-    impl camel_api::RouteController for NullRouteController {
-        async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
-            None
-        }
-        async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-    }
 
     fn test_producer_ctx() -> ProducerContext {
-        ProducerContext::new(Arc::new(Mutex::new(NullRouteController)))
+        ProducerContext::new()
     }
 
     #[test]
     fn test_http_config_defaults() {
-        let config = HttpConfig::from_uri("http://localhost:8080/api").unwrap();
+        let config = HttpEndpointConfig::from_uri("http://localhost:8080/api").unwrap();
         assert_eq!(config.base_url, "http://localhost:8080/api");
         assert!(config.http_method.is_none());
         assert!(config.throw_exception_on_failure);
@@ -1209,8 +1256,30 @@ mod tests {
     }
 
     #[test]
+    fn test_http_config_scheme() {
+        // UriConfig trait method returns "http" as primary scheme
+        assert_eq!(HttpEndpointConfig::scheme(), "http");
+    }
+
+    #[test]
+    fn test_http_config_from_components() {
+        // Test from_components directly (trait method)
+        let components = camel_endpoint::UriComponents {
+            scheme: "https".to_string(),
+            path: "//api.example.com/v1".to_string(),
+            params: std::collections::HashMap::from([(
+                "httpMethod".to_string(),
+                "POST".to_string(),
+            )]),
+        };
+        let config = HttpEndpointConfig::from_components(components).unwrap();
+        assert_eq!(config.base_url, "https://api.example.com/v1");
+        assert_eq!(config.http_method, Some("POST".to_string()));
+    }
+
+    #[test]
     fn test_http_config_with_options() {
-        let config = HttpConfig::from_uri(
+        let config = HttpEndpointConfig::from_uri(
             "https://api.example.com/v1?httpMethod=PUT&throwExceptionOnFailure=false&followRedirects=true&connectTimeout=5000&responseTimeout=10000"
         ).unwrap();
         assert_eq!(config.base_url, "https://api.example.com/v1");
@@ -1224,13 +1293,13 @@ mod tests {
     #[test]
     fn test_http_config_ok_status_range() {
         let config =
-            HttpConfig::from_uri("http://localhost/api?okStatusCodeRange=200-204").unwrap();
+            HttpEndpointConfig::from_uri("http://localhost/api?okStatusCodeRange=200-204").unwrap();
         assert_eq!(config.ok_status_code_range, (200, 204));
     }
 
     #[test]
     fn test_http_config_wrong_scheme() {
-        let result = HttpConfig::from_uri("file:/tmp");
+        let result = HttpEndpointConfig::from_uri("file:/tmp");
         assert!(result.is_err());
     }
 
@@ -1678,7 +1747,7 @@ mod tests {
     async fn test_non_camel_query_params_are_forwarded() {
         // This test verifies Bug #3 fix: non-Camel options should be forwarded
         // We'll test the config parsing, not the actual HTTP call
-        let config = HttpConfig::from_uri(
+        let config = HttpEndpointConfig::from_uri(
             "http://example.com/api?apiKey=secret123&httpMethod=GET&token=abc456",
         )
         .unwrap();
@@ -1736,7 +1805,7 @@ mod tests {
 
     #[test]
     fn test_ssrf_config_defaults() {
-        let config = HttpConfig::from_uri("http://example.com/api").unwrap();
+        let config = HttpEndpointConfig::from_uri("http://example.com/api").unwrap();
         assert!(
             !config.allow_private_ips,
             "Private IPs should be blocked by default"
@@ -1749,7 +1818,8 @@ mod tests {
 
     #[test]
     fn test_ssrf_config_allow_private_ips() {
-        let config = HttpConfig::from_uri("http://example.com/api?allowPrivateIps=true").unwrap();
+        let config =
+            HttpEndpointConfig::from_uri("http://example.com/api?allowPrivateIps=true").unwrap();
         assert!(
             config.allow_private_ips,
             "Private IPs should be allowed when explicitly set"
@@ -1758,9 +1828,10 @@ mod tests {
 
     #[test]
     fn test_ssrf_config_blocked_hosts() {
-        let config =
-            HttpConfig::from_uri("http://example.com/api?blockedHosts=evil.com,malware.net")
-                .unwrap();
+        let config = HttpEndpointConfig::from_uri(
+            "http://example.com/api?blockedHosts=evil.com,malware.net",
+        )
+        .unwrap();
         assert_eq!(config.blocked_hosts, vec!["evil.com", "malware.net"]);
     }
 
@@ -1844,6 +1915,30 @@ mod tests {
     }
 
     #[test]
+    fn test_http_server_config_scheme() {
+        // UriConfig trait method returns "http" as primary scheme
+        assert_eq!(HttpServerConfig::scheme(), "http");
+    }
+
+    #[test]
+    fn test_http_server_config_from_components() {
+        // Test from_components directly (trait method)
+        let components = camel_endpoint::UriComponents {
+            scheme: "https".to_string(),
+            path: "//0.0.0.0:8443/api".to_string(),
+            params: std::collections::HashMap::from([(
+                "maxRequestBody".to_string(),
+                "5242880".to_string(),
+            )]),
+        };
+        let cfg = HttpServerConfig::from_components(components).unwrap();
+        assert_eq!(cfg.host, "0.0.0.0");
+        assert_eq!(cfg.port, 8443);
+        assert_eq!(cfg.path, "/api");
+        assert_eq!(cfg.max_request_body, 5242880);
+    }
+
+    #[test]
     fn test_http_server_config_default_path() {
         let cfg = HttpServerConfig::from_uri("http://0.0.0.0:3000").unwrap();
         assert_eq!(cfg.path, "/");
@@ -1857,6 +1952,17 @@ mod tests {
     #[test]
     fn test_http_server_config_invalid_port() {
         assert!(HttpServerConfig::from_uri("http://localhost:abc/path").is_err());
+    }
+
+    #[test]
+    fn test_http_server_config_default_port_by_scheme() {
+        // HTTP without explicit port should default to 80
+        let cfg_http = HttpServerConfig::from_uri("http://0.0.0.0/orders").unwrap();
+        assert_eq!(cfg_http.port, 80);
+
+        // HTTPS without explicit port should default to 443
+        let cfg_https = HttpServerConfig::from_uri("https://0.0.0.0/orders").unwrap();
+        assert_eq!(cfg_https.port, 443);
     }
 
     #[test]
@@ -2136,6 +2242,27 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // HttpReplyBody streaming tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_http_reply_body_stream_variant_exists() {
+        use bytes::Bytes;
+        use camel_api::CamelError;
+        use futures::stream;
+
+        let chunks: Vec<Result<Bytes, CamelError>> =
+            vec![Ok(Bytes::from("hello")), Ok(Bytes::from(" world"))];
+        let stream = Box::pin(stream::iter(chunks));
+        let reply_body = HttpReplyBody::Stream(stream);
+        // Si compila y el match funciona, el test pasa
+        match reply_body {
+            HttpReplyBody::Stream(_) => {}
+            HttpReplyBody::Bytes(_) => panic!("expected Stream variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // OpenTelemetry propagation tests (only compiled with "otel" feature)
     // -----------------------------------------------------------------------
 
@@ -2394,5 +2521,250 @@ mod tests {
 
             (url, handle)
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Response streaming tests (Eje A - Task 2)
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Request streaming tests (Eje B - Task 3)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_request_body_arrives_as_stream() {
+        use camel_api::body::Body;
+        use camel_component::{ConsumerContext, ExchangeEnvelope};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("http://127.0.0.1:{port}/upload"))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client
+            .post(format!("http://127.0.0.1:{port}/upload"))
+            .body("hello streaming world")
+            .send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                // Body must be Body::Stream, not Body::Text or Body::Bytes
+                assert!(
+                    matches!(envelope.exchange.input.body, Body::Stream(_)),
+                    "expected Body::Stream, got discriminant {:?}",
+                    std::mem::discriminant(&envelope.exchange.input.body)
+                );
+                // Materialize to verify content
+                let bytes = envelope
+                    .exchange
+                    .input
+                    .body
+                    .into_bytes(1024 * 1024)
+                    .await
+                    .unwrap();
+                assert_eq!(&bytes[..], b"hello streaming world");
+
+                envelope.exchange.input.body = camel_api::body::Body::Empty;
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        token.cancel();
+    }
+
+    // -----------------------------------------------------------------------
+    // Response streaming tests (Eje A - Task 2)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_streaming_response_chunked() {
+        use bytes::Bytes;
+        use camel_api::CamelError;
+        use camel_api::body::{Body, StreamBody, StreamMetadata};
+        use camel_component::{ConsumerContext, ExchangeEnvelope};
+        use futures::stream;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("http://127.0.0.1:{port}/stream"))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client.get(format!("http://127.0.0.1:{port}/stream")).send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                // Respond with Body::Stream
+                let chunks: Vec<Result<Bytes, CamelError>> =
+                    vec![Ok(Bytes::from("chunk1")), Ok(Bytes::from("chunk2"))];
+                let stream = Box::pin(stream::iter(chunks));
+                envelope.exchange.input.body = Body::Stream(StreamBody {
+                    stream: Arc::new(Mutex::new(Some(stream))),
+                    metadata: StreamMetadata::default(),
+                });
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "chunk1chunk2");
+
+        token.cancel();
+    }
+
+    // -----------------------------------------------------------------------
+    // 413 Content-Length limit test (Task 4)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_413_when_content_length_exceeds_limit() {
+        use camel_component::ConsumerContext;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        // maxRequestBody=100 — any request declaring more than 100 bytes must get 413
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!(
+                "http://127.0.0.1:{port}/upload?maxRequestBody=100"
+            ))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component::ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/upload"))
+            .header("Content-Length", "1000") // declares 1000 bytes, limit is 100
+            .body("x".repeat(1000))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 413);
+
+        token.cancel();
+    }
+
+    /// Chunked upload without Content-Length header must NOT be rejected by maxRequestBody.
+    /// The spec says: "If there is no Content-Length, the limit does not apply at the
+    /// consumer level — the route is responsible."
+    #[tokio::test]
+    async fn test_chunked_upload_without_content_length_bypasses_limit() {
+        use bytes::Bytes;
+        use camel_api::body::Body;
+        use camel_component::ConsumerContext;
+        use futures::stream;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        // maxRequestBody=10 — very small limit; chunked uploads have no Content-Length
+        let component = HttpComponent::new();
+        let endpoint = component
+            .create_endpoint(&format!("http://127.0.0.1:{port}/upload?maxRequestBody=10"))
+            .unwrap();
+        let mut consumer = endpoint.create_consumer().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component::ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+
+        // Use wrap_stream so reqwest sends chunked transfer encoding WITHOUT a
+        // Content-Length header. 100 bytes exceeds the 10-byte maxRequestBody limit,
+        // but since there's no Content-Length the 413 check must NOT fire.
+        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+            Ok(Bytes::from("y".repeat(50))),
+            Ok(Bytes::from("y".repeat(50))),
+        ];
+        let stream_body = reqwest::Body::wrap_stream(stream::iter(chunks));
+        let send_fut = client
+            .post(format!("http://127.0.0.1:{port}/upload"))
+            .body(stream_body)
+            .send();
+
+        let consumer_fut = async {
+            // Use timeout to avoid deadlock if the handler rejects before enqueueing
+            match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
+                Ok(Some(mut envelope)) => {
+                    assert!(
+                        matches!(envelope.exchange.input.body, Body::Stream(_)),
+                        "expected Body::Stream"
+                    );
+                    envelope.exchange.input.body = camel_api::body::Body::Empty;
+                    if let Some(reply_tx) = envelope.reply_tx {
+                        let _ = reply_tx.send(Ok(envelope.exchange));
+                    }
+                }
+                Ok(None) => panic!("consumer channel closed unexpectedly"),
+                Err(_) => {
+                    // Timeout: the request was rejected before reaching the consumer.
+                    // The HTTP response will carry the real status code (we check below).
+                }
+            }
+        };
+
+        let (http_result, _) = tokio::join!(send_fut, consumer_fut);
+
+        let resp = http_result.unwrap();
+        // Must NOT be 413; chunked uploads without Content-Length bypass the limit.
+        assert_ne!(
+            resp.status().as_u16(),
+            413,
+            "chunked upload must not be rejected by maxRequestBody"
+        );
+        assert_eq!(resp.status().as_u16(), 200);
+
+        token.cancel();
     }
 }

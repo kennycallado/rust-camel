@@ -27,8 +27,6 @@ async-stream = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true, features = ["postgres"] }
 camel-core = { workspace = true }
 camel-builder = { workspace = true }
 camel-component-mock = { workspace = true }

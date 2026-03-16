@@ -1,3 +1,5 @@
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
 use camel_api::CamelError;
 use camel_api::body::Body;
 use camel_builder::{RouteBuilder, StepAccumulator};
@@ -16,7 +18,8 @@ async fn main() -> Result<(), CamelError> {
 
     info!("Starting Prometheus metrics demo with Lifecycle integration");
 
-    let prometheus = PrometheusService::new(9090);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 9090);
+    let prometheus = PrometheusService::new(addr);
 
     let mut ctx = CamelContext::new()
         .with_lifecycle(prometheus)

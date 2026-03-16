@@ -1,5 +1,7 @@
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -7,6 +9,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use regex::Regex;
 use tokio::fs;
+use tokio::fs::OpenOptions;
+use tokio::io;
+use tokio::io::AsyncWriteExt;
 use tokio::time;
 use tokio_util::io::ReaderStream;
 use tower::Service;
@@ -16,26 +21,118 @@ use camel_api::{
     BoxProcessor, CamelError, Exchange, Message, body::Body, body::StreamBody, body::StreamMetadata,
 };
 use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
-use camel_endpoint::parse_uri;
+use camel_endpoint::{UriConfig, parse_uri};
+
+// ---------------------------------------------------------------------------
+// TempFileGuard — RAII cleanup for temp files (panic-safe)
+// ---------------------------------------------------------------------------
+
+/// RAII guard that ensures temp file cleanup even on panic.
+///
+/// When dropped, removes the file at `path` unless `disarm` is set to true.
+/// This protects against temp file leaks if `io::copy` panics mid-write.
+struct TempFileGuard {
+    path: PathBuf,
+    disarm: bool,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            disarm: false,
+        }
+    }
+
+    /// Call after successful rename to prevent cleanup.
+    fn disarm(&mut self) {
+        self.disarm = true;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if !self.disarm {
+            // Best-effort cleanup; ignore errors (file may not exist)
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // FileExistStrategy
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Strategy for handling existing files when writing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileExistStrategy {
+    /// Overwrite existing file (default).
+    #[default]
     Override,
+    /// Append to existing file.
     Append,
+    /// Fail if file exists.
     Fail,
 }
 
-impl FileExistStrategy {
-    fn from_str(s: &str) -> Self {
+impl FromStr for FileExistStrategy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "Append" | "append" => FileExistStrategy::Append,
-            "Fail" | "fail" => FileExistStrategy::Fail,
-            _ => FileExistStrategy::Override,
+            "Override" | "override" => Ok(FileExistStrategy::Override),
+            "Append" | "append" => Ok(FileExistStrategy::Append),
+            "Fail" | "fail" => Ok(FileExistStrategy::Fail),
+            _ => Ok(FileExistStrategy::Override), // Default for unknown values
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FileGlobalConfig
+// ---------------------------------------------------------------------------
+
+/// Global configuration for File component.
+/// Plain Rust, no serde, with Default impl and builder methods.
+/// These are the fallback defaults when URI params are not set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileGlobalConfig {
+    pub delay_ms: u64,
+    pub initial_delay_ms: u64,
+    pub read_timeout_ms: u64,
+    pub write_timeout_ms: u64,
+}
+
+impl Default for FileGlobalConfig {
+    fn default() -> Self {
+        Self {
+            delay_ms: 500,
+            initial_delay_ms: 1_000,
+            read_timeout_ms: 30_000,
+            write_timeout_ms: 30_000,
+        }
+    }
+}
+
+impl FileGlobalConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_delay_ms(mut self, v: u64) -> Self {
+        self.delay_ms = v;
+        self
+    }
+    pub fn with_initial_delay_ms(mut self, v: u64) -> Self {
+        self.initial_delay_ms = v;
+        self
+    }
+    pub fn with_read_timeout_ms(mut self, v: u64) -> Self {
+        self.read_timeout_ms = v;
+        self
+    }
+    pub fn with_write_timeout_ms(mut self, v: u64) -> Self {
+        self.write_timeout_ms = v;
+        self
     }
 }
 
@@ -45,183 +142,156 @@ impl FileExistStrategy {
 
 /// Configuration for file component endpoints.
 ///
-/// # Memory Limits and Stream Materialization
+/// # Streaming
 ///
-/// The file component uses a **100MB default memory limit** for stream materialization
-/// (configurable via `max_body_size`). This limit applies when the file producer needs to
-/// materialize a stream body into bytes for writing to disk.
+/// Both the file consumer and producer use **native streaming** with no RAM
+/// materialization:
 ///
-/// ## Why This Limit?
+/// - The **consumer** creates a `Body::Stream` backed by `tokio::fs::File` via
+///   `ReaderStream`. Files of any size are handled without loading them into memory.
 ///
-/// This limit is designed for **batch file processing scenarios with trusted input**:
-/// - Processing moderate-sized files in batch jobs
-/// - Enterprise integration patterns with controlled file sizes
-/// - Scenarios where files are generated by trusted sources
+/// - The **producer** writes via `tokio::io::copy` directly to a `tokio::fs::File`
+///   using `Body::into_async_read()`. Writes for the `Override` strategy are
+///   **atomic**: data is written to a temporary file first and renamed only on
+///   success, preventing partial files on failure.
 ///
-/// The 100MB default balances memory safety with practical file processing needs in
-/// typical integration scenarios.
+/// # Write strategies (`fileExist` URI parameter)
 ///
-/// ## Overriding the Limit
-///
-/// Adjust the limit via the `maxBodySize` URI parameter (in bytes):
-///
-/// ```text
-/// file:/data/output?maxBodySize=524288000  // 500MB
-/// file:/data/output?maxBodySize=1048576    // 1MB
-/// ```
-///
-/// ## Behavior When Exceeded
-///
-/// When a file exceeds the configured `max_body_size`:
-/// - The producer returns a `CamelError::ProcessorError`
-/// - The exchange fails without writing partial data
-/// - No memory is exhausted - the check happens before full materialization
-///
-/// ## Large Files and Lazy Evaluation
-///
-/// **Important**: The file consumer uses **lazy stream evaluation**, allowing it to
-/// handle files of **any size** (including multi-gigabyte files) without loading them
-/// entirely into memory. Files are streamed chunk-by-chunk as the exchange flows
-/// through the route.
-///
-/// The memory limit only applies when:
-/// - A downstream processor requires the full body (e.g., `.into_bytes()`)
-/// - The producer needs to write the body to a file
-///
-/// For large file scenarios, consider:
-/// - Keeping the body as a stream throughout the route
-/// - Using streaming processors that don't require full materialization
-/// - Adjusting `max_body_size` only when you control the input sources
-#[derive(Debug, Clone)]
+/// | Value | Behavior |
+/// |-------|----------|
+/// | `Override` (default) | Atomic write via temp file + rename |
+/// | `Append` | Appends to existing file; non-atomic by nature |
+/// | `Fail` | Returns error if file already exists |
+#[derive(Debug, Clone, UriConfig)]
+#[uri_scheme = "file"]
+#[uri_config(skip_impl)]
 pub struct FileConfig {
+    /// Directory path to read from or write to.
     pub directory: String,
+
+    /// Polling delay in milliseconds (companion field for `delay`).
+    #[allow(dead_code)]
+    #[uri_param(name = "delay", default = "500")]
+    delay_ms: u64,
+
+    /// Polling delay as Duration.
     pub delay: Duration,
+
+    /// Initial delay in milliseconds (companion field for `initial_delay`).
+    #[allow(dead_code)]
+    #[uri_param(name = "initialDelay", default = "1000")]
+    initial_delay_ms: u64,
+
+    /// Initial delay as Duration.
     pub initial_delay: Duration,
+
+    /// If true, don't delete or move files after processing.
+    #[uri_param(default = "false")]
     pub noop: bool,
+
+    /// If true, delete files after processing.
+    #[uri_param(default = "false")]
     pub delete: bool,
-    pub move_to: Option<String>,
+
+    /// Directory to move processed files to (only if not noop/delete).
+    /// Default is ".camel" when not specified and noop/delete are false.
+    #[uri_param(name = "move")]
+    move_to: Option<String>,
+
+    /// Fixed filename for producer (optional).
+    #[uri_param(name = "fileName")]
     pub file_name: Option<String>,
+
+    /// Regex pattern for including files (consumer).
+    #[uri_param]
     pub include: Option<String>,
+
+    /// Regex pattern for excluding files (consumer).
+    #[uri_param]
     pub exclude: Option<String>,
+
+    /// Whether to scan directories recursively.
+    #[uri_param(default = "false")]
     pub recursive: bool,
+
+    /// Strategy for handling existing files when writing.
+    #[uri_param(name = "fileExist", default = "Override")]
     pub file_exist: FileExistStrategy,
+
+    /// Prefix for temporary files during atomic writes.
+    #[uri_param(name = "tempPrefix")]
     pub temp_prefix: Option<String>,
+
+    /// Whether to automatically create directories.
+    #[uri_param(name = "autoCreate", default = "true")]
     pub auto_create: bool,
-    // Timeout fields for preventing hanging on slow filesystems
+
+    /// Read timeout in milliseconds (companion field for `read_timeout`).
+    #[allow(dead_code)]
+    #[uri_param(name = "readTimeout", default = "30000")]
+    read_timeout_ms: u64,
+
+    /// Read timeout as Duration.
     pub read_timeout: Duration,
+
+    /// Write timeout in milliseconds (companion field for `write_timeout`).
+    #[allow(dead_code)]
+    #[uri_param(name = "writeTimeout", default = "30000")]
+    write_timeout_ms: u64,
+
+    /// Write timeout as Duration.
     pub write_timeout: Duration,
-    // Memory limit for body materialization (in bytes)
-    pub max_body_size: usize,
+}
+
+impl UriConfig for FileConfig {
+    fn scheme() -> &'static str {
+        "file"
+    }
+
+    fn from_uri(uri: &str) -> Result<Self, CamelError> {
+        let parts = parse_uri(uri)?;
+        Self::from_components(parts)
+    }
+
+    fn from_components(parts: camel_endpoint::UriComponents) -> Result<Self, CamelError> {
+        Self::parse_uri_components(parts)?.validate()
+    }
+
+    fn validate(self) -> Result<Self, CamelError> {
+        // Apply conditional logic for move_to:
+        // - If noop or delete is true, move_to should be None
+        // - Otherwise, if move_to is None, default to ".camel"
+        let move_to = if self.noop || self.delete {
+            None
+        } else {
+            Some(self.move_to.unwrap_or_else(|| ".camel".to_string()))
+        };
+
+        Ok(Self { move_to, ..self })
+    }
 }
 
 impl FileConfig {
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
-        let parts = parse_uri(uri)?;
-        if parts.scheme != "file" {
-            return Err(CamelError::InvalidUri(format!(
-                "expected scheme 'file', got '{}'",
-                parts.scheme
-            )));
+    /// Apply global config defaults. Since FileConfig uses a proc macro that bakes in
+    /// defaults, we compare Duration values against the known macro defaults to detect
+    /// "not explicitly set by user". Only overrides when current value == macro default.
+    ///
+    /// **Note**: If a user explicitly sets a URI param to its default value (e.g.,
+    /// `?delay=500`), it is indistinguishable from "not set" and will be overridden
+    /// by global config. This is a known limitation of the Duration comparison approach.
+    pub fn apply_global_defaults(&mut self, global: &FileGlobalConfig) {
+        if self.delay == Duration::from_millis(500) {
+            self.delay = Duration::from_millis(global.delay_ms);
         }
-
-        let delay = parts
-            .params
-            .get("delay")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(500);
-
-        let initial_delay = parts
-            .params
-            .get("initialDelay")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(1000);
-
-        let noop = parts
-            .params
-            .get("noop")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        let delete = parts
-            .params
-            .get("delete")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        let move_to = if noop || delete {
-            None
-        } else {
-            Some(
-                parts
-                    .params
-                    .get("move")
-                    .cloned()
-                    .unwrap_or_else(|| ".camel".to_string()),
-            )
-        };
-
-        let file_name = parts.params.get("fileName").cloned();
-        let include = parts.params.get("include").cloned();
-        let exclude = parts.params.get("exclude").cloned();
-
-        let recursive = parts
-            .params
-            .get("recursive")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        let file_exist = parts
-            .params
-            .get("fileExist")
-            .map(|v| FileExistStrategy::from_str(v))
-            .unwrap_or(FileExistStrategy::Override);
-
-        let temp_prefix = parts.params.get("tempPrefix").cloned();
-
-        let auto_create = parts
-            .params
-            .get("autoCreate")
-            .map(|v| v != "false")
-            .unwrap_or(true);
-
-        let read_timeout = parts
-            .params
-            .get("readTimeout")
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_secs(30));
-
-        let write_timeout = parts
-            .params
-            .get("writeTimeout")
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_secs(30));
-
-        let max_body_size = parts
-            .params
-            .get("maxBodySize")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(100 * 1024 * 1024); // Default: 100MB
-
-        Ok(Self {
-            directory: parts.path,
-            delay: Duration::from_millis(delay),
-            initial_delay: Duration::from_millis(initial_delay),
-            noop,
-            delete,
-            move_to,
-            file_name,
-            include,
-            exclude,
-            recursive,
-            file_exist,
-            temp_prefix,
-            auto_create,
-            read_timeout,
-            write_timeout,
-            max_body_size,
-        })
+        if self.initial_delay == Duration::from_millis(1_000) {
+            self.initial_delay = Duration::from_millis(global.initial_delay_ms);
+        }
+        if self.read_timeout == Duration::from_millis(30_000) {
+            self.read_timeout = Duration::from_millis(global.read_timeout_ms);
+        }
+        if self.write_timeout == Duration::from_millis(30_000) {
+            self.write_timeout = Duration::from_millis(global.write_timeout_ms);
+        }
     }
 }
 
@@ -229,11 +299,23 @@ impl FileConfig {
 // FileComponent
 // ---------------------------------------------------------------------------
 
-pub struct FileComponent;
+pub struct FileComponent {
+    config: Option<FileGlobalConfig>,
+}
 
 impl FileComponent {
     pub fn new() -> Self {
-        Self
+        Self { config: None }
+    }
+
+    pub fn with_config(config: FileGlobalConfig) -> Self {
+        Self {
+            config: Some(config),
+        }
+    }
+
+    pub fn with_optional_config(config: Option<FileGlobalConfig>) -> Self {
+        Self { config }
     }
 }
 
@@ -249,7 +331,10 @@ impl Component for FileComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let config = FileConfig::from_uri(uri)?;
+        let mut config = FileConfig::from_uri(uri)?;
+        if let Some(ref global_config) = self.config {
+            config.apply_global_defaults(global_config);
+        }
         Ok(Box::new(FileEndpoint {
             uri: uri.to_string(),
             config,
@@ -589,11 +674,6 @@ struct FileProducer {
 }
 
 impl FileProducer {
-    async fn body_to_bytes(body: Body, max_size: usize) -> Result<Vec<u8>, CamelError> {
-        let bytes = body.into_bytes(max_size).await?;
-        Ok(bytes.to_vec())
-    }
-
     fn resolve_filename(exchange: &Exchange, config: &FileConfig) -> Result<String, CamelError> {
         if let Some(name) = exchange
             .input
@@ -625,13 +705,12 @@ impl Service<Exchange> for FileProducer {
 
         Box::pin(async move {
             let file_name = FileProducer::resolve_filename(&exchange, &config)?;
-            let data =
-                FileProducer::body_to_bytes(exchange.input.body.clone(), config.max_body_size)
-                    .await?;
+            let body = exchange.input.body.clone();
 
             let dir_path = std::path::Path::new(&config.directory);
             let target_path = dir_path.join(&file_name);
 
+            // 1. Auto-create directories
             if config.auto_create
                 && let Some(parent) = target_path.parent()
             {
@@ -641,73 +720,109 @@ impl Service<Exchange> for FileProducer {
                     .map_err(CamelError::from)?;
             }
 
-            // SECURITY: Validate path is within base directory
+            // 2. Security: validate path is within base directory
             validate_path_is_within_base(dir_path, &target_path)?;
 
-            if target_path.exists() {
-                match config.file_exist {
-                    FileExistStrategy::Fail => {
-                        return Err(CamelError::ProcessorError(format!(
-                            "File already exists: {}",
-                            target_path.display()
-                        )));
-                    }
-                    FileExistStrategy::Append => {
-                        use tokio::io::AsyncWriteExt;
-                        let mut file = tokio::time::timeout(
-                            config.write_timeout,
-                            fs::OpenOptions::new().append(true).open(&target_path),
-                        )
-                        .await
-                        .map_err(|_| {
-                            CamelError::ProcessorError("Timeout opening file for append".into())
-                        })?
-                        .map_err(CamelError::from)?;
+            // 3. Handle file-exist strategy
+            match config.file_exist {
+                FileExistStrategy::Fail if target_path.exists() => {
+                    return Err(CamelError::ProcessorError(format!(
+                        "File already exists: {}",
+                        target_path.display()
+                    )));
+                }
+                FileExistStrategy::Append => {
+                    // Append: write directly without temp file (append is inherently non-atomic)
+                    let mut file = tokio::time::timeout(
+                        config.write_timeout,
+                        OpenOptions::new()
+                            .append(true)
+                            .create(true)
+                            .open(&target_path),
+                    )
+                    .await
+                    .map_err(|_| {
+                        CamelError::ProcessorError("Timeout opening file for append".into())
+                    })?
+                    .map_err(CamelError::from)?;
 
-                        tokio::time::timeout(config.write_timeout, async {
-                            file.write_all(&data).await?;
-                            file.flush().await?;
-                            Ok::<_, std::io::Error>(())
-                        })
-                        .await
-                        .map_err(|_| CamelError::ProcessorError("Timeout writing to file".into()))?
-                        .map_err(CamelError::from)?;
+                    tokio::time::timeout(
+                        config.write_timeout,
+                        io::copy(&mut body.into_async_read(), &mut file),
+                    )
+                    .await
+                    .map_err(|_| CamelError::ProcessorError("Timeout writing to file".into()))?
+                    .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
 
-                        let abs_path = target_path
-                            .canonicalize()
-                            .unwrap_or_else(|_| target_path.clone())
-                            .to_string_lossy()
-                            .to_string();
-                        exchange.input.set_header(
-                            "CamelFileNameProduced",
-                            serde_json::Value::String(abs_path),
-                        );
-                        return Ok(exchange);
+                    file.flush().await.map_err(CamelError::from)?;
+                }
+                _ => {
+                    // Override (or Fail when file doesn't exist): always atomic via temp file
+                    let temp_name = if let Some(ref prefix) = config.temp_prefix {
+                        format!("{prefix}{file_name}")
+                    } else {
+                        format!(".tmp.{file_name}")
+                    };
+                    let temp_path = dir_path.join(&temp_name);
+
+                    // RAII guard ensures cleanup even on panic
+                    let mut guard = TempFileGuard::new(temp_path.clone());
+
+                    // Write to temp file
+                    let mut file =
+                        tokio::time::timeout(config.write_timeout, fs::File::create(&temp_path))
+                            .await
+                            .map_err(|_| {
+                                CamelError::ProcessorError("Timeout creating temp file".into())
+                            })?
+                            .map_err(CamelError::from)?;
+
+                    let copy_result = tokio::time::timeout(
+                        config.write_timeout,
+                        io::copy(&mut body.into_async_read(), &mut file),
+                    )
+                    .await;
+
+                    // Flush any kernel buffers (best-effort; actual write errors come from io::copy above)
+                    let _ = file.flush().await;
+
+                    match copy_result {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            // Guard will clean up temp file on drop
+                            return Err(CamelError::ProcessorError(e.to_string()));
+                        }
+                        Err(_) => {
+                            // Guard will clean up temp file on drop
+                            return Err(CamelError::ProcessorError("Timeout writing file".into()));
+                        }
                     }
-                    FileExistStrategy::Override => {}
+
+                    // Atomic rename: temp → target
+                    let rename_result = tokio::time::timeout(
+                        config.write_timeout,
+                        fs::rename(&temp_path, &target_path),
+                    )
+                    .await;
+
+                    match rename_result {
+                        Ok(Ok(_)) => {
+                            // Success — disarm guard so it doesn't delete the renamed file
+                            guard.disarm();
+                        }
+                        Ok(Err(e)) => {
+                            // Guard will clean up temp file on drop
+                            return Err(CamelError::from(e));
+                        }
+                        Err(_) => {
+                            // Guard will clean up temp file on drop
+                            return Err(CamelError::ProcessorError("Timeout renaming file".into()));
+                        }
+                    }
                 }
             }
 
-            if let Some(ref prefix) = config.temp_prefix {
-                let temp_name = format!("{prefix}{file_name}");
-                let temp_path = dir_path.join(&temp_name);
-
-                tokio::time::timeout(config.write_timeout, fs::write(&temp_path, &data))
-                    .await
-                    .map_err(|_| CamelError::ProcessorError("Timeout writing temp file".into()))?
-                    .map_err(CamelError::from)?;
-
-                tokio::time::timeout(config.write_timeout, fs::rename(&temp_path, &target_path))
-                    .await
-                    .map_err(|_| CamelError::ProcessorError("Timeout renaming file".into()))?
-                    .map_err(CamelError::from)?;
-            } else {
-                tokio::time::timeout(config.write_timeout, fs::write(&target_path, &data))
-                    .await
-                    .map_err(|_| CamelError::ProcessorError("Timeout writing file".into()))?
-                    .map_err(CamelError::from)?;
-            }
-
+            // 4. Set output header
             let abs_path = target_path
                 .canonicalize()
                 .unwrap_or_else(|_| target_path.clone())
@@ -722,6 +837,7 @@ impl Service<Exchange> for FileProducer {
                 correlation_id = %exchange.correlation_id(),
                 "File written"
             );
+
             Ok(exchange)
         })
     }
@@ -730,44 +846,12 @@ impl Service<Exchange> for FileProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use bytes::Bytes;
     use std::time::Duration;
-    use tokio::sync::Mutex;
     use tokio_util::sync::CancellationToken;
 
-    // NullRouteController for testing
-    struct NullRouteController;
-
-    #[async_trait::async_trait]
-    impl camel_api::RouteController for NullRouteController {
-        async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
-            None
-        }
-        async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-    }
-
     fn test_producer_ctx() -> ProducerContext {
-        ProducerContext::new(Arc::new(Mutex::new(NullRouteController)))
+        ProducerContext::new()
     }
 
     #[test]
@@ -1397,5 +1481,263 @@ mod tests {
                 // Memory usage is constant - we only have this chunk in memory, not 150MB
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming producer tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_producer_writes_stream_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+        let uri = format!("file:{dir_path}?fileName=out.txt");
+
+        let component = FileComponent::new();
+        let endpoint = component.create_endpoint(&uri).unwrap();
+        let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
+
+        let chunks: Vec<Result<Bytes, CamelError>> = vec![
+            Ok(Bytes::from("hello ")),
+            Ok(Bytes::from("streaming ")),
+            Ok(Bytes::from("world")),
+        ];
+        let stream = futures::stream::iter(chunks);
+        let body = Body::Stream(camel_api::body::StreamBody {
+            stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream)))),
+            metadata: camel_api::body::StreamMetadata {
+                size_hint: None,
+                content_type: None,
+                origin: None,
+            },
+        });
+
+        let exchange = camel_api::Exchange::new(camel_api::Message::new(body));
+        tower::ServiceExt::oneshot(producer, exchange)
+            .await
+            .unwrap();
+
+        let content = tokio::fs::read_to_string(format!("{dir_path}/out.txt"))
+            .await
+            .unwrap();
+        assert_eq!(content, "hello streaming world");
+    }
+
+    #[tokio::test]
+    async fn test_producer_stream_atomic_no_partial_on_error() {
+        // If the stream errors mid-write, no file should exist at the target path
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+        let uri = format!("file:{dir_path}?fileName=out.txt");
+
+        let component = FileComponent::new();
+        let endpoint = component.create_endpoint(&uri).unwrap();
+        let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
+
+        let chunks: Vec<Result<Bytes, CamelError>> = vec![
+            Ok(Bytes::from("partial")),
+            Err(CamelError::ProcessorError(
+                "simulated stream error".to_string(),
+            )),
+        ];
+        let stream = futures::stream::iter(chunks);
+        let body = Body::Stream(camel_api::body::StreamBody {
+            stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream)))),
+            metadata: camel_api::body::StreamMetadata {
+                size_hint: None,
+                content_type: None,
+                origin: None,
+            },
+        });
+
+        let exchange = camel_api::Exchange::new(camel_api::Message::new(body));
+        let result = tower::ServiceExt::oneshot(producer, exchange).await;
+        assert!(
+            result.is_err(),
+            "expected error when stream fails mid-write"
+        );
+
+        // Target file must NOT exist — write was aborted and temp file cleaned up
+        assert!(
+            !std::path::Path::new(&format!("{dir_path}/out.txt")).exists(),
+            "partial file must not exist after failed write"
+        );
+
+        // Temp file must also be cleaned up
+        assert!(
+            !std::path::Path::new(&format!("{dir_path}/.tmp.out.txt")).exists(),
+            "temp file must be cleaned up after failed write"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_producer_stream_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+        let target = format!("{dir_path}/out.txt");
+
+        // Pre-create file with initial content
+        tokio::fs::write(&target, b"line1\n").await.unwrap();
+
+        let uri = format!("file:{dir_path}?fileName=out.txt&fileExist=Append");
+        let component = FileComponent::new();
+        let endpoint = component.create_endpoint(&uri).unwrap();
+        let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
+
+        let chunks: Vec<Result<Bytes, CamelError>> = vec![Ok(Bytes::from("line2\n"))];
+        let stream = futures::stream::iter(chunks);
+        let body = Body::Stream(camel_api::body::StreamBody {
+            stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream)))),
+            metadata: camel_api::body::StreamMetadata {
+                size_hint: None,
+                content_type: None,
+                origin: None,
+            },
+        });
+
+        let exchange = camel_api::Exchange::new(camel_api::Message::new(body));
+        tower::ServiceExt::oneshot(producer, exchange)
+            .await
+            .unwrap();
+
+        let content = tokio::fs::read_to_string(&target).await.unwrap();
+        assert_eq!(content, "line1\nline2\n");
+    }
+
+    #[tokio::test]
+    async fn test_producer_stream_append_partial_on_error() {
+        // Append is inherently non-atomic: if the stream errors mid-write,
+        // the file will contain partial data. This test documents that behavior.
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+        let target = format!("{dir_path}/out.txt");
+
+        // Pre-create file with initial content
+        tokio::fs::write(&target, b"initial\n").await.unwrap();
+
+        let uri = format!("file:{dir_path}?fileName=out.txt&fileExist=Append");
+        let component = FileComponent::new();
+        let endpoint = component.create_endpoint(&uri).unwrap();
+        let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
+
+        // Stream with an error in the middle
+        let chunks: Vec<Result<Bytes, CamelError>> = vec![
+            Ok(Bytes::from("partial-")), // This will be written
+            Err(CamelError::ProcessorError("stream error".to_string())), // This causes failure
+            Ok(Bytes::from("never-written")), // This won't be reached
+        ];
+        let stream = futures::stream::iter(chunks);
+        let body = Body::Stream(camel_api::body::StreamBody {
+            stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream)))),
+            metadata: camel_api::body::StreamMetadata {
+                size_hint: None,
+                content_type: None,
+                origin: None,
+            },
+        });
+
+        let exchange = camel_api::Exchange::new(camel_api::Message::new(body));
+        let result = tower::ServiceExt::oneshot(producer, exchange).await;
+
+        // 1. Producer must return an error
+        assert!(
+            result.is_err(),
+            "expected error when stream fails during append"
+        );
+
+        // 2. File must contain initial content + partial data written before the error
+        let content = tokio::fs::read_to_string(&target).await.unwrap();
+        assert_eq!(
+            content, "initial\npartial-",
+            "append leaves partial data on stream error (non-atomic by nature)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_producer_stream_already_consumed_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+        let uri = format!("file:{dir_path}?fileName=out.txt");
+
+        let component = FileComponent::new();
+        let endpoint = component.create_endpoint(&uri).unwrap();
+        let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
+
+        // Mutex holds None → stream already consumed
+        let arc: std::sync::Arc<
+            tokio::sync::Mutex<
+                Option<
+                    std::pin::Pin<
+                        Box<dyn futures::Stream<Item = Result<Bytes, CamelError>> + Send>,
+                    >,
+                >,
+            >,
+        > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let body = Body::Stream(camel_api::body::StreamBody {
+            stream: arc,
+            metadata: camel_api::body::StreamMetadata {
+                size_hint: None,
+                content_type: None,
+                origin: None,
+            },
+        });
+
+        let exchange = camel_api::Exchange::new(camel_api::Message::new(body));
+        let result = tower::ServiceExt::oneshot(producer, exchange).await;
+        assert!(
+            result.is_err(),
+            "expected error for already-consumed stream"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // GlobalConfig tests - apply_global_defaults behavior
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_global_config_applied_to_endpoint() {
+        // Global config with non-default values
+        let global = FileGlobalConfig::default()
+            .with_delay_ms(2000)
+            .with_initial_delay_ms(5000)
+            .with_read_timeout_ms(60_000)
+            .with_write_timeout_ms(45_000);
+        let component = FileComponent::with_config(global);
+        // URI uses no explicit delay/timeout params → macro defaults apply
+        let endpoint = component.create_endpoint("file:/tmp/inbox").unwrap();
+        // We cannot call endpoint.config directly (FileEndpoint is private),
+        // but we can test apply_global_defaults on FileConfig directly:
+        let mut config = FileConfig::from_uri("file:/tmp/inbox").unwrap();
+        let global2 = FileGlobalConfig::default()
+            .with_delay_ms(2000)
+            .with_initial_delay_ms(5000)
+            .with_read_timeout_ms(60_000)
+            .with_write_timeout_ms(45_000);
+        config.apply_global_defaults(&global2);
+        assert_eq!(config.delay, Duration::from_millis(2000));
+        assert_eq!(config.initial_delay, Duration::from_millis(5000));
+        assert_eq!(config.read_timeout, Duration::from_millis(60_000));
+        assert_eq!(config.write_timeout, Duration::from_millis(45_000));
+        // endpoint creation succeeds too
+        let _ = endpoint; // just verify create_endpoint didn't fail
+    }
+
+    #[test]
+    fn test_uri_param_wins_over_global_config() {
+        // URI explicitly sets delay=1000 (NOT the 500ms macro default)
+        let mut config =
+            FileConfig::from_uri("file:/tmp/inbox?delay=1000&initialDelay=2000").unwrap();
+        // Global config would want 3000ms delay
+        let global = FileGlobalConfig::default()
+            .with_delay_ms(3000)
+            .with_initial_delay_ms(4000);
+        config.apply_global_defaults(&global);
+        // URI value of 1000ms must be preserved (not replaced by 3000ms)
+        assert_eq!(config.delay, Duration::from_millis(1000));
+        // URI value of 2000ms must be preserved (not replaced by 4000ms)
+        assert_eq!(config.initial_delay, Duration::from_millis(2000));
+        // read_timeout was not set by URI → macro default (30000) → global wins if different
+        // (read_timeout stays at 30000 since global has same default = 30000)
+        assert_eq!(config.read_timeout, Duration::from_millis(30_000));
     }
 }

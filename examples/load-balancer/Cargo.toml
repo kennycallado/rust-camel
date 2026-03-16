@@ -1,0 +1,15 @@
+[package]
+name = "load-balancer"
+description = "Load Balancer EIP example — distribute messages across multiple endpoints"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

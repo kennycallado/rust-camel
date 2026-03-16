@@ -15,6 +15,7 @@ members = [
     "crates/camel-builder",
     "crates/camel-component",
     "crates/camel-endpoint",
+    "crates/camel-endpoint-macros",
     "crates/camel-test",
     "crates/components/camel-timer",
     "crates/components/camel-log",
@@ -40,11 +41,14 @@ members = [
     "examples/file-polling",
     "examples/file-pipeline",
     "examples/sql-example",
+    "examples/sql-streaming",
     "examples/http-client",
     "examples/aggregator",
     "examples/wiretap",
     "examples/multicast",
     "examples/http-server",
+    "examples/http-streaming",
+    "examples/file-streaming",
     "examples/pipeline-concurrency",
     "examples/log-eip",
     "examples/lazy-route",
@@ -55,6 +59,7 @@ members = [
     "examples/language-rhai",
     "examples/hot-reload",
     "examples/hot-reload-yaml",
+    "examples/xml-body",
     "examples/yaml-dsl",
     "examples/config-basic",
     "examples/config-profiles",
@@ -68,10 +73,16 @@ members = [
     "examples/container-example",
     "examples/container-nginx",
     "examples/container-hot-reload",
+    "examples/dynamic-router",
+    "examples/load-balancer",
+    "examples/throttler",
     "crates/components/camel-container",
     "crates/services/camel-prometheus",
     "crates/services/camel-otel",
 ]
+
+[workspace.metadata.crane]
+name = "rust-camel"
 
 [workspace.package]
 version = "0.4.0"
@@ -102,6 +113,7 @@ camel-dsl = { path = "crates/camel-dsl", version = "=0.4.0" }
 camel-builder = { path = "crates/camel-builder", version = "=0.4.0" }
 camel-component = { path = "crates/camel-component", version = "=0.4.0" }
 camel-endpoint = { path = "crates/camel-endpoint", version = "=0.4.0" }
+camel-endpoint-macros = { path = "crates/camel-endpoint-macros", version = "=0.4.0" }
 camel-test = { path = "crates/camel-test", version = "=0.4.0" }
 camel-component-timer = { path = "crates/components/camel-timer", version = "=0.4.0" }
 camel-component-log = { path = "crates/components/camel-log", version = "=0.4.0" }
@@ -152,6 +164,7 @@ testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["kafka", "postgres"] }
 prometheus = "0.14"
 rand = "0.8"
+quick-xml = { version = "0.37", features = ["serialize"] }
 
 # OpenTelemetry dependencies
 opentelemetry = { version = "0.31", features = ["trace", "logs", "metrics"] }

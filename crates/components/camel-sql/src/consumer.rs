@@ -12,18 +12,18 @@ use tracing::{error, info, warn};
 use camel_api::{Body, CamelError, Exchange, Message};
 use camel_component::{ConcurrencyModel, Consumer, ConsumerContext};
 
-use crate::config::SqlConfig;
+use crate::config::SqlEndpointConfig;
 use crate::headers;
 use crate::query::{QueryTemplate, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
 
 pub struct SqlConsumer {
-    pub(crate) config: SqlConfig,
+    pub(crate) config: SqlEndpointConfig,
     pub(crate) pool: Arc<OnceCell<AnyPool>>,
 }
 
 impl SqlConsumer {
-    pub fn new(config: SqlConfig, pool: Arc<OnceCell<AnyPool>>) -> Self {
+    pub fn new(config: SqlEndpointConfig, pool: Arc<OnceCell<AnyPool>>) -> Self {
         Self { config, pool }
     }
 
@@ -217,14 +217,33 @@ impl Consumer for SqlConsumer {
         let pool = self
             .pool
             .get_or_try_init(|| async {
+                // Defensive: ensure config is resolved even if caller didn't use create_endpoint
+                self.config.resolve_defaults();
+
                 // Install all compiled-in sqlx drivers so AnyPool can resolve them.
                 // This is idempotent; safe to call multiple times.
                 sqlx::any::install_default_drivers();
                 AnyPoolOptions::new()
-                    .max_connections(self.config.max_connections)
-                    .min_connections(self.config.min_connections)
-                    .idle_timeout(Duration::from_secs(self.config.idle_timeout_secs))
-                    .max_lifetime(Duration::from_secs(self.config.max_lifetime_secs))
+                    .max_connections(
+                        self.config
+                            .max_connections
+                            .expect("must be Some after resolve_defaults()"),
+                    )
+                    .min_connections(
+                        self.config
+                            .min_connections
+                            .expect("must be Some after resolve_defaults()"),
+                    )
+                    .idle_timeout(Duration::from_secs(
+                        self.config
+                            .idle_timeout_secs
+                            .expect("must be Some after resolve_defaults()"),
+                    ))
+                    .max_lifetime(Duration::from_secs(
+                        self.config
+                            .max_lifetime_secs
+                            .expect("must be Some after resolve_defaults()"),
+                    ))
                     .connect(&self.config.db_url)
                     .await
                     .map_err(|e| {
@@ -291,10 +310,15 @@ impl Consumer for SqlConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SqlConfig;
+    use crate::config::SqlEndpointConfig;
+    use camel_endpoint::UriConfig;
 
-    fn test_config() -> SqlConfig {
-        SqlConfig::from_uri("sql:select * from t?db_url=postgres://localhost/test").unwrap()
+    fn test_config() -> SqlEndpointConfig {
+        let mut c =
+            SqlEndpointConfig::from_uri("sql:select * from t?db_url=postgres://localhost/test")
+                .unwrap();
+        c.resolve_defaults();
+        c
     }
 
     #[test]
@@ -305,9 +329,10 @@ mod tests {
 
     #[test]
     fn test_consumer_stores_config() {
-        let config = SqlConfig::from_uri(
+        let mut config = SqlEndpointConfig::from_uri(
             "sql:select * from t?db_url=postgres://localhost/test&delay=2000&onConsume=update t set done=true"
         ).unwrap();
+        config.resolve_defaults();
         let c = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
         assert_eq!(c.config.delay_ms, 2000);
         assert!(c.config.on_consume.is_some());

@@ -18,6 +18,36 @@ detail_level = "minimal"
 enabled = true
 format = "json"
 
+# Component defaults (optional) - apply to all endpoints unless overridden by URI
+# Uncomment to enable global component settings:
+
+# [default.components.http]
+# connect_timeout_ms = 5000
+# response_timeout_ms = 30000
+# max_connections = 100
+# allow_private_ips = false
+
+# [default.components.kafka]
+# brokers = "localhost:9092"
+# group_id = "camel"
+# session_timeout_ms = 45000
+
+# [default.components.redis]
+# host = "localhost"
+# port = 6379
+
+# [default.components.sql]
+# max_connections = 5
+# min_connections = 1
+# idle_timeout_secs = 300
+
+# [default.components.file]
+# delay_ms = 500
+# read_timeout_ms = 30000
+
+# [default.components.container]
+# docker_host = "unix:///var/run/docker.sock"
+
 [development]
 log_level = "DEBUG"
 

@@ -3,14 +3,19 @@
 //! Uses testcontainers to spin up an Apache Kafka broker (KRaft mode, no Zookeeper).
 //!
 //! **Requires Docker to be running.** Tests will fail if Docker is unavailable.
+//!
+//! **Requires `integration-tests` feature to compile and run.**
+
+#![cfg(feature = "integration-tests")]
 
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_kafka::KafkaComponent;
+use camel_component_kafka::{KafkaComponent, KafkaEndpointConfig, KafkaProducer};
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::kafka::apache;
+use tower::{Service, ServiceExt};
 
 /// Initialise tracing once per process (ignores the error if already set).
 fn init_tracing() {
@@ -33,8 +38,58 @@ async fn start_kafka() -> (testcontainers::ContainerAsync<apache::Kafka>, String
         .await
         .unwrap();
     let brokers = format!("127.0.0.1:{port}");
+    wait_for_kafka_ready(&brokers).await;
     eprintln!("Kafka bootstrap: {brokers}");
     (container, brokers)
+}
+
+async fn kafka_probe_send(brokers: &str) -> Result<(), String> {
+    let mut config = KafkaEndpointConfig::from_uri(&format!(
+        "kafka:__camel_ready_probe?brokers={brokers}&acks=all&requestTimeoutMs=1500"
+    ))
+    .map_err(|e| format!("probe config parse failed: {e}"))?;
+    config.resolve_defaults();
+
+    let mut producer =
+        KafkaProducer::new(config).map_err(|e| format!("probe producer create failed: {e}"))?;
+    let exchange = camel_api::Exchange::new(camel_api::Message::new("ready-probe"));
+
+    producer
+        .ready()
+        .await
+        .map_err(|e| format!("probe producer not ready: {e}"))?;
+    producer
+        .call(exchange)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("probe delivery failed: {e}"))
+}
+
+async fn wait_for_kafka_ready(brokers: &str) {
+    let timeout = std::time::Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut attempt: u32 = 0;
+    let mut last_error = String::new();
+
+    loop {
+        attempt += 1;
+        match kafka_probe_send(brokers).await {
+            Ok(()) => {
+                eprintln!("Kafka ready after {attempt} probe attempt(s): {brokers}");
+                return;
+            }
+            Err(err) => {
+                last_error = err;
+                if tokio::time::Instant::now() >= deadline {
+                    panic!(
+                        "Kafka broker at {brokers} did not become ready within {:?}. Last error: {}",
+                        timeout, last_error
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            }
+        }
+    }
 }
 
 // ===========================================================================
@@ -189,8 +244,6 @@ async fn test_kafka_consumer_sets_headers() {
         ex.input.header("CamelKafkaGroupId").is_some(),
         "CamelKafkaGroupId header must be present"
     );
-    assert!(
-        ex.properties.contains_key("kafka.manual.commit"),
-        "kafka.manual.commit property must be present"
-    );
+    // Note: kafka.manual.commit JSON property removed; use exchange.get_extension::<KafkaManualCommit>("kafka.manual_commit")
+    // when allowManualCommit=true is configured.
 }

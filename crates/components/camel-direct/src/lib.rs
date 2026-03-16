@@ -10,7 +10,7 @@ use tower::Service;
 
 use camel_api::{BoxProcessor, CamelError, Exchange};
 use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
-use camel_endpoint::parse_uri;
+use camel_endpoint::UriConfig;
 
 // ---------------------------------------------------------------------------
 // Shared state: maps endpoint names to senders that deliver exchanges to the
@@ -21,6 +21,22 @@ use camel_endpoint::parse_uri;
 
 type DirectSender = mpsc::Sender<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>;
 type DirectRegistry = Arc<Mutex<HashMap<String, DirectSender>>>;
+
+// ---------------------------------------------------------------------------
+// DirectConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for Direct endpoints parsed from URIs.
+///
+/// URI format: `direct:name`
+///
+/// Example: `direct:foo` creates an endpoint named "foo"
+#[derive(Debug, Clone, UriConfig)]
+#[uri_scheme = "direct"]
+pub struct DirectConfig {
+    /// Endpoint name (path portion).
+    pub name: String,
+}
 
 // ---------------------------------------------------------------------------
 // DirectComponent
@@ -57,17 +73,10 @@ impl Component for DirectComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let parts = parse_uri(uri)?;
-        if parts.scheme != "direct" {
-            return Err(CamelError::InvalidUri(format!(
-                "expected scheme 'direct', got '{}'",
-                parts.scheme
-            )));
-        }
-
+        let config = DirectConfig::from_uri(uri)?;
         Ok(Box::new(DirectEndpoint {
             uri: uri.to_string(),
-            name: parts.path,
+            name: config.name,
             registry: Arc::clone(&self.registry),
         }))
     }
@@ -222,38 +231,8 @@ mod tests {
     use camel_component::ExchangeEnvelope;
     use tower::ServiceExt;
 
-    // NullRouteController for testing
-    struct NullRouteController;
-    #[async_trait::async_trait]
-    impl camel_api::RouteController for NullRouteController {
-        async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
-            None
-        }
-        async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-    }
-
     fn test_producer_ctx() -> ProducerContext {
-        ProducerContext::new(Arc::new(Mutex::new(NullRouteController)))
+        ProducerContext::new()
     }
 
     #[test]

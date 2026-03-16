@@ -1,6 +1,6 @@
 use camel_api::Value;
 use camel_api::exchange::Exchange;
-use camel_language_api::{Expression, Language, LanguageError, Predicate};
+use camel_language_api::{Expression, Language, LanguageError, MutatingExpression, Predicate};
 use rhai::{Engine, Scope};
 use std::sync::{Arc, RwLock};
 
@@ -184,6 +184,32 @@ fn dynamic_to_json(d: rhai::Dynamic) -> Result<Value, LanguageError> {
     }
 }
 
+/// Convert a rhai::Dynamic to a serde_json::Value (infallible version for mutating expressions).
+fn dynamic_to_value(d: rhai::Dynamic) -> Value {
+    if d.is_string() {
+        Value::String(d.cast::<String>())
+    } else if d.is::<bool>() {
+        Value::Bool(d.cast::<bool>())
+    } else if d.is_int() {
+        Value::from(d.cast::<i64>())
+    } else if d.is_float() {
+        Value::from(d.cast::<f64>())
+    } else if d.is_unit() {
+        Value::Null
+    } else {
+        Value::String(d.to_string())
+    }
+}
+
+/// Convert a Rhai Map to a HashMap<String, Value> for syncing back to exchange.
+fn rhai_map_to_value_map(map: &rhai::Map) -> std::collections::HashMap<String, Value> {
+    let mut result = std::collections::HashMap::new();
+    for (k, v) in map {
+        result.insert(k.to_string(), dynamic_to_value(v.clone()));
+    }
+    result
+}
+
 struct RhaiExpression {
     script: String,
 }
@@ -206,6 +232,86 @@ impl Predicate for RhaiPredicate {
             Value::Null => false,
             _ => true,
         })
+    }
+}
+
+/// A Rhai script expression that can mutate the Exchange during evaluation.
+///
+/// The script has access to three mutable scope variables:
+/// - `headers` — a Rhai map (`#{}`) representing the exchange headers
+/// - `properties` — a Rhai map (`#{}`) representing the exchange properties
+/// - `body` — a string representing the exchange body
+///
+/// Changes to these variables are propagated back to the Exchange after evaluation.
+/// If evaluation fails, all changes are **rolled back atomically**.
+///
+/// # Note on API differences
+///
+/// Unlike non-mutating Rhai expressions, this engine does NOT provide
+/// `header()`, `set_header()`, `property()`, or `set_property()` functions.
+/// Use direct map assignment syntax instead:
+///
+/// ```rhai
+/// headers["tenant"] = "acme";       // set header
+/// properties["trace"] = "enabled";  // set property
+/// body = "new content";             // set body
+/// let v = headers["existing"];      // read header
+/// ```
+struct RhaiMutatingExpression {
+    script: String,
+}
+
+impl MutatingExpression for RhaiMutatingExpression {
+    fn evaluate(&self, exchange: &mut Exchange) -> Result<Value, LanguageError> {
+        // 1. Snapshot original state for rollback on error
+        let original_headers = exchange.input.headers.clone();
+        let original_properties = exchange.properties.clone();
+        let original_body = exchange.input.body.clone();
+
+        // 2. Create scope with Rhai Map variables
+        let mut scope = Scope::new();
+
+        let mut headers_map = rhai::Map::new();
+        for (k, v) in &exchange.input.headers {
+            headers_map.insert(k.clone().into(), json_to_dynamic(v));
+        }
+
+        let mut properties_map = rhai::Map::new();
+        for (k, v) in &exchange.properties {
+            properties_map.insert(k.clone().into(), json_to_dynamic(v));
+        }
+
+        let body_str = exchange.input.body.as_text().unwrap_or("").to_string();
+
+        scope.push("headers", headers_map);
+        scope.push("properties", properties_map);
+        scope.push("body", body_str);
+
+        // 3. Evaluate script
+        let engine = RhaiLanguage::create_base_engine();
+
+        let result: rhai::Dynamic = match engine.eval_with_scope(&mut scope, &self.script) {
+            Ok(v) => v,
+            Err(e) => {
+                exchange.input.headers = original_headers;
+                exchange.properties = original_properties;
+                exchange.input.body = original_body;
+                return Err(LanguageError::EvalError(e.to_string()));
+            }
+        };
+
+        // 4. Sync changes back to exchange
+        if let Some(h) = scope.get_value::<rhai::Map>("headers") {
+            exchange.input.headers = rhai_map_to_value_map(&h);
+        }
+        if let Some(p) = scope.get_value::<rhai::Map>("properties") {
+            exchange.properties = rhai_map_to_value_map(&p);
+        }
+        if let Some(b) = scope.get_value::<String>("body") {
+            exchange.input.body = camel_api::Body::Text(b);
+        }
+
+        Ok(dynamic_to_value(result))
     }
 }
 
@@ -235,6 +341,25 @@ impl Language for RhaiLanguage {
                 reason: e.to_string(),
             })?;
         Ok(Box::new(RhaiPredicate {
+            script: script.to_string(),
+        }))
+    }
+
+    /// Create a mutating Rhai expression.
+    ///
+    /// The script can modify `headers`, `properties`, and `body` via assignment syntax.
+    /// See [`RhaiMutatingExpression`] for full documentation.
+    fn create_mutating_expression(
+        &self,
+        script: &str,
+    ) -> Result<Box<dyn MutatingExpression>, LanguageError> {
+        self.engine
+            .compile(script)
+            .map_err(|e| LanguageError::ParseError {
+                expr: script.to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(Box::new(RhaiMutatingExpression {
             script: script.to_string(),
         }))
     }
@@ -442,5 +567,105 @@ mod tests {
         let ex = Exchange::new(msg);
         let val = expr.evaluate(&ex).unwrap();
         assert_eq!(val, Value::String("value".to_string()));
+    }
+
+    #[test]
+    fn test_mutating_set_header_propagates_to_exchange() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["tenant"] = "acme""#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        expr.evaluate(&mut ex).unwrap();
+        assert_eq!(
+            ex.input.headers.get("tenant"),
+            Some(&Value::String("acme".into()))
+        );
+    }
+
+    #[test]
+    fn test_mutating_set_body_propagates_to_exchange() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"body = "modified""#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::new("original"));
+        expr.evaluate(&mut ex).unwrap();
+        assert_eq!(ex.input.body.as_text(), Some("modified"));
+    }
+
+    #[test]
+    fn test_mutating_set_property_propagates_to_exchange() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"properties["auth"] = "ok""#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        expr.evaluate(&mut ex).unwrap();
+        assert_eq!(ex.properties.get("auth"), Some(&Value::String("ok".into())));
+    }
+
+    #[test]
+    fn test_mutating_rollback_on_error() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["x"] = "modified"; throw "error""#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.input
+            .headers
+            .insert("x".to_string(), Value::String("original".into()));
+        let result = expr.evaluate(&mut ex);
+        assert!(result.is_err());
+        assert_eq!(
+            ex.input.headers.get("x"),
+            Some(&Value::String("original".into()))
+        );
+    }
+
+    #[test]
+    fn test_mutating_rollback_on_error_includes_body() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"body = "modified"; throw "error""#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::new("original"));
+        let result = expr.evaluate(&mut ex);
+        assert!(result.is_err());
+        assert_eq!(ex.input.body.as_text(), Some("original"));
+    }
+
+    #[test]
+    fn test_mutating_rollback_on_error_includes_property() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"properties["p"] = "modified"; throw "error""#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.properties
+            .insert("p".to_string(), Value::String("original".into()));
+        let result = expr.evaluate(&mut ex);
+        assert!(result.is_err());
+        assert_eq!(
+            ex.properties.get("p"),
+            Some(&Value::String("original".into()))
+        );
+    }
+
+    #[test]
+    fn test_mutating_combined_read_write() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["out"] = headers["in"] + "_processed""#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.input
+            .headers
+            .insert("in".to_string(), Value::String("value".into()));
+        expr.evaluate(&mut ex).unwrap();
+        assert_eq!(
+            ex.input.headers.get("out"),
+            Some(&Value::String("value_processed".into()))
+        );
     }
 }

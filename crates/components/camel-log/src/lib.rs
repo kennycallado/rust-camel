@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::task::{Context, Poll};
 
 use tower::Service;
@@ -7,31 +8,34 @@ use tracing::{debug, error, info, trace, warn};
 
 use camel_api::{BoxProcessor, CamelError, Exchange};
 use camel_component::{Component, Consumer, Endpoint, ProducerContext};
-use camel_endpoint::parse_uri;
+use camel_endpoint::UriConfig;
 
 // ---------------------------------------------------------------------------
 // LogLevel
 // ---------------------------------------------------------------------------
 
 /// Log level for the log component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogLevel {
     Trace,
     Debug,
+    #[default]
     Info,
     Warn,
     Error,
 }
 
-impl LogLevel {
-    fn from_str(s: &str) -> Self {
+impl FromStr for LogLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "trace" => LogLevel::Trace,
-            "debug" => LogLevel::Debug,
-            "info" => LogLevel::Info,
-            "warn" | "warning" => LogLevel::Warn,
-            "error" => LogLevel::Error,
-            _ => LogLevel::Info,
+            "trace" => Ok(LogLevel::Trace),
+            "debug" => Ok(LogLevel::Debug),
+            "info" => Ok(LogLevel::Info),
+            "warn" | "warning" => Ok(LogLevel::Warn),
+            "error" => Ok(LogLevel::Error),
+            _ => Err(format!("Invalid log level: {}", s)),
         }
     }
 }
@@ -43,54 +47,20 @@ impl LogLevel {
 /// Configuration parsed from a log URI.
 ///
 /// Format: `log:category?level=info&showHeaders=true&showBody=true`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, UriConfig)]
+#[uri_scheme = "log"]
 pub struct LogConfig {
     /// Log category (the path portion of the URI).
     pub category: String,
     /// Log level. Default: Info.
+    #[uri_param(default = "Info")]
     pub level: LogLevel,
     /// Whether to include headers in the log output.
+    #[uri_param(name = "showHeaders", default = "false")]
     pub show_headers: bool,
     /// Whether to include the body in the log output.
+    #[uri_param(name = "showBody", default = "true")]
     pub show_body: bool,
-}
-
-impl LogConfig {
-    /// Parse a log URI into a config.
-    pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
-        let parts = parse_uri(uri)?;
-        if parts.scheme != "log" {
-            return Err(CamelError::InvalidUri(format!(
-                "expected scheme 'log', got '{}'",
-                parts.scheme
-            )));
-        }
-
-        let level = parts
-            .params
-            .get("level")
-            .map(|v| LogLevel::from_str(v))
-            .unwrap_or(LogLevel::Info);
-
-        let show_headers = parts
-            .params
-            .get("showHeaders")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        let show_body = parts
-            .params
-            .get("showBody")
-            .map(|v| v == "true")
-            .unwrap_or(true);
-
-        Ok(Self {
-            category: parts.path,
-            level,
-            show_headers,
-            show_body,
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +141,7 @@ impl LogProducer {
                 camel_api::Body::Empty => "[empty]".to_string(),
                 camel_api::Body::Text(s) => s.clone(),
                 camel_api::Body::Json(v) => v.to_string(),
+                camel_api::Body::Xml(s) => s.clone(),
                 camel_api::Body::Bytes(b) => format!("[{} bytes]", b.len()),
                 camel_api::Body::Stream(s) => format!("[Stream: origin={:?}]", s.metadata.origin),
             };
@@ -230,42 +201,10 @@ impl Service<Exchange> for LogProducer {
 mod tests {
     use super::*;
     use camel_api::Message;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
     use tower::ServiceExt;
 
-    // NullRouteController for testing
-    struct NullRouteController;
-    #[async_trait::async_trait]
-    impl camel_api::RouteController for NullRouteController {
-        async fn start_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn stop_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn restart_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn suspend_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn resume_route(&mut self, _: &str) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        fn route_status(&self, _: &str) -> Option<camel_api::RouteStatus> {
-            None
-        }
-        async fn start_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-        async fn stop_all_routes(&mut self) -> Result<(), camel_api::CamelError> {
-            Ok(())
-        }
-    }
-
     fn test_producer_ctx() -> ProducerContext {
-        ProducerContext::new(Arc::new(Mutex::new(NullRouteController)))
+        ProducerContext::new()
     }
 
     #[test]

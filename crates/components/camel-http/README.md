@@ -14,6 +14,8 @@ The HTTP component provides HTTP client (producer) and HTTP server (consumer) ca
 - **Configurable Timeouts**: Connect and response timeouts
 - **SSRF Protection**: Optional private IP blocking
 - **Streaming**: Direct stream-to-HTTP piping without materialization
+- **Native Request Streaming**: Incoming bodies arrive as `Body::Stream`, no RAM materialization
+- **Native Response Streaming**: `Body::Stream` responses use chunked transfer encoding automatically
 - **Header Mapping**: Automatic header forwarding
 - **Status Code Handling**: Configurable success ranges
 
@@ -38,6 +40,7 @@ https://host:port/path[?options]
 | Option | Default | Description |
 |--------|---------|-------------|
 | Host/path from URI | - | e.g., `http://0.0.0.0:8080/api` |
+| `maxRequestBody` | `2097152` (2 MB) | If request `Content-Length` exceeds this value, responds 413 before opening the stream. Chunked uploads without `Content-Length` are not limited at the consumer level. |
 
 ## Producer Options (Client)
 
@@ -214,6 +217,45 @@ let route = RouteBuilder::from("direct:resilient")
     .build()?;
 ```
 
+## Global Configuration
+
+Configure default HTTP settings in `Camel.toml` that apply to all HTTP endpoints:
+
+```toml
+[default.components.http]
+connect_timeout_ms = 5000        # Connection timeout (default: 30000)
+response_timeout_ms = 30000      # Response timeout (default: none)
+max_connections = 100            # Max concurrent connections (default: 100)
+max_body_size = 10485760         # Max response body size, 10MB (default: 10MB)
+max_request_body = 2097152       # Max request body for server, 2MB (default: 2MB)
+allow_private_ips = false        # Allow requests to private IPs (default: false)
+```
+
+URI parameters always override global defaults:
+
+```rust
+// Uses global connect_timeout_ms (5000) but overrides allowPrivateIps
+.to("http://api.example.com?allowPrivateIps=true")
+
+// Overrides both global settings
+.to("http://api.example.com?connectTimeout=10000&allowPrivateIps=true")
+```
+
+### Profile-Specific Configuration
+
+```toml
+[default.components.http]
+connect_timeout_ms = 30000
+
+[production.components.http]
+connect_timeout_ms = 5000   # Faster fail in production
+allow_private_ips = false
+
+[development.components.http]
+connect_timeout_ms = 60000  # More lenient in dev
+allow_private_ips = true    # Allow internal services in dev
+```
+
 ## SSRF Protection
 
 By default, the HTTP client blocks requests to private IP addresses for security. To allow:
@@ -230,9 +272,60 @@ To block specific hosts:
 
 ## Streaming & Memory Management
 
+The HTTP component supports native streaming for both producer and consumer.
+
+### Producer (Client) Streaming
+
 The HTTP producer supports streaming request bodies directly without materializing them in memory. Stream bodies are piped to reqwest using `wrap_stream()`.
 
 Memory limits apply when materialization is required (default: 10MB).
+
+### Consumer (Server) Streaming
+
+**Request Bodies:** Incoming HTTP request bodies arrive as `Body::Stream` in the Exchange, with no RAM materialization by default. The `Content-Length` header (if present) populates `StreamMetadata.size_hint`, and `Content-Type` populates `StreamMetadata.content_type`.
+
+**413 Protection:** If the `Content-Length` header exceeds `maxRequestBody`, the server responds with HTTP 413 before opening the stream. Chunked uploads without a `Content-Length` header are not limited at the consumer level.
+
+**Response Bodies:** 
+- `Body::Stream` responses use `Transfer-Encoding: chunked` automatically (no buffering)
+- `Body::Bytes` / `Body::Text` responses use standard `Content-Length`
+
+### Streaming Response Example
+
+```rust
+// Streaming response example (server-sent data)
+from("http://0.0.0.0:8080/stream")
+    .process(|exchange| Box::pin(async move {
+        let chunks = vec![
+            Ok(Bytes::from("chunk1\n")),
+            Ok(Bytes::from("chunk2\n")),
+        ];
+        let stream = Box::pin(futures::stream::iter(chunks));
+        exchange.input.body = Body::Stream(StreamBody {
+            stream: Arc::new(tokio::sync::Mutex::new(Some(stream))),
+            metadata: StreamMetadata::default(),
+        });
+        Ok(())
+    }))
+    .build()
+```
+
+### Request Body Access
+
+```rust
+// Access request body as stream (default) or materialize it
+from("http://0.0.0.0:8080/upload")
+    .process(|exchange| Box::pin(async move {
+        // Option A: keep as stream (zero-copy)
+        // exchange.input.body is already Body::Stream
+        
+        // Option B: materialize when you need the bytes
+        let bytes = exchange.input.body.into_bytes(10 * 1024 * 1024).await?;
+        exchange.input.body = Body::Bytes(bytes);
+        Ok(())
+    }))
+    .build()
+```
 
 ## Documentation
 

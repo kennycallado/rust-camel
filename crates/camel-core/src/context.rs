@@ -1,5 +1,8 @@
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -7,12 +10,15 @@ use tracing::{info, warn};
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
     CamelError, HealthReport, HealthStatus, Lifecycle, MetricsCollector, NoOpMetrics,
-    RouteController, RouteStatus, ServiceHealth, ServiceStatus, SupervisionConfig,
+    RouteController, RuntimeCommandBus, RuntimeQueryBus, ServiceHealth, ServiceStatus,
+    SupervisionConfig,
 };
 use camel_component::Component;
 use camel_language_api::Language;
 use camel_language_api::LanguageError;
 
+use crate::adapters::RuntimeExecutionAdapter;
+use crate::application::runtime_bus::RuntimeBus;
 use crate::config::TracerConfig;
 use crate::registry::Registry;
 use crate::route::RouteDefinition;
@@ -20,6 +26,8 @@ use crate::route_controller::{
     DefaultRouteController, RouteControllerInternal, SharedLanguageRegistry,
 };
 use crate::supervising_route_controller::SupervisingRouteController;
+
+static CONTEXT_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
 ///
@@ -31,11 +39,113 @@ use crate::supervising_route_controller::SupervisingRouteController;
 pub struct CamelContext {
     registry: Arc<std::sync::Mutex<Registry>>,
     route_controller: Arc<Mutex<dyn RouteControllerInternal>>,
+    runtime: Arc<RuntimeBus>,
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsCollector>,
     languages: SharedLanguageRegistry,
     shutdown_timeout: std::time::Duration,
     services: Vec<Box<dyn Lifecycle>>,
+    component_configs: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+}
+
+/// Opaque handle for runtime side-effect execution operations.
+///
+/// This intentionally does not expose direct lifecycle mutation APIs to callers.
+#[derive(Clone)]
+pub struct RuntimeExecutionHandle {
+    controller: Arc<Mutex<dyn RouteControllerInternal>>,
+    runtime: Arc<RuntimeBus>,
+}
+
+impl RuntimeExecutionHandle {
+    pub(crate) async fn add_route_definition(
+        &self,
+        definition: RouteDefinition,
+    ) -> Result<(), CamelError> {
+        let mut controller = self.controller.lock().await;
+        controller.add_route(definition)
+    }
+
+    pub(crate) async fn remove_route_definition(&self, route_id: &str) -> Result<(), CamelError> {
+        let mut controller = self.controller.lock().await;
+        controller.remove_route(route_id)
+    }
+
+    pub(crate) async fn compile_route_definition(
+        &self,
+        definition: RouteDefinition,
+    ) -> Result<camel_api::BoxProcessor, CamelError> {
+        let controller = self.controller.lock().await;
+        controller.compile_route_definition(definition)
+    }
+
+    pub(crate) async fn swap_route_pipeline(
+        &self,
+        route_id: &str,
+        pipeline: camel_api::BoxProcessor,
+    ) -> Result<(), CamelError> {
+        let controller = self.controller.lock().await;
+        controller.swap_pipeline(route_id, pipeline)
+    }
+
+    pub(crate) async fn bootstrap_register_route(
+        &self,
+        route_id: String,
+    ) -> Result<(), CamelError> {
+        self.runtime.bootstrap_register_route(route_id).await
+    }
+
+    pub(crate) async fn execute_runtime_command(
+        &self,
+        cmd: camel_api::RuntimeCommand,
+    ) -> Result<camel_api::RuntimeCommandResult, CamelError> {
+        self.runtime.execute(cmd).await
+    }
+
+    pub(crate) async fn runtime_route_status(
+        &self,
+        route_id: &str,
+    ) -> Result<Option<String>, CamelError> {
+        match self
+            .runtime
+            .ask(camel_api::RuntimeQuery::GetRouteStatus {
+                route_id: route_id.to_string(),
+            })
+            .await
+        {
+            Ok(camel_api::RuntimeQueryResult::RouteStatus { status, .. }) => Ok(Some(status)),
+            Ok(_) => Err(CamelError::RouteError(
+                "unexpected runtime query response for route status".to_string(),
+            )),
+            Err(CamelError::RouteError(msg)) if msg.contains("not found") => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub(crate) async fn runtime_route_ids(&self) -> Result<Vec<String>, CamelError> {
+        match self.runtime.ask(camel_api::RuntimeQuery::ListRoutes).await {
+            Ok(camel_api::RuntimeQueryResult::Routes { route_ids }) => Ok(route_ids),
+            Ok(_) => Err(CamelError::RouteError(
+                "unexpected runtime query response for route listing".to_string(),
+            )),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn force_start_route_for_test(
+        &self,
+        route_id: &str,
+    ) -> Result<(), CamelError> {
+        let mut controller = self.controller.lock().await;
+        controller.start_route(route_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn controller_route_count_for_test(&self) -> usize {
+        let controller = self.controller.lock().await;
+        controller.route_count()
+    }
 }
 
 impl CamelContext {
@@ -48,9 +158,50 @@ impl CamelContext {
         Arc::new(std::sync::Mutex::new(languages))
     }
 
+    fn build_runtime(
+        controller: Arc<Mutex<dyn RouteControllerInternal>>,
+        store: crate::adapters::InMemoryRuntimeStore,
+    ) -> Arc<RuntimeBus> {
+        let execution = Arc::new(RuntimeExecutionAdapter::new(Arc::clone(&controller)));
+        Arc::new(
+            RuntimeBus::new(
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+                Arc::new(store.clone()),
+            )
+            .with_uow(Arc::new(store))
+            .with_execution(execution),
+        )
+    }
+
+    fn runtime_store_with_journal_path(path: PathBuf) -> crate::adapters::InMemoryRuntimeStore {
+        let store = crate::adapters::InMemoryRuntimeStore::default();
+        match crate::adapters::FileRuntimeEventJournal::new(path.clone()) {
+            Ok(journal) => store.with_journal(Arc::new(journal)),
+            Err(err) => {
+                warn!(
+                    journal_path = %path.display(),
+                    error = %err,
+                    "Failed to initialize runtime event journal; falling back to in-memory-only runtime store"
+                );
+                store
+            }
+        }
+    }
+
     /// Create a new, empty CamelContext.
+    ///
+    /// Runtime state is in-memory/ephemeral by default.
     pub fn new() -> Self {
         Self::with_metrics(Arc::new(NoOpMetrics))
+    }
+
+    /// Create a new CamelContext with an explicit runtime journal file path.
+    ///
+    /// This opt-in path enables local runtime replay/durability semantics.
+    pub fn new_with_runtime_journal_path(path: impl Into<PathBuf>) -> Self {
+        Self::with_metrics_and_runtime_journal_path(Arc::new(NoOpMetrics), path)
     }
 
     /// Create a new CamelContext with a custom metrics collector.
@@ -60,22 +211,65 @@ impl CamelContext {
         let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
             DefaultRouteController::with_languages(Arc::clone(&registry), Arc::clone(&languages)),
         ));
+        let store = crate::adapters::InMemoryRuntimeStore::default();
+        let runtime = Self::build_runtime(Arc::clone(&controller), store);
 
         // Set self-ref so DefaultRouteController can create ProducerContext
         // Use try_lock since we just created it and nobody else has access yet
-        controller
+        let mut controller_guard = controller
             .try_lock()
-            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
-            .set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access");
+        controller_guard.set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
+        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+        controller_guard.set_runtime_handle(runtime_handle);
+        drop(controller_guard);
 
         Self {
             registry,
             route_controller: controller,
+            runtime,
             cancel_token: CancellationToken::new(),
             metrics,
             languages,
             shutdown_timeout: std::time::Duration::from_secs(30),
             services: Vec::new(),
+            component_configs: HashMap::new(),
+        }
+    }
+
+    /// Create a new CamelContext with custom metrics and explicit runtime journal file path.
+    pub fn with_metrics_and_runtime_journal_path(
+        metrics: Arc<dyn MetricsCollector>,
+        journal_path: impl Into<PathBuf>,
+    ) -> Self {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let languages = Self::built_in_languages();
+        let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
+            DefaultRouteController::with_languages(Arc::clone(&registry), Arc::clone(&languages)),
+        ));
+        let store = Self::runtime_store_with_journal_path(journal_path.into());
+        let runtime = Self::build_runtime(Arc::clone(&controller), store);
+
+        // Set self-ref so DefaultRouteController can create ProducerContext
+        // Use try_lock since we just created it and nobody else has access yet
+        let mut controller_guard = controller
+            .try_lock()
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access");
+        controller_guard.set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
+        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+        controller_guard.set_runtime_handle(runtime_handle);
+        drop(controller_guard);
+
+        Self {
+            registry,
+            route_controller: controller,
+            runtime,
+            cancel_token: CancellationToken::new(),
+            metrics,
+            languages,
+            shutdown_timeout: std::time::Duration::from_secs(30),
+            services: Vec::new(),
+            component_configs: HashMap::new(),
         }
     }
 
@@ -103,22 +297,71 @@ impl CamelContext {
             )
             .with_metrics(Arc::clone(&metrics)),
         ));
+        let store = crate::adapters::InMemoryRuntimeStore::default();
+        let runtime = Self::build_runtime(Arc::clone(&controller), store);
 
         // Set self-ref so SupervisingRouteController can create ProducerContext
         // Use try_lock since we just created it and nobody else has access yet
-        controller
+        let mut controller_guard = controller
             .try_lock()
-            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
-            .set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access");
+        controller_guard.set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
+        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+        controller_guard.set_runtime_handle(runtime_handle);
+        drop(controller_guard);
 
         Self {
             registry,
             route_controller: controller,
+            runtime,
             cancel_token: CancellationToken::new(),
             metrics,
             languages,
             shutdown_timeout: std::time::Duration::from_secs(30),
             services: Vec::new(),
+            component_configs: HashMap::new(),
+        }
+    }
+
+    /// Create a new CamelContext with supervision, custom metrics, and explicit journal path.
+    pub fn with_supervision_and_metrics_and_runtime_journal_path(
+        config: SupervisionConfig,
+        metrics: Arc<dyn MetricsCollector>,
+        journal_path: impl Into<PathBuf>,
+    ) -> Self {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let languages = Self::built_in_languages();
+        let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
+            SupervisingRouteController::with_languages(
+                Arc::clone(&registry),
+                config,
+                Arc::clone(&languages),
+            )
+            .with_metrics(Arc::clone(&metrics)),
+        ));
+        let store = Self::runtime_store_with_journal_path(journal_path.into());
+        let runtime = Self::build_runtime(Arc::clone(&controller), store);
+
+        // Set self-ref so SupervisingRouteController can create ProducerContext
+        // Use try_lock since we just created it and nobody else has access yet
+        let mut controller_guard = controller
+            .try_lock()
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access");
+        controller_guard.set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
+        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+        controller_guard.set_runtime_handle(runtime_handle);
+        drop(controller_guard);
+
+        Self {
+            registry,
+            route_controller: controller,
+            runtime,
+            cancel_token: CancellationToken::new(),
+            metrics,
+            languages,
+            shutdown_timeout: std::time::Duration::from_secs(30),
+            services: Vec::new(),
+            component_configs: HashMap::new(),
         }
     }
 
@@ -143,6 +386,16 @@ impl CamelContext {
 
     /// Configure tracing with full config.
     pub fn set_tracer_config(&mut self, config: TracerConfig) {
+        // Inject metrics collector if not already set
+        let config = if config.metrics_collector.is_none() {
+            TracerConfig {
+                metrics_collector: Some(Arc::clone(&self.metrics)),
+                ..config
+            }
+        } else {
+            config
+        };
+
         self.route_controller
             .try_lock()
             .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
@@ -218,12 +471,55 @@ impl CamelContext {
     ///
     /// The route must have an ID. Steps are resolved immediately using registered components.
     pub fn add_route_definition(&mut self, definition: RouteDefinition) -> Result<(), CamelError> {
-        info!(from = definition.from_uri(), route_id = %definition.route_id(), "Adding route definition");
+        let route_id = definition.route_id().to_string();
+        info!(
+            from = definition.from_uri(),
+            route_id = %route_id,
+            "Adding route definition"
+        );
 
         self.route_controller
             .try_lock()
             .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
-            .add_route(definition)
+            .add_route(definition)?;
+
+        if let Err(register_err) = self.bootstrap_runtime_registration(route_id.clone()) {
+            let rollback_result = self
+                .route_controller
+                .try_lock()
+                .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
+                .remove_route(&route_id);
+            if let Err(rollback_err) = rollback_result {
+                return Err(CamelError::RouteError(format!(
+                    "failed runtime bootstrap registration for route '{route_id}': {register_err}; rollback failed: {rollback_err}"
+                )));
+            }
+            return Err(register_err);
+        }
+
+        Ok(())
+    }
+
+    fn bootstrap_runtime_registration(&self, route_id: String) -> Result<(), CamelError> {
+        let runtime = Arc::clone(&self.runtime);
+        std::thread::spawn(move || -> Result<(), CamelError> {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| {
+                    CamelError::RouteError(format!(
+                        "failed to create runtime bootstrap worker: {err}"
+                    ))
+                })?;
+            rt.block_on(runtime.bootstrap_register_route(route_id))
+        })
+        .join()
+        .map_err(|_| CamelError::RouteError("runtime bootstrap worker panicked".to_string()))?
+    }
+
+    fn next_context_command_id(op: &str, route_id: &str) -> String {
+        let seq = CONTEXT_COMMAND_SEQ.fetch_add(1, Ordering::Relaxed);
+        format!("context:{op}:{route_id}:{seq}")
     }
 
     /// Access the component registry.
@@ -233,9 +529,12 @@ impl CamelContext {
             .expect("mutex poisoned: another thread panicked while holding this lock")
     }
 
-    /// Access the route controller.
-    pub fn route_controller(&self) -> &Arc<Mutex<dyn RouteControllerInternal>> {
-        &self.route_controller
+    /// Get runtime execution handle for file-watcher integrations.
+    pub fn runtime_execution_handle(&self) -> RuntimeExecutionHandle {
+        RuntimeExecutionHandle {
+            controller: Arc::clone(&self.route_controller),
+            runtime: Arc::clone(&self.runtime),
+        }
     }
 
     /// Get the metrics collector.
@@ -243,12 +542,32 @@ impl CamelContext {
         Arc::clone(&self.metrics)
     }
 
-    /// Get the status of a route by ID.
-    pub fn route_status(&self, route_id: &str) -> Option<RouteStatus> {
-        self.route_controller
-            .try_lock()
-            .ok()?
-            .route_status(route_id)
+    /// Get runtime command/query bus handle.
+    pub fn runtime(&self) -> Arc<dyn camel_api::RuntimeHandle> {
+        self.runtime.clone()
+    }
+
+    /// Build a producer context wired to this runtime.
+    pub fn producer_context(&self) -> camel_api::ProducerContext {
+        camel_api::ProducerContext::new().with_runtime(self.runtime())
+    }
+
+    /// Query route status via runtime read-model.
+    pub async fn runtime_route_status(&self, route_id: &str) -> Result<Option<String>, CamelError> {
+        match self
+            .runtime()
+            .ask(camel_api::RuntimeQuery::GetRouteStatus {
+                route_id: route_id.to_string(),
+            })
+            .await
+        {
+            Ok(camel_api::RuntimeQueryResult::RouteStatus { status, .. }) => Ok(Some(status)),
+            Ok(_) => Err(CamelError::RouteError(
+                "unexpected runtime query response for route status".to_string(),
+            )),
+            Err(CamelError::RouteError(msg)) if msg.contains("not found") => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     /// Start all routes. Each route's consumer will begin producing exchanges.
@@ -281,12 +600,21 @@ impl CamelContext {
             }
         }
 
-        // Then start routes
-        self.route_controller
-            .lock()
-            .await
-            .start_all_routes()
-            .await?;
+        // Then start routes via runtime command bus (aggregate-first),
+        // preserving route controller startup ordering metadata.
+        let route_ids = {
+            let controller = self.route_controller.lock().await;
+            controller.auto_startup_route_ids()
+        };
+        for route_id in route_ids {
+            self.runtime
+                .execute(camel_api::RuntimeCommand::StartRoute {
+                    route_id: route_id.clone(),
+                    command_id: Self::next_context_command_id("start", &route_id),
+                    causation_id: None,
+                })
+                .await?;
+        }
 
         info!("CamelContext started");
         Ok(())
@@ -307,8 +635,25 @@ impl CamelContext {
         // Signal cancellation (for any legacy code that might use it)
         self.cancel_token.cancel();
 
-        // Stop all routes via the controller
-        self.route_controller.lock().await.stop_all_routes().await?;
+        // Stop all routes via runtime command bus (aggregate-first),
+        // preserving route controller shutdown ordering metadata.
+        let route_ids = {
+            let controller = self.route_controller.lock().await;
+            controller.shutdown_route_ids()
+        };
+        for route_id in route_ids {
+            if let Err(err) = self
+                .runtime
+                .execute(camel_api::RuntimeCommand::StopRoute {
+                    route_id: route_id.clone(),
+                    command_id: Self::next_context_command_id("stop", &route_id),
+                    causation_id: None,
+                })
+                .await
+            {
+                warn!(route_id = %route_id, error = %err, "Runtime stop command failed during context shutdown");
+            }
+        }
 
         // Then stop lifecycle services in reverse insertion order (LIFO)
         // Continue stopping all services even if some fail
@@ -345,7 +690,20 @@ impl CamelContext {
     /// Immediate abort — kills all tasks without draining.
     pub async fn abort(&mut self) {
         self.cancel_token.cancel();
-        let _ = self.route_controller.lock().await.stop_all_routes().await;
+        let route_ids = {
+            let controller = self.route_controller.lock().await;
+            controller.shutdown_route_ids()
+        };
+        for route_id in route_ids {
+            let _ = self
+                .runtime
+                .execute(camel_api::RuntimeCommand::StopRoute {
+                    route_id: route_id.clone(),
+                    command_id: Self::next_context_command_id("abort-stop", &route_id),
+                    causation_id: None,
+                })
+                .await;
+        }
     }
 
     /// Check health status of all registered services.
@@ -371,6 +729,19 @@ impl CamelContext {
             ..Default::default()
         }
     }
+
+    /// Store a component config. Overwrites any previously stored config of the same type.
+    pub fn set_component_config<T: 'static + Send + Sync>(&mut self, config: T) {
+        self.component_configs
+            .insert(TypeId::of::<T>(), Box::new(config));
+    }
+
+    /// Retrieve a stored component config by type. Returns None if not stored.
+    pub fn get_component_config<T: 'static + Send + Sync>(&self) -> Option<&T> {
+        self.component_configs
+            .get(&TypeId::of::<T>())
+            .and_then(|b| b.downcast_ref::<T>())
+    }
 }
 
 impl Default for CamelContext {
@@ -382,9 +753,15 @@ impl Default for CamelContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{RouteRuntimeAggregate, RouteRuntimeState};
     use crate::route::{BuilderStep, LanguageExpressionDef, RouteDefinition};
+    use async_trait::async_trait;
     use camel_api::CamelError;
-    use camel_component::Endpoint;
+    use camel_api::{
+        CanonicalRouteSpec, RuntimeCommand, RuntimeCommandResult, RuntimeQuery, RuntimeQueryResult,
+    };
+    use camel_component::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
+    use tempfile::tempdir;
 
     /// Mock component for testing
     struct MockComponent;
@@ -396,6 +773,55 @@ mod tests {
 
         fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
             Err(CamelError::ComponentNotFound("mock".to_string()))
+        }
+    }
+
+    struct HoldConsumer;
+
+    #[async_trait]
+    impl Consumer for HoldConsumer {
+        async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+            ctx.cancelled().await;
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        fn concurrency_model(&self) -> ConcurrencyModel {
+            ConcurrencyModel::Sequential
+        }
+    }
+
+    struct HoldEndpoint;
+
+    impl Endpoint for HoldEndpoint {
+        fn uri(&self) -> &str {
+            "hold:test"
+        }
+
+        fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+            Ok(Box::new(HoldConsumer))
+        }
+
+        fn create_producer(
+            &self,
+            _ctx: &camel_api::ProducerContext,
+        ) -> Result<camel_api::BoxProcessor, CamelError> {
+            Err(CamelError::RouteError("no producer".to_string()))
+        }
+    }
+
+    struct HoldComponent;
+
+    impl Component for HoldComponent {
+        fn scheme(&self) -> &str {
+            "hold"
+        }
+
+        fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+            Ok(Box::new(HoldEndpoint))
         }
     }
 
@@ -598,6 +1024,438 @@ mod tests {
         assert_eq!(report.status, HealthStatus::Healthy);
         assert!(report.services.is_empty());
     }
+
+    #[tokio::test]
+    async fn context_exposes_runtime_command_and_query_buses() {
+        let ctx = CamelContext::new();
+        let runtime = ctx.runtime();
+
+        let register = runtime
+            .execute(RuntimeCommand::RegisterRoute {
+                spec: CanonicalRouteSpec::new("runtime-r1", "timer:tick"),
+                command_id: "cmd-1".into(),
+                causation_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            register,
+            RuntimeCommandResult::RouteRegistered { ref route_id } if route_id == "runtime-r1"
+        ));
+
+        let query = runtime
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: "runtime-r1".into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            query,
+            RuntimeQueryResult::RouteStatus { ref status, .. } if status == "Registered"
+        ));
+    }
+
+    #[tokio::test]
+    async fn context_with_explicit_runtime_journal_path_persists_events_to_file() {
+        let dir = tempdir().unwrap();
+        let journal_path = dir.path().join("context-runtime-events.jsonl");
+        let mut ctx = CamelContext::new_with_runtime_journal_path(journal_path.clone());
+        ctx.register_component(HoldComponent);
+
+        ctx.runtime()
+            .execute(RuntimeCommand::RegisterRoute {
+                spec: CanonicalRouteSpec::new("journal-path-r1", "hold:test"),
+                command_id: "journal-c1".into(),
+                causation_id: None,
+            })
+            .await
+            .unwrap();
+        ctx.runtime()
+            .execute(RuntimeCommand::StartRoute {
+                route_id: "journal-path-r1".into(),
+                command_id: "journal-c2".into(),
+                causation_id: Some("journal-c1".into()),
+            })
+            .await
+            .unwrap();
+
+        let data = std::fs::read_to_string(&journal_path).unwrap();
+        assert!(
+            data.contains("journal-path-r1"),
+            "journal file must contain route id"
+        );
+        assert!(
+            data.contains("RouteRegistered"),
+            "journal file must contain route registered event"
+        );
+        assert!(
+            data.contains("RouteStarted"),
+            "journal file must contain route started event"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_runtime_journal_isolated_per_context_without_env_override() {
+        if let Ok(value) = std::env::var("CAMEL_RUNTIME_JOURNAL_PATH")
+            && !value.trim().is_empty()
+        {
+            return;
+        }
+
+        let first = CamelContext::new();
+        first
+            .runtime()
+            .execute(RuntimeCommand::RegisterRoute {
+                spec: CanonicalRouteSpec::new("default-isolation-r1", "timer:tick"),
+                command_id: "iso-c1".into(),
+                causation_id: None,
+            })
+            .await
+            .unwrap();
+
+        let second = CamelContext::new();
+        second
+            .runtime()
+            .execute(RuntimeCommand::RegisterRoute {
+                spec: CanonicalRouteSpec::new("default-isolation-r1", "timer:tick"),
+                command_id: "iso-c2".into(),
+                causation_id: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_commands_drive_real_route_controller_lifecycle() {
+        let mut ctx = CamelContext::new();
+        ctx.register_component(HoldComponent);
+        let runtime = ctx.runtime();
+
+        runtime
+            .execute(RuntimeCommand::RegisterRoute {
+                spec: CanonicalRouteSpec::new("runtime-hold", "hold:test"),
+                command_id: "c1".into(),
+                causation_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ctx.runtime_route_status("runtime-hold").await.unwrap(),
+            Some("Registered".to_string())
+        );
+        assert!(matches!(
+            ctx.runtime.repo().load("runtime-hold").await.unwrap(),
+            Some(agg) if matches!(agg.state(), crate::domain::RouteRuntimeState::Registered)
+        ));
+
+        runtime
+            .execute(RuntimeCommand::StartRoute {
+                route_id: "runtime-hold".into(),
+                command_id: "c2".into(),
+                causation_id: Some("c1".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ctx.runtime_route_status("runtime-hold").await.unwrap(),
+            Some("Started".to_string())
+        );
+        assert!(matches!(
+            ctx.runtime.repo().load("runtime-hold").await.unwrap(),
+            Some(agg) if matches!(agg.state(), crate::domain::RouteRuntimeState::Started)
+        ));
+
+        runtime
+            .execute(RuntimeCommand::SuspendRoute {
+                route_id: "runtime-hold".into(),
+                command_id: "c3".into(),
+                causation_id: Some("c2".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ctx.runtime_route_status("runtime-hold").await.unwrap(),
+            Some("Suspended".to_string())
+        );
+
+        runtime
+            .execute(RuntimeCommand::ResumeRoute {
+                route_id: "runtime-hold".into(),
+                command_id: "c4".into(),
+                causation_id: Some("c3".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ctx.runtime_route_status("runtime-hold").await.unwrap(),
+            Some("Started".to_string())
+        );
+
+        runtime
+            .execute(RuntimeCommand::StopRoute {
+                route_id: "runtime-hold".into(),
+                command_id: "c5".into(),
+                causation_id: Some("c4".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ctx.runtime_route_status("runtime-hold").await.unwrap(),
+            Some("Stopped".to_string())
+        );
+
+        runtime
+            .execute(RuntimeCommand::ReloadRoute {
+                route_id: "runtime-hold".into(),
+                command_id: "c6".into(),
+                causation_id: Some("c5".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ctx.runtime_route_status("runtime-hold").await.unwrap(),
+            Some("Started".to_string())
+        );
+
+        runtime
+            .execute(RuntimeCommand::StopRoute {
+                route_id: "runtime-hold".into(),
+                command_id: "c7".into(),
+                causation_id: Some("c6".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ctx.runtime_route_status("runtime-hold").await.unwrap(),
+            Some("Stopped".to_string())
+        );
+
+        runtime
+            .execute(RuntimeCommand::RemoveRoute {
+                route_id: "runtime-hold".into(),
+                command_id: "c8".into(),
+                causation_id: Some("c7".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            ctx.runtime_route_status("runtime-hold").await.unwrap(),
+            None
+        );
+        assert!(
+            ctx.runtime
+                .repo()
+                .load("runtime-hold")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_queries_read_projection_state_when_connected() {
+        let mut ctx = CamelContext::new();
+        ctx.register_component(HoldComponent);
+        let runtime = ctx.runtime();
+        runtime
+            .execute(RuntimeCommand::RegisterRoute {
+                spec: CanonicalRouteSpec::new("rq", "hold:test"),
+                command_id: "c1".into(),
+                causation_id: None,
+            })
+            .await
+            .unwrap();
+
+        // Diverge live controller state from the projection on purpose.
+        ctx.runtime_execution_handle()
+            .force_start_route_for_test("rq")
+            .await
+            .unwrap();
+
+        let result = runtime
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: "rq".into(),
+            })
+            .await
+            .unwrap();
+
+        match result {
+            RuntimeQueryResult::RouteStatus { status, .. } => assert_eq!(status, "Registered"),
+            _ => panic!("unexpected query result"),
+        }
+    }
+
+    #[test]
+    fn add_route_definition_injects_runtime_into_producer_context() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct RuntimeAwareEndpoint {
+            saw_runtime: Arc<AtomicBool>,
+        }
+
+        impl Endpoint for RuntimeAwareEndpoint {
+            fn uri(&self) -> &str {
+                "runtime-aware:test"
+            }
+
+            fn create_consumer(&self) -> Result<Box<dyn camel_component::Consumer>, CamelError> {
+                Err(CamelError::RouteError("no consumer".to_string()))
+            }
+
+            fn create_producer(
+                &self,
+                ctx: &camel_api::ProducerContext,
+            ) -> Result<camel_api::BoxProcessor, CamelError> {
+                self.saw_runtime
+                    .store(ctx.runtime().is_some(), Ordering::SeqCst);
+                if ctx.runtime().is_none() {
+                    return Err(CamelError::RouteError(
+                        "runtime handle missing in ProducerContext".to_string(),
+                    ));
+                }
+                Ok(camel_api::BoxProcessor::new(camel_api::IdentityProcessor))
+            }
+        }
+
+        struct RuntimeAwareComponent {
+            saw_runtime: Arc<AtomicBool>,
+        }
+
+        impl Component for RuntimeAwareComponent {
+            fn scheme(&self) -> &str {
+                "runtime-aware"
+            }
+
+            fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+                Ok(Box::new(RuntimeAwareEndpoint {
+                    saw_runtime: Arc::clone(&self.saw_runtime),
+                }))
+            }
+        }
+
+        let saw_runtime = Arc::new(AtomicBool::new(false));
+        let mut ctx = CamelContext::new();
+        ctx.register_component(RuntimeAwareComponent {
+            saw_runtime: Arc::clone(&saw_runtime),
+        });
+
+        let definition = RouteDefinition::new(
+            "timer:tick",
+            vec![BuilderStep::To("runtime-aware:test".to_string())],
+        )
+        .with_route_id("runtime-aware-route");
+
+        let result = ctx.add_route_definition(definition);
+        assert!(
+            result.is_ok(),
+            "route should resolve producer with runtime context: {result:?}"
+        );
+        assert!(
+            saw_runtime.load(Ordering::SeqCst),
+            "component producer should observe runtime handle in ProducerContext"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_route_definition_registers_runtime_projection_and_aggregate() {
+        let mut ctx = CamelContext::new();
+        ctx.register_component(HoldComponent);
+
+        let definition = RouteDefinition::new("hold:test", vec![]).with_route_id("ctx-runtime-r1");
+        ctx.add_route_definition(definition).unwrap();
+
+        let aggregate = ctx.runtime.repo().load("ctx-runtime-r1").await.unwrap();
+        assert!(
+            matches!(aggregate, Some(agg) if matches!(agg.state(), RouteRuntimeState::Stopped)),
+            "route registration should seed aggregate as Stopped"
+        );
+
+        let status = ctx.runtime_route_status("ctx-runtime-r1").await.unwrap();
+        assert_eq!(status.as_deref(), Some("Stopped"));
+    }
+
+    #[tokio::test]
+    async fn add_route_definition_rolls_back_controller_when_runtime_registration_fails() {
+        let mut ctx = CamelContext::new();
+        ctx.register_component(HoldComponent);
+
+        ctx.runtime
+            .repo()
+            .save(RouteRuntimeAggregate::new("ctx-runtime-dup"))
+            .await
+            .unwrap();
+
+        let definition = RouteDefinition::new("hold:test", vec![]).with_route_id("ctx-runtime-dup");
+        let result = ctx.add_route_definition(definition);
+        assert!(result.is_err(), "duplicate runtime registration must fail");
+
+        assert_eq!(
+            ctx.runtime_execution_handle()
+                .controller_route_count_for_test()
+                .await,
+            0,
+            "controller route should be rolled back on runtime bootstrap failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_start_stop_drives_runtime_lifecycle_via_command_bus() {
+        let mut ctx = CamelContext::new();
+        ctx.register_component(HoldComponent);
+
+        let autostart =
+            RouteDefinition::new("hold:test", vec![]).with_route_id("ctx-lifecycle-auto");
+        let lazy = RouteDefinition::new("hold:test", vec![])
+            .with_route_id("ctx-lifecycle-lazy")
+            .with_auto_startup(false);
+
+        ctx.add_route_definition(autostart).unwrap();
+        ctx.add_route_definition(lazy).unwrap();
+
+        assert_eq!(
+            ctx.runtime_route_status("ctx-lifecycle-auto")
+                .await
+                .unwrap(),
+            Some("Stopped".to_string())
+        );
+        assert_eq!(
+            ctx.runtime_route_status("ctx-lifecycle-lazy")
+                .await
+                .unwrap(),
+            Some("Stopped".to_string())
+        );
+
+        ctx.start().await.unwrap();
+
+        assert_eq!(
+            ctx.runtime_route_status("ctx-lifecycle-auto")
+                .await
+                .unwrap(),
+            Some("Started".to_string())
+        );
+        assert_eq!(
+            ctx.runtime_route_status("ctx-lifecycle-lazy")
+                .await
+                .unwrap(),
+            Some("Stopped".to_string())
+        );
+
+        ctx.stop().await.unwrap();
+
+        assert_eq!(
+            ctx.runtime_route_status("ctx-lifecycle-auto")
+                .await
+                .unwrap(),
+            Some("Stopped".to_string())
+        );
+        assert_eq!(
+            ctx.runtime_route_status("ctx-lifecycle-lazy")
+                .await
+                .unwrap(),
+            Some("Stopped".to_string())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -757,19 +1615,25 @@ mod lifecycle_tests {
             }
 
             async fn stop(&mut self) -> Result<(), CamelError> {
-                self.order
-                    .lock()
-                    .unwrap()
-                    .push(self.name.clone());
+                self.order.lock().unwrap().push(self.name.clone());
                 Ok(())
             }
         }
 
         let order = Arc::new(StdMutex::new(Vec::<String>::new()));
 
-        let s1 = OrderTracker { name: "first".into(),  order: Arc::clone(&order) };
-        let s2 = OrderTracker { name: "second".into(), order: Arc::clone(&order) };
-        let s3 = OrderTracker { name: "third".into(),  order: Arc::clone(&order) };
+        let s1 = OrderTracker {
+            name: "first".into(),
+            order: Arc::clone(&order),
+        };
+        let s2 = OrderTracker {
+            name: "second".into(),
+            order: Arc::clone(&order),
+        };
+        let s3 = OrderTracker {
+            name: "third".into(),
+            order: Arc::clone(&order),
+        };
 
         let mut ctx = CamelContext::new()
             .with_lifecycle(s1)
@@ -780,7 +1644,42 @@ mod lifecycle_tests {
         ctx.stop().await.unwrap();
 
         let stopped = order.lock().unwrap();
-        assert_eq!(*stopped, vec!["third", "second", "first"],
-            "services must stop in reverse insertion order");
+        assert_eq!(
+            *stopped,
+            vec!["third", "second", "first"],
+            "services must stop in reverse insertion order"
+        );
+    }
+}
+
+#[cfg(test)]
+mod config_registry_tests {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct MyConfig {
+        value: u32,
+    }
+
+    #[test]
+    fn test_set_and_get_component_config() {
+        let mut ctx = CamelContext::new();
+        ctx.set_component_config(MyConfig { value: 42 });
+        let got = ctx.get_component_config::<MyConfig>();
+        assert_eq!(got, Some(&MyConfig { value: 42 }));
+    }
+
+    #[test]
+    fn test_get_missing_config_returns_none() {
+        let ctx = CamelContext::new();
+        assert!(ctx.get_component_config::<MyConfig>().is_none());
+    }
+
+    #[test]
+    fn test_set_overwrites_previous_config() {
+        let mut ctx = CamelContext::new();
+        ctx.set_component_config(MyConfig { value: 1 });
+        ctx.set_component_config(MyConfig { value: 2 });
+        assert_eq!(ctx.get_component_config::<MyConfig>().unwrap().value, 2);
     }
 }
