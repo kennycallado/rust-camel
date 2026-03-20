@@ -386,10 +386,9 @@ impl DefaultRouteController {
         producer_ctx: &ProducerContext,
         registry: Arc<std::sync::Mutex<Registry>>,
     ) -> Result<Vec<BoxProcessor>, CamelError> {
-        // Lock registry for step resolution
-        let registry_guard = registry
-            .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
+        // NOTE: Do NOT hold registry_guard across recursive resolve_steps calls —
+        // std::sync::Mutex is non-reentrant and re-locking from the same thread
+        // (e.g. in Filter/Split/Choice sub-steps) would deadlock.
         let mut processors: Vec<BoxProcessor> = Vec::new();
         for step in steps {
             match step {
@@ -398,6 +397,10 @@ impl DefaultRouteController {
                 }
                 BuilderStep::To(uri) => {
                     let parsed = parse_uri(&uri)?;
+                    // Lock only for the duration of this endpoint lookup.
+                    let registry_guard = registry
+                        .lock()
+                        .expect("mutex poisoned: another thread panicked while holding this lock");
                     let component = registry_guard.get_or_err(&parsed.scheme)?;
                     let endpoint = component.create_endpoint(&uri)?;
                     let producer = endpoint.create_producer(producer_ctx)?;
@@ -576,6 +579,10 @@ impl DefaultRouteController {
                 }
                 BuilderStep::WireTap { uri } => {
                     let parsed = parse_uri(&uri)?;
+                    // Lock only for the duration of this endpoint lookup.
+                    let registry_guard = registry
+                        .lock()
+                        .expect("mutex poisoned: another thread panicked while holding this lock");
                     let component = registry_guard.get_or_err(&parsed.scheme)?;
                     let endpoint = component.create_endpoint(&uri)?;
                     let producer = endpoint.create_producer(producer_ctx)?;
