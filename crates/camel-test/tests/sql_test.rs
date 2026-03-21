@@ -3,8 +3,6 @@
 //! Uses testcontainers to spin up PostgreSQL instances for testing.
 //!
 //! **Requires Docker to be running.** Tests will fail if Docker is unavailable.
-//!
-//! Run with: `cargo test -p camel-component-sql -- --ignored`
 
 use camel_api::CamelError;
 use camel_api::Value;
@@ -71,7 +69,6 @@ async fn setup_test_table(pool: &AnyPool, table_name: &str) {
 
 /// Test 1: Producer SELECT - Create table, insert data, query via producer, verify JSON body
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_select() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -148,7 +145,6 @@ async fn test_producer_select() {
 
 /// Test 2: Producer INSERT - Insert via producer with named params, verify row count header
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_insert() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -215,7 +211,6 @@ async fn test_producer_insert() {
 
 /// Test 3: Producer UPDATE - Update via producer, verify update count header
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_update() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -286,7 +281,6 @@ async fn test_producer_update() {
 
 /// Test 4: Producer DELETE - Delete via producer, verify update count
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_delete() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -356,7 +350,6 @@ async fn test_producer_delete() {
 
 /// Test 5: Producer SelectOne - Query single row, verify single JSON object (not array)
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_select_one() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -421,7 +414,6 @@ async fn test_producer_select_one() {
 
 /// Test 6: Producer batch - Batch insert multiple rows
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_batch() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -490,7 +482,6 @@ async fn test_producer_batch() {
 
 /// Test 7: Producer noop - Execute query but verify original body preserved
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_noop() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -568,7 +559,6 @@ async fn test_producer_noop() {
 
 /// Test 8: Consumer polling - Start consumer, insert row, verify exchange received
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_consumer_polling() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -641,7 +631,6 @@ async fn test_consumer_polling() {
 
 /// Test 9: Consumer onConsume - Verify post-processing query executes after successful processing
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_consumer_on_consume() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -710,7 +699,6 @@ async fn test_consumer_on_consume() {
 
 /// Test 10: Consumer empty result - Verify no exchange sent when query returns empty and route_empty_result_set=false
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_consumer_empty_result() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -780,7 +768,6 @@ async fn test_consumer_empty_result() {
 /// Assert: `failed_rows` has at least one row after the consumer runs,
 /// confirming that `onConsumeFailed` executed the configured SQL.
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_consumer_on_consume_failed() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -843,7 +830,6 @@ async fn test_consumer_on_consume_failed() {
 
 /// Test 10b: Consumer with routeEmptyResultSet=true should send empty result
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_consumer_empty_result_routed() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
