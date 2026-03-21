@@ -4,13 +4,24 @@
 //!
 //! **Requires Docker to be running.** Tests will fail if Docker is unavailable.
 
+use camel_api::{Body, Exchange, Message};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_kafka::KafkaComponent;
+use camel_component_kafka::{KafkaComponent, KafkaEndpointConfig, KafkaProducer};
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
 use testcontainers::runners::AsyncRunner;
+use testcontainers::ContainerAsync;
 use testcontainers_modules::kafka::apache;
+use std::sync::OnceLock;
+use tower::Service as _;
+
+/// Serializes tests in this file so we don't start multiple Kafka brokers in parallel.
+static TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn test_lock() -> &'static tokio::sync::Mutex<()> {
+    TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 /// Initialise tracing once per process (ignores the error if already set).
 fn init_tracing() {
@@ -24,16 +35,44 @@ fn init_tracing() {
         .try_init();
 }
 
-/// Start an Apache Kafka container (KRaft, no Zookeeper) and return the bootstrap address.
-async fn start_kafka() -> (testcontainers::ContainerAsync<apache::Kafka>, String) {
+/// Starts an Apache Kafka broker and returns `(container, brokers)`.
+///
+/// `container.start().await` waits for "Kafka Server started", but we still do
+/// a protocol-level warm-up (real produce) before considering the broker ready.
+async fn start_kafka() -> (ContainerAsync<apache::Kafka>, String) {
     init_tracing();
-    let container = apache::Kafka::default().start().await.unwrap();
+
+    let container: ContainerAsync<apache::Kafka> = apache::Kafka::default().start().await.unwrap();
     let port = container
         .get_host_port_ipv4(apache::KAFKA_PORT)
         .await
         .unwrap();
     let brokers = format!("127.0.0.1:{port}");
     eprintln!("Kafka bootstrap: {brokers}");
+
+    // Protocol-level warm-up with a slightly larger per-attempt timeout.
+    // This is test-only and reduces flakiness under CI/host load.
+    let warmup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        let mut cfg = KafkaEndpointConfig::from_uri(&format!(
+            "kafka:__warmup__?brokers={}&requestTimeoutMs=10000",
+            brokers
+        ))
+        .unwrap();
+        cfg.resolve_defaults();
+        let mut producer = KafkaProducer::new(cfg).unwrap();
+        let msg = Message::new(Body::Text("warmup".to_string()));
+        let result = producer.call(Exchange::new(msg)).await;
+        if result.is_ok() {
+            eprintln!("Kafka warm-up: broker ready at {brokers}");
+            break;
+        }
+        if std::time::Instant::now() >= warmup_deadline {
+            panic!("Kafka broker at {brokers} did not become ready within 90s");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
     (container, brokers)
 }
 
@@ -43,6 +82,7 @@ async fn start_kafka() -> (testcontainers::ContainerAsync<apache::Kafka>, String
 
 #[tokio::test]
 async fn test_kafka_producer_sends_without_error() {
+    let _guard = test_lock().lock().await;
     let (_container, brokers) = start_kafka().await;
 
     let mock = MockComponent::new();
@@ -84,6 +124,7 @@ async fn test_kafka_producer_sends_without_error() {
 
 #[tokio::test]
 async fn test_kafka_consumer_receives_message() {
+    let _guard = test_lock().lock().await;
     let (_container, brokers) = start_kafka().await;
 
     let mock = MockComponent::new();
@@ -134,6 +175,7 @@ async fn test_kafka_consumer_receives_message() {
 
 #[tokio::test]
 async fn test_kafka_consumer_sets_headers() {
+    let _guard = test_lock().lock().await;
     let (_container, brokers) = start_kafka().await;
 
     let mock = MockComponent::new();
