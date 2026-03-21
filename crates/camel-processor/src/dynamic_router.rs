@@ -28,8 +28,16 @@ impl EndpointCache {
         }
     }
 
-    fn get(&self, uri: &str) -> Option<BoxProcessor> {
-        self.map.get(uri).cloned()
+    fn get(&mut self, uri: &str) -> Option<BoxProcessor> {
+        if let Some(processor) = self.map.get(uri).cloned() {
+            if let Some(pos) = self.order.iter().position(|x| x == uri) {
+                self.order.remove(pos);
+                self.order.push_back(uri.to_string());
+            }
+            Some(processor)
+        } else {
+            None
+        }
     }
 
     /// Insert `uri -> endpoint`, evicting the oldest entry when at capacity.
@@ -113,7 +121,7 @@ impl Service<Exchange> for DynamicRouterService {
                     }
 
                     let endpoint = {
-                        let cache_guard = cache.lock().unwrap();
+                        let mut cache_guard = cache.lock().unwrap();
                         cache_guard.get(uri)
                     };
 
