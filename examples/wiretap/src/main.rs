@@ -33,7 +33,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:main?showBody=true&showCorrelationId=true")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
 
     tokio::signal::ctrl_c()

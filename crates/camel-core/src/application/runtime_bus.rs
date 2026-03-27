@@ -8,12 +8,13 @@ use camel_api::{
     RuntimeQueryBus, RuntimeQueryResult,
 };
 
-use crate::application::commands::{CommandDeps, execute_command};
+use crate::application::commands::{CommandDeps, execute_command, handle_register_internal};
+use crate::application::internal_commands::InternalRuntimeCommandBus;
 use crate::application::queries::{QueryDeps, execute_query};
-use crate::domain::{RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent};
+use crate::application::route_types::RouteDefinition;
 use crate::ports::{
     CommandDedupPort, EventPublisherPort, ProjectionStorePort, RouteRepositoryPort,
-    RouteStatusProjection, RuntimeExecutionPort, RuntimeUnitOfWorkPort,
+    RuntimeExecutionPort, RuntimeUnitOfWorkPort,
 };
 
 pub struct RuntimeBus {
@@ -87,38 +88,6 @@ impl RuntimeBus {
             .await?;
         Ok(())
     }
-
-    /// Seed runtime aggregate/projection/event state for routes registered through
-    /// non-CQRS bootstrap paths (e.g. CamelContext::add_route_definition).
-    pub async fn bootstrap_register_route(&self, route_id: String) -> Result<(), CamelError> {
-        if self.repo.load(&route_id).await?.is_some() {
-            return Err(CamelError::RouteError(format!(
-                "route '{route_id}' is already registered in runtime state"
-            )));
-        }
-
-        let aggregate =
-            RouteRuntimeAggregate::from_snapshot(route_id.clone(), RouteRuntimeState::Stopped, 0);
-        let projection = RouteStatusProjection {
-            route_id: route_id.clone(),
-            status: "Stopped".to_string(),
-        };
-        let events = vec![
-            RuntimeEvent::RouteRegistered {
-                route_id: route_id.clone(),
-            },
-            RuntimeEvent::RouteStopped { route_id },
-        ];
-
-        if let Some(uow) = &self.uow {
-            uow.persist_upsert(aggregate, None, projection, &events)
-                .await
-        } else {
-            self.repo.save(aggregate).await?;
-            self.projections.upsert_status(projection).await?;
-            self.events.publish(&events).await
-        }
-    }
 }
 
 #[async_trait]
@@ -146,5 +115,191 @@ impl RuntimeQueryBus for RuntimeBus {
         self.ensure_journal_recovered().await?;
         let deps = self.query_deps();
         execute_query(&deps, query).await
+    }
+}
+
+#[async_trait]
+impl InternalRuntimeCommandBus for RuntimeBus {
+    async fn register_route(&self, def: RouteDefinition) -> Result<(), CamelError> {
+        self.ensure_journal_recovered().await?;
+        let deps = self.deps();
+        handle_register_internal(&deps, def).await.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
+
+    use crate::application::internal_commands::InternalRuntimeCommandBus;
+    use crate::application::route_types::RouteDefinition;
+    use crate::domain::{RouteRuntimeAggregate, RuntimeEvent};
+    use crate::ports::RouteStatusProjection;
+
+    #[derive(Clone, Default)]
+    struct InMemoryTestRepo {
+        routes: Arc<Mutex<HashMap<String, RouteRuntimeAggregate>>>,
+    }
+
+    #[async_trait]
+    impl RouteRepositoryPort for InMemoryTestRepo {
+        async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, CamelError> {
+            Ok(self
+                .routes
+                .lock()
+                .expect("lock test routes")
+                .get(route_id)
+                .cloned())
+        }
+
+        async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), CamelError> {
+            self.routes
+                .lock()
+                .expect("lock test routes")
+                .insert(aggregate.route_id().to_string(), aggregate);
+            Ok(())
+        }
+
+        async fn save_if_version(
+            &self,
+            aggregate: RouteRuntimeAggregate,
+            expected_version: u64,
+        ) -> Result<(), CamelError> {
+            let route_id = aggregate.route_id().to_string();
+            let mut routes = self.routes.lock().expect("lock test routes");
+            let current = routes.get(&route_id).ok_or_else(|| {
+                CamelError::RouteError(format!(
+                    "optimistic lock conflict for route '{route_id}': route not found"
+                ))
+            })?;
+
+            if current.version() != expected_version {
+                return Err(CamelError::RouteError(format!(
+                    "optimistic lock conflict for route '{route_id}': expected version {expected_version}, actual {}",
+                    current.version()
+                )));
+            }
+
+            routes.insert(route_id, aggregate);
+            Ok(())
+        }
+
+        async fn delete(&self, route_id: &str) -> Result<(), CamelError> {
+            self.routes
+                .lock()
+                .expect("lock test routes")
+                .remove(route_id);
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct InMemoryTestProjectionStore {
+        statuses: Arc<Mutex<HashMap<String, RouteStatusProjection>>>,
+    }
+
+    #[async_trait]
+    impl ProjectionStorePort for InMemoryTestProjectionStore {
+        async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), CamelError> {
+            self.statuses
+                .lock()
+                .expect("lock test statuses")
+                .insert(status.route_id.clone(), status);
+            Ok(())
+        }
+
+        async fn get_status(
+            &self,
+            route_id: &str,
+        ) -> Result<Option<RouteStatusProjection>, CamelError> {
+            Ok(self
+                .statuses
+                .lock()
+                .expect("lock test statuses")
+                .get(route_id)
+                .cloned())
+        }
+
+        async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, CamelError> {
+            Ok(self
+                .statuses
+                .lock()
+                .expect("lock test statuses")
+                .values()
+                .cloned()
+                .collect())
+        }
+
+        async fn remove_status(&self, route_id: &str) -> Result<(), CamelError> {
+            self.statuses
+                .lock()
+                .expect("lock test statuses")
+                .remove(route_id);
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct InMemoryTestEventPublisher;
+
+    #[async_trait]
+    impl EventPublisherPort for InMemoryTestEventPublisher {
+        async fn publish(&self, _events: &[RuntimeEvent]) -> Result<(), CamelError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct InMemoryTestDedup {
+        seen: Arc<Mutex<HashSet<String>>>,
+    }
+
+    #[async_trait]
+    impl CommandDedupPort for InMemoryTestDedup {
+        async fn first_seen(&self, command_id: &str) -> Result<bool, CamelError> {
+            let mut seen = self.seen.lock().expect("lock dedup set");
+            Ok(seen.insert(command_id.to_string()))
+        }
+
+        async fn forget_seen(&self, command_id: &str) -> Result<(), CamelError> {
+            self.seen.lock().expect("lock dedup set").remove(command_id);
+            Ok(())
+        }
+    }
+
+    fn build_test_runtime_bus() -> RuntimeBus {
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher);
+        let dedup: Arc<dyn CommandDedupPort> = Arc::new(InMemoryTestDedup::default());
+        RuntimeBus::new(repo, projections, events, dedup)
+    }
+
+    #[tokio::test]
+    async fn runtime_bus_implements_internal_command_bus() {
+        let bus = build_test_runtime_bus();
+        let def = RouteDefinition::new("timer:test", vec![]).with_route_id("internal-route");
+        let result = InternalRuntimeCommandBus::register_route(&bus, def).await;
+        assert!(
+            result.is_ok(),
+            "internal bus registration failed: {:?}",
+            result
+        );
+
+        let status = bus
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: "internal-route".to_string(),
+            })
+            .await
+            .unwrap();
+        match status {
+            RuntimeQueryResult::RouteStatus { status, .. } => {
+                assert_eq!(status, "Registered");
+            }
+            _ => panic!("unexpected query result"),
+        }
     }
 }

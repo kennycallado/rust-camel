@@ -26,7 +26,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:info?showHeaders=true&showCorrelationId=true")
         .build()?;
 
-    ctx.add_route_definition(lazy_route)?;
+    ctx.add_route_definition(lazy_route).await?;
 
     // Start the context - only auto_startup routes will start
     ctx.start().await?;

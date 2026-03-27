@@ -33,7 +33,7 @@ async fn test_route() {
         .build()
         .unwrap();
     
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;

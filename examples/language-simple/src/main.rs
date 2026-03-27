@@ -95,7 +95,7 @@ async fn main() -> Result<(), CamelError> {
         .end_filter()
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
 
     println!("Simple Language example running.");

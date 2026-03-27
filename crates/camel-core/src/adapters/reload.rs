@@ -16,8 +16,8 @@
 use camel_api::CamelError;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::application::route_types::RouteDefinition;
 use crate::context::RuntimeExecutionHandle;
-use crate::route::RouteDefinition;
 #[cfg(test)]
 use crate::route_controller::RouteControllerInternal;
 
@@ -222,51 +222,30 @@ pub(crate) async fn execute_reload_actions(
                     }
                 };
 
-                let add_result = controller.add_route_definition(def).await;
-                match add_result {
-                    Ok(()) => {
-                        if let Err(e) = controller.bootstrap_register_route(route_id.clone()).await
-                        {
-                            let rollback_error =
-                                controller.remove_route_definition(&route_id).await.err();
-                            let error = match rollback_error {
-                                Some(rollback) => CamelError::RouteError(format!(
-                                    "runtime bootstrap failed: {e}; rollback failed: {rollback}"
-                                )),
-                                None => e,
-                            };
-                            errors.push(ReloadError {
-                                route_id,
-                                action: "Add (register)".into(),
-                                error,
-                            });
-                            continue;
-                        }
+                if let Err(e) = controller.add_route_definition(def).await {
+                    errors.push(ReloadError {
+                        route_id,
+                        action: "Add".into(),
+                        error: e,
+                    });
+                    continue;
+                }
 
-                        let start_result = controller
-                            .execute_runtime_command(camel_api::RuntimeCommand::StartRoute {
-                                route_id: route_id.clone(),
-                                command_id: next_reload_command_id("add-start", &route_id),
-                                causation_id: None,
-                            })
-                            .await;
-                        if let Err(e) = start_result {
-                            errors.push(ReloadError {
-                                route_id,
-                                action: "Add (start)".into(),
-                                error: e,
-                            });
-                        } else {
-                            tracing::info!(route_id = %route_id, "hot-reload: added and started route");
-                        }
-                    }
-                    Err(e) => {
-                        errors.push(ReloadError {
-                            route_id,
-                            action: "Add".into(),
-                            error: e,
-                        });
-                    }
+                let start_result = controller
+                    .execute_runtime_command(camel_api::RuntimeCommand::StartRoute {
+                        route_id: route_id.clone(),
+                        command_id: next_reload_command_id("add-start", &route_id),
+                        causation_id: None,
+                    })
+                    .await;
+                if let Err(e) = start_result {
+                    errors.push(ReloadError {
+                        route_id,
+                        action: "Add (start)".into(),
+                        error: e,
+                    });
+                } else {
+                    tracing::info!(route_id = %route_id, "hot-reload: added and started route");
                 }
             }
 
@@ -399,22 +378,6 @@ pub(crate) async fn execute_reload_actions(
                         route_id,
                         action: "Restart (add)".into(),
                         error: e,
-                    });
-                    continue;
-                }
-
-                if let Err(e) = controller.bootstrap_register_route(route_id.clone()).await {
-                    let rollback_error = controller.remove_route_definition(&route_id).await.err();
-                    let error = match rollback_error {
-                        Some(rollback) => CamelError::RouteError(format!(
-                            "runtime bootstrap failed: {e}; rollback failed: {rollback}"
-                        )),
-                        None => e,
-                    };
-                    errors.push(ReloadError {
-                        route_id,
-                        action: "Restart (register)".into(),
-                        error,
                     });
                     continue;
                 }
@@ -617,7 +580,7 @@ mod tests {
         // Add route through context so runtime aggregate/projection are seeded.
         let def =
             RouteDefinition::new("timer:tick?period=100", vec![]).with_route_id("exec-remove-test");
-        ctx.add_route_definition(def).unwrap();
+        ctx.add_route_definition(def).await.unwrap();
         assert_eq!(
             ctx.runtime_execution_handle()
                 .controller_route_count_for_test()
@@ -653,7 +616,7 @@ mod tests {
         // Add route through context so runtime aggregate/projection are seeded.
         let def =
             RouteDefinition::new("timer:tick?period=100", vec![]).with_route_id("exec-swap-test");
-        ctx.add_route_definition(def).unwrap();
+        ctx.add_route_definition(def).await.unwrap();
 
         // Swap with same from_uri (exercises compile + swap_pipeline code path)
         let new_def =
@@ -677,7 +640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_restart_action_preserves_stopped_runtime_state() {
+    async fn test_execute_restart_action_preserves_registered_lifecycle_state() {
         use crate::CamelContext;
         use camel_api::{RuntimeQuery, RuntimeQueryResult};
         use camel_component_timer::TimerComponent;
@@ -689,9 +652,9 @@ mod tests {
         // Add route through context so runtime aggregate/projection are seeded.
         let initial = RouteDefinition::new("timer:tick?period=100", vec![])
             .with_route_id("exec-restart-test");
-        ctx.add_route_definition(initial).unwrap();
+        ctx.add_route_definition(initial).await.unwrap();
 
-        // Route is seeded as Stopped by runtime bootstrap.
+        // Route is seeded as Registered by context registration.
         let before = ctx
             .runtime()
             .ask(RuntimeQuery::GetRouteStatus {
@@ -700,7 +663,7 @@ mod tests {
             .await
             .unwrap();
         match before {
-            RuntimeQueryResult::RouteStatus { status, .. } => assert_eq!(status, "Stopped"),
+            RuntimeQueryResult::RouteStatus { status, .. } => assert_eq!(status, "Registered"),
             other => panic!("unexpected query result: {other:?}"),
         }
 
@@ -714,7 +677,8 @@ mod tests {
                 .await;
         assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
 
-        // Restart should preserve prior lifecycle intent: if route was Stopped, keep it Stopped.
+        // Restart re-adds through RuntimeExecutionHandle::add_route_definition,
+        // which now goes through InternalRuntimeCommandBus and preserves Registered state.
         let after = ctx
             .runtime()
             .ask(RuntimeQuery::GetRouteStatus {
@@ -723,13 +687,13 @@ mod tests {
             .await
             .unwrap();
         match after {
-            RuntimeQueryResult::RouteStatus { status, .. } => assert_eq!(status, "Stopped"),
+            RuntimeQueryResult::RouteStatus { status, .. } => assert_eq!(status, "Registered"),
             other => panic!("unexpected query result: {other:?}"),
         }
 
         assert_eq!(
             ctx.runtime_route_status("exec-restart-test").await.unwrap(),
-            Some("Stopped".to_string())
+            Some("Registered".to_string())
         );
 
         ctx.stop().await.unwrap();

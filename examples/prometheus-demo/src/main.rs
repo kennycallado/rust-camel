@@ -45,7 +45,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:output?showBody=true")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
 
     info!("Routes configured. Prometheus server will start automatically on http://0.0.0.0:9090");
     info!("Metrics available at http://0.0.0.0:9090/metrics");

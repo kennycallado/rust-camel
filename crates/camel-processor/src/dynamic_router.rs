@@ -37,10 +37,10 @@ impl EndpointCache {
         if self.map.contains_key(&uri) {
             return;
         }
-        if self.map.len() >= capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.map.remove(&oldest);
-            }
+        if self.map.len() >= capacity
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.map.remove(&oldest);
         }
         self.order.push_back(uri.clone());
         self.map.insert(uri, endpoint);

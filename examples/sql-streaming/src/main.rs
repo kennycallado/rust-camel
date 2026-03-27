@@ -108,7 +108,7 @@ async fn main() -> Result<(), CamelError> {
             Ok(ex)
         })
         .build()?;
-    ctx.add_route_definition(select_route)?;
+    ctx.add_route_definition(select_route).await?;
 
     // -------------------------------------------------------------------------
     // Demo 2: StreamList route - lazy streaming
@@ -164,7 +164,7 @@ async fn main() -> Result<(), CamelError> {
             }
         })
         .build()?;
-    ctx.add_route_definition(stream_route)?;
+    ctx.add_route_definition(stream_route).await?;
 
     // -------------------------------------------------------------------------
     // Start and run

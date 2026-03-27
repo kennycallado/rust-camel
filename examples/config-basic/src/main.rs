@@ -27,7 +27,7 @@ async fn main() -> Result<(), CamelError> {
 
     let route_count = routes.len();
     for route in routes {
-        ctx.add_route_definition(route)?;
+        ctx.add_route_definition(route).await?;
     }
 
     println!(

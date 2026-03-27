@@ -105,9 +105,9 @@ async fn main() -> Result<(), CamelError> {
         )
         .build()?;
 
-    ctx.add_route_definition(route_slow)?;
-    ctx.add_route_definition(route_limited)?;
-    ctx.add_route_definition(route_sequential)?;
+    ctx.add_route_definition(route_slow).await?;
+    ctx.add_route_definition(route_limited).await?;
+    ctx.add_route_definition(route_sequential).await?;
 
     ctx.start().await?;
 

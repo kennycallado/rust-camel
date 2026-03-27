@@ -99,7 +99,7 @@ async fn main() -> Result<(), CamelError> {
     }
 
     for def in initial_defs {
-        ctx.add_route_definition(def)?;
+        ctx.add_route_definition(def).await?;
     }
 
     // ── 4. Start context ──────────────────────────────────────────────────────

@@ -92,7 +92,7 @@ async fn test_producer_select() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -157,7 +157,7 @@ async fn test_producer_insert() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -220,7 +220,7 @@ async fn test_producer_update() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -282,7 +282,7 @@ async fn test_producer_delete() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -343,7 +343,7 @@ async fn test_producer_select_one() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -400,7 +400,7 @@ async fn test_producer_batch() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -462,7 +462,7 @@ async fn test_producer_noop() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -529,7 +529,7 @@ async fn test_consumer_polling() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).unwrap();
+    ctx.add_route_definition(consumer_route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -596,7 +596,7 @@ async fn test_consumer_on_consume() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).unwrap();
+    ctx.add_route_definition(consumer_route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -645,7 +645,7 @@ async fn test_consumer_empty_result() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).unwrap();
+    ctx.add_route_definition(consumer_route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -706,7 +706,7 @@ async fn test_consumer_on_consume_failed() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).unwrap();
+    ctx.add_route_definition(consumer_route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -748,7 +748,7 @@ async fn test_consumer_empty_result_routed() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).unwrap();
+    ctx.add_route_definition(consumer_route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;

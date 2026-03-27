@@ -55,7 +55,7 @@ async fn test_redis_string_commands() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -97,7 +97,7 @@ async fn test_redis_list_commands() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -140,7 +140,7 @@ async fn test_redis_hash_commands() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -182,7 +182,7 @@ async fn test_redis_set_commands() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -224,7 +224,7 @@ async fn test_redis_pubsub_producer() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -266,7 +266,7 @@ async fn test_redis_consumer_queue_mode() {
     .build()
     .unwrap();
 
-    ctx.add_route_definition(consumer_route).unwrap();
+    ctx.add_route_definition(consumer_route).await.unwrap();
 
     let producer_route = RouteBuilder::from("timer:push?period=100&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("myqueue".into()))
@@ -276,7 +276,7 @@ async fn test_redis_consumer_queue_mode() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(producer_route).unwrap();
+    ctx.add_route_definition(producer_route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -322,7 +322,7 @@ async fn test_redis_consumer_pubsub_mode() {
     .build()
     .unwrap();
 
-    ctx.add_route_definition(consumer_route).unwrap();
+    ctx.add_route_definition(consumer_route).await.unwrap();
 
     let producer_route = RouteBuilder::from("timer:pub?period=2000&repeatCount=1")
         .set_header("CamelRedis.Channel", Value::String("testchannel".into()))
@@ -332,7 +332,7 @@ async fn test_redis_consumer_pubsub_mode() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(producer_route).unwrap();
+    ctx.add_route_definition(producer_route).await.unwrap();
     ctx.start().await.unwrap();
 
     let endpoint = mock.get_endpoint("received").unwrap();

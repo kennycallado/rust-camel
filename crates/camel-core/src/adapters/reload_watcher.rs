@@ -24,9 +24,9 @@ use tokio_util::sync::CancellationToken;
 
 use camel_api::CamelError;
 
+use crate::application::route_types::RouteDefinition;
 use crate::context::RuntimeExecutionHandle;
 use crate::reload::{compute_reload_actions_from_runtime_snapshot, execute_reload_actions};
-use crate::route::RouteDefinition;
 
 /// Watch directories and reload pipelines when YAML files change.
 ///

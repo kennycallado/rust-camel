@@ -12,7 +12,7 @@ use camel_api::{
 };
 use camel_api::{CamelError, RuntimeCommand, RuntimeCommandResult};
 
-use crate::domain::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
+use crate::application::route_types::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use crate::domain::{
     RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent,
 };
@@ -104,6 +104,76 @@ async fn handle_register(
         }
 
         deps.events.publish(&events).await?;
+    }
+
+    Ok(RuntimeCommandResult::RouteRegistered { route_id })
+}
+
+pub(crate) async fn handle_register_internal(
+    deps: &CommandDeps,
+    def: RouteDefinition,
+) -> Result<RuntimeCommandResult, CamelError> {
+    let route_id = def.route_id().to_string();
+
+    if deps.repo.load(&route_id).await?.is_some() {
+        return Err(CamelError::RouteError(format!(
+            "route '{route_id}' is already registered"
+        )));
+    }
+
+    if let Some(execution) = &deps.execution {
+        execution.register_route(def).await?;
+    }
+
+    let aggregate = RouteRuntimeAggregate::new(route_id.clone());
+    let events = vec![RuntimeEvent::RouteRegistered {
+        route_id: route_id.clone(),
+    }];
+
+    let persist_result: Result<(), CamelError> = if let Some(uow) = &deps.uow {
+        uow.persist_upsert(
+            aggregate.clone(),
+            None,
+            project_from_aggregate(&aggregate),
+            &events,
+        )
+        .await
+    } else {
+        match deps.repo.save(aggregate.clone()).await {
+            Ok(()) => {
+                if let Some(primary_error) = upsert_projection_with_reconciliation(
+                    &*deps.projections,
+                    project_from_aggregate(&aggregate),
+                )
+                .await?
+                {
+                    deps.events.publish(&events).await?;
+                    Err(CamelError::RouteError(format!(
+                        "post-effect reconciliation recovered after runtime persistence error: {primary_error}"
+                    )))
+                } else {
+                    deps.events.publish(&events).await
+                }
+            }
+            Err(err) => Err(err),
+        }
+    };
+
+    if let Err(persist_err) = persist_result {
+        if let Some(execution) = &deps.execution
+            && let Err(rollback_err) = execution.remove_route(&route_id).await
+        {
+            tracing::error!(
+                route_id = %route_id,
+                persist_error = %persist_err,
+                rollback_error = %rollback_err,
+                "INCONSISTENCY: route installed but state persist failed and rollback also failed — manual reconciliation required"
+            );
+            return Err(CamelError::RouteError(format!(
+                "route '{route_id}' registration inconsistency: persist failed ({persist_err}) and rollback failed ({rollback_err}) — manual reconciliation required"
+            )));
+        }
+        return Err(persist_err);
     }
 
     Ok(RuntimeCommandResult::RouteRegistered { route_id })
@@ -447,5 +517,291 @@ fn canonical_step_to_builder_step(
             })
         }
         camel_api::runtime::CanonicalStepSpec::Stop => Ok(BuilderStep::Stop),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+
+    #[derive(Clone, Default)]
+    struct InMemoryTestRepo {
+        routes: Arc<Mutex<HashMap<String, RouteRuntimeAggregate>>>,
+    }
+
+    #[async_trait]
+    impl RouteRepositoryPort for InMemoryTestRepo {
+        async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, CamelError> {
+            Ok(self
+                .routes
+                .lock()
+                .expect("lock test routes")
+                .get(route_id)
+                .cloned())
+        }
+
+        async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), CamelError> {
+            self.routes
+                .lock()
+                .expect("lock test routes")
+                .insert(aggregate.route_id().to_string(), aggregate);
+            Ok(())
+        }
+
+        async fn save_if_version(
+            &self,
+            aggregate: RouteRuntimeAggregate,
+            expected_version: u64,
+        ) -> Result<(), CamelError> {
+            let route_id = aggregate.route_id().to_string();
+            let mut routes = self.routes.lock().expect("lock test routes");
+            let current = routes.get(&route_id).ok_or_else(|| {
+                CamelError::RouteError(format!(
+                    "optimistic lock conflict for route '{route_id}': route not found"
+                ))
+            })?;
+
+            if current.version() != expected_version {
+                return Err(CamelError::RouteError(format!(
+                    "optimistic lock conflict for route '{route_id}': expected version {expected_version}, actual {}",
+                    current.version()
+                )));
+            }
+
+            routes.insert(route_id, aggregate);
+            Ok(())
+        }
+
+        async fn delete(&self, route_id: &str) -> Result<(), CamelError> {
+            self.routes
+                .lock()
+                .expect("lock test routes")
+                .remove(route_id);
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct InMemoryTestProjectionStore {
+        statuses: Arc<Mutex<HashMap<String, RouteStatusProjection>>>,
+    }
+
+    #[async_trait]
+    impl ProjectionStorePort for InMemoryTestProjectionStore {
+        async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), CamelError> {
+            self.statuses
+                .lock()
+                .expect("lock test statuses")
+                .insert(status.route_id.clone(), status);
+            Ok(())
+        }
+
+        async fn get_status(
+            &self,
+            route_id: &str,
+        ) -> Result<Option<RouteStatusProjection>, CamelError> {
+            Ok(self
+                .statuses
+                .lock()
+                .expect("lock test statuses")
+                .get(route_id)
+                .cloned())
+        }
+
+        async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, CamelError> {
+            Ok(self
+                .statuses
+                .lock()
+                .expect("lock test statuses")
+                .values()
+                .cloned()
+                .collect())
+        }
+
+        async fn remove_status(&self, route_id: &str) -> Result<(), CamelError> {
+            self.statuses
+                .lock()
+                .expect("lock test statuses")
+                .remove(route_id);
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct InMemoryTestEventPublisher {
+        events: Arc<Mutex<Vec<RuntimeEvent>>>,
+    }
+
+    #[async_trait]
+    impl EventPublisherPort for InMemoryTestEventPublisher {
+        async fn publish(&self, events: &[RuntimeEvent]) -> Result<(), CamelError> {
+            self.events
+                .lock()
+                .expect("lock test events")
+                .extend(events.iter().cloned());
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TrackingExecutionPort {
+        registered: Arc<Mutex<Vec<String>>>,
+        removed: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TrackingExecutionPort {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn remove_called(&self, route_id: &str) -> bool {
+            self.removed
+                .lock()
+                .expect("lock removed routes")
+                .iter()
+                .any(|id| id == route_id)
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeExecutionPort for TrackingExecutionPort {
+        async fn register_route(&self, definition: RouteDefinition) -> Result<(), CamelError> {
+            self.registered
+                .lock()
+                .expect("lock registered routes")
+                .push(definition.route_id().to_string());
+            Ok(())
+        }
+
+        async fn start_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn stop_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn suspend_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn resume_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn reload_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn remove_route(&self, route_id: &str) -> Result<(), CamelError> {
+            self.removed
+                .lock()
+                .expect("lock removed routes")
+                .push(route_id.to_string());
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FailingSaveRepository {
+        inner: InMemoryTestRepo,
+    }
+
+    #[async_trait]
+    impl RouteRepositoryPort for FailingSaveRepository {
+        async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, CamelError> {
+            self.inner.load(route_id).await
+        }
+
+        async fn save(&self, _aggregate: RouteRuntimeAggregate) -> Result<(), CamelError> {
+            Err(CamelError::RouteError(
+                "simulated repository save failure".to_string(),
+            ))
+        }
+
+        async fn save_if_version(
+            &self,
+            aggregate: RouteRuntimeAggregate,
+            expected_version: u64,
+        ) -> Result<(), CamelError> {
+            self.inner
+                .save_if_version(aggregate, expected_version)
+                .await
+        }
+
+        async fn delete(&self, route_id: &str) -> Result<(), CamelError> {
+            self.inner.delete(route_id).await
+        }
+    }
+
+    fn build_test_deps_no_execution() -> CommandDeps {
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher::default());
+        CommandDeps {
+            repo,
+            projections,
+            events,
+            uow: None,
+            execution: None,
+        }
+    }
+
+    fn build_test_deps_with_failing_repo(execution: Arc<TrackingExecutionPort>) -> CommandDeps {
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(FailingSaveRepository::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher::default());
+        let execution: Arc<dyn RuntimeExecutionPort> = execution;
+        CommandDeps {
+            repo,
+            projections,
+            events,
+            uow: None,
+            execution: Some(execution),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_register_internal_persists_registered_state() {
+        let deps = build_test_deps_no_execution();
+        let def = RouteDefinition::new("timer:test", vec![]).with_route_id("route-a");
+        let result = handle_register_internal(&deps, def).await;
+        assert!(result.is_ok());
+
+        let aggregate = deps.repo.load("route-a").await.unwrap().unwrap();
+        assert_eq!(aggregate.state(), &RouteRuntimeState::Registered);
+    }
+
+    #[tokio::test]
+    async fn handle_register_internal_compensates_on_persist_failure() {
+        let execution = Arc::new(TrackingExecutionPort::new());
+        let deps = build_test_deps_with_failing_repo(execution.clone());
+        let def = RouteDefinition::new("timer:test", vec![]).with_route_id("route-b");
+        let result = handle_register_internal(&deps, def).await;
+        assert!(result.is_err());
+        assert!(execution.remove_called("route-b"));
+    }
+
+    #[tokio::test]
+    async fn handle_register_internal_rejects_duplicate_route_id() {
+        let deps = build_test_deps_no_execution();
+        let def1 = RouteDefinition::new("timer:test", vec![]).with_route_id("route-c");
+        let def2 = RouteDefinition::new("timer:other", vec![]).with_route_id("route-c");
+        handle_register_internal(&deps, def1).await.unwrap();
+
+        let result = handle_register_internal(&deps, def2).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("already registered")
+        );
     }
 }

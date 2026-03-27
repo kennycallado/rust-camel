@@ -34,7 +34,7 @@ async fn test_timer_to_mock() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -85,7 +85,7 @@ async fn test_timer_filter_mock() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -145,7 +145,7 @@ async fn test_filter_matching_exchanges_reach_inner_mock() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -187,7 +187,7 @@ async fn test_filter_non_matching_continue_outer_pipeline() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -219,7 +219,7 @@ async fn test_timer_set_header_mock() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -265,7 +265,7 @@ async fn test_timer_to_log() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Just verify it doesn't panic — the log producer writes to tracing
@@ -298,8 +298,8 @@ async fn test_multiple_routes() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route_a).unwrap();
-    ctx.add_route_definition(route_b).unwrap();
+    ctx.add_route_definition(route_a).await.unwrap();
+    ctx.add_route_definition(route_b).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -362,7 +362,7 @@ async fn test_dlc_receives_failed_exchange() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
@@ -413,7 +413,7 @@ async fn test_retry_recovers_before_dlc() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
     ctx.stop().await.unwrap();
@@ -449,7 +449,7 @@ async fn test_on_exception_handled_by_specific_endpoint() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
@@ -485,7 +485,7 @@ async fn test_global_error_handler_fallback() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
@@ -516,7 +516,7 @@ async fn test_per_route_overrides_global() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
@@ -552,7 +552,7 @@ async fn test_direct_error_bubbles_to_caller() {
         .process_fn(failing_step("subroute failure"))
         .build()
         .unwrap();
-    ctx.add_route_definition(sub_route).unwrap();
+    ctx.add_route_definition(sub_route).await.unwrap();
 
     // Calling route: timer → direct:sub → DLC catches the bubble.
     let main_route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
@@ -561,7 +561,7 @@ async fn test_direct_error_bubbles_to_caller() {
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:caller-dlc"))
         .build()
         .unwrap();
-    ctx.add_route_definition(main_route).unwrap();
+    ctx.add_route_definition(main_route).await.unwrap();
 
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -595,7 +595,7 @@ async fn test_direct_error_contained_in_subroute() {
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:sub-dlc"))
         .build()
         .unwrap();
-    ctx.add_route_definition(sub_route).unwrap();
+    ctx.add_route_definition(sub_route).await.unwrap();
 
     // Calling route continues after subroute (error was absorbed).
     let main_route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
@@ -604,7 +604,7 @@ async fn test_direct_error_contained_in_subroute() {
         .to("mock:caller-received")
         .build()
         .unwrap();
-    ctx.add_route_definition(main_route).unwrap();
+    ctx.add_route_definition(main_route).await.unwrap();
 
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -634,7 +634,7 @@ async fn test_no_error_handler_logs_and_continues() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
@@ -680,7 +680,7 @@ async fn test_circuit_breaker_with_error_handler() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Give enough time for all 5 timer ticks to fire (5 × 50ms = 250ms).
@@ -744,7 +744,7 @@ async fn test_split_with_timer_and_mock() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -806,7 +806,7 @@ async fn test_split_with_error_handler() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -855,7 +855,7 @@ async fn test_file_consumer_to_mock() {
     .build()
     .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -895,7 +895,7 @@ async fn test_timer_to_file_producer() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -931,7 +931,7 @@ async fn test_file_to_file_pipeline() {
     .build()
     .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1052,7 +1052,7 @@ async fn test_http_get_e2e() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
@@ -1117,7 +1117,7 @@ async fn test_http_post_with_body_e2e() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
@@ -1183,7 +1183,7 @@ async fn test_http_response_headers_mapped_e2e() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
@@ -1243,7 +1243,7 @@ async fn test_http_error_handling_e2e() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
@@ -1313,7 +1313,7 @@ async fn test_aggregator_collect_all() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     ctx.stop().await.unwrap();
@@ -1390,7 +1390,7 @@ async fn test_aggregator_custom_strategy() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     ctx.stop().await.unwrap();
@@ -1439,7 +1439,7 @@ async fn test_aggregator_scatter_gather() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
@@ -1482,7 +1482,7 @@ async fn test_route_set_body_static() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1524,7 +1524,7 @@ async fn test_route_set_body_fn() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1563,7 +1563,7 @@ async fn test_route_set_header_fn() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1618,7 +1618,7 @@ async fn test_http_query_params_forwarded_e2e() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     ctx.stop().await.unwrap();
@@ -1681,7 +1681,7 @@ async fn test_stop_inside_filter_prevents_outer_pipeline() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
     ctx.stop().await.unwrap();
@@ -1723,7 +1723,7 @@ async fn test_multicast_sends_to_multiple_endpoints() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -1767,7 +1767,7 @@ async fn test_multicast_metadata_properties() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -1839,7 +1839,7 @@ async fn test_multicast_parallel_collect_all() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -1885,7 +1885,7 @@ async fn test_http_concurrent_pipeline() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Give server time to start
@@ -1951,7 +1951,7 @@ async fn test_http_sequential_override() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2030,7 +2030,7 @@ async fn test_http_concurrent_with_semaphore_limit() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2095,7 +2095,7 @@ async fn test_http_concurrent_with_circuit_breaker() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Give server time to start
@@ -2181,7 +2181,7 @@ async fn test_http_concurrent_shutdown_drains_inflight() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Give server time to start
@@ -2250,7 +2250,7 @@ async fn test_http_concurrent_error_propagation() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Give server time to start
@@ -2341,7 +2341,7 @@ async fn test_choice_when_routes_matching_exchange() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     ctx.stop().await.unwrap();
@@ -2375,7 +2375,7 @@ async fn test_choice_otherwise_fires_when_no_when_matches() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
@@ -2411,7 +2411,7 @@ async fn test_choice_no_match_no_otherwise_continues() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     ctx.stop().await.unwrap();
@@ -2447,7 +2447,7 @@ async fn test_choice_short_circuits_first_match() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     ctx.stop().await.unwrap();
@@ -2488,7 +2488,7 @@ async fn test_xml_body_pipeline() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Give the route a moment to start
@@ -2560,7 +2560,7 @@ async fn test_mock_new_assertion_api() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     let ep = mock.get_endpoint("assert-api-result").unwrap();

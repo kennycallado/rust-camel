@@ -34,7 +34,7 @@ async fn test_script_error_prevents_downstream_delivery() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -79,7 +79,7 @@ async fn test_script_sets_header() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Give the route a moment to start
@@ -125,7 +125,7 @@ async fn test_script_reads_and_transforms_body() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -170,7 +170,7 @@ async fn test_script_sets_multiple_headers() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -220,7 +220,7 @@ async fn test_script_reads_existing_header() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -267,7 +267,7 @@ async fn test_script_sets_property() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -312,7 +312,7 @@ async fn test_script_unregistered_language_fails_at_route_add() {
         .unwrap();
 
     // Should fail because "rhai" language is not registered
-    let result = ctx.add_route_definition(route);
+    let result = ctx.add_route_definition(route).await;
     assert!(
         result.is_err(),
         "Expected error when language not registered"
@@ -346,7 +346,7 @@ async fn test_script_empty_body_handled() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;

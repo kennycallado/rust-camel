@@ -72,7 +72,7 @@ async fn test_watcher_swaps_pipeline_on_file_change() {
     let pattern = format!("{}/*.yaml", dir.path().display());
     let defs = camel_dsl::discover_routes(std::slice::from_ref(&pattern)).unwrap();
     for def in defs {
-        ctx.add_route_definition(def).unwrap();
+        ctx.add_route_definition(def).await.unwrap();
     }
     ctx.start().await.unwrap();
 
@@ -147,7 +147,7 @@ async fn test_watcher_removes_route_on_file_deletion() {
     let pattern = format!("{}/*.yaml", dir.path().display());
     let defs = camel_dsl::discover_routes(std::slice::from_ref(&pattern)).unwrap();
     for def in defs {
-        ctx.add_route_definition(def).unwrap();
+        ctx.add_route_definition(def).await.unwrap();
     }
     ctx.start().await.unwrap();
 
@@ -221,11 +221,11 @@ async fn test_watcher_removes_route_on_file_deletion() {
 }
 
 #[tokio::test]
-async fn test_watcher_restart_preserves_stopped_route_state() {
+async fn test_watcher_restart_preserves_non_running_route_state() {
     let dir = tempdir().unwrap();
     let route_file = dir.path().join("route.yaml");
 
-    // Initial route is stopped by startup policy.
+    // Initial route is not auto-started by startup policy.
     write_route_yaml_custom(
         &route_file,
         "stopped-restart-test",
@@ -242,7 +242,7 @@ async fn test_watcher_restart_preserves_stopped_route_state() {
     let pattern = format!("{}/*.yaml", dir.path().display());
     let defs = camel_dsl::discover_routes(std::slice::from_ref(&pattern)).unwrap();
     for def in defs {
-        ctx.add_route_definition(def).unwrap();
+        ctx.add_route_definition(def).await.unwrap();
     }
     ctx.start().await.unwrap();
 
@@ -250,7 +250,7 @@ async fn test_watcher_restart_preserves_stopped_route_state() {
         ctx.runtime_route_status("stopped-restart-test")
             .await
             .unwrap(),
-        Some("Stopped".to_string())
+        Some("Registered".to_string())
     );
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -282,7 +282,7 @@ async fn test_watcher_restart_preserves_stopped_route_state() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Change from_uri to force Restart action; route must stay stopped.
+    // Change from_uri to force Restart action; route must stay non-running.
     write_route_yaml_custom(
         &route_file,
         "stopped-restart-test",
@@ -297,7 +297,7 @@ async fn test_watcher_restart_preserves_stopped_route_state() {
         ctx.runtime_route_status("stopped-restart-test")
             .await
             .unwrap(),
-        Some("Stopped".to_string())
+        Some("Registered".to_string())
     );
 
     let v2_count = if let Some(ep) = mock.get_endpoint("stopped-v2") {
@@ -307,7 +307,7 @@ async fn test_watcher_restart_preserves_stopped_route_state() {
     };
     assert_eq!(
         v2_count, 0,
-        "restart of a stopped route must preserve stopped state"
+        "restart of a non-running route must preserve non-running state"
     );
 
     shutdown.cancel();

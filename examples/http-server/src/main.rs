@@ -33,12 +33,12 @@ async fn main() -> Result<(), CamelError> {
     let update_user_route = update_user_route(Arc::clone(&storage), Arc::clone(&request_count))?;
     let delete_user_route = delete_user_route(Arc::clone(&storage), Arc::clone(&request_count))?;
 
-    ctx.add_route_definition(health_route)?;
-    ctx.add_route_definition(list_users_route)?;
-    ctx.add_route_definition(create_user_route)?;
-    ctx.add_route_definition(get_user_route)?;
-    ctx.add_route_definition(update_user_route)?;
-    ctx.add_route_definition(delete_user_route)?;
+    ctx.add_route_definition(health_route).await?;
+    ctx.add_route_definition(list_users_route).await?;
+    ctx.add_route_definition(create_user_route).await?;
+    ctx.add_route_definition(get_user_route).await?;
+    ctx.add_route_definition(update_user_route).await?;
+    ctx.add_route_definition(delete_user_route).await?;
 
     ctx.start().await?;
 

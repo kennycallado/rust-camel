@@ -72,8 +72,8 @@ async fn main() -> Result<(), CamelError> {
         )
         .build()?;
 
-    ctx.add_route_definition(failing_service)?;
-    ctx.add_route_definition(main_route)?;
+    ctx.add_route_definition(failing_service).await?;
+    ctx.add_route_definition(main_route).await?;
     ctx.start().await?;
 
     println!("Circuit Breaker example running.");

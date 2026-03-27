@@ -184,14 +184,14 @@ async fn main() -> Result<(), CamelError> {
         .build()?;
 
     // --- Register all routes ---
-    ctx.add_route_definition(subroute_no_handler)?;
-    ctx.add_route_definition(subroute_with_handler)?;
-    ctx.add_route_definition(route1)?;
-    ctx.add_route_definition(route2)?;
-    ctx.add_route_definition(route3)?;
-    ctx.add_route_definition(route4)?;
-    ctx.add_route_definition(route5)?;
-    ctx.add_route_definition(route6)?;
+    ctx.add_route_definition(subroute_no_handler).await?;
+    ctx.add_route_definition(subroute_with_handler).await?;
+    ctx.add_route_definition(route1).await?;
+    ctx.add_route_definition(route2).await?;
+    ctx.add_route_definition(route3).await?;
+    ctx.add_route_definition(route4).await?;
+    ctx.add_route_definition(route5).await?;
+    ctx.add_route_definition(route6).await?;
 
     ctx.start().await?;
 

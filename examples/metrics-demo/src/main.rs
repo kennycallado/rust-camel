@@ -99,7 +99,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:output?showBody=true&showCorrelationId=true")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
 
     println!("Metrics demo running.");

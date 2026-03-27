@@ -20,7 +20,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:info?showHeaders=true&showCorrelationId=true") // Correlation ID
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
 
     println!("Hello World example running. Press Ctrl+C to stop.");

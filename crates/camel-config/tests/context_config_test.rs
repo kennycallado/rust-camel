@@ -59,6 +59,7 @@ routes:
 
     for route in routes {
         ctx.add_route_definition(route)
+            .await
             .expect("Failed to add route");
     }
 

@@ -84,7 +84,7 @@ async fn main() -> Result<(), CamelError> {
 
     for route in routes {
         let route_id = route.route_id().to_string();
-        ctx.add_route_definition(route)?;
+        ctx.add_route_definition(route).await?;
         println!("    ✓ Added: {}", route_id);
     }
 

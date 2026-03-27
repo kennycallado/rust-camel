@@ -98,7 +98,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:info?showHeaders=true")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
 
     println!("Press Ctrl+C to stop.");
@@ -503,7 +503,7 @@ ctx.register_component(LogComponent::new());
 let routes = discover_routes(&config.routes)
     .map_err(|e| CamelError::Config(e.to_string()))?;
 for route in routes {
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
 }
 
 ctx.start().await?;

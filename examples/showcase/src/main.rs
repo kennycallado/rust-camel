@@ -860,46 +860,46 @@ async fn main() -> Result<(), CamelError> {
     println!("Registering routes...");
 
     // Category 1: EIP Basics
-    ctx.add_route_definition(route1)?;
-    ctx.add_route_definition(route2)?;
-    ctx.add_route_definition(route3)?;
-    ctx.add_route_definition(route4)?;
-    ctx.add_route_definition(route5)?;
+    ctx.add_route_definition(route1).await?;
+    ctx.add_route_definition(route2).await?;
+    ctx.add_route_definition(route3).await?;
+    ctx.add_route_definition(route4).await?;
+    ctx.add_route_definition(route5).await?;
 
     // Category 2: Routing
-    ctx.add_route_definition(route6)?;
-    ctx.add_route_definition(route6b)?;
-    ctx.add_route_definition(route7)?;
-    ctx.add_route_definition(route8)?;
-    ctx.add_route_definition(route8a)?;
-    ctx.add_route_definition(route8b)?;
+    ctx.add_route_definition(route6).await?;
+    ctx.add_route_definition(route6b).await?;
+    ctx.add_route_definition(route7).await?;
+    ctx.add_route_definition(route8).await?;
+    ctx.add_route_definition(route8a).await?;
+    ctx.add_route_definition(route8b).await?;
 
     // Category 3: Resilience
-    ctx.add_route_definition(route9)?;
-    ctx.add_route_definition(route10)?;
-    ctx.add_route_definition(route11)?;
-    ctx.add_route_definition(route12_supervision)?;
+    ctx.add_route_definition(route9).await?;
+    ctx.add_route_definition(route10).await?;
+    ctx.add_route_definition(route11).await?;
+    ctx.add_route_definition(route12_supervision).await?;
 
     // Category 4: Components
-    ctx.add_route_definition(route12)?;
-    ctx.add_route_definition(route13)?;
-    ctx.add_route_definition(route13b)?;
-    ctx.add_route_definition(route14)?;
-    ctx.add_route_definition(route15)?;
-    ctx.add_route_definition(route16)?;
-    ctx.add_route_definition(route17_target)?;
-    ctx.add_route_definition(route17_suspend)?;
-    ctx.add_route_definition(route17_resume)?;
+    ctx.add_route_definition(route12).await?;
+    ctx.add_route_definition(route13).await?;
+    ctx.add_route_definition(route13b).await?;
+    ctx.add_route_definition(route14).await?;
+    ctx.add_route_definition(route15).await?;
+    ctx.add_route_definition(route16).await?;
+    ctx.add_route_definition(route17_target).await?;
+    ctx.add_route_definition(route17_suspend).await?;
+    ctx.add_route_definition(route17_resume).await?;
 
     // Category 5: Advanced
-    ctx.add_route_definition(route18)?;
-    ctx.add_route_definition(route19)?;
-    ctx.add_route_definition(route19a)?;
-    ctx.add_route_definition(route19b)?;
-    ctx.add_route_definition(route20)?;
-    ctx.add_route_definition(route21)?;
-    ctx.add_route_definition(route21b)?;
-    ctx.add_route_definition(route22)?;
+    ctx.add_route_definition(route18).await?;
+    ctx.add_route_definition(route19).await?;
+    ctx.add_route_definition(route19a).await?;
+    ctx.add_route_definition(route19b).await?;
+    ctx.add_route_definition(route20).await?;
+    ctx.add_route_definition(route21).await?;
+    ctx.add_route_definition(route21b).await?;
+    ctx.add_route_definition(route22).await?;
 
     // Start the context
     ctx.start().await?;

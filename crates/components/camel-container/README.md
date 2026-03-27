@@ -279,7 +279,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:info?showHeaders=true")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
 
     tokio::signal::ctrl_c().await.ok();

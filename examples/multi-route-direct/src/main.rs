@@ -44,8 +44,8 @@ async fn main() -> Result<(), CamelError> {
         )
         .build()?;
 
-    ctx.add_route_definition(route_a)?;
-    ctx.add_route_definition(route_b)?;
+    ctx.add_route_definition(route_a).await?;
+    ctx.add_route_definition(route_b).await?;
     ctx.start().await?;
 
     println!("Multi-route direct example running.");

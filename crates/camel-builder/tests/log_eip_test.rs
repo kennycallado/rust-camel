@@ -36,7 +36,7 @@ async fn test_log_eip_with_timer() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -84,8 +84,8 @@ async fn test_log_eip_with_direct() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(trigger_route).unwrap();
-    ctx.add_route_definition(process_route).unwrap();
+    ctx.add_route_definition(trigger_route).await.unwrap();
+    ctx.add_route_definition(process_route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -143,7 +143,7 @@ async fn test_log_eip_in_filter_scope() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -191,7 +191,7 @@ async fn test_log_eip_in_split_scope() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -230,7 +230,7 @@ async fn test_log_eip_multiple_levels() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;

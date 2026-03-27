@@ -21,7 +21,7 @@ async fn test_tracer_enabled_spans_emitted() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -47,7 +47,7 @@ async fn test_tracer_disabled_zero_overhead() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;

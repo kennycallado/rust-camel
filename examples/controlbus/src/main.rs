@@ -54,9 +54,9 @@ async fn main() -> Result<(), CamelError> {
         .to("log:control?showBody=true")
         .build()?;
 
-    ctx.add_route_definition(target_route)?;
-    ctx.add_route_definition(suspend_route)?;
-    ctx.add_route_definition(resume_route)?;
+    ctx.add_route_definition(target_route).await?;
+    ctx.add_route_definition(suspend_route).await?;
+    ctx.add_route_definition(resume_route).await?;
     ctx.start().await?;
 
     println!("ControlBus example running.");

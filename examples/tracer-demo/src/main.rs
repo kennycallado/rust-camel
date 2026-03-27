@@ -85,7 +85,7 @@ async fn run_section_1() -> Result<(), Box<dyn std::error::Error>> {
         .to("log:info?showBody=true")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
     ctx.stop().await?;
@@ -115,7 +115,7 @@ async fn run_section_2() -> Result<(), Box<dyn std::error::Error>> {
         .to("log:info?showHeaders=true&showBody=true")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
     ctx.stop().await?;
@@ -146,7 +146,7 @@ async fn run_section_3() -> Result<(), Box<dyn std::error::Error>> {
         .to("log:info?showHeaders=true&showBody=true")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
     ctx.stop().await?;
@@ -179,7 +179,7 @@ async fn run_section_4() -> Result<(), Box<dyn std::error::Error>> {
         .to("log:info?showBody=true")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
     ctx.stop().await?;

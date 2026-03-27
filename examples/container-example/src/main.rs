@@ -72,9 +72,9 @@ async fn main() -> Result<(), CamelError> {
         .to("log:info?showBody=true")
         .build()?;
 
-    ctx.add_route_definition(list_route)?;
-    ctx.add_route_definition(lifecycle_route)?;
-    ctx.add_route_definition(events_route)?;
+    ctx.add_route_definition(list_route).await?;
+    ctx.add_route_definition(lifecycle_route).await?;
+    ctx.add_route_definition(events_route).await?;
 
     println!();
     println!("Container example started!");

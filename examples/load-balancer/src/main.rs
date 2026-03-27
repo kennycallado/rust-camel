@@ -41,7 +41,7 @@ async fn main() -> Result<(), CamelError> {
         .end_load_balance()
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
 
     println!("Load Balancer example running.");

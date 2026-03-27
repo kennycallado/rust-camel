@@ -270,6 +270,7 @@ async fn supervision_restart_updates_runtime_projection_to_started() {
     ctx.add_route_definition(
         RouteDefinition::new("crash-once-hold:test", vec![]).with_route_id("supervised-r1"),
     )
+    .await
     .unwrap();
     ctx.start().await.unwrap();
 
@@ -318,6 +319,7 @@ async fn supervision_respects_runtime_stopped_state_and_skips_restart() {
     ctx.add_route_definition(
         RouteDefinition::new("crash-once-hold:test", vec![]).with_route_id("supervised-stop-r1"),
     )
+    .await
     .unwrap();
     ctx.start().await.unwrap();
 

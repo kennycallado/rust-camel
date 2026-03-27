@@ -143,16 +143,19 @@ fn application_layer_depends_on_ports_and_domain_only() {
 }
 
 #[test]
-fn ports_layer_has_no_application_or_adapter_dependencies() {
+fn ports_layer_only_uses_approved_application_imports() {
     assert_no_forbidden_imports(
         "ports",
         &[
             "crate::adapters",
-            "crate::application",
             "crate::context",
             "crate::reload",
             "crate::route_controller",
             "crate::supervising_route_controller",
+            "crate::application::commands",
+            "crate::application::runtime_bus",
+            "crate::application::queries",
+            "crate::application::internal_commands",
         ],
     );
 }
@@ -176,8 +179,12 @@ fn domain_and_ports_do_not_import_runtime_contract_types_from_camel_api_directly
     );
     assert_file_contains(
         &runtime_ports,
-        &["use crate::domain::{RouteDefinition, RouteRuntimeAggregate, RuntimeEvent};"],
+        &[
+            "use crate::application::route_types::RouteDefinition",
+            "use crate::domain::{RouteRuntimeAggregate, RuntimeEvent}",
+        ],
     );
+    assert_file_not_contains(&runtime_ports, &["use crate::domain::{RouteDefinition"]);
 }
 
 #[test]
@@ -299,4 +306,49 @@ fn runtime_execution_adapter_uses_semantic_executor_naming() {
     assert_file_contains(&adapters_mod, &["RuntimeExecutionAdapter"]);
     assert_file_contains(&context, &["RuntimeExecutionAdapter::new("]);
     assert_file_not_contains(&context, &["RouteControllerExecutionAdapter::new("]);
+}
+
+#[test]
+fn domain_has_no_tower_or_framework_types() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/domain");
+    let mut files = Vec::new();
+    collect_rust_files(&root, &mut files);
+
+    let forbidden = &[
+        "tower::",
+        "BoxProcessor",
+        "compose_pipeline",
+        "TracingProcessor",
+        "use camel_component::",
+    ];
+
+    for file in &files {
+        let content = std::fs::read_to_string(file).expect("failed to read source file");
+        for pattern in forbidden {
+            assert!(
+                !content.contains(pattern),
+                "domain boundary violation in {}: found forbidden pattern `{}`",
+                file.display(),
+                pattern
+            );
+        }
+    }
+}
+
+#[test]
+fn ports_imports_route_definition_from_application_not_adapters() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let ports_file = root.join("ports/runtime_ports.rs");
+
+    assert_file_contains(
+        &ports_file,
+        &["use crate::application::route_types::RouteDefinition"],
+    );
+
+    assert_file_not_contains(&ports_file, &["crate::adapters::"]);
+}
+
+#[test]
+fn domain_does_not_import_application_or_adapters() {
+    assert_no_forbidden_imports("domain", &["crate::application::", "crate::adapters::"]);
 }

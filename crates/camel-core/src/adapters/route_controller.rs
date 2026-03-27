@@ -26,12 +26,12 @@ use camel_processor::error_handler::ErrorHandlerLayer;
 use camel_processor::script_mutator::ScriptMutator;
 use camel_processor::{ChoiceService, WhenClause};
 
+use crate::adapters::route_compiler::{compose_pipeline, compose_traced_pipeline};
+use crate::application::route_types::{
+    BuilderStep, LanguageExpressionDef, RouteDefinition, RouteDefinitionInfo, ValueSourceDef,
+};
 use crate::config::{DetailLevel, TracerConfig};
 use crate::registry::Registry;
-use crate::route::{
-    BuilderStep, LanguageExpressionDef, RouteDefinition, RouteDefinitionInfo, ValueSourceDef,
-    compose_pipeline, compose_traced_pipeline,
-};
 use arc_swap::ArcSwap;
 use camel_bean::BeanRegistry;
 

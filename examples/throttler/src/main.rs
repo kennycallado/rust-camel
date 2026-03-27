@@ -35,7 +35,7 @@ async fn main() -> Result<(), CamelError> {
         .end_throttle()
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
 
     println!("Throttler example running.");

@@ -195,7 +195,7 @@ async fn run(
         Ok(defs) => {
             for def in defs {
                 let id = def.route_id().to_string();
-                if let Err(e) = ctx.add_route_definition(def) {
+                if let Err(e) = ctx.add_route_definition(def).await {
                     tracing::error!("Failed to add route '{}': {}", id, e);
                 }
             }

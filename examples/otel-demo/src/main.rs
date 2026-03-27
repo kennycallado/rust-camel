@@ -109,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to("log:response?showBody=true")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
 
     println!("Starting CamelContext with OpenTelemetry integration");
     ctx.start().await?;

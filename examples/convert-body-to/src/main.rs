@@ -51,7 +51,7 @@ async fn main() -> Result<(), CamelError> {
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
 
-    ctx.add_route_definition(route_text_to_json)?;
+    ctx.add_route_definition(route_text_to_json).await?;
 
     // =========================================================================
     // Route 2: Json → Bytes
@@ -79,7 +79,7 @@ async fn main() -> Result<(), CamelError> {
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
 
-    ctx.add_route_definition(route_json_to_bytes)?;
+    ctx.add_route_definition(route_json_to_bytes).await?;
 
     // =========================================================================
     // Route 3: Bytes → Text
@@ -104,7 +104,7 @@ async fn main() -> Result<(), CamelError> {
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
 
-    ctx.add_route_definition(route_bytes_to_text)?;
+    ctx.add_route_definition(route_bytes_to_text).await?;
 
     // =========================================================================
     // Route 4: Error Path - Empty → Text (fails gracefully)
@@ -136,7 +136,7 @@ async fn main() -> Result<(), CamelError> {
         )
         .build()?;
 
-    ctx.add_route_definition(route_error_path)?;
+    ctx.add_route_definition(route_error_path).await?;
 
     // Start the Camel context
     ctx.start().await?;

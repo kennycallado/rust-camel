@@ -18,10 +18,10 @@ use camel_language_api::Language;
 use camel_language_api::LanguageError;
 
 use crate::adapters::RuntimeExecutionAdapter;
+use crate::application::route_types::RouteDefinition;
 use crate::application::runtime_bus::RuntimeBus;
 use crate::config::TracerConfig;
 use crate::registry::Registry;
-use crate::route::RouteDefinition;
 use crate::route_controller::{
     DefaultRouteController, RouteControllerInternal, SharedLanguageRegistry,
 };
@@ -62,13 +62,8 @@ impl RuntimeExecutionHandle {
         &self,
         definition: RouteDefinition,
     ) -> Result<(), CamelError> {
-        let mut controller = self.controller.lock().await;
-        controller.add_route(definition)
-    }
-
-    pub(crate) async fn remove_route_definition(&self, route_id: &str) -> Result<(), CamelError> {
-        let mut controller = self.controller.lock().await;
-        controller.remove_route(route_id)
+        use crate::application::internal_commands::InternalRuntimeCommandBus;
+        self.runtime.register_route(definition).await
     }
 
     pub(crate) async fn compile_route_definition(
@@ -86,13 +81,6 @@ impl RuntimeExecutionHandle {
     ) -> Result<(), CamelError> {
         let controller = self.controller.lock().await;
         controller.swap_pipeline(route_id, pipeline)
-    }
-
-    pub(crate) async fn bootstrap_register_route(
-        &self,
-        route_id: String,
-    ) -> Result<(), CamelError> {
-        self.runtime.bootstrap_register_route(route_id).await
     }
 
     pub(crate) async fn execute_runtime_command(
@@ -470,51 +458,17 @@ impl CamelContext {
     /// Add a route definition to this context.
     ///
     /// The route must have an ID. Steps are resolved immediately using registered components.
-    pub fn add_route_definition(&mut self, definition: RouteDefinition) -> Result<(), CamelError> {
-        let route_id = definition.route_id().to_string();
+    pub async fn add_route_definition(
+        &mut self,
+        definition: RouteDefinition,
+    ) -> Result<(), CamelError> {
+        use crate::application::internal_commands::InternalRuntimeCommandBus;
         info!(
             from = definition.from_uri(),
-            route_id = %route_id,
+            route_id = %definition.route_id(),
             "Adding route definition"
         );
-
-        self.route_controller
-            .try_lock()
-            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
-            .add_route(definition)?;
-
-        if let Err(register_err) = self.bootstrap_runtime_registration(route_id.clone()) {
-            let rollback_result = self
-                .route_controller
-                .try_lock()
-                .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access")
-                .remove_route(&route_id);
-            if let Err(rollback_err) = rollback_result {
-                return Err(CamelError::RouteError(format!(
-                    "failed runtime bootstrap registration for route '{route_id}': {register_err}; rollback failed: {rollback_err}"
-                )));
-            }
-            return Err(register_err);
-        }
-
-        Ok(())
-    }
-
-    fn bootstrap_runtime_registration(&self, route_id: String) -> Result<(), CamelError> {
-        let runtime = Arc::clone(&self.runtime);
-        std::thread::spawn(move || -> Result<(), CamelError> {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|err| {
-                    CamelError::RouteError(format!(
-                        "failed to create runtime bootstrap worker: {err}"
-                    ))
-                })?;
-            rt.block_on(runtime.bootstrap_register_route(route_id))
-        })
-        .join()
-        .map_err(|_| CamelError::RouteError("runtime bootstrap worker panicked".to_string()))?
+        self.runtime.register_route(definition).await
     }
 
     fn next_context_command_id(op: &str, route_id: &str) -> String {
@@ -753,8 +707,8 @@ impl Default for CamelContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::route_types::{BuilderStep, LanguageExpressionDef, RouteDefinition};
     use crate::domain::{RouteRuntimeAggregate, RouteRuntimeState};
-    use crate::route::{BuilderStep, LanguageExpressionDef, RouteDefinition};
     use async_trait::async_trait;
     use camel_api::CamelError;
     use camel_api::{
@@ -929,8 +883,8 @@ mod tests {
         assert!(result.is_ok(), "first registration should succeed");
     }
 
-    #[test]
-    fn test_add_route_definition_uses_runtime_registered_language() {
+    #[tokio::test]
+    async fn test_add_route_definition_uses_runtime_registered_language() {
         use camel_language_api::{Expression, LanguageError, Predicate};
 
         struct DummyExpression;
@@ -983,15 +937,15 @@ mod tests {
         )
         .with_route_id("runtime-lang-route");
 
-        let result = ctx.add_route_definition(definition);
+        let result = ctx.add_route_definition(definition).await;
         assert!(
             result.is_ok(),
             "route should resolve runtime language: {result:?}"
         );
     }
 
-    #[test]
-    fn test_add_route_definition_fails_for_unregistered_runtime_language() {
+    #[tokio::test]
+    async fn test_add_route_definition_fails_for_unregistered_runtime_language() {
         let mut ctx = CamelContext::new();
         let definition = RouteDefinition::new(
             "timer:tick",
@@ -1004,7 +958,7 @@ mod tests {
         )
         .with_route_id("missing-runtime-lang-route");
 
-        let result = ctx.add_route_definition(definition);
+        let result = ctx.add_route_definition(definition).await;
         assert!(
             result.is_err(),
             "route should fail when language is missing"
@@ -1286,8 +1240,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn add_route_definition_injects_runtime_into_producer_context() {
+    #[tokio::test]
+    async fn add_route_definition_produces_registered_state() {
+        let mut ctx = CamelContext::new();
+        let definition =
+            RouteDefinition::new("direct:test", vec![]).with_route_id("async-test-route");
+
+        ctx.add_route_definition(definition).await.unwrap();
+
+        let status = ctx
+            .runtime()
+            .ask(RuntimeQuery::GetRouteStatus {
+                route_id: "async-test-route".to_string(),
+            })
+            .await
+            .unwrap();
+
+        match status {
+            RuntimeQueryResult::RouteStatus { status, .. } => {
+                assert_eq!(
+                    status, "Registered",
+                    "expected Registered state after add_route_definition"
+                );
+            }
+            _ => panic!("unexpected query result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn add_route_definition_injects_runtime_into_producer_context() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         struct RuntimeAwareEndpoint {
@@ -1346,7 +1327,7 @@ mod tests {
         )
         .with_route_id("runtime-aware-route");
 
-        let result = ctx.add_route_definition(definition);
+        let result = ctx.add_route_definition(definition).await;
         assert!(
             result.is_ok(),
             "route should resolve producer with runtime context: {result:?}"
@@ -1363,16 +1344,16 @@ mod tests {
         ctx.register_component(HoldComponent);
 
         let definition = RouteDefinition::new("hold:test", vec![]).with_route_id("ctx-runtime-r1");
-        ctx.add_route_definition(definition).unwrap();
+        ctx.add_route_definition(definition).await.unwrap();
 
         let aggregate = ctx.runtime.repo().load("ctx-runtime-r1").await.unwrap();
         assert!(
-            matches!(aggregate, Some(agg) if matches!(agg.state(), RouteRuntimeState::Stopped)),
-            "route registration should seed aggregate as Stopped"
+            matches!(aggregate, Some(agg) if matches!(agg.state(), RouteRuntimeState::Registered)),
+            "route registration should seed aggregate as Registered"
         );
 
         let status = ctx.runtime_route_status("ctx-runtime-r1").await.unwrap();
-        assert_eq!(status.as_deref(), Some("Stopped"));
+        assert_eq!(status.as_deref(), Some("Registered"));
     }
 
     #[tokio::test]
@@ -1387,7 +1368,7 @@ mod tests {
             .unwrap();
 
         let definition = RouteDefinition::new("hold:test", vec![]).with_route_id("ctx-runtime-dup");
-        let result = ctx.add_route_definition(definition);
+        let result = ctx.add_route_definition(definition).await;
         assert!(result.is_err(), "duplicate runtime registration must fail");
 
         assert_eq!(
@@ -1410,20 +1391,20 @@ mod tests {
             .with_route_id("ctx-lifecycle-lazy")
             .with_auto_startup(false);
 
-        ctx.add_route_definition(autostart).unwrap();
-        ctx.add_route_definition(lazy).unwrap();
+        ctx.add_route_definition(autostart).await.unwrap();
+        ctx.add_route_definition(lazy).await.unwrap();
 
         assert_eq!(
             ctx.runtime_route_status("ctx-lifecycle-auto")
                 .await
                 .unwrap(),
-            Some("Stopped".to_string())
+            Some("Registered".to_string())
         );
         assert_eq!(
             ctx.runtime_route_status("ctx-lifecycle-lazy")
                 .await
                 .unwrap(),
-            Some("Stopped".to_string())
+            Some("Registered".to_string())
         );
 
         ctx.start().await.unwrap();
@@ -1438,7 +1419,7 @@ mod tests {
             ctx.runtime_route_status("ctx-lifecycle-lazy")
                 .await
                 .unwrap(),
-            Some("Stopped".to_string())
+            Some("Registered".to_string())
         );
 
         ctx.stop().await.unwrap();
@@ -1453,7 +1434,7 @@ mod tests {
             ctx.runtime_route_status("ctx-lifecycle-lazy")
                 .await
                 .unwrap(),
-            Some("Stopped".to_string())
+            Some("Registered".to_string())
         );
     }
 }

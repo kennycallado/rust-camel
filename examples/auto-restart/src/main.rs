@@ -205,8 +205,8 @@ async fn main() -> Result<(), CamelError> {
         .build()?;
 
     // Add routes
-    ctx.add_route_definition(timer_route)?;
-    ctx.add_route_definition(crash_route)?;
+    ctx.add_route_definition(timer_route).await?;
+    ctx.add_route_definition(crash_route).await?;
 
     println!("Starting routes with supervision...");
     println!("Watch for crash and restart messages:");

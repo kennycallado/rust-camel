@@ -68,7 +68,11 @@ pub mod registry;
 pub mod tracer;
 
 pub mod route {
-    pub use crate::domain::route::*;
+    // Domain-only type
+    pub use crate::domain::route::RouteSpec;
+    // Application types (Tower-dependent, re-exported for public API)
+    pub use crate::adapters::route_compiler::{compose_pipeline, compose_traced_pipeline};
+    pub use crate::application::route_types::*;
 }
 
 pub mod route_controller {

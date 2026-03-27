@@ -37,7 +37,7 @@ async fn main() -> Result<(), CamelError> {
         .to("log:health?showBody=false")
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
 
     info!("Starting CamelContext with health monitoring...\n");
 

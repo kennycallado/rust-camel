@@ -114,7 +114,7 @@ async fn test_kafka_producer_sends_without_error() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -166,8 +166,8 @@ async fn test_kafka_consumer_receives_message() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).unwrap();
-    ctx.add_route_definition(producer_route).unwrap();
+    ctx.add_route_definition(consumer_route).await.unwrap();
+    ctx.add_route_definition(producer_route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Give consumer time to assign partitions (5s delay before producer fires),
@@ -213,8 +213,8 @@ async fn test_kafka_consumer_sets_headers() {
             .build()
             .unwrap();
 
-    ctx.add_route_definition(consumer_route).unwrap();
-    ctx.add_route_definition(producer_route).unwrap();
+    ctx.add_route_definition(consumer_route).await.unwrap();
+    ctx.add_route_definition(producer_route).await.unwrap();
     ctx.start().await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_secs(15)).await;

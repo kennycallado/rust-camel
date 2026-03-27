@@ -32,3 +32,9 @@ impl ProducerContext {
         self.runtime.as_ref()
     }
 }
+
+impl Default for ProducerContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}

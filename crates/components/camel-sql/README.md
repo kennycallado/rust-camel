@@ -130,7 +130,7 @@ ctx.register_component(SqlComponent::new());
 let route = RouteBuilder::from("direct:get-users")
     .to("sql:SELECT * FROM users?db_url=postgres://localhost/mydb")
     .build()?;
-ctx.add_route_definition(route)?;
+ctx.add_route_definition(route).await?;
 ```
 
 ### Parameterized Query
@@ -278,8 +278,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .build()?;
 
-    ctx.add_route_definition(producer)?;
-    ctx.add_route_definition(consumer)?;
+    ctx.add_route_definition(producer).await?;
+    ctx.add_route_definition(consumer).await?;
     ctx.start().await?;
 
     Ok(())

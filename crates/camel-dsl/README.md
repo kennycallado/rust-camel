@@ -59,7 +59,7 @@ ctx.register_component(LogComponent::new());
 
 let routes = load_from_file("routes.yaml")?;
 for route in routes {
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
 }
 
 ctx.start().await?;

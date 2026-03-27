@@ -71,8 +71,8 @@ async fn main() -> Result<(), CamelError> {
     .to("log:info?showHeaders=true")
     .build()?;
 
-    ctx.add_route_definition(producer_route)?;
-    ctx.add_route_definition(consumer_route)?;
+    ctx.add_route_definition(producer_route).await?;
+    ctx.add_route_definition(consumer_route).await?;
 
     println!("Starting Kafka example... Press Ctrl+C to stop.");
 

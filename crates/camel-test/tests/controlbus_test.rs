@@ -21,6 +21,8 @@ async fn route_status(ctx: &CamelContext, route_id: &str) -> Option<RouteStatus>
     {
         Some(status) => match status.as_str() {
             "Stopped" => Some(RouteStatus::Stopped),
+            // Registered = pre-start state (route added but never started), equivalent to Stopped for assertions
+            "Registered" => Some(RouteStatus::Stopped),
             "Starting" => Some(RouteStatus::Starting),
             "Started" => Some(RouteStatus::Started),
             "Stopping" => Some(RouteStatus::Stopping),
@@ -84,7 +86,7 @@ async fn test_autostartup_false_route_does_not_start() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
 
     // Start the context - should NOT start the lazy route
     ctx.start().await.unwrap();
@@ -143,8 +145,8 @@ async fn test_controlbus_starts_route() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(lazy_route).unwrap();
-    ctx.add_route_definition(trigger_route).unwrap();
+    ctx.add_route_definition(lazy_route).await.unwrap();
+    ctx.add_route_definition(trigger_route).await.unwrap();
 
     // Before starting, lazy route should be Stopped
     let status_before = route_status(&ctx, "lazy-route").await;
@@ -217,7 +219,7 @@ async fn test_route_controller_starts_lazy_route() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(lazy_route).unwrap();
+    ctx.add_route_definition(lazy_route).await.unwrap();
 
     // Start context - lazy route should NOT start
     ctx.start().await.unwrap();
@@ -283,8 +285,8 @@ async fn test_controlbus_stops_route() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(auto_route).unwrap();
-    ctx.add_route_definition(trigger_route).unwrap();
+    ctx.add_route_definition(auto_route).await.unwrap();
+    ctx.add_route_definition(trigger_route).await.unwrap();
 
     ctx.start().await.unwrap();
 
@@ -348,9 +350,9 @@ async fn test_startup_order_respected() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route1).unwrap();
-    ctx.add_route_definition(route2).unwrap();
-    ctx.add_route_definition(route3).unwrap();
+    ctx.add_route_definition(route1).await.unwrap();
+    ctx.add_route_definition(route2).await.unwrap();
+    ctx.add_route_definition(route3).await.unwrap();
 
     ctx.start().await.unwrap();
 
@@ -410,8 +412,8 @@ async fn test_mixed_autostartup_routes() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(auto_route).unwrap();
-    ctx.add_route_definition(lazy_route).unwrap();
+    ctx.add_route_definition(auto_route).await.unwrap();
+    ctx.add_route_definition(lazy_route).await.unwrap();
 
     ctx.start().await.unwrap();
 
@@ -467,7 +469,7 @@ async fn test_suspend_changes_status_to_suspended() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Route should be started
@@ -505,7 +507,7 @@ async fn test_resume_changes_status_to_started() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Suspend the route
@@ -566,7 +568,7 @@ async fn test_suspend_drains_inflight_messages() {
     .build()
     .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Let some messages be sent (but not all)
@@ -635,7 +637,7 @@ async fn test_suspend_blocks_new_intake_until_resume() {
     .build()
     .unwrap();
 
-    ctx.add_route_definition(route).unwrap();
+    ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
     // Let messages flow before suspend

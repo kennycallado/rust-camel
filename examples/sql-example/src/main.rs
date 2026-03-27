@@ -104,7 +104,7 @@ async fn main() -> Result<(), CamelError> {
         .log("Inserted user from timer", LogLevel::Info)
         .build()?;
 
-    ctx.add_route_definition(producer_route)?;
+    ctx.add_route_definition(producer_route).await?;
 
     // -------------------------------------------------------------------------
     // Step 4: Consumer route - Poll for unprocessed users, mark as processed
@@ -121,7 +121,7 @@ async fn main() -> Result<(), CamelError> {
         .log("Consumed user row", LogLevel::Info)
         .build()?;
 
-    ctx.add_route_definition(consumer_route)?;
+    ctx.add_route_definition(consumer_route).await?;
 
     // -------------------------------------------------------------------------
     // Step 5: Start the context and run for a few seconds

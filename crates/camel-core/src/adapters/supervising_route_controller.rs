@@ -18,8 +18,8 @@ use camel_api::{
     RuntimeQueryResult, SupervisionConfig,
 };
 
+use crate::application::route_types::RouteDefinition;
 use crate::registry::Registry;
-use crate::route::RouteDefinition;
 use crate::route_controller::{
     CrashNotification, DefaultRouteController, RouteControllerInternal, SharedLanguageRegistry,
 };
@@ -185,7 +185,7 @@ impl RouteControllerInternal for SupervisingRouteController {
 
     fn compile_route_definition(
         &self,
-        def: crate::route::RouteDefinition,
+        def: RouteDefinition,
     ) -> Result<camel_api::BoxProcessor, camel_api::CamelError> {
         self.inner.compile_route_definition(def)
     }
@@ -412,6 +412,7 @@ async fn supervision_loop(
 mod tests {
     use super::*;
     use crate::adapters::{InMemoryRuntimeStore, RuntimeExecutionAdapter};
+    use crate::application::internal_commands::InternalRuntimeCommandBus;
     use crate::application::runtime_bus::RuntimeBus;
     use async_trait::async_trait;
     use camel_api::RuntimeQueryBus;
@@ -539,13 +540,9 @@ mod tests {
         let runtime = attach_runtime_bus(&controller).await;
 
         // Add a route
-        let def = crate::route::RouteDefinition::new("crash-then-block:test", vec![])
+        let runtime_def = crate::route::RouteDefinition::new("crash-then-block:test", vec![])
             .with_route_id("crash-route");
-        controller.try_lock().unwrap().add_route(def).unwrap();
-        runtime
-            .bootstrap_register_route("crash-route".to_string())
-            .await
-            .unwrap();
+        runtime.register_route(runtime_def).await.unwrap();
 
         // Start all routes
         controller.lock().await.start_all_routes().await.unwrap();
@@ -637,13 +634,9 @@ mod tests {
             .set_self_ref(StdArc::clone(&controller) as StdArc<Mutex<dyn RouteController>>);
         let runtime = attach_runtime_bus(&controller).await;
 
-        let def = crate::route::RouteDefinition::new("always-crash:test", vec![])
+        let runtime_def = crate::route::RouteDefinition::new("always-crash:test", vec![])
             .with_route_id("always-crash-route");
-        controller.try_lock().unwrap().add_route(def).unwrap();
-        runtime
-            .bootstrap_register_route("always-crash-route".to_string())
-            .await
-            .unwrap();
+        runtime.register_route(runtime_def).await.unwrap();
 
         controller.lock().await.start_all_routes().await.unwrap();
 
@@ -771,13 +764,9 @@ mod tests {
             .set_self_ref(StdArc::clone(&controller) as StdArc<Mutex<dyn RouteController>>);
         let runtime = attach_runtime_bus(&controller).await;
 
-        let def = crate::route::RouteDefinition::new("always-crash-count:test", vec![])
+        let runtime_def = crate::route::RouteDefinition::new("always-crash-count:test", vec![])
             .with_route_id("give-up-route");
-        controller.try_lock().unwrap().add_route(def).unwrap();
-        runtime
-            .bootstrap_register_route("give-up-route".to_string())
-            .await
-            .unwrap();
+        runtime.register_route(runtime_def).await.unwrap();
 
         controller.lock().await.start_all_routes().await.unwrap();
 
@@ -922,13 +911,9 @@ mod tests {
             .set_self_ref(StdArc::clone(&controller) as StdArc<Mutex<dyn RouteController>>);
         let runtime = attach_runtime_bus(&controller).await;
 
-        let def = crate::route::RouteDefinition::new("crash-odd-block-even:test", vec![])
+        let runtime_def = crate::route::RouteDefinition::new("crash-odd-block-even:test", vec![])
             .with_route_id("reset-attempt-route");
-        controller.try_lock().unwrap().add_route(def).unwrap();
-        runtime
-            .bootstrap_register_route("reset-attempt-route".to_string())
-            .await
-            .unwrap();
+        runtime.register_route(runtime_def).await.unwrap();
 
         controller.lock().await.start_all_routes().await.unwrap();
 

@@ -5,8 +5,8 @@ use tokio::sync::Mutex;
 
 use camel_api::CamelError;
 
+use crate::application::route_types::RouteDefinition;
 use crate::ports::RuntimeExecutionPort;
-use crate::route::RouteDefinition;
 use crate::route_controller::RouteControllerInternal;
 
 /// Runtime side-effect adapter backed by the technical route controller.

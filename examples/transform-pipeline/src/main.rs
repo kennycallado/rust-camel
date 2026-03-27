@@ -38,7 +38,7 @@ async fn main() -> Result<(), CamelError> {
         )
         .build()?;
 
-    ctx.add_route_definition(route)?;
+    ctx.add_route_definition(route).await?;
     ctx.start().await?;
 
     println!("Transform pipeline running. Press Ctrl+C to stop.");

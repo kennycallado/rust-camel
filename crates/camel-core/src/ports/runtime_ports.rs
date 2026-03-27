@@ -2,7 +2,8 @@ use async_trait::async_trait;
 
 use crate::CamelError;
 
-use crate::domain::{RouteDefinition, RouteRuntimeAggregate, RuntimeEvent};
+use crate::application::route_types::RouteDefinition;
+use crate::domain::{RouteRuntimeAggregate, RuntimeEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteStatusProjection {
