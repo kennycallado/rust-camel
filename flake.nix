@@ -2,7 +2,7 @@
   description = "rust-camel";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
@@ -13,7 +13,6 @@
 
   outputs =
     {
-      self,
       nixpkgs,
       crane,
       flake-utils,
