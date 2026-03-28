@@ -38,8 +38,8 @@ tracing-opentelemetry = { workspace = true, optional = true }
 [dev-dependencies]
 tokio.workspace = true
 tempfile = "3"
-camel-component-timer = { path = "../components/camel-timer" }
-camel-component-log = { path = "../components/camel-log" }
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
 
 [features]
 otel = ["dep:tracing-opentelemetry"]

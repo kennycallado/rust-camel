@@ -6,8 +6,8 @@ set -e
 
 DRY_RUN=""
 if [ "$1" == "--dry-run" ]; then
-  DRY_RUN="--dry-run"
-  echo "🔍 DRY RUN MODE - No actual publishing"
+	DRY_RUN="--dry-run"
+	echo "🔍 DRY RUN MODE - No actual publishing"
 fi
 
 echo "📦 Publishing rust-camel crates to crates.io"
@@ -19,70 +19,79 @@ WORKSPACE_VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
 
 # Function to publish a crate
 publish_crate() {
-  local crate=$1
-  local path=$2
-  echo ""
-  echo "📦 Publishing $crate..."
-  cd "$path"
+	local crate=$1
+	local path=$2
+	echo ""
+	echo "📦 Publishing $crate..."
+	cd "$path"
 
-  # Get current version (check if workspace version)
-  local version_line=$(grep '^version' Cargo.toml | head -1)
-  local current_version
+	# Get current version (check if workspace version)
+	local version_line=$(grep '^version' Cargo.toml | head -1)
+	local current_version
 
-  if echo "$version_line" | grep -q "workspace"; then
-    current_version=$WORKSPACE_VERSION
-  else
-    current_version=$(echo "$version_line" | cut -d'"' -f2)
-  fi
+	if echo "$version_line" | grep -q "workspace"; then
+		current_version=$WORKSPACE_VERSION
+	else
+		current_version=$(echo "$version_line" | cut -d'"' -f2)
+	fi
 
-  # Check via crates.io API (authoritative, no cache issues)
-  local http_status=$(curl -s -o /dev/null -w "%{http_code}" \
-    "https://crates.io/api/v1/crates/${crate}/${current_version}")
+	# Check via crates.io API (authoritative, no cache issues)
+	local http_status=$(curl -s -o /dev/null -w "%{http_code}" \
+		"https://crates.io/api/v1/crates/${crate}/${current_version}")
 
-  if [ "$http_status" = "200" ]; then
-    echo "⚠️  $crate@$current_version already exists on crates.io, skipping..."
-    cd "$WORKSPACE_ROOT" >/dev/null
-    return 0
-  fi
+	if [ "$http_status" = "200" ]; then
+		echo "⚠️  $crate@$current_version already exists on crates.io, skipping..."
+		cd "$WORKSPACE_ROOT" >/dev/null
+		return 0
+	fi
 
-  echo "📦 Publishing $crate@$current_version..."
+	echo "📦 Publishing $crate@$current_version..."
 
-  # Capture output; treat "already exists" as success (idempotent)
-  local publish_output
-  publish_output=$(cargo publish $DRY_RUN 2>&1) || {
-    if echo "$publish_output" | grep -q "already exists"; then
-      echo "⚠️  $crate@$current_version already exists (race), skipping..."
-      cd "$WORKSPACE_ROOT" >/dev/null
-      return 0
-    fi
-    echo "$publish_output"
-    cd "$WORKSPACE_ROOT" >/dev/null
-    return 1
-  }
-  echo "$publish_output"
+	# Skip verification in dry-run mode (dependencies don't exist on crates.io yet)
+	if [ -n "$DRY_RUN" ]; then
+		echo "⚠️  Dry-run: skipping cargo publish verification (would fail due to deps not on crates.io)"
+		cd "$WORKSPACE_ROOT" >/dev/null
+		return 0
+	fi
 
-  cd "$WORKSPACE_ROOT" >/dev/null
-  if [ -z "$DRY_RUN" ]; then
-    echo "⏳ Waiting 30s for crates.io to index..."
-    sleep 30
-  fi
+	# Capture output; treat "already exists" as success (idempotent)
+	local publish_output
+	publish_output=$(cargo publish $DRY_RUN --allow-dirty 2>&1) || {
+		if echo "$publish_output" | grep -q "already exists"; then
+			echo "⚠️  $crate@$current_version already exists (race), skipping..."
+			cd "$WORKSPACE_ROOT" >/dev/null
+			return 0
+		fi
+		echo "$publish_output"
+		cd "$WORKSPACE_ROOT" >/dev/null
+		return 1
+	}
+	echo "$publish_output"
+
+	cd "$WORKSPACE_ROOT" >/dev/null
+	if [ -z "$DRY_RUN" ]; then
+		echo "⏳ Waiting 30s for crates.io to index..."
+		sleep 30
+	fi
 }
 
 # Core crates (in dependency order)
 publish_crate "camel-api" "crates/camel-api"
 publish_crate "camel-util" "crates/camel-util"
 publish_crate "camel-support" "crates/camel-support"
+publish_crate "camel-endpoint-macros" "crates/camel-endpoint-macros"
 publish_crate "camel-endpoint" "crates/camel-endpoint"
+
+# Language crates (needed by camel-processor and camel-core)
+publish_crate "camel-language-api" "crates/languages/camel-language-api"
+publish_crate "camel-language-simple" "crates/languages/camel-language-simple"
+publish_crate "camel-language-rhai" "crates/languages/camel-language-rhai"
+
 publish_crate "camel-component" "crates/camel-component"
 publish_crate "camel-processor" "crates/camel-processor"
 
 # Container component (depends on camel-api, camel-component, camel-endpoint)
 publish_crate "camel-component-container" "crates/components/camel-container"
-
-# Language crates (needed by camel-core)
-publish_crate "camel-language-api" "crates/languages/camel-language-api"
-publish_crate "camel-language-simple" "crates/languages/camel-language-simple"
-publish_crate "camel-language-rhai" "crates/languages/camel-language-rhai"
 
 # Bean crates (needed by camel-core)
 publish_crate "camel-bean-macros" "crates/camel-bean-macros"
@@ -104,13 +113,10 @@ publish_crate "camel-builder" "crates/camel-builder"
 # OTel (must come before camel-config which depends on it)
 publish_crate "camel-otel" "crates/services/camel-otel"
 
-# camel-config depends on camel-otel
-publish_crate "camel-config" "crates/camel-config"
-
 # Prometheus depends on camel-builder + camel-component-timer
 publish_crate "camel-prometheus" "crates/services/camel-prometheus"
 
-# Remaining component crates
+# Component crates (needed by camel-config which has optional deps on most of them)
 publish_crate "camel-component-log" "crates/components/camel-log"
 publish_crate "camel-component-file" "crates/components/camel-file"
 publish_crate "camel-component-http" "crates/components/camel-http"
@@ -118,6 +124,9 @@ publish_crate "camel-component-redis" "crates/components/camel-redis"
 publish_crate "camel-component-kafka" "crates/components/camel-kafka"
 publish_crate "camel-component-sql" "crates/components/camel-sql"
 publish_crate "camel-component-controlbus" "crates/components/camel-controlbus"
+
+# camel-config depends on camel-otel, camel-prometheus and many component crates
+publish_crate "camel-config" "crates/camel-config"
 
 # Test utilities
 publish_crate "camel-test" "crates/camel-test"
