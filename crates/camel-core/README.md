@@ -1,31 +1,28 @@
 # camel-core
 
-> Core routing engine with DDD/CQRS architecture for rust-camel
+> Core routing engine with DDD/CQRS/Hexagonal architecture for rust-camel
 
 ## Overview
 
-`camel-core` is the heart of the rust-camel framework. It implements a **Domain-Driven Design** architecture with **CQRS** (Command Query Responsibility Segregation) and **Hexagonal Architecture** (Ports and Adapters).
+`camel-core` is the heart of the rust-camel framework. It implements a **Domain-Driven Design** architecture with **CQRS** and **Hexagonal Architecture** organized as vertical bounded contexts.
 
-### Architecture Layers
+### Bounded Contexts
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Domain Layer                            │
-│   RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent        │
-│   (Pure business logic, no external dependencies)               │
-├─────────────────────────────────────────────────────────────────┤
-│                      Application Layer                          │
-│   RuntimeBus, Command Handlers, Query Handlers                  │
-│   (Orchestrates domain operations via ports)                    │
-├─────────────────────────────────────────────────────────────────┤
-│                         Ports Layer                             │
-│   RouteRepositoryPort, ProjectionStorePort, RuntimeExecutionPort│
-│   (Interfaces, no implementations)                              │
-├─────────────────────────────────────────────────────────────────┤
-│                       Adapters Layer                            │
-│   InMemory*, FileRuntimeEventJournal, RuntimeExecutionAdapter   │
-│   (Concrete implementations)                                    │
-└─────────────────────────────────────────────────────────────────┘
+crates/camel-core/src/
+  lifecycle/          ← Route lifecycle management
+    domain/           │  RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent
+    application/      │  RuntimeBus, Command/Query handlers, RouteDefinition
+    ports/            │  RouteRepositoryPort, ProjectionStorePort, …
+    adapters/         │  InMemory*, FileRuntimeEventJournal, DefaultRouteController
+  hot_reload/         ← Live route updates
+    domain/           │  ReloadAction
+    application/      │  compute_reload_actions, execute_reload_actions
+    adapters/         │  ReloadWatcher
+  shared/             ← Cross-cutting concerns
+    observability/    │  TracerConfig, TracingProcessor (OTel adapter)
+    components/       │  Registry (component lookup by URI scheme)
+  context.rs          ← CamelContext (composition root)
 ```
 
 ## Features
@@ -44,7 +41,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-core = "0.4"
+camel-core = "0.5"
 ```
 
 ## Usage
@@ -213,6 +210,8 @@ Tests verify:
 - Domain layer has no infrastructure dependencies
 - Application layer depends only on ports and domain
 - Ports layer has no adapter dependencies
+- Bounded contexts do not bypass each other's layers
+- `shared/` cross-cutting types are only accessed via canonical paths
 - Runtime side effects flow through `RuntimeExecutionPort`
 
 ## Documentation

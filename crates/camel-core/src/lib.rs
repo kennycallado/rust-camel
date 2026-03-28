@@ -58,58 +58,55 @@
 //! //! Configuration types for the Tracer EIP live in `camel-core` rather than `camel-config`
 //! //! to avoid a circular dependency — `camel-config` depends on `camel-core`.
 //!
-pub mod adapters;
-pub mod application;
-pub mod config;
 pub mod context;
-pub mod domain;
-pub mod ports;
-pub mod registry;
-pub mod tracer;
+pub(crate) mod hot_reload;
+pub mod lifecycle;
+pub(crate) mod shared;
 
 pub mod route {
-    // Domain-only type
-    pub use crate::domain::route::RouteSpec;
-    // Application types (Tower-dependent, re-exported for public API)
-    pub use crate::adapters::route_compiler::{compose_pipeline, compose_traced_pipeline};
-    pub use crate::application::route_types::*;
+    pub use crate::lifecycle::adapters::route_compiler::{
+        compose_pipeline, compose_traced_pipeline,
+    };
+    pub use crate::lifecycle::adapters::route_types::Route;
+    pub use crate::lifecycle::application::route_definition::*;
+    pub use crate::lifecycle::domain::route::RouteSpec;
 }
 
 pub mod route_controller {
-    pub use crate::adapters::route_controller::*;
+    pub use crate::lifecycle::adapters::route_controller::*;
 }
 
 pub mod supervising_route_controller {
-    pub use crate::adapters::supervising_route_controller::*;
-}
-
-pub mod reload {
-    pub(crate) use crate::adapters::reload::*;
+    pub use crate::lifecycle::application::supervision_service::*;
 }
 
 pub mod reload_watcher {
-    pub use crate::adapters::reload_watcher::*;
+    pub use crate::hot_reload::adapters::reload_watcher::*;
 }
 
-pub use adapters::{
+pub use crate::hot_reload::adapters::ReloadWatcher;
+pub use crate::lifecycle::adapters::route_controller::DefaultRouteController;
+pub use crate::lifecycle::adapters::route_types::Route;
+pub use crate::lifecycle::adapters::{
     FileRuntimeEventJournal, InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore,
     InMemoryRouteRepository, InMemoryRuntimeStore, RuntimeExecutionAdapter,
 };
-pub use application::runtime_bus::RuntimeBus;
-pub use config::{
-    DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
+pub use crate::lifecycle::application::SupervisingRouteController;
+pub use crate::lifecycle::application::runtime_bus::RuntimeBus;
+pub use crate::lifecycle::application::{BuilderStep, RouteDefinition};
+pub use crate::lifecycle::domain::{
+    RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent,
 };
-pub use context::CamelContext;
-pub use domain::{RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent};
-pub use ports::{
+pub use crate::lifecycle::ports::{
     CommandDedupPort, EventPublisherPort, ProjectionStorePort, RouteRepositoryPort,
     RouteStatusProjection, RuntimeEventJournalPort, RuntimeExecutionPort, RuntimeUnitOfWorkPort,
 };
-pub use registry::Registry;
-pub use route::{Route, RouteDefinition};
-pub use route_controller::DefaultRouteController;
-pub use supervising_route_controller::SupervisingRouteController;
-pub use tracer::TracingProcessor;
+pub use crate::shared::components::domain::Registry;
+pub use crate::shared::observability::adapters::TracingProcessor;
+pub use crate::shared::observability::domain::{
+    DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
+};
+pub use context::CamelContext;
 
 // Re-export route controller types from camel-api (they live there to avoid cyclic dependencies).
 pub use camel_api::CamelError;

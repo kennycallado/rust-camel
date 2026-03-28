@@ -17,15 +17,15 @@ use camel_component::Component;
 use camel_language_api::Language;
 use camel_language_api::LanguageError;
 
-use crate::adapters::RuntimeExecutionAdapter;
-use crate::application::route_types::RouteDefinition;
-use crate::application::runtime_bus::RuntimeBus;
-use crate::config::TracerConfig;
-use crate::registry::Registry;
-use crate::route_controller::{
+use crate::lifecycle::adapters::RuntimeExecutionAdapter;
+use crate::lifecycle::adapters::route_controller::{
     DefaultRouteController, RouteControllerInternal, SharedLanguageRegistry,
 };
-use crate::supervising_route_controller::SupervisingRouteController;
+use crate::lifecycle::application::route_definition::RouteDefinition;
+use crate::lifecycle::application::runtime_bus::RuntimeBus;
+use crate::lifecycle::application::supervision_service::SupervisingRouteController;
+use crate::shared::components::domain::Registry;
+use crate::shared::observability::domain::TracerConfig;
 
 static CONTEXT_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -62,7 +62,7 @@ impl RuntimeExecutionHandle {
         &self,
         definition: RouteDefinition,
     ) -> Result<(), CamelError> {
-        use crate::application::internal_commands::InternalRuntimeCommandBus;
+        use crate::lifecycle::ports::RouteRegistrationPort;
         self.runtime.register_route(definition).await
     }
 
@@ -148,7 +148,7 @@ impl CamelContext {
 
     fn build_runtime(
         controller: Arc<Mutex<dyn RouteControllerInternal>>,
-        store: crate::adapters::InMemoryRuntimeStore,
+        store: crate::lifecycle::adapters::InMemoryRuntimeStore,
     ) -> Arc<RuntimeBus> {
         let execution = Arc::new(RuntimeExecutionAdapter::new(Arc::clone(&controller)));
         Arc::new(
@@ -163,9 +163,11 @@ impl CamelContext {
         )
     }
 
-    fn runtime_store_with_journal_path(path: PathBuf) -> crate::adapters::InMemoryRuntimeStore {
-        let store = crate::adapters::InMemoryRuntimeStore::default();
-        match crate::adapters::FileRuntimeEventJournal::new(path.clone()) {
+    fn runtime_store_with_journal_path(
+        path: PathBuf,
+    ) -> crate::lifecycle::adapters::InMemoryRuntimeStore {
+        let store = crate::lifecycle::adapters::InMemoryRuntimeStore::default();
+        match crate::lifecycle::adapters::FileRuntimeEventJournal::new(path.clone()) {
             Ok(journal) => store.with_journal(Arc::new(journal)),
             Err(err) => {
                 warn!(
@@ -199,7 +201,7 @@ impl CamelContext {
         let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
             DefaultRouteController::with_languages(Arc::clone(&registry), Arc::clone(&languages)),
         ));
-        let store = crate::adapters::InMemoryRuntimeStore::default();
+        let store = crate::lifecycle::adapters::InMemoryRuntimeStore::default();
         let runtime = Self::build_runtime(Arc::clone(&controller), store);
 
         // Set self-ref so DefaultRouteController can create ProducerContext
@@ -285,7 +287,7 @@ impl CamelContext {
             )
             .with_metrics(Arc::clone(&metrics)),
         ));
-        let store = crate::adapters::InMemoryRuntimeStore::default();
+        let store = crate::lifecycle::adapters::InMemoryRuntimeStore::default();
         let runtime = Self::build_runtime(Arc::clone(&controller), store);
 
         // Set self-ref so SupervisingRouteController can create ProducerContext
@@ -459,10 +461,10 @@ impl CamelContext {
     ///
     /// The route must have an ID. Steps are resolved immediately using registered components.
     pub async fn add_route_definition(
-        &mut self,
+        &self,
         definition: RouteDefinition,
     ) -> Result<(), CamelError> {
-        use crate::application::internal_commands::InternalRuntimeCommandBus;
+        use crate::lifecycle::ports::RouteRegistrationPort;
         info!(
             from = definition.from_uri(),
             route_id = %definition.route_id(),
@@ -707,8 +709,10 @@ impl Default for CamelContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::route_types::{BuilderStep, LanguageExpressionDef, RouteDefinition};
-    use crate::domain::{RouteRuntimeAggregate, RouteRuntimeState};
+    use crate::lifecycle::application::route_definition::{
+        BuilderStep, LanguageExpressionDef, RouteDefinition,
+    };
+    use crate::lifecycle::domain::{RouteRuntimeAggregate, RouteRuntimeState};
     use async_trait::async_trait;
     use camel_api::CamelError;
     use camel_api::{
@@ -970,6 +974,18 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn add_route_definition_does_not_require_mut() {
+        let ctx = CamelContext::new();
+        let definition = RouteDefinition::new("timer:tick", vec![]).with_route_id("immutable-ctx");
+
+        let result = ctx.add_route_definition(definition).await;
+        assert!(
+            result.is_ok(),
+            "immutable context should add route: {result:?}"
+        );
+    }
+
     #[test]
     fn test_health_check_empty_context() {
         let ctx = CamelContext::new();
@@ -1100,7 +1116,8 @@ mod tests {
         );
         assert!(matches!(
             ctx.runtime.repo().load("runtime-hold").await.unwrap(),
-            Some(agg) if matches!(agg.state(), crate::domain::RouteRuntimeState::Registered)
+            Some(agg)
+                if matches!(agg.state(), crate::lifecycle::domain::RouteRuntimeState::Registered)
         ));
 
         runtime
@@ -1117,7 +1134,8 @@ mod tests {
         );
         assert!(matches!(
             ctx.runtime.repo().load("runtime-hold").await.unwrap(),
-            Some(agg) if matches!(agg.state(), crate::domain::RouteRuntimeState::Started)
+            Some(agg)
+                if matches!(agg.state(), crate::lifecycle::domain::RouteRuntimeState::Started)
         ));
 
         runtime

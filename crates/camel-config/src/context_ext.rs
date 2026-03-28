@@ -2,7 +2,8 @@ use crate::config::{CamelConfig, OtelProtocol, OtelSampler};
 use crate::discovery::discover_routes;
 use camel_api::CamelError;
 use camel_core::CamelContext;
-use camel_core::config::OutputFormat;
+use camel_core::OutputFormat;
+use camel_core::TracerConfig;
 use camel_core::route::RouteDefinition;
 use camel_otel::{
     OtelConfig, OtelProtocol as OtelProtocolOtel, OtelSampler as OtelSamplerOtel, OtelService,
@@ -254,7 +255,7 @@ impl CamelConfig {
     }
 
     fn init_tracing_subscriber(
-        config: &camel_core::config::TracerConfig,
+        config: &TracerConfig,
         log_level: &str,
         otel_active: bool,
     ) -> Result<(), CamelError> {

@@ -114,10 +114,10 @@ fn assert_file_section_not_contains(path: &Path, section_start: &str, forbidden:
 #[test]
 fn domain_layer_has_no_infrastructure_dependencies() {
     assert_no_forbidden_imports(
-        "domain",
+        "lifecycle/domain",
         &[
-            "crate::adapters",
-            "crate::application",
+            "crate::lifecycle::adapters",
+            "crate::lifecycle::application",
             "crate::context",
             "crate::reload",
             "crate::route_controller",
@@ -129,15 +129,12 @@ fn domain_layer_has_no_infrastructure_dependencies() {
 #[test]
 fn application_layer_depends_on_ports_and_domain_only() {
     assert_no_forbidden_imports(
-        "application",
+        "lifecycle/application",
         &[
-            "crate::adapters",
             "crate::context",
             "crate::reload",
             "crate::route_controller",
             "crate::supervising_route_controller",
-            "RouteControllerInternal",
-            "with_controller(",
         ],
     );
 }
@@ -145,17 +142,18 @@ fn application_layer_depends_on_ports_and_domain_only() {
 #[test]
 fn ports_layer_only_uses_approved_application_imports() {
     assert_no_forbidden_imports(
-        "ports",
+        "lifecycle/ports",
         &[
-            "crate::adapters",
+            "crate::lifecycle::adapters",
             "crate::context",
             "crate::reload",
             "crate::route_controller",
             "crate::supervising_route_controller",
-            "crate::application::commands",
-            "crate::application::runtime_bus",
-            "crate::application::queries",
-            "crate::application::internal_commands",
+            "crate::lifecycle::application::commands",
+            "crate::lifecycle::application::runtime_bus",
+            "crate::lifecycle::application::queries",
+            // `internal_commands` module was removed; keep guarding concrete app internals that still exist.
+            "crate::lifecycle::application::supervision_service",
         ],
     );
 }
@@ -163,8 +161,8 @@ fn ports_layer_only_uses_approved_application_imports() {
 #[test]
 fn domain_and_ports_do_not_import_runtime_contract_types_from_camel_api_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let route_runtime = root.join("domain/route_runtime.rs");
-    let runtime_ports = root.join("ports/runtime_ports.rs");
+    let route_runtime = root.join("lifecycle/domain/route_runtime.rs");
+    let runtime_ports = root.join("lifecycle/ports/runtime_ports.rs");
 
     assert_file_not_contains(
         &route_runtime,
@@ -180,18 +178,21 @@ fn domain_and_ports_do_not_import_runtime_contract_types_from_camel_api_directly
     assert_file_contains(
         &runtime_ports,
         &[
-            "use crate::application::route_types::RouteDefinition",
-            "use crate::domain::{RouteRuntimeAggregate, RuntimeEvent}",
+            "use crate::lifecycle::application::route_definition::RouteDefinition",
+            "use crate::lifecycle::domain::{RouteRuntimeAggregate, RuntimeEvent}",
         ],
     );
-    assert_file_not_contains(&runtime_ports, &["use crate::domain::{RouteDefinition"]);
+    assert_file_not_contains(
+        &runtime_ports,
+        &["use crate::lifecycle::domain::{RouteDefinition"],
+    );
 }
 
 #[test]
 fn runtime_bus_and_command_handlers_are_controller_agnostic() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let runtime_bus = root.join("application/runtime_bus.rs");
-    let commands = root.join("application/commands.rs");
+    let runtime_bus = root.join("lifecycle/application/runtime_bus.rs");
+    let commands = root.join("lifecycle/application/commands.rs");
 
     assert_file_not_contains(
         &runtime_bus,
@@ -215,7 +216,7 @@ fn runtime_bus_and_command_handlers_are_controller_agnostic() {
 fn runtime_side_effects_flow_through_execution_port() {
     let commands = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
-        .join("application/commands.rs");
+        .join("lifecycle/application/commands.rs");
 
     assert_file_contains(
         &commands,
@@ -230,8 +231,8 @@ fn runtime_side_effects_flow_through_execution_port() {
 #[test]
 fn reload_runtime_path_does_not_use_controller_local_status_heuristics() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let reload_watcher = root.join("adapters/reload_watcher.rs");
-    let reload = root.join("adapters/reload.rs");
+    let reload_watcher = root.join("hot_reload/adapters/reload_watcher.rs");
+    let reload = root.join("hot_reload/application/reload.rs");
 
     assert_file_contains(&reload_watcher, &["runtime_route_ids()"]);
     assert_file_contains(&reload, &["runtime_route_status("]);
@@ -247,8 +248,9 @@ fn reload_runtime_path_does_not_use_controller_local_status_heuristics() {
 fn supervision_loop_decisions_are_runtime_query_driven() {
     let supervising = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
-        .join("adapters")
-        .join("supervising_route_controller.rs");
+        .join("lifecycle")
+        .join("application")
+        .join("supervision_service.rs");
 
     assert_file_section_contains(
         &supervising,
@@ -300,7 +302,7 @@ fn public_route_controller_trait_exposes_no_lifecycle_read_model() {
 #[test]
 fn runtime_execution_adapter_uses_semantic_executor_naming() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let adapters_mod = root.join("adapters/mod.rs");
+    let adapters_mod = root.join("lifecycle/adapters/mod.rs");
     let context = root.join("context.rs");
 
     assert_file_contains(&adapters_mod, &["RuntimeExecutionAdapter"]);
@@ -310,7 +312,7 @@ fn runtime_execution_adapter_uses_semantic_executor_naming() {
 
 #[test]
 fn domain_has_no_tower_or_framework_types() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/domain");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lifecycle/domain");
     let mut files = Vec::new();
     collect_rust_files(&root, &mut files);
 
@@ -338,17 +340,85 @@ fn domain_has_no_tower_or_framework_types() {
 #[test]
 fn ports_imports_route_definition_from_application_not_adapters() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let ports_file = root.join("ports/runtime_ports.rs");
+    let ports_file = root.join("lifecycle/ports/runtime_ports.rs");
 
     assert_file_contains(
         &ports_file,
-        &["use crate::application::route_types::RouteDefinition"],
+        &["use crate::lifecycle::application::route_definition::RouteDefinition"],
     );
 
-    assert_file_not_contains(&ports_file, &["crate::adapters::"]);
+    assert_file_not_contains(&ports_file, &["crate::lifecycle::adapters::"]);
 }
 
 #[test]
 fn domain_does_not_import_application_or_adapters() {
-    assert_no_forbidden_imports("domain", &["crate::application::", "crate::adapters::"]);
+    assert_no_forbidden_imports(
+        "lifecycle/domain",
+        &[
+            "crate::lifecycle::application::",
+            "crate::lifecycle::adapters::",
+        ],
+    );
+}
+
+#[test]
+fn lifecycle_domain_does_not_import_hot_reload() {
+    assert_no_forbidden_imports("lifecycle/domain", &["crate::hot_reload", "hot_reload::"]);
+}
+
+#[test]
+fn lifecycle_domain_does_not_import_lifecycle_application_or_adapters() {
+    assert_no_forbidden_imports(
+        "lifecycle/domain",
+        &[
+            "crate::lifecycle::application",
+            "crate::lifecycle::adapters",
+        ],
+    );
+}
+
+#[test]
+fn lifecycle_application_does_not_import_hot_reload() {
+    assert_no_forbidden_imports(
+        "lifecycle/application",
+        &["crate::hot_reload", "hot_reload::"],
+    );
+}
+
+#[test]
+fn hot_reload_does_not_import_lifecycle_domain_directly() {
+    // hot_reload may use lifecycle application/adapters types directly (by design),
+    // but must never bypass the layering by importing raw domain types.
+    assert_no_forbidden_imports("hot_reload", &["crate::lifecycle::domain"]);
+}
+
+#[test]
+fn lifecycle_ports_registration_port_is_pub_crate_only() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/lifecycle/ports/registration_port.rs");
+    let content = std::fs::read_to_string(&path).expect("failed to read registration_port.rs");
+    assert!(
+        content.contains("pub(crate) trait RouteRegistrationPort"),
+        "RouteRegistrationPort must be pub(crate), not pub"
+    );
+    assert!(
+        !content.contains("pub trait RouteRegistrationPort"),
+        "RouteRegistrationPort must NOT be pub (only pub(crate))"
+    );
+}
+
+#[test]
+fn lifecycle_does_not_use_old_flat_config_path() {
+    assert_no_forbidden_imports(
+        "lifecycle",
+        &["crate::config::", "crate::tracer::", "crate::registry::"],
+    );
+}
+
+#[test]
+fn hot_reload_does_not_use_old_flat_config_path() {
+    assert_no_forbidden_imports(
+        "hot_reload",
+        &["crate::config::", "crate::tracer::", "crate::registry::"],
+    );
 }

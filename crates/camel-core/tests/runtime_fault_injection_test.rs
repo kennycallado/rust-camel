@@ -9,11 +9,10 @@ use camel_api::{
 };
 use camel_component_timer::TimerComponent;
 use camel_core::Registry;
-use camel_core::ports::{ProjectionStorePort, RouteStatusProjection};
 use camel_core::route_controller::RouteControllerInternal;
 use camel_core::{
     DefaultRouteController, InMemoryCommandDedup, InMemoryEventPublisher, InMemoryRouteRepository,
-    RuntimeBus, RuntimeExecutionAdapter,
+    ProjectionStorePort, RouteStatusProjection, RuntimeBus, RuntimeExecutionAdapter,
 };
 use tokio::sync::{Mutex, RwLock};
 

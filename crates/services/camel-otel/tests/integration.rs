@@ -16,8 +16,8 @@ use std::sync::{Mutex, MutexGuard};
 use camel_api::exchange::Exchange;
 use camel_api::message::Message;
 use camel_api::{BoxProcessor, IdentityProcessor};
-use camel_core::config::DetailLevel;
-use camel_core::tracer::TracingProcessor;
+use camel_core::DetailLevel;
+use camel_core::TracingProcessor;
 use camel_otel::propagation::{
     extract_context, extract_into_exchange, inject_context, inject_from_exchange,
 };

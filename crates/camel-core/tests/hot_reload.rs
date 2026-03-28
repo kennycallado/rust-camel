@@ -7,7 +7,7 @@
 
 use camel_api::RouteController;
 use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, IdentityProcessor, Value};
-use camel_core::registry::Registry;
+use camel_core::Registry;
 use camel_core::route::RouteDefinition;
 use camel_core::route_controller::DefaultRouteController;
 use std::sync::Arc;

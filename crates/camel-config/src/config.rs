@@ -1,4 +1,4 @@
-use camel_core::config::TracerConfig;
+use camel_core::TracerConfig;
 use config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
