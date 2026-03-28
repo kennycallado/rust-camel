@@ -171,6 +171,8 @@ fn js_to_value_inner(
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::PI;
+
     use super::*;
     use serde_json::json;
 
@@ -228,10 +230,10 @@ mod tests {
     #[test]
     fn test_float_roundtrip() {
         let mut ctx = ctx();
-        let v = json!(3.14);
+        let v = json!(PI);
         let js = value_to_js(&v, &mut ctx).unwrap();
         let back = js_to_value(&js, &mut ctx).unwrap();
-        assert!((back.as_f64().unwrap() - 3.14).abs() < 1e-10);
+        assert!((back.as_f64().unwrap() - PI).abs() < 1e-10);
     }
 
     #[test]
