@@ -140,8 +140,12 @@ pub struct SetBodyStep {
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum SetBodyData {
-    Literal(serde_json::Value),
+    // Config must be tried BEFORE Literal: serde_json::Value matches any YAML value (including
+    // objects), so it would greedily swallow `{ simple: "..." }` as a Literal JSON object
+    // instead of a SetBodyConfig. By placing Config first, structured forms like
+    // `set_body: { simple: "..." }` deserialize correctly.
     Config(SetBodyConfig),
+    Literal(serde_json::Value),
 }
 
 #[derive(Deserialize, Debug)]
