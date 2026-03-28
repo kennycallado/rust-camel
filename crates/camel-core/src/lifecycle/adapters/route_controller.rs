@@ -460,7 +460,7 @@ impl DefaultRouteController {
         &self,
         steps: Vec<BuilderStep>,
         producer_ctx: &ProducerContext,
-        registry: Arc<std::sync::Mutex<Registry>>,
+        registry: &Arc<std::sync::Mutex<Registry>>,
     ) -> Result<Vec<BoxProcessor>, CamelError> {
         let resolve_producer = |uri: &str| -> Result<BoxProcessor, CamelError> {
             let parsed = parse_uri(uri)?;
@@ -530,7 +530,7 @@ impl DefaultRouteController {
                 BuilderStep::DeclarativeFilter { predicate, steps } => {
                     let predicate = self.compile_filter_predicate(&predicate)?;
                     let sub_processors =
-                        self.resolve_steps(steps, producer_ctx, registry.clone())?;
+                        self.resolve_steps(steps, producer_ctx, registry)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
@@ -541,7 +541,7 @@ impl DefaultRouteController {
                     for when_step in whens {
                         let predicate = self.compile_filter_predicate(&when_step.predicate)?;
                         let sub_processors =
-                            self.resolve_steps(when_step.steps, producer_ctx, registry.clone())?;
+                            self.resolve_steps(when_step.steps, producer_ctx, registry)?;
                         let pipeline = compose_pipeline(sub_processors);
                         when_clauses.push(WhenClause {
                             predicate,
@@ -550,7 +550,7 @@ impl DefaultRouteController {
                     }
                     let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
                         let sub_processors =
-                            self.resolve_steps(otherwise_steps, producer_ctx, registry.clone())?;
+                            self.resolve_steps(otherwise_steps, producer_ctx, registry)?;
                         Some(compose_pipeline(sub_processors))
                     } else {
                         None
@@ -571,7 +571,7 @@ impl DefaultRouteController {
                 }
                 BuilderStep::Split { config, steps } => {
                     let sub_processors =
-                        self.resolve_steps(steps, producer_ctx, registry.clone())?;
+                        self.resolve_steps(steps, producer_ctx, registry)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let splitter =
                         camel_processor::splitter::SplitterService::new(config, sub_pipeline);
@@ -619,7 +619,7 @@ impl DefaultRouteController {
                     }
 
                     let sub_processors =
-                        self.resolve_steps(steps, producer_ctx, registry.clone())?;
+                        self.resolve_steps(steps, producer_ctx, registry)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let splitter =
                         camel_processor::splitter::SplitterService::new(config, sub_pipeline);
@@ -631,7 +631,7 @@ impl DefaultRouteController {
                 }
                 BuilderStep::Filter { predicate, steps } => {
                     let sub_processors =
-                        self.resolve_steps(steps, producer_ctx, registry.clone())?;
+                        self.resolve_steps(steps, producer_ctx, registry)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
@@ -642,7 +642,7 @@ impl DefaultRouteController {
                     let mut when_clauses = Vec::new();
                     for when_step in whens {
                         let sub_processors =
-                            self.resolve_steps(when_step.steps, producer_ctx, registry.clone())?;
+                            self.resolve_steps(when_step.steps, producer_ctx, registry)?;
                         let pipeline = compose_pipeline(sub_processors);
                         when_clauses.push(WhenClause {
                             predicate: when_step.predicate,
@@ -652,7 +652,7 @@ impl DefaultRouteController {
                     // Resolve otherwise branch (if present).
                     let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
                         let sub_processors =
-                            self.resolve_steps(otherwise_steps, producer_ctx, registry.clone())?;
+                            self.resolve_steps(otherwise_steps, producer_ctx, registry)?;
                         Some(compose_pipeline(sub_processors))
                     } else {
                         None
@@ -670,7 +670,7 @@ impl DefaultRouteController {
                     let mut endpoints = Vec::new();
                     for step in steps {
                         let sub_processors =
-                            self.resolve_steps(vec![step], producer_ctx, registry.clone())?;
+                            self.resolve_steps(vec![step], producer_ctx, registry)?;
                         let endpoint = compose_pipeline(sub_processors);
                         endpoints.push(endpoint);
                     }
@@ -751,7 +751,7 @@ impl DefaultRouteController {
                 }
                 BuilderStep::Throttle { config, steps } => {
                     let sub_processors =
-                        self.resolve_steps(steps, producer_ctx, registry.clone())?;
+                        self.resolve_steps(steps, producer_ctx, registry)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::throttler::ThrottlerService::new(config, sub_pipeline);
@@ -762,7 +762,7 @@ impl DefaultRouteController {
                     let mut endpoints = Vec::new();
                     for step in steps {
                         let sub_processors =
-                            self.resolve_steps(vec![step], producer_ctx, registry.clone())?;
+                            self.resolve_steps(vec![step], producer_ctx, registry)?;
                         let endpoint = compose_pipeline(sub_processors);
                         endpoints.push(endpoint);
                     }
@@ -774,7 +774,7 @@ impl DefaultRouteController {
                     use camel_processor::dynamic_router::EndpointResolver;
 
                     let producer_ctx_clone = producer_ctx.clone();
-                    let registry_clone = registry.clone();
+                    let registry_clone = Arc::clone(registry);
                     let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                         let parsed = match parse_uri(uri) {
                             Ok(p) => p,
@@ -839,7 +839,7 @@ impl DefaultRouteController {
 
         // Resolve steps into processors (takes ownership of steps)
         let processors =
-            self.resolve_steps(definition.steps, &producer_ctx, self.registry.clone())?;
+            self.resolve_steps(definition.steps, &producer_ctx, &self.registry)?;
         let route_id_for_tracing = route_id.clone();
         let mut pipeline = compose_traced_pipeline(
             processors,
@@ -900,7 +900,7 @@ impl DefaultRouteController {
 
         let producer_ctx = self.build_producer_context()?;
 
-        let processors = self.resolve_steps(def.steps, &producer_ctx, self.registry.clone())?;
+        let processors = self.resolve_steps(def.steps, &producer_ctx, &self.registry)?;
         let mut pipeline = compose_traced_pipeline(
             processors,
             &route_id,
