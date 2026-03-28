@@ -16,44 +16,44 @@ rust-camel implements **Domain-Driven Design (DDD)** with **CQRS** and **Hexagon
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              camel-core                                      │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                         Domain Layer                                 │   │
-│  │   RouteRuntimeAggregate, RouteRuntimeState, RouteLifecycleCommand   │   │
-│  │   RuntimeEvent (internal contract, no external deps)                │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                    │                                         │
-│                                    ▼                                         │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                       Application Layer                              │   │
-│  │   RuntimeBus (CommandBus + QueryBus), Command Handlers, Queries     │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                    │                                         │
-│                                    ▼                                         │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                          Ports Layer                                 │   │
-│  │   RouteRepositoryPort, ProjectionStorePort, RuntimeExecutionPort,   │   │
-│  │   EventPublisherPort, RuntimeEventJournalPort, CommandDedupPort     │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                    │                                         │
-│                                    ▼                                         │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                        Adapters Layer                                │   │
-│  │   InMemory* adapters, FileRuntimeEventJournal, RuntimeExecutionAdap │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│                               camel-core                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                         Domain Layer                                │    │
+│  │   RouteRuntimeAggregate, RouteRuntimeState, RouteLifecycleCommand   │    │
+│  │   RuntimeEvent (internal contract, no external deps)                │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                        │
+│                                    ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                       Application Layer                             │    │
+│  │   RuntimeBus (CommandBus + QueryBus), Command Handlers, Queries     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                        │
+│                                    ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                          Ports Layer                                │    │
+│  │   RouteRepositoryPort, ProjectionStorePort, RuntimeExecutionPort,   │    │
+│  │   EventPublisherPort, RuntimeEventJournalPort, CommandDedupPort     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                        │
+│                                    ▼                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                        Adapters Layer                               │    │
+│  │   InMemory* adapters, FileRuntimeEventJournal, RuntimeExecutionAdap │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Concepts
 
-| Concept | Description |
-|---------|-------------|
-| **Aggregate** | `RouteRuntimeAggregate` owns route lifecycle state with optimistic locking |
-| **Projection** | `RouteStatusProjection` is the read model for queries |
-| **Command** | `RuntimeCommand` (RegisterRoute, StartRoute, StopRoute, etc.) |
-| **Query** | `RuntimeQuery` (GetRouteStatus, ListRoutes) |
-| **Event** | `RuntimeEvent` (RouteStarted, RouteStopped, RouteFailed, etc.) |
-| **Journal** | Optional durable event journal for crash recovery |
+| Concept        | Description                                                                |
+| -------------- | -------------------------------------------------------------------------- |
+| **Aggregate**  | `RouteRuntimeAggregate` owns route lifecycle state with optimistic locking |
+| **Projection** | `RouteStatusProjection` is the read model for queries                      |
+| **Command**    | `RuntimeCommand` (RegisterRoute, StartRoute, StopRoute, etc.)              |
+| **Query**      | `RuntimeQuery` (GetRouteStatus, ListRoutes)                                |
+| **Event**      | `RuntimeEvent` (RouteStarted, RouteStopped, RouteFailed, etc.)             |
+| **Journal**    | Optional durable event journal for crash recovery                          |
 
 ### Runtime Bus
 
@@ -115,37 +115,37 @@ cargo run -p hello-world
 
 ## Crate Map
 
-| Crate | Description |
-|-------|-------------|
-| `camel-api` | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent` |
-| `camel-core` | Runtime engine with DDD/CQRS: `CamelContext`, domain aggregates, ports, adapters, event journal |
-| `camel-config` | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns |
-| `camel-builder` | Fluent `RouteBuilder` API |
-| `camel-component` | `Component`, `Endpoint`, `Consumer` traits |
-| `camel-processor` | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody` + Tower `Layer` types |
-| `camel-endpoint` | Endpoint URI parsing utilities; `UriConfig` derive macro for typed component config |
-| `camel-endpoint-macros` | Proc-macro crate backing `#[derive(UriConfig)]` |
-| `camel-bean` | Bean/Registry system for dependency injection and business logic integration |
-| `camel-bean-macros` | Proc-macro crate for `#[bean]` attribute |
-| `camel-dsl` | YAML DSL: load and run routes from `.yaml` files |
-| `camel-health` | Health check types and endpoint support |
-| `camel-timer` | Timer source component |
-| `camel-log` | Log sink component |
-| `camel-direct` | In-memory synchronous component |
-| `camel-mock` | Test component with assertions on received exchanges (`await_exchanges`, `ExchangeAssert`) |
-| `camel-test` | Integration test harness |
-| `camel-controlbus` | Control routes dynamically from within routes |
-| `camel-http` | HTTP producer (client) and HTTP consumer (server, native streaming) |
-| `camel-file` | File producer and consumer |
-| `camel-kafka` | Kafka producer and consumer with SSL/SASL and manual commit |
-| `camel-redis` | Redis producer and consumer |
-| `camel-sql` | SQL producer (query/insert/update) with streaming result support |
-| `camel-container` | Docker container producer/consumer via `bollard` |
-| `camel-language-api` | Language trait API: `Language`, `Expression`, `Predicate` |
-| `camel-language-simple` | Simple Language: `${header.x}`, `${body}`, operators |
-| `camel-language-rhai` | Rhai scripting language for full expression power |
-| `camel-prometheus` | Prometheus metrics exporter with /metrics endpoint |
-| `camel-otel` | OpenTelemetry tracing and metrics exporter |
+| Crate                   | Description                                                                                                                              |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `camel-api`             | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent` |
+| `camel-core`            | Runtime engine with DDD/CQRS: `CamelContext`, domain aggregates, ports, adapters, event journal                                          |
+| `camel-config`          | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns                                                         |
+| `camel-builder`         | Fluent `RouteBuilder` API                                                                                                                |
+| `camel-component`       | `Component`, `Endpoint`, `Consumer` traits                                                                                               |
+| `camel-processor`       | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody` + Tower `Layer` types       |
+| `camel-endpoint`        | Endpoint URI parsing utilities; `UriConfig` derive macro for typed component config                                                      |
+| `camel-endpoint-macros` | Proc-macro crate backing `#[derive(UriConfig)]`                                                                                          |
+| `camel-bean`            | Bean/Registry system for dependency injection and business logic integration                                                             |
+| `camel-bean-macros`     | Proc-macro crate for `#[bean]` attribute                                                                                                 |
+| `camel-dsl`             | YAML DSL: load and run routes from `.yaml` files                                                                                         |
+| `camel-health`          | Health check types and endpoint support                                                                                                  |
+| `camel-timer`           | Timer source component                                                                                                                   |
+| `camel-log`             | Log sink component                                                                                                                       |
+| `camel-direct`          | In-memory synchronous component                                                                                                          |
+| `camel-mock`            | Test component with assertions on received exchanges (`await_exchanges`, `ExchangeAssert`)                                               |
+| `camel-test`            | Integration test harness                                                                                                                 |
+| `camel-controlbus`      | Control routes dynamically from within routes                                                                                            |
+| `camel-http`            | HTTP producer (client) and HTTP consumer (server, native streaming)                                                                      |
+| `camel-file`            | File producer and consumer                                                                                                               |
+| `camel-kafka`           | Kafka producer and consumer with SSL/SASL and manual commit                                                                              |
+| `camel-redis`           | Redis producer and consumer                                                                                                              |
+| `camel-sql`             | SQL producer (query/insert/update) with streaming result support                                                                         |
+| `camel-container`       | Docker container producer/consumer via `bollard`                                                                                         |
+| `camel-language-api`    | Language trait API: `Language`, `Expression`, `Predicate`                                                                                |
+| `camel-language-simple` | Simple Language: `${header.x}`, `${body}`, operators                                                                                     |
+| `camel-language-rhai`   | Rhai scripting language for full expression power                                                                                        |
+| `camel-prometheus`      | Prometheus metrics exporter with /metrics endpoint                                                                                       |
+| `camel-otel`            | OpenTelemetry tracing and metrics exporter                                                                                               |
 
 ## Building & Testing
 
@@ -156,18 +156,18 @@ cargo test --workspace
 
 ## Implemented EIP Patterns
 
-| Pattern | Builder Method | Description |
-|---------|---------------|-------------|
-| Aggregator | `.aggregate(config)` | Correlate and aggregate multiple exchanges |
-| Content-Based Router | `.choice()` / `.when()` | Route based on exchange content |
-| Dynamic Router | `.dynamic_router(expr)` | Expression-based routing with slip pattern |
-| Routing Slip | `.routing_slip(expr)` | Route through a sequence of endpoints determined at runtime |
-| Filter | `.filter(predicate)` | Forward exchange only when predicate is true |
-| Load Balancer | `.load_balance()` | Distribute across endpoints with RoundRobin/Random/Weighted/Failover |
-| Multicast | `.multicast()` | Send the same exchange to multiple endpoints |
-| Splitter | `.split(config)` | Split one exchange into multiple fragments |
-| Throttler | `.throttle(n, duration)` | Rate limiting with Delay/Reject/Drop strategies |
-| WireTap | `.wire_tap(uri)` | Fire-and-forget copy to a tap endpoint |
+| Pattern              | Builder Method           | Description                                                          |
+| -------------------- | ------------------------ | -------------------------------------------------------------------- |
+| Aggregator           | `.aggregate(config)`     | Correlate and aggregate multiple exchanges                           |
+| Content-Based Router | `.choice()` / `.when()`  | Route based on exchange content                                      |
+| Dynamic Router       | `.dynamic_router(expr)`  | Expression-based routing with slip pattern                           |
+| Routing Slip         | `.routing_slip(expr)`    | Route through a sequence of endpoints determined at runtime          |
+| Filter               | `.filter(predicate)`     | Forward exchange only when predicate is true                         |
+| Load Balancer        | `.load_balance()`        | Distribute across endpoints with RoundRobin/Random/Weighted/Failover |
+| Multicast            | `.multicast()`           | Send the same exchange to multiple endpoints                         |
+| Splitter             | `.split(config)`         | Split one exchange into multiple fragments                           |
+| Throttler            | `.throttle(n, duration)` | Rate limiting with Delay/Reject/Drop strategies                      |
+| WireTap              | `.wire_tap(uri)`         | Fire-and-forget copy to a tap endpoint                               |
 
 Run an example:
 
@@ -237,6 +237,7 @@ All file operations validate that resolved paths remain within the configured ba
 ### Timeouts
 
 All I/O operations have configurable timeouts:
+
 - File: `readTimeout`, `writeTimeout` (default: 30s)
 - HTTP: `connectTimeout`, `responseTimeout`
 
@@ -270,6 +271,7 @@ ctx.start().await?;
 ```
 
 Available metrics:
+
 - `camel_exchanges_total{route}` - Total exchanges processed
 - `camel_errors_total{route, error_type}` - Total errors
 - `camel_exchange_duration_seconds{route}` - Exchange processing duration (histogram)
@@ -283,7 +285,7 @@ Available metrics:
 Built-in health endpoints for Kubernetes:
 
 - `/healthz` - Liveness probe
-- `/readyz` - Readiness probe  
+- `/readyz` - Readiness probe
 - `/health` - Detailed health report
 
 ```yaml
@@ -381,6 +383,7 @@ let error_handler = ErrorHandlerConfig::dead_letter_channel("log:errors")
 ```
 
 **Jitter Benefits:**
+
 - Prevents thundering herd in distributed systems
 - Recommended values: 0.1-0.3 (10-30%)
 - Adds randomization: `delay ± (delay * jitter_factor)`
@@ -476,6 +479,7 @@ Each component supports global defaults that apply to all endpoints. URI paramet
 ```
 
 Supported component configurations:
+
 - **`[components.http]`**: `connect_timeout_ms`, `response_timeout_ms`, `max_connections`, `max_body_size`, `max_request_body`, `allow_private_ips`
 - **`[components.kafka]`**: `brokers`, `group_id`, `session_timeout_ms`, `request_timeout_ms`, `auto_offset_reset`, `security_protocol`
 - **`[components.redis]`**: `host`, `port`
