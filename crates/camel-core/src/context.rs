@@ -144,6 +144,17 @@ impl CamelContext {
             "simple".to_string(),
             Arc::new(camel_language_simple::SimpleLanguage),
         );
+        #[cfg(feature = "lang-js")]
+        {
+            let js_lang = camel_language_js::JsLanguage::new();
+            languages.insert("js".to_string(), Arc::new(js_lang.clone()));
+            languages.insert("javascript".to_string(), Arc::new(js_lang));
+        }
+        #[cfg(feature = "lang-rhai")]
+        {
+            let rhai_lang = camel_language_rhai::RhaiLanguage::new();
+            languages.insert("rhai".to_string(), Arc::new(rhai_lang));
+        }
         Arc::new(std::sync::Mutex::new(languages))
     }
 

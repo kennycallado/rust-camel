@@ -1,0 +1,13 @@
+routes:
+  - id: "script-rhai"
+    from: "timer:rhai?period=3000"
+    steps:
+      # script: runs Rhai and can mutate the exchange (body + headers)
+      # Rhai uses direct variable assignment: headers["key"] = value, body = value
+      - script:
+          language: "rhai"
+          source: |
+            headers["greeting"] = "Hello from Rhai";
+            headers["counter"] = headers["CamelTimerCounter"];
+            body = "Rhai processed exchange #" + headers["CamelTimerCounter"];
+      - log: "Rhai: ${body} (greeting=${header.greeting})"

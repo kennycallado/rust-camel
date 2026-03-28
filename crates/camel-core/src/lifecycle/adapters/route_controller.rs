@@ -529,8 +529,7 @@ impl DefaultRouteController {
                 },
                 BuilderStep::DeclarativeFilter { predicate, steps } => {
                     let predicate = self.compile_filter_predicate(&predicate)?;
-                    let sub_processors =
-                        self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
@@ -559,19 +558,40 @@ impl DefaultRouteController {
                     processors.push(BoxProcessor::new(svc));
                 }
                 BuilderStep::DeclarativeScript { expression } => {
-                    let expression = self.compile_language_expression(&expression)?;
-                    let svc = camel_processor::SetBody::new(
-                        IdentityProcessor,
-                        move |exchange: &Exchange| {
-                            let value = expression.evaluate(exchange).unwrap_or(Value::Null);
-                            Self::value_to_body(value)
-                        },
-                    );
-                    processors.push(BoxProcessor::new(svc));
+                    let lang = self.resolve_language(&expression.language)?;
+                    match lang.create_mutating_expression(&expression.source) {
+                        Ok(mut_expr) => {
+                            processors.push(BoxProcessor::new(ScriptMutator::new(mut_expr)));
+                        }
+                        Err(LanguageError::NotSupported { .. }) => {
+                            // Graceful degradation: YAML declarative routes fall back to read-only
+                            // Expression → SetBody when the language doesn't support MutatingExpression.
+                            // This preserves backwards compatibility for languages like Simple that
+                            // only implement Expression. Contrast with the explicit .script() DSL step
+                            // which hard-errors on NotSupported (user opted in to mutation semantics).
+                            // TODO: add integration test asserting Simple language falls back to
+                            // read-only path (requires full CamelContext test harness).
+                            let expression = self.compile_language_expression(&expression)?;
+                            let svc = camel_processor::SetBody::new(
+                                IdentityProcessor,
+                                move |exchange: &Exchange| {
+                                    let value =
+                                        expression.evaluate(exchange).unwrap_or(Value::Null);
+                                    Self::value_to_body(value)
+                                },
+                            );
+                            processors.push(BoxProcessor::new(svc));
+                        }
+                        Err(e) => {
+                            return Err(CamelError::RouteError(format!(
+                                "Failed to create mutating expression for language '{}': {}",
+                                expression.language, e
+                            )));
+                        }
+                    }
                 }
                 BuilderStep::Split { config, steps } => {
-                    let sub_processors =
-                        self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let splitter =
                         camel_processor::splitter::SplitterService::new(config, sub_pipeline);
@@ -618,8 +638,7 @@ impl DefaultRouteController {
                         config = config.parallel_limit(limit);
                     }
 
-                    let sub_processors =
-                        self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let splitter =
                         camel_processor::splitter::SplitterService::new(config, sub_pipeline);
@@ -630,8 +649,7 @@ impl DefaultRouteController {
                     processors.push(BoxProcessor::new(svc));
                 }
                 BuilderStep::Filter { predicate, steps } => {
-                    let sub_processors =
-                        self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
@@ -736,6 +754,8 @@ impl DefaultRouteController {
                             feature,
                             language: ref lang_name,
                         }) => {
+                            // Hard error: the .script() DSL step explicitly requests mutation semantics.
+                            // If the language doesn't support MutatingExpression, the route is mis-configured.
                             return Err(CamelError::RouteError(format!(
                                 "Language '{}' does not support {} (required for .script() step)",
                                 lang_name, feature
@@ -750,8 +770,7 @@ impl DefaultRouteController {
                     }
                 }
                 BuilderStep::Throttle { config, steps } => {
-                    let sub_processors =
-                        self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::throttler::ThrottlerService::new(config, sub_pipeline);
@@ -838,8 +857,7 @@ impl DefaultRouteController {
         let producer_ctx = self.build_producer_context()?;
 
         // Resolve steps into processors (takes ownership of steps)
-        let processors =
-            self.resolve_steps(definition.steps, &producer_ctx, &self.registry)?;
+        let processors = self.resolve_steps(definition.steps, &producer_ctx, &self.registry)?;
         let route_id_for_tracing = route_id.clone();
         let mut pipeline = compose_traced_pipeline(
             processors,

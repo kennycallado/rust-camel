@@ -7,10 +7,12 @@ A ready-to-run project layout showing how to use `camel run` with a
 
 ```
 camel-cli-run/
-├── Camel.toml          # Context configuration + route patterns
+├── Camel.toml              # Context configuration + route patterns
 └── routes/
-    ├── hello.yaml      # Timer route: logs a greeting every 2s
-    └── transform.yaml  # Timer route: set_body + set_header every 5s
+    ├── hello.yaml          # Timer route: logs a greeting every 2s (Simple language)
+    ├── transform.yaml      # Timer route: set_body + set_header every 5s (Simple language)
+    ├── script-js.yaml      # Timer route: mutating JavaScript script every 3s
+    └── script-rhai.yaml    # Timer route: mutating Rhai script every 3s
 ```
 
 ## Running
@@ -33,6 +35,26 @@ cargo install camel-cli
 cd examples/camel-cli-run
 camel run
 ```
+
+### Running with scripting languages (JS / Rhai)
+
+The `script-js.yaml` and `script-rhai.yaml` routes require the CLI to be built
+with the corresponding feature flags:
+
+```bash
+# JavaScript support
+cargo build -p camel-cli --features lang-js
+
+# Rhai support
+cargo build -p camel-cli --features lang-rhai
+
+# Both
+cargo build -p camel-cli --features lang-js,lang-rhai
+```
+
+If the CLI is built **without** a language feature, routes that use that language
+will fail to start with a "language not registered" error. The `hello.yaml` and
+`transform.yaml` routes use only the built-in Simple language and always work.
 
 ## Hot-reload
 

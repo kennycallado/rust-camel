@@ -20,6 +20,8 @@ camel-component.workspace = true
 camel-endpoint.workspace = true
 camel-language-api.workspace = true
 camel-language-simple.workspace = true
+camel-language-js = { workspace = true, optional = true }
+camel-language-rhai = { workspace = true, optional = true }
 camel-bean.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
@@ -35,6 +37,11 @@ tracing-subscriber = { workspace = true }
 notify.workspace = true
 opentelemetry = { workspace = true }
 redb = { workspace = true }
+
+[features]
+default = []
+lang-js = ["camel-language-js"]
+lang-rhai = ["camel-language-rhai"]
 
 [dev-dependencies]
 futures = "0.3"

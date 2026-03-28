@@ -1,0 +1,12 @@
+routes:
+  - id: "script-js"
+    from: "timer:js?period=3000"
+    steps:
+      # script: runs JavaScript and can mutate the exchange (body + headers)
+      - script:
+          language: "js"
+          source: |
+            camel.headers.set("greeting", "Hello from JS");
+            camel.headers.set("counter", String(camel.headers.get("CamelTimerCounter")));
+            camel.body = "JS processed exchange #" + camel.headers.get("CamelTimerCounter");
+      - log: "JS: ${body} (greeting=${header.greeting})"

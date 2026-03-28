@@ -28,6 +28,7 @@ members = [
     "crates/components/camel-sql",
     "crates/components/camel-controlbus",
     "crates/languages/camel-language-api",
+    "crates/languages/camel-language-js",
     "crates/languages/camel-language-rhai",
     "crates/languages/camel-language-simple",
     "examples/hello-world",
@@ -57,6 +58,7 @@ members = [
     "examples/controlbus",
     "examples/language-simple",
     "examples/language-rhai",
+    "examples/language-js",
     "examples/hot-reload",
     "examples/hot-reload-yaml",
     "examples/xml-body",
@@ -131,6 +133,7 @@ camel-otel = { path = "crates/services/camel-otel", version = "=0.5.0" }
 camel-prometheus = { path = "crates/services/camel-prometheus", version = "=0.5.0" }
 camel-component-container = { path = "crates/components/camel-container", version = "=0.5.0" }
 camel-language-api = { path = "crates/languages/camel-language-api", version = "=0.5.0" }
+camel-language-js = { path = "crates/languages/camel-language-js", version = "=0.5.0" }
 camel-language-rhai = { path = "crates/languages/camel-language-rhai", version = "=0.5.0" }
 camel-language-simple = { path = "crates/languages/camel-language-simple", version = "=0.5.0" }
 camel-config = { path = "crates/camel-config", version = "=0.5.0" }
@@ -156,6 +159,8 @@ http = "1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 rhai = { version = "1", features = ["sync"] }
+# Pin to 0.20: versions >= 0.21 make Context !Send + !Sync
+boa_engine = { version = "0.20", features = [] }
 arc-swap = "1"
 serde_yaml = "0.9"
 config = "0.14"
