@@ -21,6 +21,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
 camel-core.workspace = true
 camel-api.workspace = true
 camel-dsl.workspace = true
@@ -37,6 +39,10 @@ camel-component-container = { workspace = true, optional = true }
 camel-component-redis = { workspace = true, optional = true }
 camel-component-kafka = { workspace = true, optional = true }
 camel-component-sql = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json.workspace = true
 
 [features]
 default = []

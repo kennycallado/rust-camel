@@ -18,6 +18,7 @@ use camel_language_api::Language;
 use camel_language_api::LanguageError;
 
 use crate::lifecycle::adapters::RuntimeExecutionAdapter;
+use crate::lifecycle::adapters::redb_journal::{RedbJournalOptions, RedbRuntimeEventJournal};
 use crate::lifecycle::adapters::route_controller::{
     DefaultRouteController, RouteControllerInternal, SharedLanguageRegistry,
 };
@@ -163,35 +164,11 @@ impl CamelContext {
         )
     }
 
-    fn runtime_store_with_journal_path(
-        path: PathBuf,
-    ) -> crate::lifecycle::adapters::InMemoryRuntimeStore {
-        let store = crate::lifecycle::adapters::InMemoryRuntimeStore::default();
-        match crate::lifecycle::adapters::FileRuntimeEventJournal::new(path.clone()) {
-            Ok(journal) => store.with_journal(Arc::new(journal)),
-            Err(err) => {
-                warn!(
-                    journal_path = %path.display(),
-                    error = %err,
-                    "Failed to initialize runtime event journal; falling back to in-memory-only runtime store"
-                );
-                store
-            }
-        }
-    }
-
     /// Create a new, empty CamelContext.
     ///
     /// Runtime state is in-memory/ephemeral by default.
     pub fn new() -> Self {
         Self::with_metrics(Arc::new(NoOpMetrics))
-    }
-
-    /// Create a new CamelContext with an explicit runtime journal file path.
-    ///
-    /// This opt-in path enables local runtime replay/durability semantics.
-    pub fn new_with_runtime_journal_path(path: impl Into<PathBuf>) -> Self {
-        Self::with_metrics_and_runtime_journal_path(Arc::new(NoOpMetrics), path)
     }
 
     /// Create a new CamelContext with a custom metrics collector.
@@ -202,42 +179,6 @@ impl CamelContext {
             DefaultRouteController::with_languages(Arc::clone(&registry), Arc::clone(&languages)),
         ));
         let store = crate::lifecycle::adapters::InMemoryRuntimeStore::default();
-        let runtime = Self::build_runtime(Arc::clone(&controller), store);
-
-        // Set self-ref so DefaultRouteController can create ProducerContext
-        // Use try_lock since we just created it and nobody else has access yet
-        let mut controller_guard = controller
-            .try_lock()
-            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access");
-        controller_guard.set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
-        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
-        controller_guard.set_runtime_handle(runtime_handle);
-        drop(controller_guard);
-
-        Self {
-            registry,
-            route_controller: controller,
-            runtime,
-            cancel_token: CancellationToken::new(),
-            metrics,
-            languages,
-            shutdown_timeout: std::time::Duration::from_secs(30),
-            services: Vec::new(),
-            component_configs: HashMap::new(),
-        }
-    }
-
-    /// Create a new CamelContext with custom metrics and explicit runtime journal file path.
-    pub fn with_metrics_and_runtime_journal_path(
-        metrics: Arc<dyn MetricsCollector>,
-        journal_path: impl Into<PathBuf>,
-    ) -> Self {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        let languages = Self::built_in_languages();
-        let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
-            DefaultRouteController::with_languages(Arc::clone(&registry), Arc::clone(&languages)),
-        ));
-        let store = Self::runtime_store_with_journal_path(journal_path.into());
         let runtime = Self::build_runtime(Arc::clone(&controller), store);
 
         // Set self-ref so DefaultRouteController can create ProducerContext
@@ -313,12 +254,60 @@ impl CamelContext {
         }
     }
 
-    /// Create a new CamelContext with supervision, custom metrics, and explicit journal path.
-    pub fn with_supervision_and_metrics_and_runtime_journal_path(
+    /// Create a new CamelContext backed by a redb runtime journal.
+    pub async fn new_with_redb_journal(
+        path: impl Into<PathBuf>,
+        options: RedbJournalOptions,
+    ) -> Result<Self, CamelError> {
+        Self::with_metrics_and_redb_journal(Arc::new(NoOpMetrics), path, options).await
+    }
+
+    /// Create a new CamelContext with custom metrics and a redb runtime journal.
+    pub async fn with_metrics_and_redb_journal(
+        metrics: Arc<dyn MetricsCollector>,
+        path: impl Into<PathBuf>,
+        options: RedbJournalOptions,
+    ) -> Result<Self, CamelError> {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let languages = Self::built_in_languages();
+        let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
+            DefaultRouteController::with_languages(Arc::clone(&registry), Arc::clone(&languages)),
+        ));
+        let journal = RedbRuntimeEventJournal::new(path, options).await?;
+        let store = crate::lifecycle::adapters::InMemoryRuntimeStore::default()
+            .with_journal(Arc::new(journal));
+        let runtime = Self::build_runtime(Arc::clone(&controller), store);
+
+        // Set self-ref so DefaultRouteController can create ProducerContext
+        // Use try_lock since we just created it and nobody else has access yet
+        let mut controller_guard = controller
+            .try_lock()
+            .expect("BUG: CamelContext lock contention — try_lock should always succeed here since &mut self prevents concurrent access");
+        controller_guard.set_self_ref(Arc::clone(&controller) as Arc<Mutex<dyn RouteController>>);
+        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+        controller_guard.set_runtime_handle(runtime_handle);
+        drop(controller_guard);
+
+        Ok(Self {
+            registry,
+            route_controller: controller,
+            runtime,
+            cancel_token: CancellationToken::new(),
+            metrics,
+            languages,
+            shutdown_timeout: std::time::Duration::from_secs(30),
+            services: Vec::new(),
+            component_configs: HashMap::new(),
+        })
+    }
+
+    /// Create a new CamelContext with supervision, custom metrics, and a redb runtime journal.
+    pub async fn with_supervision_and_metrics_and_redb_journal(
         config: SupervisionConfig,
         metrics: Arc<dyn MetricsCollector>,
-        journal_path: impl Into<PathBuf>,
-    ) -> Self {
+        path: impl Into<PathBuf>,
+        options: RedbJournalOptions,
+    ) -> Result<Self, CamelError> {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let languages = Self::built_in_languages();
         let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
@@ -329,7 +318,9 @@ impl CamelContext {
             )
             .with_metrics(Arc::clone(&metrics)),
         ));
-        let store = Self::runtime_store_with_journal_path(journal_path.into());
+        let journal = RedbRuntimeEventJournal::new(path, options).await?;
+        let store = crate::lifecycle::adapters::InMemoryRuntimeStore::default()
+            .with_journal(Arc::new(journal));
         let runtime = Self::build_runtime(Arc::clone(&controller), store);
 
         // Set self-ref so SupervisingRouteController can create ProducerContext
@@ -342,7 +333,7 @@ impl CamelContext {
         controller_guard.set_runtime_handle(runtime_handle);
         drop(controller_guard);
 
-        Self {
+        Ok(Self {
             registry,
             route_controller: controller,
             runtime,
@@ -352,7 +343,7 @@ impl CamelContext {
             shutdown_timeout: std::time::Duration::from_secs(30),
             services: Vec::new(),
             component_configs: HashMap::new(),
-        }
+        })
     }
 
     /// Set a global error handler applied to all routes without a per-route handler.
@@ -719,7 +710,6 @@ mod tests {
         CanonicalRouteSpec, RuntimeCommand, RuntimeCommandResult, RuntimeQuery, RuntimeQueryResult,
     };
     use camel_component::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
-    use tempfile::tempdir;
 
     /// Mock component for testing
     struct MockComponent;
@@ -1023,45 +1013,6 @@ mod tests {
             query,
             RuntimeQueryResult::RouteStatus { ref status, .. } if status == "Registered"
         ));
-    }
-
-    #[tokio::test]
-    async fn context_with_explicit_runtime_journal_path_persists_events_to_file() {
-        let dir = tempdir().unwrap();
-        let journal_path = dir.path().join("context-runtime-events.jsonl");
-        let mut ctx = CamelContext::new_with_runtime_journal_path(journal_path.clone());
-        ctx.register_component(HoldComponent);
-
-        ctx.runtime()
-            .execute(RuntimeCommand::RegisterRoute {
-                spec: CanonicalRouteSpec::new("journal-path-r1", "hold:test"),
-                command_id: "journal-c1".into(),
-                causation_id: None,
-            })
-            .await
-            .unwrap();
-        ctx.runtime()
-            .execute(RuntimeCommand::StartRoute {
-                route_id: "journal-path-r1".into(),
-                command_id: "journal-c2".into(),
-                causation_id: Some("journal-c1".into()),
-            })
-            .await
-            .unwrap();
-
-        let data = std::fs::read_to_string(&journal_path).unwrap();
-        assert!(
-            data.contains("journal-path-r1"),
-            "journal file must contain route id"
-        );
-        assert!(
-            data.contains("RouteRegistered"),
-            "journal file must contain route registered event"
-        );
-        assert!(
-            data.contains("RouteStarted"),
-            "journal file must contain route started event"
-        );
     }
 
     #[tokio::test]

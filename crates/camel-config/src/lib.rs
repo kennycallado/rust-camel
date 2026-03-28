@@ -5,8 +5,8 @@ pub mod yaml;
 
 pub use config::{
     CamelConfig, ComponentsConfig, ContainerCamelConfig, FileCamelConfig, HttpCamelConfig,
-    KafkaCamelConfig, ObservabilityConfig, OtelCamelConfig, RedisCamelConfig, SqlCamelConfig,
-    SupervisionCamelConfig,
+    JournalConfig, JournalDurability, KafkaCamelConfig, ObservabilityConfig, OtelCamelConfig,
+    RedisCamelConfig, SqlCamelConfig, SupervisionCamelConfig,
 };
 pub use discovery::{DiscoveryError, discover_routes};
 pub use yaml::{

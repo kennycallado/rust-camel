@@ -15,11 +15,11 @@ pub struct CamelConfig {
     #[serde(default)]
     pub watch: bool,
 
-    /// Optional stable runtime journal path for CQRS event durability/replay.
+    /// Optional redb runtime journal configuration.
     ///
-    /// When unset, runtime durability/replay is disabled and runtime state is ephemeral.
+    /// When unset, runtime state is ephemeral (in-memory only).
     #[serde(default)]
-    pub runtime_journal_path: Option<String>,
+    pub runtime_journal: Option<JournalConfig>,
 
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -336,6 +336,58 @@ impl SupervisionCamelConfig {
             initial_delay: Duration::from_millis(self.initial_delay_ms),
             backoff_multiplier: self.backoff_multiplier,
             max_delay: Duration::from_millis(self.max_delay_ms),
+        }
+    }
+}
+
+/// Durability mode for the redb journal. Mirrors `camel_core::JournalDurability`.
+///
+/// Defined here (in camel-config) for TOML deserialization. Mapped to the
+/// camel-core type in `context_ext.rs` via `From`. No circular dependency —
+/// camel-config already depends on camel-core.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalDurability {
+    /// fsync on every commit — protects against power loss (default).
+    #[default]
+    Immediate,
+    /// No fsync — suitable for dev/test.
+    Eventual,
+}
+
+impl From<JournalDurability> for camel_core::JournalDurability {
+    fn from(d: JournalDurability) -> Self {
+        match d {
+            JournalDurability::Immediate => camel_core::JournalDurability::Immediate,
+            JournalDurability::Eventual => camel_core::JournalDurability::Eventual,
+        }
+    }
+}
+
+fn default_compaction_threshold_events() -> u64 {
+    10_000
+}
+
+/// Configuration for the redb runtime event journal.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct JournalConfig {
+    /// Path to the `.db` file. Created if it does not exist.
+    pub path: std::path::PathBuf,
+
+    /// Durability mode. Default: `immediate`.
+    #[serde(default)]
+    pub durability: JournalDurability,
+
+    /// Trigger compaction after this many events. Default: 10_000.
+    #[serde(default = "default_compaction_threshold_events")]
+    pub compaction_threshold_events: u64,
+}
+
+impl From<&JournalConfig> for camel_core::RedbJournalOptions {
+    fn from(cfg: &JournalConfig) -> Self {
+        camel_core::RedbJournalOptions {
+            durability: cfg.durability.clone().into(),
+            compaction_threshold_events: cfg.compaction_threshold_events,
         }
     }
 }

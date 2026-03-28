@@ -7,7 +7,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
     CamelConfig {
         routes: vec![],
         watch: false,
-        runtime_journal_path: None,
+        runtime_journal: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: ComponentsConfig::default(),
@@ -41,32 +41,32 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
     }
 }
 
-#[test]
-fn test_configure_context_succeeds_with_json_format() {
+#[tokio::test]
+async fn test_configure_context_succeeds_with_json_format() {
     let config = make_config_with_stdout_format(OutputFormat::Json, false);
-    let result = CamelConfig::configure_context(&config);
+    let result = CamelConfig::configure_context(&config).await;
     assert!(
         result.is_ok(),
         "configure_context with JSON format must succeed"
     );
 }
 
-#[test]
-fn test_configure_context_succeeds_with_plain_format() {
+#[tokio::test]
+async fn test_configure_context_succeeds_with_plain_format() {
     let config = make_config_with_stdout_format(OutputFormat::Plain, false);
-    let result = CamelConfig::configure_context(&config);
+    let result = CamelConfig::configure_context(&config).await;
     assert!(
         result.is_ok(),
         "configure_context with Plain format must succeed"
     );
 }
 
-#[test]
-fn test_configure_context_with_otel_enabled_does_not_error() {
+#[tokio::test]
+async fn test_configure_context_with_otel_enabled_does_not_error() {
     // When OTel is "enabled" in config but camel-otel service is not started,
     // configure_context must still succeed (it just adds layers, doesn't connect).
     let config = make_config_with_stdout_format(OutputFormat::Json, true);
-    let result = CamelConfig::configure_context(&config);
+    let result = CamelConfig::configure_context(&config).await;
     assert!(
         result.is_ok(),
         "configure_context with otel enabled must succeed"

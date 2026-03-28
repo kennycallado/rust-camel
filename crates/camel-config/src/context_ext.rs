@@ -104,7 +104,7 @@ impl CamelConfig {
     /// Always installs a unified tracing subscriber (Layers 1–3, plus Layer 4
     /// when OTel is enabled). `OtelService`, if present, only manages providers —
     /// it never installs a subscriber.
-    pub fn configure_context(config: &CamelConfig) -> Result<CamelContext, CamelError> {
+    pub async fn configure_context(config: &CamelConfig) -> Result<CamelContext, CamelError> {
         let otel_enabled = config
             .observability
             .otel
@@ -113,17 +113,19 @@ impl CamelConfig {
 
         // Build context with optional supervision
         let mut ctx = if let Some(ref sup) = config.supervision {
-            if let Some(path) = config.runtime_journal_path.as_deref() {
-                CamelContext::with_supervision_and_metrics_and_runtime_journal_path(
+            if let Some(ref jcfg) = config.runtime_journal {
+                CamelContext::with_supervision_and_metrics_and_redb_journal(
                     sup.clone().into_supervision_config(),
                     std::sync::Arc::new(camel_api::NoOpMetrics),
-                    path.to_string(),
+                    jcfg.path.clone(),
+                    jcfg.into(),
                 )
+                .await?
             } else {
                 CamelContext::with_supervision(sup.clone().into_supervision_config())
             }
-        } else if let Some(path) = config.runtime_journal_path.as_deref() {
-            CamelContext::new_with_runtime_journal_path(path.to_string())
+        } else if let Some(ref jcfg) = config.runtime_journal {
+            CamelContext::new_with_redb_journal(jcfg.path.clone(), jcfg.into()).await?
         } else {
             CamelContext::new()
         };
@@ -383,8 +385,8 @@ mod configure_context_smoke_tests {
     use super::*;
     use config::FileFormat;
 
-    #[test]
-    fn test_configure_context_empty_config() {
+    #[tokio::test]
+    async fn test_configure_context_empty_config() {
         let cfg = config::Config::builder()
             .add_source(config::File::from_str("", FileFormat::Toml))
             .build()
@@ -392,7 +394,124 @@ mod configure_context_smoke_tests {
             .try_deserialize::<CamelConfig>()
             .unwrap();
         // configure_context compiles and runs without error on empty config
-        let result = CamelConfig::configure_context(&cfg);
+        let result = CamelConfig::configure_context(&cfg).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn journal_config_deserializes_with_defaults() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+                [runtime_journal]
+                path = "/tmp/test.db"
+                "#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let jcfg = cfg.runtime_journal.unwrap();
+        assert_eq!(jcfg.path, std::path::PathBuf::from("/tmp/test.db"));
+        assert_eq!(jcfg.durability, crate::config::JournalDurability::Immediate);
+        assert_eq!(jcfg.compaction_threshold_events, 10_000);
+    }
+
+    #[tokio::test]
+    async fn journal_config_deserializes_durability_eventual() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+                [runtime_journal]
+                path = "/tmp/test.db"
+                durability = "eventual"
+                "#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let jcfg = cfg.runtime_journal.unwrap();
+        assert_eq!(jcfg.durability, crate::config::JournalDurability::Eventual);
+    }
+
+    #[tokio::test]
+    async fn configure_context_without_journal_creates_ephemeral_context() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str("", FileFormat::Toml))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        assert!(cfg.runtime_journal.is_none());
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn configure_context_with_supervision_and_journal_creates_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("sup-journal.db");
+        let path_str = db_path.to_str().unwrap();
+
+        let toml_str = format!(
+            r#"
+            [supervision]
+            max_attempts = 5
+            initial_delay_ms = 1000
+            backoff_multiplier = 2.0
+            max_delay_ms = 60000
+
+            [runtime_journal]
+            path = "{}"
+            "#,
+            path_str
+        );
+
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(&toml_str, FileFormat::Toml))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        assert!(cfg.supervision.is_some());
+        assert!(cfg.runtime_journal.is_some());
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(
+            result.is_ok(),
+            "supervision+journal context creation must succeed: {:?}",
+            result.err()
+        );
+        assert!(
+            db_path.exists(),
+            "redb journal file must be created on disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn journal_config_without_path_fails_deserialization() {
+        let result = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+                [runtime_journal]
+                durability = "eventual"
+                "#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>();
+
+        assert!(
+            result.is_err(),
+            "JournalConfig without 'path' field must fail deserialization"
+        );
     }
 }

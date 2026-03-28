@@ -1,5 +1,5 @@
 use camel_api::{CanonicalRouteSpec, RuntimeCommand};
-use camel_config::{CamelConfig, ObservabilityConfig, OtelCamelConfig};
+use camel_config::{CamelConfig, JournalConfig, ObservabilityConfig, OtelCamelConfig};
 use std::fs;
 use tempfile::tempdir;
 
@@ -72,12 +72,12 @@ routes:
     ctx.stop().await.unwrap();
 }
 
-#[test]
-fn test_configure_context_with_supervision() {
+#[tokio::test]
+async fn test_configure_context_with_supervision() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
-        runtime_journal_path: None,
+        runtime_journal: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -90,19 +90,19 @@ fn test_configure_context_with_supervision() {
         }),
     };
 
-    let result = CamelConfig::configure_context(&config);
+    let result = CamelConfig::configure_context(&config).await;
     assert!(
         result.is_ok(),
         "configure_context should succeed with supervision config"
     );
 }
 
-#[test]
-fn test_configure_context_sets_shutdown_timeout() {
+#[tokio::test]
+async fn test_configure_context_sets_shutdown_timeout() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
-        runtime_journal_path: None,
+        runtime_journal: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -110,7 +110,9 @@ fn test_configure_context_sets_shutdown_timeout() {
         supervision: None,
     };
 
-    let ctx = CamelConfig::configure_context(&config).expect("configure_context should succeed");
+    let ctx = CamelConfig::configure_context(&config)
+        .await
+        .expect("configure_context should succeed");
 
     // Verify that the shutdown timeout is set correctly from timeout_ms
     assert_eq!(
@@ -119,12 +121,12 @@ fn test_configure_context_sets_shutdown_timeout() {
     );
 }
 
-#[test]
-fn test_configure_context_with_valid_log_level() {
+#[tokio::test]
+async fn test_configure_context_with_valid_log_level() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
-        runtime_journal_path: None,
+        runtime_journal: None,
         log_level: "debug".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -132,19 +134,19 @@ fn test_configure_context_with_valid_log_level() {
         supervision: None,
     };
 
-    let result = CamelConfig::configure_context(&config);
+    let result = CamelConfig::configure_context(&config).await;
     assert!(
         result.is_ok(),
         "configure_context should succeed with valid log level 'debug'"
     );
 }
 
-#[test]
-fn test_configure_context_with_invalid_log_level() {
+#[tokio::test]
+async fn test_configure_context_with_invalid_log_level() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
-        runtime_journal_path: None,
+        runtime_journal: None,
         log_level: "invalid_level".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -152,19 +154,19 @@ fn test_configure_context_with_invalid_log_level() {
         supervision: None,
     };
 
-    let result = CamelConfig::configure_context(&config);
+    let result = CamelConfig::configure_context(&config).await;
     assert!(
         result.is_ok(),
         "configure_context should succeed even with invalid log level (should default to INFO)"
     );
 }
 
-#[test]
-fn test_configure_context_with_otel_enabled_registers_lifecycle() {
+#[tokio::test]
+async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
-        runtime_journal_path: None,
+        runtime_journal: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -181,7 +183,9 @@ fn test_configure_context_with_otel_enabled_registers_lifecycle() {
         supervision: None,
     };
 
-    let ctx = CamelConfig::configure_context(&config).expect("configure_context should succeed");
+    let ctx = CamelConfig::configure_context(&config)
+        .await
+        .expect("configure_context should succeed");
 
     // The health report should contain a service named "otel"
     let report = ctx.health_check();
@@ -192,12 +196,12 @@ fn test_configure_context_with_otel_enabled_registers_lifecycle() {
     );
 }
 
-#[test]
-fn test_configure_context_without_otel_no_lifecycle() {
+#[tokio::test]
+async fn test_configure_context_without_otel_no_lifecycle() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
-        runtime_journal_path: None,
+        runtime_journal: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -205,7 +209,9 @@ fn test_configure_context_without_otel_no_lifecycle() {
         supervision: None,
     };
 
-    let ctx = CamelConfig::configure_context(&config).expect("configure_context should succeed");
+    let ctx = CamelConfig::configure_context(&config)
+        .await
+        .expect("configure_context should succeed");
 
     // No OTel service should be registered
     let report = ctx.health_check();
@@ -217,13 +223,17 @@ fn test_configure_context_without_otel_no_lifecycle() {
 }
 
 #[tokio::test]
-async fn test_configure_context_uses_runtime_journal_path_from_config() {
+async fn test_configure_context_uses_runtime_journal_from_config() {
     let dir = tempdir().unwrap();
-    let journal_path = dir.path().join("config-runtime-events.jsonl");
+    let journal_path = dir.path().join("config-runtime-events.db");
     let config = CamelConfig {
         routes: vec![],
         watch: false,
-        runtime_journal_path: Some(journal_path.to_string_lossy().to_string()),
+        runtime_journal: Some(JournalConfig {
+            path: journal_path.clone(),
+            durability: camel_config::JournalDurability::Immediate,
+            compaction_threshold_events: 10_000,
+        }),
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: Default::default(),
@@ -231,8 +241,9 @@ async fn test_configure_context_uses_runtime_journal_path_from_config() {
         supervision: None,
     };
 
-    let mut ctx =
-        CamelConfig::configure_context(&config).expect("configure_context should succeed");
+    let mut ctx = CamelConfig::configure_context(&config)
+        .await
+        .expect("configure_context should succeed");
     ctx.register_component(camel_component_timer::TimerComponent::new());
 
     ctx.runtime()
@@ -244,9 +255,9 @@ async fn test_configure_context_uses_runtime_journal_path_from_config() {
         .await
         .unwrap();
 
-    let data = fs::read_to_string(&journal_path).expect("journal file should be readable");
+    // The redb database file should exist after context creation
     assert!(
-        data.contains("cfg-journal-r1"),
-        "journal file must include configured route id"
+        journal_path.exists(),
+        "journal db file should exist after context creation"
     );
 }

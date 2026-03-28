@@ -85,11 +85,15 @@ pub mod reload_watcher {
 }
 
 pub use crate::hot_reload::adapters::ReloadWatcher;
+pub use crate::lifecycle::adapters::redb_journal::{
+    JournalDurability, JournalEntry, JournalInspectFilter, RedbJournalOptions,
+    RedbRuntimeEventJournal,
+};
 pub use crate::lifecycle::adapters::route_controller::DefaultRouteController;
 pub use crate::lifecycle::adapters::route_types::Route;
 pub use crate::lifecycle::adapters::{
-    FileRuntimeEventJournal, InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore,
-    InMemoryRouteRepository, InMemoryRuntimeStore, RuntimeExecutionAdapter,
+    InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore, InMemoryRouteRepository,
+    InMemoryRuntimeStore, RuntimeExecutionAdapter,
 };
 pub use crate::lifecycle::application::SupervisingRouteController;
 pub use crate::lifecycle::application::runtime_bus::RuntimeBus;

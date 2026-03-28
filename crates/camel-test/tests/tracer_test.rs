@@ -58,8 +58,8 @@ async fn test_tracer_disabled_zero_overhead() {
     endpoint.assert_exchange_count(1).await;
 }
 
-#[test]
-fn test_tracer_file_output_invalid_path_returns_error() {
+#[tokio::test]
+async fn test_tracer_file_output_invalid_path_returns_error() {
     use camel_config::config::{CamelConfig, ComponentsConfig, ObservabilityConfig};
     use camel_core::{
         DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
@@ -69,7 +69,7 @@ fn test_tracer_file_output_invalid_path_returns_error() {
     let config = CamelConfig {
         routes: vec![],
         watch: false,
-        runtime_journal_path: None,
+        runtime_journal: None,
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         components: ComponentsConfig::default(),
@@ -97,7 +97,7 @@ fn test_tracer_file_output_invalid_path_returns_error() {
     };
 
     // configure_context should propagate the file-open error
-    let result = CamelConfig::configure_context(&config);
+    let result = CamelConfig::configure_context(&config).await;
 
     assert!(
         result.is_err(),

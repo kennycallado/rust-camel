@@ -34,6 +34,7 @@ chrono = { workspace = true }
 tracing-subscriber = { workspace = true }
 notify.workspace = true
 opentelemetry = { workspace = true }
+redb = { workspace = true }
 
 [dev-dependencies]
 futures = "0.3"

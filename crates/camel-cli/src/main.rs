@@ -1,3 +1,5 @@
+mod commands;
+
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +46,18 @@ enum Commands {
         #[arg(long, value_name = "NAME")]
         service_name: Option<String>,
     },
+
+    /// Inspect a runtime journal file.
+    Journal {
+        #[command(subcommand)]
+        action: JournalAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum JournalAction {
+    /// Inspect events in a redb journal file.
+    Inspect(commands::journal::JournalInspectArgs),
 }
 
 #[tokio::main]
@@ -70,6 +84,11 @@ async fn main() {
             };
             run(routes, config, cli_watch, otel, otel_endpoint, service_name).await
         }
+        Commands::Journal { action } => match action {
+            JournalAction::Inspect(args) => {
+                commands::journal::run_inspect(args).await;
+            }
+        },
     }
 }
 
@@ -119,6 +138,7 @@ async fn run(
 
     // 2. Build context (also initialises tracing subscriber)
     let mut ctx = camel_config::config::CamelConfig::configure_context(&camel_config)
+        .await
         .unwrap_or_else(|e| {
             eprintln!("Failed to configure CamelContext: {e}");
             std::process::exit(1);
