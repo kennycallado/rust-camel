@@ -935,17 +935,27 @@ mod tests {
             count
         );
 
-        // Verify runtime projection is NOT Failed.
-        let status = match runtime
-            .ask(RuntimeQuery::GetRouteStatus {
-                route_id: "reset-attempt-route".into(),
-            })
-            .await
-            .unwrap()
-        {
-            RuntimeQueryResult::RouteStatus { status, .. } => status,
-            other => panic!("unexpected query result: {other:?}"),
-        };
-        assert_ne!(status, "Failed");
+        // Verify runtime projection is NOT Failed (polling, since route crashes in a loop).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let status = match runtime
+                .ask(RuntimeQuery::GetRouteStatus {
+                    route_id: "reset-attempt-route".into(),
+                })
+                .await
+                .unwrap()
+            {
+                RuntimeQueryResult::RouteStatus { status, .. } => status,
+                other => panic!("unexpected query result: {other:?}"),
+            };
+            if status != "Failed" {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "route remained in Failed state for 2s — supervision likely gave up"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
