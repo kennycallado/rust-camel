@@ -108,6 +108,9 @@ pub enum BuilderStep {
     DynamicRouter {
         config: camel_api::DynamicRouterConfig,
     },
+    RoutingSlip {
+        config: camel_api::RoutingSlipConfig,
+    },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -193,6 +196,9 @@ impl std::fmt::Debug for BuilderStep {
             }
             BuilderStep::DynamicRouter { .. } => {
                 write!(f, "BuilderStep::DynamicRouter {{ .. }}")
+            }
+            BuilderStep::RoutingSlip { .. } => {
+                write!(f, "BuilderStep::RoutingSlip {{ .. }}")
             }
         }
     }

@@ -4,6 +4,7 @@ pub mod body_converter;
 pub mod circuit_breaker;
 pub mod declarative;
 pub mod dynamic_router;
+pub mod endpoint_pipeline;
 pub mod error;
 pub mod error_handler;
 pub mod exchange;
@@ -17,6 +18,7 @@ pub mod multicast;
 pub mod processor;
 pub mod producer;
 pub mod route_controller;
+pub mod routing_slip;
 pub mod runtime;
 pub mod splitter;
 pub mod supervision;
@@ -30,6 +32,7 @@ pub use body_converter::{BodyType, convert as convert_body};
 pub use circuit_breaker::CircuitBreakerConfig;
 pub use declarative::{LanguageExpressionDef, ValueSourceDef};
 pub use dynamic_router::{DynamicRouterConfig, RouterExpression};
+pub use endpoint_pipeline::{CAMEL_SLIP_ENDPOINT, EndpointPipelineConfig, EndpointResolver};
 pub use error::CamelError;
 pub use error_handler::{
     ErrorHandlerConfig, ExceptionPolicy, ExceptionPolicyBuilder, HEADER_REDELIVERED,
@@ -49,6 +52,7 @@ pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
 pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn};
 pub use producer::ProducerContext;
 pub use route_controller::{RouteAction, RouteController, RouteStatus};
+pub use routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
 pub use runtime::{
     CANONICAL_CONTRACT_DECLARATIVE_ONLY_STEPS, CANONICAL_CONTRACT_EXCLUDED_DECLARATIVE_STEPS,
     CANONICAL_CONTRACT_NAME, CANONICAL_CONTRACT_RUST_ONLY_STEPS,

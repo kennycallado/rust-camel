@@ -6,6 +6,7 @@ use camel_api::dynamic_router::{DynamicRouterConfig, RouterExpression};
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::load_balancer::LoadBalancerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
+use camel_api::routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
 use camel_api::splitter::SplitterConfig;
 use camel_api::throttler::{ThrottleStrategy, ThrottlerConfig};
 use camel_api::{
@@ -379,6 +380,15 @@ impl RouteBuilder {
         self
     }
 
+    pub fn routing_slip(self, expression: RoutingSlipExpression) -> Self {
+        self.routing_slip_with_config(RoutingSlipConfig::new(expression))
+    }
+
+    pub fn routing_slip_with_config(mut self, config: RoutingSlipConfig) -> Self {
+        self.steps.push(BuilderStep::RoutingSlip { config });
+        self
+    }
+
     /// Consume the builder and produce a [`RouteDefinition`].
     pub fn build(self) -> Result<RouteDefinition, CamelError> {
         if self.from_uri.is_empty() {
@@ -600,6 +610,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::Throttle { .. } => "throttle",
         BuilderStep::LoadBalance { .. } => "load_balancer",
         BuilderStep::DynamicRouter { .. } => "dynamic_router",
+        BuilderStep::RoutingSlip { .. } => "routing_slip",
     }
 }
 
@@ -1950,5 +1961,47 @@ mod tests {
             BuilderStep::DynamicRouter { .. }
         ));
         assert!(matches!(&definition.steps()[1], BuilderStep::To(uri) if uri == "mock:outer"));
+    }
+
+    #[test]
+    fn routing_slip_builder_creates_step() {
+        use camel_api::RoutingSlipExpression;
+
+        let expression: RoutingSlipExpression = Arc::new(|_| Some("direct:a,direct:b".to_string()));
+
+        let route = RouteBuilder::from("direct:start")
+            .route_id("routing-slip-test")
+            .routing_slip(expression)
+            .build()
+            .unwrap();
+
+        assert!(
+            matches!(route.steps()[0], BuilderStep::RoutingSlip { .. }),
+            "Expected RoutingSlip step"
+        );
+    }
+
+    #[test]
+    fn routing_slip_with_config_builder_creates_step() {
+        use camel_api::RoutingSlipConfig;
+
+        let config = RoutingSlipConfig::new(Arc::new(|_| Some("mock:a".to_string())))
+            .uri_delimiter("|")
+            .cache_size(50)
+            .ignore_invalid_endpoints(true);
+
+        let route = RouteBuilder::from("direct:start")
+            .route_id("routing-slip-config-test")
+            .routing_slip_with_config(config)
+            .build()
+            .unwrap();
+
+        if let BuilderStep::RoutingSlip { config } = &route.steps()[0] {
+            assert_eq!(config.uri_delimiter, "|");
+            assert_eq!(config.cache_size, 50);
+            assert!(config.ignore_invalid_endpoints);
+        } else {
+            panic!("Expected RoutingSlip step");
+        }
     }
 }

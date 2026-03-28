@@ -1,65 +1,32 @@
-use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use tower::Service;
 use tower::ServiceExt;
 
-use camel_api::{BoxProcessor, CamelError, DynamicRouterConfig, Exchange, Value};
+use camel_api::endpoint_pipeline::{CAMEL_SLIP_ENDPOINT, EndpointPipelineConfig, EndpointResolver};
+use camel_api::{CamelError, DynamicRouterConfig, Exchange, Value};
 
-const CAMEL_SLIP_ENDPOINT: &str = "CamelSlipEndpoint";
-
-pub type EndpointResolver = Arc<dyn Fn(&str) -> Option<BoxProcessor> + Send + Sync>;
-
-struct EndpointCache {
-    map: HashMap<String, BoxProcessor>,
-    order: VecDeque<String>,
-}
-
-impl EndpointCache {
-    fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-            order: VecDeque::new(),
-        }
-    }
-
-    fn get(&self, uri: &str) -> Option<BoxProcessor> {
-        self.map.get(uri).cloned()
-    }
-
-    /// Insert `uri -> endpoint`, evicting the oldest entry when at capacity.
-    fn insert(&mut self, uri: String, endpoint: BoxProcessor, capacity: usize) {
-        if self.map.contains_key(&uri) {
-            return;
-        }
-        if self.map.len() >= capacity
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.map.remove(&oldest);
-        }
-        self.order.push_back(uri.clone());
-        self.map.insert(uri, endpoint);
-    }
-}
+use crate::endpoint_pipeline::EndpointPipelineService;
 
 #[derive(Clone)]
 pub struct DynamicRouterService {
     config: DynamicRouterConfig,
-    endpoint_resolver: EndpointResolver,
-    endpoint_cache: Arc<Mutex<EndpointCache>>,
+    pipeline: EndpointPipelineService,
 }
 
 impl DynamicRouterService {
     pub fn new(config: DynamicRouterConfig, endpoint_resolver: EndpointResolver) -> Self {
+        let pipeline_config = EndpointPipelineConfig {
+            cache_size: EndpointPipelineConfig::from_signed(config.cache_size),
+            ignore_invalid_endpoints: config.ignore_invalid_endpoints,
+        };
+
         Self {
             config,
-            endpoint_resolver,
-            endpoint_cache: Arc::new(Mutex::new(EndpointCache::new())),
+            pipeline: EndpointPipelineService::new(endpoint_resolver, pipeline_config),
         }
     }
 }
@@ -75,8 +42,7 @@ impl Service<Exchange> for DynamicRouterService {
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let config = self.config.clone();
-        let resolver = self.endpoint_resolver.clone();
-        let cache = self.endpoint_cache.clone();
+        let pipeline = self.pipeline.clone();
 
         Box::pin(async move {
             let start = Instant::now();
@@ -112,36 +78,10 @@ impl Service<Exchange> for DynamicRouterService {
                         continue;
                     }
 
-                    let endpoint = {
-                        let cache_guard = cache.lock().unwrap();
-                        cache_guard.get(uri)
-                    };
-
-                    let endpoint = match endpoint {
+                    let endpoint = match pipeline.resolve(uri)? {
                         Some(e) => e,
                         None => {
-                            let e = match (resolver)(uri) {
-                                Some(e) => e,
-                                None => {
-                                    if config.ignore_invalid_endpoints {
-                                        continue;
-                                    } else {
-                                        return Err(CamelError::ProcessorError(format!(
-                                            "Invalid endpoint: {}",
-                                            uri
-                                        )));
-                                    }
-                                }
-                            };
-                            if config.cache_size > 0 {
-                                let mut cache_guard = cache.lock().unwrap();
-                                cache_guard.insert(
-                                    uri.to_string(),
-                                    e.clone(),
-                                    config.cache_size as usize,
-                                );
-                            }
-                            e
+                            continue;
                         }
                     };
 
@@ -160,7 +100,7 @@ impl Service<Exchange> for DynamicRouterService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{BoxProcessorExt, Message};
+    use camel_api::{BoxProcessor, BoxProcessorExt, Message};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;

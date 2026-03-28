@@ -790,7 +790,7 @@ impl DefaultRouteController {
                     processors.push(BoxProcessor::new(svc));
                 }
                 BuilderStep::DynamicRouter { config } => {
-                    use camel_processor::dynamic_router::EndpointResolver;
+                    use camel_api::EndpointResolver;
 
                     let producer_ctx_clone = producer_ctx.clone();
                     let registry_clone = Arc::clone(registry);
@@ -820,6 +820,39 @@ impl DefaultRouteController {
                     let svc = camel_processor::dynamic_router::DynamicRouterService::new(
                         config, resolver,
                     );
+                    processors.push(BoxProcessor::new(svc));
+                }
+                BuilderStep::RoutingSlip { config } => {
+                    use camel_api::EndpointResolver;
+
+                    let producer_ctx_clone = producer_ctx.clone();
+                    let registry_clone = registry.clone();
+                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
+                        let parsed = match parse_uri(uri) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        let registry_guard = match registry_clone.lock() {
+                            Ok(g) => g,
+                            Err(_) => return None,
+                        };
+                        let component = match registry_guard.get_or_err(&parsed.scheme) {
+                            Ok(c) => c,
+                            Err(_) => return None,
+                        };
+                        let endpoint = match component.create_endpoint(uri) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
+                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        Some(BoxProcessor::new(producer))
+                    });
+
+                    let svc =
+                        camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
                     processors.push(BoxProcessor::new(svc));
                 }
             }

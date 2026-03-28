@@ -76,6 +76,7 @@ members = [
     "examples/container-nginx",
     "examples/container-hot-reload",
     "examples/dynamic-router",
+    "examples/routing-slip",
     "examples/load-balancer",
     "examples/throttler",
     "crates/components/camel-container",

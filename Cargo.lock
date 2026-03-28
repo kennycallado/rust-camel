@@ -633,6 +633,8 @@ dependencies = [
  "camel-config",
  "camel-core",
  "camel-dsl",
+ "camel-language-js",
+ "camel-language-rhai",
  "chrono",
  "clap",
  "config",
@@ -894,6 +896,8 @@ dependencies = [
  "camel-dsl",
  "camel-endpoint",
  "camel-language-api",
+ "camel-language-js",
+ "camel-language-rhai",
  "camel-language-simple",
  "camel-processor",
  "camel-support",
@@ -977,8 +981,11 @@ dependencies = [
  "boa_engine",
  "camel-api",
  "camel-language-api",
+ "camel-processor",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -2799,6 +2806,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "language-js"
+version = "0.5.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-language-js",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "language-rhai"
 version = "0.5.0"
 dependencies = [
@@ -4153,6 +4174,19 @@ dependencies = [
  "bitflags 2.11.0",
  "serde",
  "serde_derive",
+]
+
+[[package]]
+name = "routing-slip"
+version = "0.5.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

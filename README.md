@@ -161,6 +161,7 @@ cargo test --workspace
 | Aggregator | `.aggregate(config)` | Correlate and aggregate multiple exchanges |
 | Content-Based Router | `.choice()` / `.when()` | Route based on exchange content |
 | Dynamic Router | `.dynamic_router(expr)` | Expression-based routing with slip pattern |
+| Routing Slip | `.routing_slip(expr)` | Route through a sequence of endpoints determined at runtime |
 | Filter | `.filter(predicate)` | Forward exchange only when predicate is true |
 | Load Balancer | `.load_balance()` | Distribute across endpoints with RoundRobin/Random/Weighted/Failover |
 | Multicast | `.multicast()` | Send the same exchange to multiple endpoints |
@@ -180,6 +181,7 @@ Run an example:
  cargo run -p content-based-routing
  cargo run -p controlbus
  cargo run -p dynamic-router
+ cargo run -p routing-slip
  cargo run -p error-handling
  cargo run -p file-pipeline
  cargo run -p file-polling
