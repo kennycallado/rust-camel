@@ -65,7 +65,7 @@ pub(crate) mod shared;
 
 pub mod route {
     pub use crate::lifecycle::adapters::route_compiler::{
-        compose_pipeline, compose_traced_pipeline,
+        compose_pipeline, compose_pipeline_with_contracts, compose_traced_pipeline,
     };
     pub use crate::lifecycle::adapters::route_types::Route;
     pub use crate::lifecycle::application::route_definition::*;

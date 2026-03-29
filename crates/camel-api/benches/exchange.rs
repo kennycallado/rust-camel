@@ -1,5 +1,6 @@
-use camel_api::{Exchange, Message, Value};
+use camel_api::{Body, Exchange, Message, Value};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use serde_json::json;
 
 fn bench_exchange_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("exchange/creation");
@@ -82,11 +83,45 @@ fn bench_exchange_properties(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_exchange_body_as(c: &mut Criterion) {
+    let mut group = c.benchmark_group("exchange/body_as");
+
+    let ex_text = Exchange::new(Message::new(Body::Text("hello world".to_string())));
+    group.bench_function("body_as_string_from_text", |b| {
+        b.iter(|| ex_text.body_as::<String>().unwrap())
+    });
+
+    let ex_json_string = Exchange::new(Message::new(Body::Json(serde_json::Value::String(
+        "hello".to_string(),
+    ))));
+    group.bench_function("body_as_string_from_json_string", |b| {
+        b.iter(|| ex_json_string.body_as::<String>().unwrap())
+    });
+
+    let ex_json_number = Exchange::new(Message::new(Body::Json(json!(42))));
+    group.bench_function("body_as_string_from_json_number", |b| {
+        b.iter(|| ex_json_number.body_as::<String>().unwrap())
+    });
+
+    let ex_json = Exchange::new(Message::new(Body::Json(json!({ "id": 1 }))));
+    group.bench_function("body_as_value_from_json", |b| {
+        b.iter(|| ex_json.body_as::<serde_json::Value>().unwrap())
+    });
+
+    let ex_text_bytes = Exchange::new(Message::new(Body::Text("hello".to_string())));
+    group.bench_function("body_as_vec_u8_from_text", |b| {
+        b.iter(|| ex_text_bytes.body_as::<Vec<u8>>().unwrap())
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_exchange_creation,
     bench_exchange_clone,
     bench_exchange_headers,
     bench_exchange_properties,
+    bench_exchange_body_as,
 );
 criterion_main!(benches);

@@ -110,6 +110,7 @@ pub fn convert(body: Body, target: BodyType) -> Result<Body, CamelError> {
         )),
 
         // Json conversions
+        (Body::Json(serde_json::Value::String(s)), BodyType::Text) => Ok(Body::Text(s)),
         (Body::Json(v), BodyType::Text) => Ok(Body::Text(v.to_string())),
         (Body::Json(v), BodyType::Bytes) => {
             let b = serde_json::to_vec(&v).map_err(|e| {

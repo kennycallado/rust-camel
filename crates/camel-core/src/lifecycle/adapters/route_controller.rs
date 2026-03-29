@@ -26,7 +26,9 @@ use camel_processor::error_handler::ErrorHandlerLayer;
 use camel_processor::script_mutator::ScriptMutator;
 use camel_processor::{ChoiceService, WhenClause};
 
-use crate::lifecycle::adapters::route_compiler::{compose_pipeline, compose_traced_pipeline};
+use crate::lifecycle::adapters::route_compiler::{
+    compose_pipeline, compose_traced_pipeline_with_contracts,
+};
 use crate::lifecycle::application::route_definition::{
     BuilderStep, LanguageExpressionDef, RouteDefinition, RouteDefinitionInfo, ValueSourceDef,
 };
@@ -461,7 +463,7 @@ impl DefaultRouteController {
         steps: Vec<BuilderStep>,
         producer_ctx: &ProducerContext,
         registry: &Arc<std::sync::Mutex<Registry>>,
-    ) -> Result<Vec<BoxProcessor>, CamelError> {
+    ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
         let resolve_producer = |uri: &str| -> Result<BoxProcessor, CamelError> {
             let parsed = parse_uri(uri)?;
             let registry_guard = registry
@@ -472,27 +474,34 @@ impl DefaultRouteController {
             endpoint.create_producer(producer_ctx)
         };
 
-        let mut processors: Vec<BoxProcessor> = Vec::new();
+        let mut processors: Vec<(BoxProcessor, Option<camel_api::BodyType>)> = Vec::new();
         for step in steps {
             match step {
                 BuilderStep::Processor(svc) => {
-                    processors.push(svc);
+                    processors.push((svc, None));
                 }
                 BuilderStep::To(uri) => {
-                    let producer = resolve_producer(&uri)?;
-                    processors.push(producer);
+                    let parsed = parse_uri(&uri)?;
+                    let registry_guard = registry
+                        .lock()
+                        .expect("mutex poisoned: another thread panicked while holding this lock");
+                    let component = registry_guard.get_or_err(&parsed.scheme)?;
+                    let endpoint = component.create_endpoint(&uri)?;
+                    let contract = endpoint.body_contract();
+                    let producer = endpoint.create_producer(producer_ctx)?;
+                    processors.push((producer, contract));
                 }
                 BuilderStep::Stop => {
-                    processors.push(BoxProcessor::new(camel_processor::StopService));
+                    processors.push((BoxProcessor::new(camel_processor::StopService), None));
                 }
                 BuilderStep::Log { level, message } => {
                     let svc = camel_processor::LogProcessor::new(level, message);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::DeclarativeSetHeader { key, value } => match value {
                     ValueSourceDef::Literal(value) => {
                         let svc = camel_processor::SetHeader::new(IdentityProcessor, key, value);
-                        processors.push(BoxProcessor::new(svc));
+                        processors.push((BoxProcessor::new(svc), None));
                     }
                     ValueSourceDef::Expression(expression) => {
                         let expression = self.compile_language_expression(&expression)?;
@@ -503,7 +512,7 @@ impl DefaultRouteController {
                                 expression.evaluate(exchange).unwrap_or(Value::Null)
                             },
                         );
-                        processors.push(BoxProcessor::new(svc));
+                        processors.push((BoxProcessor::new(svc), None));
                     }
                 },
                 BuilderStep::DeclarativeSetBody { value } => match value {
@@ -513,7 +522,7 @@ impl DefaultRouteController {
                             IdentityProcessor,
                             move |_exchange: &Exchange| body.clone(),
                         );
-                        processors.push(BoxProcessor::new(svc));
+                        processors.push((BoxProcessor::new(svc), None));
                     }
                     ValueSourceDef::Expression(expression) => {
                         let expression = self.compile_language_expression(&expression)?;
@@ -524,23 +533,27 @@ impl DefaultRouteController {
                                 Self::value_to_body(value)
                             },
                         );
-                        processors.push(BoxProcessor::new(svc));
+                        processors.push((BoxProcessor::new(svc), None));
                     }
                 },
                 BuilderStep::DeclarativeFilter { predicate, steps } => {
                     let predicate = self.compile_filter_predicate(&predicate)?;
-                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_pairs = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors: Vec<BoxProcessor> =
+                        sub_pairs.into_iter().map(|(p, _)| p).collect();
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::DeclarativeChoice { whens, otherwise } => {
                     let mut when_clauses = Vec::new();
                     for when_step in whens {
                         let predicate = self.compile_filter_predicate(&when_step.predicate)?;
-                        let sub_processors =
+                        let sub_pairs =
                             self.resolve_steps(when_step.steps, producer_ctx, registry)?;
+                        let sub_processors: Vec<BoxProcessor> =
+                            sub_pairs.into_iter().map(|(p, _)| p).collect();
                         let pipeline = compose_pipeline(sub_processors);
                         when_clauses.push(WhenClause {
                             predicate,
@@ -548,20 +561,23 @@ impl DefaultRouteController {
                         });
                     }
                     let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
-                        let sub_processors =
+                        let sub_pairs =
                             self.resolve_steps(otherwise_steps, producer_ctx, registry)?;
+                        let sub_processors: Vec<BoxProcessor> =
+                            sub_pairs.into_iter().map(|(p, _)| p).collect();
                         Some(compose_pipeline(sub_processors))
                     } else {
                         None
                     };
                     let svc = ChoiceService::new(when_clauses, otherwise_pipeline);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::DeclarativeScript { expression } => {
                     let lang = self.resolve_language(&expression.language)?;
                     match lang.create_mutating_expression(&expression.source) {
                         Ok(mut_expr) => {
-                            processors.push(BoxProcessor::new(ScriptMutator::new(mut_expr)));
+                            processors
+                                .push((BoxProcessor::new(ScriptMutator::new(mut_expr)), None));
                         }
                         Err(LanguageError::NotSupported { .. }) => {
                             // Graceful degradation: YAML declarative routes fall back to read-only
@@ -580,7 +596,7 @@ impl DefaultRouteController {
                                     Self::value_to_body(value)
                                 },
                             );
-                            processors.push(BoxProcessor::new(svc));
+                            processors.push((BoxProcessor::new(svc), None));
                         }
                         Err(e) => {
                             return Err(CamelError::RouteError(format!(
@@ -591,11 +607,13 @@ impl DefaultRouteController {
                     }
                 }
                 BuilderStep::Split { config, steps } => {
-                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_pairs = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors: Vec<BoxProcessor> =
+                        sub_pairs.into_iter().map(|(p, _)| p).collect();
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let splitter =
                         camel_processor::splitter::SplitterService::new(config, sub_pipeline);
-                    processors.push(BoxProcessor::new(splitter));
+                    processors.push((BoxProcessor::new(splitter), None));
                 }
                 BuilderStep::DeclarativeSplit {
                     expression,
@@ -638,29 +656,35 @@ impl DefaultRouteController {
                         config = config.parallel_limit(limit);
                     }
 
-                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_pairs = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors: Vec<BoxProcessor> =
+                        sub_pairs.into_iter().map(|(p, _)| p).collect();
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let splitter =
                         camel_processor::splitter::SplitterService::new(config, sub_pipeline);
-                    processors.push(BoxProcessor::new(splitter));
+                    processors.push((BoxProcessor::new(splitter), None));
                 }
                 BuilderStep::Aggregate { config } => {
                     let svc = camel_processor::AggregatorService::new(config);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::Filter { predicate, steps } => {
-                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_pairs = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors: Vec<BoxProcessor> =
+                        sub_pairs.into_iter().map(|(p, _)| p).collect();
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::Choice { whens, otherwise } => {
                     // Resolve each when clause's sub-steps into a pipeline.
                     let mut when_clauses = Vec::new();
                     for when_step in whens {
-                        let sub_processors =
+                        let sub_pairs =
                             self.resolve_steps(when_step.steps, producer_ctx, registry)?;
+                        let sub_processors: Vec<BoxProcessor> =
+                            sub_pairs.into_iter().map(|(p, _)| p).collect();
                         let pipeline = compose_pipeline(sub_processors);
                         when_clauses.push(WhenClause {
                             predicate: when_step.predicate,
@@ -669,31 +693,34 @@ impl DefaultRouteController {
                     }
                     // Resolve otherwise branch (if present).
                     let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
-                        let sub_processors =
+                        let sub_pairs =
                             self.resolve_steps(otherwise_steps, producer_ctx, registry)?;
+                        let sub_processors: Vec<BoxProcessor> =
+                            sub_pairs.into_iter().map(|(p, _)| p).collect();
                         Some(compose_pipeline(sub_processors))
                     } else {
                         None
                     };
                     let svc = ChoiceService::new(when_clauses, otherwise_pipeline);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::WireTap { uri } => {
                     let producer = resolve_producer(&uri)?;
                     let svc = camel_processor::WireTapService::new(producer);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::Multicast { config, steps } => {
                     // Each top-level step in the multicast scope becomes an independent endpoint.
                     let mut endpoints = Vec::new();
                     for step in steps {
-                        let sub_processors =
-                            self.resolve_steps(vec![step], producer_ctx, registry)?;
+                        let sub_pairs = self.resolve_steps(vec![step], producer_ctx, registry)?;
+                        let sub_processors: Vec<BoxProcessor> =
+                            sub_pairs.into_iter().map(|(p, _)| p).collect();
                         let endpoint = compose_pipeline(sub_processors);
                         endpoints.push(endpoint);
                     }
                     let svc = camel_processor::MulticastService::new(endpoints, config);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::DeclarativeLog { level, message } => {
                     let ValueSourceDef::Expression(expression) = message else {
@@ -714,7 +741,7 @@ impl DefaultRouteController {
                                 })
                                 .to_string()
                         });
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::Bean { name, method } => {
                     // Lock beans registry to lookup bean
@@ -742,13 +769,14 @@ impl DefaultRouteController {
                         }
                     });
 
-                    processors.push(BoxProcessor::new(processor));
+                    processors.push((BoxProcessor::new(processor), None));
                 }
                 BuilderStep::Script { language, script } => {
                     let lang = self.resolve_language(&language)?;
                     match lang.create_mutating_expression(&script) {
                         Ok(mut_expr) => {
-                            processors.push(BoxProcessor::new(ScriptMutator::new(mut_expr)));
+                            processors
+                                .push((BoxProcessor::new(ScriptMutator::new(mut_expr)), None));
                         }
                         Err(LanguageError::NotSupported {
                             feature,
@@ -770,24 +798,27 @@ impl DefaultRouteController {
                     }
                 }
                 BuilderStep::Throttle { config, steps } => {
-                    let sub_processors = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_pairs = self.resolve_steps(steps, producer_ctx, registry)?;
+                    let sub_processors: Vec<BoxProcessor> =
+                        sub_pairs.into_iter().map(|(p, _)| p).collect();
                     let sub_pipeline = compose_pipeline(sub_processors);
                     let svc =
                         camel_processor::throttler::ThrottlerService::new(config, sub_pipeline);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::LoadBalance { config, steps } => {
                     // Each top-level step in the load_balance scope becomes an independent endpoint.
                     let mut endpoints = Vec::new();
                     for step in steps {
-                        let sub_processors =
-                            self.resolve_steps(vec![step], producer_ctx, registry)?;
+                        let sub_pairs = self.resolve_steps(vec![step], producer_ctx, registry)?;
+                        let sub_processors: Vec<BoxProcessor> =
+                            sub_pairs.into_iter().map(|(p, _)| p).collect();
                         let endpoint = compose_pipeline(sub_processors);
                         endpoints.push(endpoint);
                     }
                     let svc =
                         camel_processor::load_balancer::LoadBalancerService::new(endpoints, config);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::DynamicRouter { config } => {
                     use camel_api::EndpointResolver;
@@ -820,7 +851,7 @@ impl DefaultRouteController {
                     let svc = camel_processor::dynamic_router::DynamicRouterService::new(
                         config, resolver,
                     );
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::RoutingSlip { config } => {
                     use camel_api::EndpointResolver;
@@ -853,7 +884,7 @@ impl DefaultRouteController {
 
                     let svc =
                         camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
-                    processors.push(BoxProcessor::new(svc));
+                    processors.push((BoxProcessor::new(svc), None));
                 }
             }
         }
@@ -890,10 +921,11 @@ impl DefaultRouteController {
         let producer_ctx = self.build_producer_context()?;
 
         // Resolve steps into processors (takes ownership of steps)
-        let processors = self.resolve_steps(definition.steps, &producer_ctx, &self.registry)?;
+        let processors_with_contracts =
+            self.resolve_steps(definition.steps, &producer_ctx, &self.registry)?;
         let route_id_for_tracing = route_id.clone();
-        let mut pipeline = compose_traced_pipeline(
-            processors,
+        let mut pipeline = compose_traced_pipeline_with_contracts(
+            processors_with_contracts,
             &route_id_for_tracing,
             self.tracing_enabled,
             self.tracer_detail_level.clone(),
@@ -951,9 +983,10 @@ impl DefaultRouteController {
 
         let producer_ctx = self.build_producer_context()?;
 
-        let processors = self.resolve_steps(def.steps, &producer_ctx, &self.registry)?;
-        let mut pipeline = compose_traced_pipeline(
-            processors,
+        let processors_with_contracts =
+            self.resolve_steps(def.steps, &producer_ctx, &self.registry)?;
+        let mut pipeline = compose_traced_pipeline_with_contracts(
+            processors_with_contracts,
             &route_id,
             self.tracing_enabled,
             self.tracer_detail_level.clone(),

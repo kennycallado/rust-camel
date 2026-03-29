@@ -6,6 +6,7 @@ use opentelemetry::Context;
 use uuid::Uuid;
 
 use crate::error::CamelError;
+use crate::from_body::FromBody;
 use crate::message::Message;
 use crate::value::Value;
 
@@ -110,6 +111,21 @@ impl Exchange {
     pub fn get_extension<T: Any>(&self, key: &str) -> Option<&T> {
         self.extensions.get(key)?.downcast_ref::<T>()
     }
+
+    /// Deserialize the body into type `T`.
+    ///
+    /// Uses built-in conversions for `String`, `Vec<u8>`, [`bytes::Bytes`], and
+    /// `serde_json::Value`. For custom types, implement [`FromBody`] or use
+    /// [`impl_from_body_via_serde!`].
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let text: String = exchange.body_as::<String>()?;
+    /// let raw: Vec<u8> = exchange.body_as::<Vec<u8>>()?;
+    /// ```
+    pub fn body_as<T: FromBody>(&self) -> Result<T, CamelError> {
+        T::from_body(&self.input.body)
+    }
 }
 
 impl Clone for Exchange {
@@ -136,6 +152,8 @@ impl Default for Exchange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Body;
+    use serde_json::json;
 
     #[test]
     fn test_exchange_new() {
@@ -237,5 +255,50 @@ mod tests {
         // Both see the same value
         assert_eq!(ex.get_extension::<u64>("shared"), Some(&99u64));
         assert_eq!(cloned.get_extension::<u64>("shared"), Some(&99u64));
+    }
+
+    #[test]
+    fn test_body_as_string_from_text() {
+        let ex = Exchange::new(Message::new(Body::Text("hello".to_string())));
+
+        let result = ex.body_as::<String>();
+
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_body_as_string_from_json_string() {
+        let ex = Exchange::new(Message::new(Body::Json(json!("hello"))));
+
+        let result = ex.body_as::<String>();
+
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_body_as_json_value_from_json_number() {
+        let ex = Exchange::new(Message::new(Body::Json(json!(42))));
+
+        let result = ex.body_as::<serde_json::Value>();
+
+        assert_eq!(result.unwrap(), json!(42));
+    }
+
+    #[test]
+    fn test_body_as_vec_u8_from_bytes() {
+        let ex = Exchange::new(Message::new(Body::from(vec![1u8, 2, 3, 4])));
+
+        let result = ex.body_as::<Vec<u8>>();
+
+        assert_eq!(result.unwrap(), vec![1u8, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_body_as_string_from_empty_returns_err() {
+        let ex = Exchange::new(Message::new(Body::Empty));
+
+        let result = ex.body_as::<String>();
+
+        assert!(result.is_err());
     }
 }

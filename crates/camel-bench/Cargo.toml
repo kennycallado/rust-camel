@@ -28,3 +28,7 @@ harness = false
 [[bench]]
 name = "exchange_flow"
 harness = false
+
+[[bench]]
+name = "body_coercion"
+harness = false

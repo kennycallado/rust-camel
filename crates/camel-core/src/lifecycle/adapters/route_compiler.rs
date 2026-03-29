@@ -11,9 +11,11 @@ use std::task::{Context, Poll};
 use tower::Service;
 use tower::ServiceExt;
 
+use camel_api::BodyType;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor};
 
+use crate::lifecycle::adapters::body_coercing::wrap_if_needed;
 use crate::shared::observability::adapters::TracingProcessor;
 use crate::shared::observability::domain::DetailLevel;
 
@@ -50,6 +52,61 @@ pub fn compose_traced_pipeline(
         .map(|(idx, processor)| {
             BoxProcessor::new(TracingProcessor::new(
                 processor,
+                route_id.to_string(),
+                idx,
+                detail_level.clone(),
+                metrics.clone(),
+            ))
+        })
+        .collect();
+
+    BoxProcessor::new(TracedPipeline { steps: wrapped })
+}
+
+/// Compose a list of `(BoxProcessor, Option<BodyType>)` pairs into a single pipeline.
+///
+/// Each processor is optionally wrapped with [`BodyCoercingProcessor`] based on its
+/// contract. Processors with `None` contract are passed through with zero overhead.
+///
+/// This is the internal variant used by `route_controller` for top-level route steps.
+/// Sub-pipelines (filter, choice, split branches) always use [`compose_pipeline`] because
+/// their steps are `.process()` closures or EIP processors — never raw component producers.
+pub fn compose_pipeline_with_contracts(
+    processors: Vec<(BoxProcessor, Option<BodyType>)>,
+) -> BoxProcessor {
+    let wrapped: Vec<BoxProcessor> = processors
+        .into_iter()
+        .map(|(p, c)| wrap_if_needed(p, c))
+        .collect();
+    compose_pipeline(wrapped)
+}
+
+/// Compose a list of `(BoxProcessor, Option<BodyType>)` pairs into a traced pipeline.
+///
+/// Applies body coercion contracts first, then wraps with `TracingProcessor`.
+/// When tracing is disabled, falls back to [`compose_pipeline_with_contracts`].
+pub(crate) fn compose_traced_pipeline_with_contracts(
+    processors: Vec<(BoxProcessor, Option<BodyType>)>,
+    route_id: &str,
+    trace_enabled: bool,
+    detail_level: DetailLevel,
+    metrics: Option<Arc<dyn MetricsCollector>>,
+) -> BoxProcessor {
+    if !trace_enabled {
+        return compose_pipeline_with_contracts(processors);
+    }
+
+    if processors.is_empty() {
+        return BoxProcessor::new(IdentityProcessor);
+    }
+
+    let wrapped: Vec<BoxProcessor> = processors
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (p, c))| {
+            let coerced = wrap_if_needed(p, c);
+            BoxProcessor::new(TracingProcessor::new(
+                coerced,
                 route_id.to_string(),
                 idx,
                 detail_level.clone(),
@@ -126,7 +183,9 @@ impl Service<Exchange> for TracedPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::BoxProcessorExt;
+    use camel_api::{Body, BoxProcessorExt, Message};
+    use serde_json::json;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A service that returns `Pending` on the first `poll_ready`, then `Ready`.
@@ -228,5 +287,30 @@ mod tests {
         let ex = Exchange::new(camel_api::Message::new("hello"));
         let result = tower::ServiceExt::oneshot(pipeline, ex).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_compose_pipeline_with_contracts_coerces_before_inner_processor() {
+        let seen_body = Arc::new(Mutex::new(None::<Body>));
+        let seen_body_clone = Arc::clone(&seen_body);
+
+        let inner = BoxProcessor::from_fn(move |ex: Exchange| {
+            let seen_body_clone = Arc::clone(&seen_body_clone);
+            Box::pin(async move {
+                *seen_body_clone.lock().expect("lock seen body") = Some(ex.input.body.clone());
+                Ok(ex)
+            })
+        });
+
+        let pipeline = compose_pipeline_with_contracts(vec![(inner, Some(BodyType::Text))]);
+
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::Json(json!("hello"));
+
+        let result = tower::ServiceExt::oneshot(pipeline, ex).await;
+        assert!(result.is_ok());
+
+        let observed = seen_body.lock().expect("lock seen body").clone();
+        assert_eq!(observed, Some(Body::Text("hello".to_string())));
     }
 }
