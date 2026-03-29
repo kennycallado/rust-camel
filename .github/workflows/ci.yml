@@ -43,3 +43,19 @@ jobs:
         run: cargo test -p camel-core --test hexagonal_architecture_boundaries_test
       - name: Test (full workspace)
         run: cargo test --workspace
+
+  coverage:
+    name: Coverage Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Build
+        run: cargo build --workspace
+      - name: Run coverage check
+        run: ./scripts/coverage.sh

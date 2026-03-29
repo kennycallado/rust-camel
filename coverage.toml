@@ -1,0 +1,10 @@
+[baseline]
+# Minimum line coverage percentage enforced by CI
+# Current: 77.41%, set threshold 2% below as safety margin
+minimum_line_coverage = 75.0
+
+# Date this baseline was established
+established = "2026-03-29"
+
+# Measured coverage at time of establishment (for reference)
+measured_at_establishment = 77.41

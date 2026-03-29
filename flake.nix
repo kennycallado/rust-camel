@@ -94,8 +94,12 @@
             cargo-watch
             cargo-edit
             bacon
+            cargo-llvm-cov
+            llvm
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+          LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";
+          LLVM_PROFDATA = "${pkgs.llvm}/bin/llvm-profdata";
         };
       }
     );
