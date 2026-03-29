@@ -1,6 +1,6 @@
 # rust-camel
 
-A Rust integration framework inspired by [Apache Camel](https://camel.apache.org/), built on [Tower](https://docs.rs/tower).
+A Rust-native, Tower-native integration framework inspired by [Apache Camel](https://camel.apache.org/), built for async pipelines, EIP patterns, and production observability.
 
 > **Status:** Pre-release (`0.5.0`). APIs will change.
 
@@ -12,48 +12,42 @@ Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `kafka`, `
 
 ## Architecture
 
-rust-camel implements **Domain-Driven Design (DDD)** with **CQRS** and **Hexagonal Architecture**:
+rust-camel separates two planes:
+
+- **Data plane** — Tower-native. Every processor and producer is a `Service<Exchange>`. EIP patterns compose as Tower middleware.
+- **Control plane** — its own trait hierarchy: `Component`, `Endpoint`, `Consumer`, route lifecycle, supervision, hot-reload.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                               camel-core                                    │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         Domain Layer                                │    │
-│  │   RouteRuntimeAggregate, RouteRuntimeState, RouteLifecycleCommand   │    │
-│  │   RuntimeEvent (internal contract, no external deps)                │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                    │                                        │
-│                                    ▼                                        │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                       Application Layer                             │    │
-│  │   RuntimeBus (CommandBus + QueryBus), Command Handlers, Queries     │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                    │                                        │
-│                                    ▼                                        │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                          Ports Layer                                │    │
-│  │   RouteRepositoryPort, ProjectionStorePort, RuntimeExecutionPort,   │    │
-│  │   EventPublisherPort, RuntimeEventJournalPort, CommandDedupPort     │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                    │                                        │
-│                                    ▼                                        │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                        Adapters Layer                               │    │
-│  │   InMemory* adapters, RedbRuntimeEventJournal, RuntimeExecutionAdap │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                    Your Application                  │
+│         RouteBuilder / YAML DSL / camel-config       │
+└──────────────────────┬───────────────────────────────┘
+                       │
+┌──────────────────────▼───────────────────────────────┐
+│                    camel-core                        │
+│  CamelContext — composition root                     │
+│                                                      │
+│  ┌──────────────────────────────────────────────┐    │
+│  │  Data plane (Tower)                          │    │
+│  │  Exchange → Service<Exchange> pipeline       │    │
+│  │  EIP processors as Tower middleware          │    │
+│  └──────────────────────────────────────────────┘    │
+│                                                      │
+│  ┌──────────────────────────────────────────────┐    │
+│  │  Control plane                               │    │
+│  │  Route lifecycle, supervision, hot-reload    │    │
+│  │  RuntimeBus (CQRS), event journal (redb)     │    │
+│  └──────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────┘
+          │                          │
+┌─────────▼──────────┐   ┌──────────▼─────────────────┐
+│   camel-processor  │   │   Components                │
+│   EIP patterns     │   │   timer, log, http, file,   │
+│   (Tower layers)   │   │   kafka, redis, sql, …      │
+└────────────────────┘   └────────────────────────────┘
 ```
 
-### Key Concepts
-
-| Concept        | Description                                                                |
-| -------------- | -------------------------------------------------------------------------- |
-| **Aggregate**  | `RouteRuntimeAggregate` owns route lifecycle state with optimistic locking |
-| **Projection** | `RouteStatusProjection` is the read model for queries                      |
-| **Command**    | `RuntimeCommand` (RegisterRoute, StartRoute, StopRoute, etc.)              |
-| **Query**      | `RuntimeQuery` (GetRouteStatus, ListRoutes)                                |
-| **Event**      | `RuntimeEvent` (RouteStarted, RouteStopped, RouteFailed, etc.)             |
-| **Journal**    | Optional durable event journal for crash recovery                          |
+> The internal DDD/CQRS/hexagonal structure of `camel-core` is an implementation detail — see [`crates/camel-core/README.md`](crates/camel-core/README.md) for those internals.
 
 ### Runtime Bus
 
