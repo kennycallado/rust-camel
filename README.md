@@ -150,7 +150,10 @@ cargo run -p hello-world
 ```sh
 cargo build --workspace
 cargo test --workspace
+cargo bench --workspace
 ```
+
+The benchmark suite uses [Criterion](https://bheisler.github.io/criterion.rs/book/) with HTML reports. Per-crate inline benchmarks cover core types, processors, and the DSL. The `camel-bench` crate provides integration pipeline benchmarks.
 
 ## Implemented EIP Patterns
 
