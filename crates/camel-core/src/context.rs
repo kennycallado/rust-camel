@@ -1222,7 +1222,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_route_definition_produces_registered_state() {
-        let mut ctx = CamelContext::new();
+        let ctx = CamelContext::new();
         let definition =
             RouteDefinition::new("direct:test", vec![]).with_route_id("async-test-route");
 
