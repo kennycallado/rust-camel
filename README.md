@@ -435,6 +435,20 @@ During retries, these headers are automatically set:
 - `CamelRedeliveryCounter` - Current retry attempt (1-indexed)
 - `CamelRedeliveryMaxCounter` - Maximum retry attempts
 
+### RouteBuilder shorthand
+
+```rust
+RouteBuilder::from("direct:input")
+    .route_id("shorthand")
+    .dead_letter_channel("log:dlc")
+    .on_exception(|e| matches!(e, CamelError::Io(_)))
+        .retry(3)
+        .handled_by("log:io-errors")
+    .end_on_exception()
+    .to("mock:result")
+    .build()?;
+```
+
 ### YAML Configuration
 
 ```yaml
@@ -442,13 +456,18 @@ routes:
   - id: "retry-example"
     from: "timer:tick"
     error_handler:
-      dead_letter_uri: "log:dlc"
+      dead_letter_channel: "log:dlc"
       retry:
         max_attempts: 3
         initial_delay_ms: 100
         multiplier: 2.0
         max_delay_ms: 10000
         jitter_factor: 0.2
+      on_exceptions:
+        - kind: "ProcessorError"
+          message_contains: "validation"
+          retry:
+            max_attempts: 1
     steps:
       - to: "direct:processor"
 ```

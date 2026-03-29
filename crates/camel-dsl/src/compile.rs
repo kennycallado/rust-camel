@@ -90,7 +90,48 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
         ErrorHandlerConfig::log_only()
     };
 
-    if let Some(retry) = def.retry {
+    if let Some(on_exceptions) = def.on_exceptions {
+        for clause in on_exceptions {
+            if clause.kind.is_none() && clause.message_contains.is_none() {
+                return Err(CamelError::Config(
+                    "error_handler.on_exceptions clause must set `kind` or `message_contains`"
+                        .into(),
+                ));
+            }
+
+            if let Some(ref kind) = clause.kind {
+                ensure_known_exception_kind(kind)?;
+            }
+
+            let kind = clause.kind;
+            let message_contains = clause.message_contains;
+            let mut builder = config.on_exception(move |e| {
+                let kind_ok = kind
+                    .as_deref()
+                    .is_none_or(|expected| exception_kind_matches(expected, e));
+                let message_ok = message_contains
+                    .as_ref()
+                    .is_none_or(|needle| e.to_string().contains(needle));
+                kind_ok && message_ok
+            });
+
+            if let Some(retry) = clause.retry {
+                builder = builder.retry(retry.max_attempts).with_backoff(
+                    Duration::from_millis(retry.initial_delay_ms),
+                    retry.multiplier,
+                    Duration::from_millis(retry.max_delay_ms),
+                );
+                if retry.jitter_factor > 0.0 {
+                    builder = builder.with_jitter(retry.jitter_factor);
+                }
+                if let Some(uri) = retry.handled_by {
+                    builder = builder.handled_by(uri);
+                }
+            }
+
+            config = builder.build();
+        }
+    } else if let Some(retry) = def.retry {
         let mut builder = config.on_exception(|_e| true).retry(retry.max_attempts);
         builder = builder.with_backoff(
             Duration::from_millis(retry.initial_delay_ms),
@@ -107,6 +148,58 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
     }
 
     Ok(config)
+}
+
+fn ensure_known_exception_kind(kind: &str) -> Result<(), CamelError> {
+    if supported_exception_kinds().contains(&kind) {
+        Ok(())
+    } else {
+        Err(CamelError::Config(format!(
+            "unknown exception kind '{kind}'. supported kinds: {}",
+            supported_exception_kinds().join(", ")
+        )))
+    }
+}
+
+fn supported_exception_kinds() -> Vec<&'static str> {
+    vec![
+        "ComponentNotFound",
+        "EndpointCreationFailed",
+        "ProcessorError",
+        "TypeConversionFailed",
+        "InvalidUri",
+        "ChannelClosed",
+        "RouteError",
+        "Io",
+        "DeadLetterChannelFailed",
+        "CircuitOpen",
+        "HttpOperationFailed",
+        "Stopped",
+        "Config",
+        "AlreadyConsumed",
+        "StreamLimitExceeded",
+    ]
+}
+
+fn exception_kind_matches(kind: &str, err: &CamelError) -> bool {
+    match kind {
+        "ComponentNotFound" => matches!(err, CamelError::ComponentNotFound(_)),
+        "EndpointCreationFailed" => matches!(err, CamelError::EndpointCreationFailed(_)),
+        "ProcessorError" => matches!(err, CamelError::ProcessorError(_)),
+        "TypeConversionFailed" => matches!(err, CamelError::TypeConversionFailed(_)),
+        "InvalidUri" => matches!(err, CamelError::InvalidUri(_)),
+        "ChannelClosed" => matches!(err, CamelError::ChannelClosed),
+        "RouteError" => matches!(err, CamelError::RouteError(_)),
+        "Io" => matches!(err, CamelError::Io(_)),
+        "DeadLetterChannelFailed" => matches!(err, CamelError::DeadLetterChannelFailed(_)),
+        "CircuitOpen" => matches!(err, CamelError::CircuitOpen(_)),
+        "HttpOperationFailed" => matches!(err, CamelError::HttpOperationFailed { .. }),
+        "Stopped" => matches!(err, CamelError::Stopped),
+        "Config" => matches!(err, CamelError::Config(_)),
+        "AlreadyConsumed" => matches!(err, CamelError::AlreadyConsumed),
+        "StreamLimitExceeded" => matches!(err, CamelError::StreamLimitExceeded(_)),
+        _ => false,
+    }
 }
 
 fn compile_circuit_breaker(def: DeclarativeCircuitBreaker) -> CircuitBreakerConfig {
@@ -464,5 +557,184 @@ fn compile_log_level(level: LogLevelDef) -> LogLevel {
         LogLevelDef::Info => LogLevel::Info,
         LogLevelDef::Warn => LogLevel::Warn,
         LogLevelDef::Error => LogLevel::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DeclarativeOnException, DeclarativeRedeliveryPolicy};
+
+    #[test]
+    fn test_compile_error_handler_on_exceptions_order_preserved() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: Some("log:dlc".into()),
+            retry: None,
+            on_exceptions: Some(vec![
+                DeclarativeOnException {
+                    kind: Some("Io".into()),
+                    message_contains: None,
+                    retry: Some(DeclarativeRedeliveryPolicy {
+                        max_attempts: 3,
+                        initial_delay_ms: 10,
+                        multiplier: 2.0,
+                        max_delay_ms: 100,
+                        jitter_factor: 0.0,
+                        handled_by: Some("log:io".into()),
+                    }),
+                },
+                DeclarativeOnException {
+                    kind: Some("ProcessorError".into()),
+                    message_contains: Some("validation".into()),
+                    retry: Some(DeclarativeRedeliveryPolicy {
+                        max_attempts: 1,
+                        initial_delay_ms: 5,
+                        multiplier: 2.0,
+                        max_delay_ms: 50,
+                        jitter_factor: 0.0,
+                        handled_by: None,
+                    }),
+                },
+            ]),
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(config.policies.len(), 2);
+        assert_eq!(
+            config.policies[0].retry.as_ref().map(|p| p.max_attempts),
+            Some(3)
+        );
+        assert_eq!(
+            config.policies[1].retry.as_ref().map(|p| p.max_attempts),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_compile_error_handler_unknown_kind_returns_config_error() {
+        let err = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("NotRealKind".into()),
+                message_contains: None,
+                retry: None,
+            }]),
+        })
+        .err()
+        .expect("should fail");
+
+        assert!(matches!(err, CamelError::Config(_)));
+    }
+
+    #[test]
+    fn test_compile_error_handler_invalid_clause_without_matcher() {
+        let err = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: None,
+                message_contains: None,
+                retry: None,
+            }]),
+        })
+        .err()
+        .expect("should fail");
+
+        assert!(matches!(err, CamelError::Config(_)));
+    }
+
+    #[test]
+    fn test_compile_error_handler_legacy_retry_still_supported() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: Some("log:dlc".into()),
+            retry: Some(DeclarativeRedeliveryPolicy {
+                max_attempts: 2,
+                initial_delay_ms: 100,
+                multiplier: 2.0,
+                max_delay_ms: 1000,
+                jitter_factor: 0.0,
+                handled_by: None,
+            }),
+            on_exceptions: None,
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(config.policies.len(), 1);
+        assert_eq!(
+            config.policies[0].retry.as_ref().map(|p| p.max_attempts),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_compile_error_handler_kind_list_guard() {
+        let expected = vec![
+            "ComponentNotFound",
+            "EndpointCreationFailed",
+            "ProcessorError",
+            "TypeConversionFailed",
+            "InvalidUri",
+            "ChannelClosed",
+            "RouteError",
+            "Io",
+            "DeadLetterChannelFailed",
+            "CircuitOpen",
+            "HttpOperationFailed",
+            "Stopped",
+            "Config",
+            "AlreadyConsumed",
+            "StreamLimitExceeded",
+        ];
+
+        assert_eq!(supported_exception_kinds(), expected);
+    }
+
+    #[test]
+    fn test_compile_error_handler_message_contains_refines_kind_matching() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: Some("log:dlc".into()),
+            retry: None,
+            on_exceptions: Some(vec![
+                DeclarativeOnException {
+                    kind: Some("Io".into()),
+                    message_contains: Some("validation".into()),
+                    retry: Some(DeclarativeRedeliveryPolicy {
+                        max_attempts: 1,
+                        initial_delay_ms: 10,
+                        multiplier: 2.0,
+                        max_delay_ms: 100,
+                        jitter_factor: 0.0,
+                        handled_by: Some("log:validation".into()),
+                    }),
+                },
+                DeclarativeOnException {
+                    kind: Some("Io".into()),
+                    message_contains: None,
+                    retry: Some(DeclarativeRedeliveryPolicy {
+                        max_attempts: 2,
+                        initial_delay_ms: 10,
+                        multiplier: 2.0,
+                        max_delay_ms: 100,
+                        jitter_factor: 0.0,
+                        handled_by: Some("log:io".into()),
+                    }),
+                },
+            ]),
+        })
+        .expect("compile should succeed");
+
+        let err = CamelError::Io("network reset".into());
+        let first_matches = (config.policies[0].matches)(&err);
+        let second_matches = (config.policies[1].matches)(&err);
+
+        assert!(!first_matches);
+        assert!(second_matches);
+        assert_eq!(
+            config.policies[0].handled_by.as_deref(),
+            Some("log:validation")
+        );
+        assert_eq!(config.policies[1].handled_by.as_deref(), Some("log:io"));
+        assert_eq!(config.dlc_uri.as_deref(), Some("log:dlc"));
     }
 }

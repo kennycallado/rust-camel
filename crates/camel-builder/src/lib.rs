@@ -3,7 +3,7 @@ use camel_api::body::Body;
 use camel_api::body_converter::BodyType;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::dynamic_router::{DynamicRouterConfig, RouterExpression};
-use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::error_handler::{ErrorHandlerConfig, RedeliveryPolicy};
 use camel_api::load_balancer::LoadBalancerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
@@ -177,11 +177,31 @@ pub struct RouteBuilder {
     from_uri: String,
     steps: Vec<BuilderStep>,
     error_handler: Option<ErrorHandlerConfig>,
+    error_handler_mode: ErrorHandlerMode,
     circuit_breaker_config: Option<CircuitBreakerConfig>,
     concurrency: Option<ConcurrencyModel>,
     route_id: Option<String>,
     auto_startup: Option<bool>,
     startup_order: Option<i32>,
+}
+
+#[derive(Default)]
+enum ErrorHandlerMode {
+    #[default]
+    None,
+    ExplicitConfig,
+    Shorthand {
+        dlc_uri: Option<String>,
+        specs: Vec<OnExceptionSpec>,
+    },
+    Mixed,
+}
+
+#[derive(Clone)]
+struct OnExceptionSpec {
+    matches: std::sync::Arc<dyn Fn(&CamelError) -> bool + Send + Sync>,
+    retry: Option<RedeliveryPolicy>,
+    handled_by: Option<String>,
 }
 
 impl RouteBuilder {
@@ -191,6 +211,7 @@ impl RouteBuilder {
             from_uri: endpoint.to_string(),
             steps: Vec::new(),
             error_handler: None,
+            error_handler_mode: ErrorHandlerMode::None,
             circuit_breaker_config: None,
             concurrency: None,
             route_id: None,
@@ -238,8 +259,55 @@ impl RouteBuilder {
 
     /// Set a per-route error handler. Overrides the global error handler on `CamelContext`.
     pub fn error_handler(mut self, config: ErrorHandlerConfig) -> Self {
+        self.error_handler_mode = match self.error_handler_mode {
+            ErrorHandlerMode::None | ErrorHandlerMode::ExplicitConfig => {
+                ErrorHandlerMode::ExplicitConfig
+            }
+            ErrorHandlerMode::Shorthand { .. } | ErrorHandlerMode::Mixed => ErrorHandlerMode::Mixed,
+        };
         self.error_handler = Some(config);
         self
+    }
+
+    /// Set a dead letter channel URI for shorthand error handler mode.
+    pub fn dead_letter_channel(mut self, uri: impl Into<String>) -> Self {
+        let uri = uri.into();
+        self.error_handler_mode = match self.error_handler_mode {
+            ErrorHandlerMode::None => ErrorHandlerMode::Shorthand {
+                dlc_uri: Some(uri),
+                specs: Vec::new(),
+            },
+            ErrorHandlerMode::Shorthand { specs, .. } => ErrorHandlerMode::Shorthand {
+                dlc_uri: Some(uri),
+                specs,
+            },
+            ErrorHandlerMode::ExplicitConfig | ErrorHandlerMode::Mixed => ErrorHandlerMode::Mixed,
+        };
+        self
+    }
+
+    /// Add a shorthand exception policy scope. Call `.end_on_exception()` to return to route builder.
+    pub fn on_exception<F>(mut self, matches: F) -> OnExceptionBuilder
+    where
+        F: Fn(&CamelError) -> bool + Send + Sync + 'static,
+    {
+        self.error_handler_mode = match self.error_handler_mode {
+            ErrorHandlerMode::None => ErrorHandlerMode::Shorthand {
+                dlc_uri: None,
+                specs: Vec::new(),
+            },
+            ErrorHandlerMode::ExplicitConfig | ErrorHandlerMode::Mixed => ErrorHandlerMode::Mixed,
+            shorthand @ ErrorHandlerMode::Shorthand { .. } => shorthand,
+        };
+
+        OnExceptionBuilder {
+            parent: self,
+            policy: OnExceptionSpec {
+                matches: std::sync::Arc::new(matches),
+                retry: None,
+                handled_by: None,
+            },
+        }
     }
 
     /// Set a circuit breaker for this route.
@@ -402,8 +470,49 @@ impl RouteBuilder {
                     .to_string(),
             )
         })?;
+        let resolved_error_handler = match self.error_handler_mode {
+            ErrorHandlerMode::None => self.error_handler,
+            ErrorHandlerMode::ExplicitConfig => self.error_handler,
+            ErrorHandlerMode::Mixed => {
+                return Err(CamelError::RouteError(
+                    "mixed error handler modes: cannot combine .error_handler(config) with shorthand methods".into(),
+                ));
+            }
+            ErrorHandlerMode::Shorthand { dlc_uri, specs } => {
+                let mut config = if let Some(uri) = dlc_uri {
+                    ErrorHandlerConfig::dead_letter_channel(uri)
+                } else {
+                    ErrorHandlerConfig::log_only()
+                };
+
+                for spec in specs {
+                    let matcher = spec.matches.clone();
+                    let mut builder = config.on_exception(move |e| matcher(e));
+
+                    if let Some(retry) = spec.retry {
+                        builder = builder.retry(retry.max_attempts).with_backoff(
+                            retry.initial_delay,
+                            retry.multiplier,
+                            retry.max_delay,
+                        );
+                        if retry.jitter_factor > 0.0 {
+                            builder = builder.with_jitter(retry.jitter_factor);
+                        }
+                    }
+
+                    if let Some(uri) = spec.handled_by {
+                        builder = builder.handled_by(uri);
+                    }
+
+                    config = builder.build();
+                }
+
+                Some(config)
+            }
+        };
+
         let definition = RouteDefinition::new(self.from_uri, self.steps);
-        let definition = if let Some(eh) = self.error_handler {
+        let definition = if let Some(eh) = resolved_error_handler {
             definition.with_error_handler(eh)
         } else {
             definition
@@ -460,6 +569,51 @@ impl RouteBuilder {
         };
         spec.validate_contract()?;
         Ok(spec)
+    }
+}
+
+pub struct OnExceptionBuilder {
+    parent: RouteBuilder,
+    policy: OnExceptionSpec,
+}
+
+impl OnExceptionBuilder {
+    pub fn retry(mut self, max_attempts: u32) -> Self {
+        self.policy.retry = Some(RedeliveryPolicy::new(max_attempts));
+        self
+    }
+
+    pub fn with_backoff(
+        mut self,
+        initial: std::time::Duration,
+        multiplier: f64,
+        max: std::time::Duration,
+    ) -> Self {
+        if let Some(ref mut retry) = self.policy.retry {
+            retry.initial_delay = initial;
+            retry.multiplier = multiplier;
+            retry.max_delay = max;
+        }
+        self
+    }
+
+    pub fn with_jitter(mut self, jitter_factor: f64) -> Self {
+        if let Some(ref mut retry) = self.policy.retry {
+            retry.jitter_factor = jitter_factor.clamp(0.0, 1.0);
+        }
+        self
+    }
+
+    pub fn handled_by(mut self, uri: impl Into<String>) -> Self {
+        self.policy.handled_by = Some(uri.into());
+        self
+    }
+
+    pub fn end_on_exception(mut self) -> RouteBuilder {
+        if let ErrorHandlerMode::Shorthand { ref mut specs, .. } = self.parent.error_handler_mode {
+            specs.push(self.policy);
+        }
+        self.parent
     }
 }
 
@@ -985,10 +1139,12 @@ impl StepAccumulator for LoadBalancerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::error_handler::ErrorHandlerConfig;
     use camel_api::load_balancer::LoadBalanceStrategy;
     use camel_api::{Exchange, Message};
     use camel_core::route::BuilderStep;
     use std::sync::Arc;
+    use std::time::Duration;
     use tower::{Service, ServiceExt};
 
     #[test]
@@ -1237,6 +1393,91 @@ mod tests {
             "circuit breaker config should be set"
         );
         // Route definition was built successfully with both configs.
+    }
+
+    #[test]
+    fn test_builder_on_exception_shorthand_multiple_clauses_preserve_order() {
+        let definition = RouteBuilder::from("direct:start")
+            .route_id("test-route")
+            .dead_letter_channel("log:dlc")
+            .on_exception(|e| matches!(e, CamelError::Io(_)))
+            .retry(3)
+            .handled_by("log:io")
+            .end_on_exception()
+            .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
+            .retry(1)
+            .end_on_exception()
+            .to("mock:out")
+            .build()
+            .expect("route should build");
+
+        let cfg = definition
+            .error_handler_config()
+            .expect("error handler should be set");
+        assert_eq!(cfg.policies.len(), 2);
+        assert_eq!(cfg.dlc_uri.as_deref(), Some("log:dlc"));
+        assert_eq!(
+            cfg.policies[0].retry.as_ref().map(|p| p.max_attempts),
+            Some(3)
+        );
+        assert_eq!(cfg.policies[0].handled_by.as_deref(), Some("log:io"));
+        assert_eq!(
+            cfg.policies[1].retry.as_ref().map(|p| p.max_attempts),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_builder_on_exception_mixed_mode_rejected() {
+        let result = RouteBuilder::from("direct:start")
+            .route_id("test-route")
+            .error_handler(ErrorHandlerConfig::log_only())
+            .on_exception(|_e| true)
+            .end_on_exception()
+            .to("mock:out")
+            .build();
+
+        let err = result.err().expect("mixed mode should fail with an error");
+
+        assert!(
+            format!("{err}").contains("mixed error handler modes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_builder_on_exception_backoff_and_jitter_without_retry_noop() {
+        let definition = RouteBuilder::from("direct:start")
+            .route_id("test-route")
+            .on_exception(|_e| true)
+            .with_backoff(Duration::from_millis(5), 3.0, Duration::from_millis(100))
+            .with_jitter(0.5)
+            .end_on_exception()
+            .to("mock:out")
+            .build()
+            .expect("route should build");
+
+        let cfg = definition
+            .error_handler_config()
+            .expect("error handler should be set");
+        assert_eq!(cfg.policies.len(), 1);
+        assert!(cfg.policies[0].retry.is_none());
+    }
+
+    #[test]
+    fn test_builder_dead_letter_channel_without_on_exception_sets_dlc() {
+        let definition = RouteBuilder::from("direct:start")
+            .route_id("test-route")
+            .dead_letter_channel("log:dlc")
+            .to("mock:out")
+            .build()
+            .expect("route should build");
+
+        let cfg = definition
+            .error_handler_config()
+            .expect("error handler should be set");
+        assert_eq!(cfg.dlc_uri.as_deref(), Some("log:dlc"));
+        assert!(cfg.policies.is_empty());
     }
 
     // --- Splitter builder tests ---

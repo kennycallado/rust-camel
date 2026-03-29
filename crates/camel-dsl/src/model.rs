@@ -23,9 +23,17 @@ pub struct DeclarativeRedeliveryPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct DeclarativeOnException {
+    pub kind: Option<String>,
+    pub message_contains: Option<String>,
+    pub retry: Option<DeclarativeRedeliveryPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeclarativeErrorHandler {
     pub dead_letter_channel: Option<String>,
     pub retry: Option<DeclarativeRedeliveryPolicy>,
+    pub on_exceptions: Option<Vec<DeclarativeOnException>>,
 }
 
 #[derive(Debug, Clone)]

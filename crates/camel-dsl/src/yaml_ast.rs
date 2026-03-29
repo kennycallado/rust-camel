@@ -31,6 +31,18 @@ pub struct YamlErrorHandler {
     pub dead_letter_channel: Option<String>,
     #[serde(default)]
     pub retry: Option<YamlRedeliveryPolicy>,
+    #[serde(default)]
+    pub on_exceptions: Option<Vec<YamlOnException>>,
+}
+
+#[derive(Deserialize)]
+pub struct YamlOnException {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub message_contains: Option<String>,
+    #[serde(default)]
+    pub retry: Option<YamlRedeliveryPolicy>,
 }
 
 #[derive(Deserialize)]

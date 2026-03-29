@@ -7,6 +7,9 @@
 //! 3. **`onException` with `handled_by`** — route errors to a specific endpoint based on type
 //! 4. **`direct:` error propagation** — subroute errors bubble up to the caller's handler
 //! 5. **Global vs per-route handlers** — per-route takes precedence over context-level config
+//! 6. **RouteBuilder shorthand** — `.dead_letter_channel().on_exception()...end_on_exception()`
+//! 7. **First-match-wins ordering** — broad clause before specific clause
+//! 8. **No-match fallback to DLC** — when no clause matches, route-level DLC is used
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -29,6 +32,11 @@ fn always_fail(reason: &'static str) -> BoxProcessor {
     BoxProcessor::from_fn(move |_ex| {
         Box::pin(async move { Err(CamelError::ProcessorError(reason.into())) })
     })
+}
+
+/// A processor that always fails with an IO error.
+fn always_fail_io(reason: &'static str) -> BoxProcessor {
+    BoxProcessor::from_fn(move |_ex| Box::pin(async move { Err(CamelError::Io(reason.into())) }))
 }
 
 /// A processor that fails N times then succeeds — simulates a transient error.
@@ -183,6 +191,71 @@ async fn main() -> Result<(), CamelError> {
         .process_fn(always_fail("route6: uses global handler"))
         .build()?;
 
+    // -----------------------------------------------------------------------
+    // Route 7: New shorthand API
+    //
+    // Same behavior as explicit ErrorHandlerConfig, but with route builder DSL:
+    // .dead_letter_channel(...).on_exception(...).retry(...).end_on_exception()
+    // -----------------------------------------------------------------------
+    let route7 = RouteBuilder::from("timer:route7?period=2000&repeatCount=1")
+        .route_id("shorthand-on-exception")
+        .set_header("example", Value::String("shorthand-on-exception".into()))
+        .process_fn(always_fail("route7: shorthand policy"))
+        .dead_letter_channel("log:route7-dlc?showHeaders=true&showBody=true&showCorrelationId=true")
+        .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
+        .retry(2)
+        .with_backoff(Duration::from_millis(50), 2.0, Duration::from_secs(1))
+        .handled_by("log:route7-handled?showHeaders=true&showBody=true&showCorrelationId=true")
+        .end_on_exception()
+        .build()?;
+
+    // -----------------------------------------------------------------------
+    // Route 8: First-match-wins ordering
+    //
+    // The first clause is broad (`|_| true`), so the second specific clause
+    // will never execute for this route.
+    // -----------------------------------------------------------------------
+    let route8 = RouteBuilder::from("timer:route8?period=2000&repeatCount=1")
+        .route_id("shorthand-first-match-wins")
+        .set_header(
+            "example",
+            Value::String("shorthand-first-match-wins".into()),
+        )
+        .process_fn(always_fail("route8: ordering demo"))
+        .dead_letter_channel("log:route8-dlc?showHeaders=true&showBody=true&showCorrelationId=true")
+        .on_exception(|_| true)
+        .handled_by(
+            "log:route8-catchall-first?showHeaders=true&showBody=true&showCorrelationId=true",
+        )
+        .end_on_exception()
+        .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
+        .handled_by(
+            "log:route8-specific-second?showHeaders=true&showBody=true&showCorrelationId=true",
+        )
+        .end_on_exception()
+        .build()?;
+
+    // -----------------------------------------------------------------------
+    // Route 9: No-match fallback to DLC
+    //
+    // This route fails with Io(...), but only has a ProcessorError clause.
+    // Since no clause matches, exchange goes to route9 DLC.
+    // -----------------------------------------------------------------------
+    let route9 = RouteBuilder::from("timer:route9?period=2000&repeatCount=1")
+        .route_id("shorthand-no-match-fallback")
+        .set_header(
+            "example",
+            Value::String("shorthand-no-match-fallback".into()),
+        )
+        .process_fn(always_fail_io("route9: io failure"))
+        .dead_letter_channel("log:route9-dlc?showHeaders=true&showBody=true&showCorrelationId=true")
+        .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
+        .handled_by(
+            "log:route9-processor-errors?showHeaders=true&showBody=true&showCorrelationId=true",
+        )
+        .end_on_exception()
+        .build()?;
+
     // --- Register all routes ---
     ctx.add_route_definition(subroute_no_handler).await?;
     ctx.add_route_definition(subroute_with_handler).await?;
@@ -192,6 +265,9 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(route4).await?;
     ctx.add_route_definition(route5).await?;
     ctx.add_route_definition(route6).await?;
+    ctx.add_route_definition(route7).await?;
+    ctx.add_route_definition(route8).await?;
+    ctx.add_route_definition(route9).await?;
 
     ctx.start().await?;
 
@@ -203,7 +279,11 @@ async fn main() -> Result<(), CamelError> {
     println!("  Route 4: direct: bubble up (subroute error → caller's DLC)");
     println!("  Route 5: direct: contained (subroute DLC absorbs error, caller continues)");
     println!("  Route 6: Global fallback (no per-route handler → log:global-dlc)");
-    println!("\nPress Ctrl+C to stop.\n");
+    println!("  Route 7: Shorthand on_exception (→ log:route7-handled, else log:route7-dlc)");
+    println!("  Route 8: First-match-wins (catch-all first → log:route8-catchall-first)");
+    println!("  Route 9: No-match fallback (Io error + ProcessorError clause → log:route9-dlc)");
+    println!("\nYAML note: message_contains is demonstrated in crates/camel-dsl/README.md.");
+    println!("Press Ctrl+C to stop.\n");
 
     tokio::signal::ctrl_c()
         .await

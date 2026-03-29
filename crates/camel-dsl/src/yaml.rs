@@ -9,10 +9,11 @@ use crate::compile::{compile_declarative_route, compile_declarative_route_to_can
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
-    DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRedeliveryPolicy, DeclarativeRoute,
-    DeclarativeStep, LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef,
-    MulticastStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
-    SplitExpressionDef, SplitStepDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeOnException,
+    DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep, LanguageExpressionDef,
+    LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef, ScriptStepDef,
+    SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
+    ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
     AggregateData, AggregateStep, ChoiceData, ChoiceStep, FilterStep, LogConfig, LogMessageData,
@@ -97,6 +98,23 @@ fn yaml_route_to_declarative_route(route: YamlRoute) -> Result<DeclarativeRoute,
             max_delay_ms: retry.max_delay_ms,
             jitter_factor: retry.jitter_factor,
             handled_by: retry.handled_by,
+        }),
+        on_exceptions: eh.on_exceptions.map(|clauses| {
+            clauses
+                .into_iter()
+                .map(|clause| DeclarativeOnException {
+                    kind: clause.kind,
+                    message_contains: clause.message_contains,
+                    retry: clause.retry.map(|retry| DeclarativeRedeliveryPolicy {
+                        max_attempts: retry.max_attempts,
+                        initial_delay_ms: retry.initial_delay_ms,
+                        multiplier: retry.multiplier,
+                        max_delay_ms: retry.max_delay_ms,
+                        jitter_factor: retry.jitter_factor,
+                        handled_by: retry.handled_by,
+                    }),
+                })
+                .collect()
         }),
     });
 
@@ -622,6 +640,29 @@ routes:
         assert!(!routes[0].auto_startup);
         assert_eq!(routes[0].startup_order, 7);
         assert_eq!(routes[0].steps.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_yaml_to_declarative_parses_on_exceptions() {
+        let yaml = r#"
+routes:
+  - id: "eh-route"
+    from: "direct:start"
+    error_handler:
+      dead_letter_channel: "log:dlc"
+      on_exceptions:
+        - kind: "Io"
+          retry:
+            max_attempts: 3
+            handled_by: "log:io"
+"#;
+
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let eh = routes[0]
+            .error_handler
+            .as_ref()
+            .expect("error handler should be present");
+        assert!(eh.on_exceptions.is_some());
     }
 
     #[test]

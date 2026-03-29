@@ -254,6 +254,11 @@ impl RouteDefinition {
         self
     }
 
+    /// Get the route-level error handler config, if set.
+    pub fn error_handler_config(&self) -> Option<&ErrorHandlerConfig> {
+        self.error_handler.as_ref()
+    }
+
     /// Set a circuit breaker for this route.
     pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
         self.circuit_breaker = Some(config);

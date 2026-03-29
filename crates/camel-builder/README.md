@@ -156,6 +156,28 @@ let route = RouteBuilder::from("direct:input")
     .unwrap();
 ```
 
+Shorthand route-level exception clauses:
+
+```rust
+use camel_api::CamelError;
+use std::time::Duration;
+
+let route = RouteBuilder::from("direct:input")
+    .route_id("shorthand-errors")
+    .dead_letter_channel("log:dlc")
+    .on_exception(|e| matches!(e, CamelError::Io(_)))
+        .retry(3)
+        .with_backoff(Duration::from_millis(100), 2.0, Duration::from_secs(1))
+        .handled_by("log:io")
+    .end_on_exception()
+    .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
+        .retry(1)
+    .end_on_exception()
+    .to("mock:result")
+    .build()
+    .unwrap();
+```
+
 ### Circuit Breaker
 
 ```rust
@@ -224,7 +246,10 @@ let route = RouteBuilder::from("timer:tick")
 | `log(msg, level)` | Log message |
 | `stop()` | Stop processing |
 | `script(language, source)` | Execute a script that can modify headers, properties, and body |
-| `error_handler(cfg)` | Set error handler |
+| `error_handler(cfg)` | Set explicit error handler config |
+| `dead_letter_channel(uri)` | Set DLC for shorthand error mode |
+| `on_exception(pred)` | Open shorthand exception clause |
+| `end_on_exception()` | Close shorthand exception clause |
 | `circuit_breaker(cfg)` | Set circuit breaker |
 | `concurrent(n)` | Enable concurrency |
 | `sequential()` | Force sequential |

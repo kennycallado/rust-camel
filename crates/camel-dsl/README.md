@@ -173,9 +173,22 @@ routes:
     concurrency: concurrent  # or "sequential"
     error_handler:             # Optional error handling
       dead_letter_channel: "log:errors"
+      # Legacy single catch-all retry (still supported)
       retry:
         max_attempts: 3
         initial_delay_ms: 100
+
+      # New ordered exception clauses (first-match-wins)
+      on_exceptions:
+        - kind: "Io"
+          retry:
+            max_attempts: 3
+            initial_delay_ms: 100
+            handled_by: "log:io-errors"
+        - kind: "ProcessorError"
+          message_contains: "validation"
+          retry:
+            max_attempts: 1
     circuit_breaker:           # Optional circuit breaker
       failure_threshold: 5
       open_duration_ms: 30000
