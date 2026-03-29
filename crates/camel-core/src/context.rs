@@ -951,7 +951,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_route_definition_fails_for_unregistered_runtime_language() {
-        let mut ctx = CamelContext::new();
+        let ctx = CamelContext::new();
         let definition = RouteDefinition::new(
             "timer:tick",
             vec![BuilderStep::DeclarativeSetBody {
