@@ -14,7 +14,7 @@ crates/camel-core/src/
     domain/           │  RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent
     application/      │  RuntimeBus, Command/Query handlers, RouteDefinition
     ports/            │  RouteRepositoryPort, ProjectionStorePort, …
-    adapters/         │  InMemory*, FileRuntimeEventJournal, DefaultRouteController
+    adapters/         │  InMemory*, RedbRuntimeEventJournal, DefaultRouteController
   hot_reload/         ← Live route updates
     domain/           │  ReloadAction
     application/      │  compute_reload_actions, execute_reload_actions
@@ -30,10 +30,13 @@ crates/camel-core/src/
 - **CamelContext**: Central context for managing routes and components
 - **DDD Aggregate**: `RouteRuntimeAggregate` with state machine and optimistic locking
 - **CQRS Runtime Bus**: Separate command/query paths with projection-backed reads
-- **Event Sourcing**: Optional durable journal for crash recovery
+- **Event Sourcing**: Optional durable journal (redb v2) for crash recovery
 - **Hexagonal Architecture**: Clean separation via ports and adapters
 - **Hot-reload**: Live route updates with zero downtime
 - **Supervision**: Auto-recovery with configurable exponential backoff
+- **Tracer EIP**: Automatic message-flow tracing with configurable detail levels
+- **Metrics**: Pluggable `MetricsCollector` integration
+- **Optional languages**: `lang-js` and `lang-rhai` feature flags
 
 ## Installation
 
@@ -42,6 +45,18 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 camel-core = "0.5"
+```
+
+### Optional Features
+
+| Feature | Description |
+|---------|-------------|
+| `lang-js` | JavaScript scripting via `camel-language-js` |
+| `lang-rhai` | Rhai scripting via `camel-language-rhai` |
+
+```toml
+[dependencies]
+camel-core = { version = "0.5", features = ["lang-rhai"] }
 ```
 
 ## Usage
@@ -101,14 +116,36 @@ println!("Status: {:?}", status);
 
 ### Optional Durability
 
-Enable file-backed event journal for runtime state recovery across restarts:
+Enable redb-backed event journal for runtime state recovery across restarts:
 
 ```rust
-// With durability
-let ctx = CamelContext::new_with_runtime_journal_path(".camel/runtime.jsonl");
+use camel_core::{CamelContext, RedbJournalOptions, JournalDurability};
 
-// Events are persisted and replayed on startup
+// Default options (Immediate durability, compaction at 10_000 events)
+let ctx = CamelContext::new_with_redb_journal(
+    ".camel/runtime.redb",
+    RedbJournalOptions::default(),
+).await?;
+
+// Eventual durability (dev/test — no fsync)
+let ctx = CamelContext::new_with_redb_journal(
+    ".camel/runtime.redb",
+    RedbJournalOptions {
+        durability: JournalDurability::Eventual,
+        compaction_threshold_events: 1_000,
+    },
+).await?;
+
+// With supervision and metrics
+let ctx = CamelContext::with_supervision_and_metrics_and_redb_journal(
+    supervision_config,
+    metrics,
+    ".camel/runtime.redb",
+    RedbJournalOptions::default(),
+).await?;
 ```
+
+Events are persisted and replayed on startup for crash recovery.
 
 ## Core Types
 
@@ -140,8 +177,51 @@ let ctx = CamelContext::new_with_runtime_journal_path(".camel/runtime.jsonl");
 | `InMemoryRouteRepository` | RouteRepositoryPort |
 | `InMemoryProjectionStore` | ProjectionStorePort |
 | `InMemoryRuntimeStore` | Combined in-memory implementation |
-| `FileRuntimeEventJournal` | RuntimeEventJournalPort |
+| `RedbRuntimeEventJournal` | RuntimeEventJournalPort (redb v2) |
 | `RuntimeExecutionAdapter` | RuntimeExecutionPort |
+
+## Tracer EIP
+
+Automatic message-flow tracing across all route steps:
+
+```rust
+use camel_core::{CamelContext, TracerConfig, DetailLevel, TracerOutputs, StdoutOutput, OutputFormat};
+
+// Simple toggle
+let mut ctx = CamelContext::new();
+ctx.set_tracing(true);
+
+// Full configuration
+let config = TracerConfig {
+    enabled: true,
+    detail_level: DetailLevel::Medium,
+    outputs: TracerOutputs {
+        stdout: Some(StdoutOutput { enabled: true, format: OutputFormat::Json }),
+        file: None,
+    },
+};
+ctx.set_tracer_config(config);
+```
+
+Or via `Camel.toml`:
+
+```toml
+[observability.tracer]
+enabled = true
+detail_level = "minimal"  # minimal | medium | full
+
+[observability.tracer.outputs.stdout]
+enabled = true
+format = "json"
+```
+
+**Detail levels:**
+
+| Level | Fields |
+|-------|--------|
+| `minimal` | `correlation_id`, `route_id`, `step_id`, `step_index`, `timestamp`, `duration_ms`, `status` |
+| `medium` | + `headers_count`, `body_type`, `has_error`, `output_body_type` |
+| `full` | + up to 3 message headers (`header_0`…`header_2`) |
 
 ## Health Monitoring
 
@@ -158,6 +238,20 @@ match report.status {
         }
     }
 }
+```
+
+## Metrics
+
+Plug in a custom `MetricsCollector` at construction time:
+
+```rust
+use camel_core::CamelContext;
+use std::sync::Arc;
+
+let ctx = CamelContext::with_metrics(Arc::new(my_metrics_collector));
+
+// Access the collector later
+let metrics = ctx.metrics();
 ```
 
 ## Hot-Reload System
