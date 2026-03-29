@@ -24,4 +24,9 @@ camel-endpoint.workspace = true
 glob = { workspace = true }
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile = "3"
+
+[[bench]]
+name = "route_parsing"
+harness = false

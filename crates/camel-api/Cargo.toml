@@ -28,4 +28,13 @@ opentelemetry = { workspace = true }
 quick-xml = { workspace = true }
 
 [dev-dependencies]
+criterion.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[bench]]
+name = "exchange"
+harness = false
+
+[[bench]]
+name = "message"
+harness = false

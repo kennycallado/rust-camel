@@ -46,9 +46,17 @@ lang-rhai = ["camel-language-rhai"]
 [dev-dependencies]
 futures = "0.3"
 tempfile = "3"
-serde_json = "1"
 camel-component-timer.workspace = true
 camel-component-log.workspace = true
 camel-component-mock.workspace = true
 camel-dsl.workspace = true
 camel-bean.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "context"
+harness = false
+
+[[bench]]
+name = "lifecycle"
+harness = false

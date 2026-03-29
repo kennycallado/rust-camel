@@ -27,5 +27,33 @@ rand.workspace = true
 
 [dev-dependencies]
 bytes.workspace = true
-futures = "0.3"
-tokio = { workspace = true, features = ["macros", "rt"] }
+criterion.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[[bench]]
+name = "choice"
+harness = false
+
+[[bench]]
+name = "filter"
+harness = false
+
+[[bench]]
+name = "splitter"
+harness = false
+
+[[bench]]
+name = "multicast"
+harness = false
+
+[[bench]]
+name = "aggregator"
+harness = false
+
+[[bench]]
+name = "circuit_breaker"
+harness = false
+
+[[bench]]
+name = "load_balancer"
+harness = false
