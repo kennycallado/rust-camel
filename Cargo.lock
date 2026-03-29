@@ -1094,6 +1094,7 @@ dependencies = [
  "camel-config",
  "camel-core",
  "camel-endpoint",
+ "camel-language-api",
  "camel-language-rhai",
  "camel-processor",
  "reqwest",

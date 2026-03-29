@@ -10,8 +10,16 @@ use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_direct::DirectComponent;
 use camel_component_mock::MockComponent;
 use camel_core::CamelContext;
+use camel_language_api::LanguageError;
 use camel_language_rhai::RhaiLanguage;
 use tower::ServiceExt;
+
+fn ensure_rhai_registered(ctx: &mut CamelContext) {
+    match ctx.register_language("rhai", Box::new(RhaiLanguage::new())) {
+        Ok(()) | Err(LanguageError::AlreadyRegistered(_)) => {}
+        Err(e) => panic!("failed to register rhai language: {e}"),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Test 0: Script error prevents downstream delivery (CRITICAL)
@@ -24,8 +32,7 @@ async fn test_script_error_prevents_downstream_delivery() {
     let mut ctx = CamelContext::new();
     ctx.register_component(direct);
     ctx.register_component(mock.clone());
-    ctx.register_language("rhai", Box::new(RhaiLanguage::new()))
-        .unwrap();
+    ensure_rhai_registered(&mut ctx);
 
     let route = RouteBuilder::from("direct:input-err")
         .route_id("test-script-error")
@@ -69,8 +76,7 @@ async fn test_script_sets_header() {
     let mut ctx = CamelContext::new();
     ctx.register_component(direct);
     ctx.register_component(mock.clone());
-    ctx.register_language("rhai", Box::new(RhaiLanguage::new()))
-        .unwrap();
+    ensure_rhai_registered(&mut ctx);
 
     let route = RouteBuilder::from("direct:input")
         .route_id("test-script-header")
@@ -115,8 +121,7 @@ async fn test_script_reads_and_transforms_body() {
     let mut ctx = CamelContext::new();
     ctx.register_component(direct);
     ctx.register_component(mock.clone());
-    ctx.register_language("rhai", Box::new(RhaiLanguage::new()))
-        .unwrap();
+    ensure_rhai_registered(&mut ctx);
 
     let route = RouteBuilder::from("direct:input")
         .route_id("test-script-body")
@@ -160,8 +165,7 @@ async fn test_script_sets_multiple_headers() {
     let mut ctx = CamelContext::new();
     ctx.register_component(direct);
     ctx.register_component(mock.clone());
-    ctx.register_language("rhai", Box::new(RhaiLanguage::new()))
-        .unwrap();
+    ensure_rhai_registered(&mut ctx);
 
     let route = RouteBuilder::from("direct:input")
         .route_id("test-script-multi-headers")
@@ -210,8 +214,7 @@ async fn test_script_reads_existing_header() {
     let mut ctx = CamelContext::new();
     ctx.register_component(direct);
     ctx.register_component(mock.clone());
-    ctx.register_language("rhai", Box::new(RhaiLanguage::new()))
-        .unwrap();
+    ensure_rhai_registered(&mut ctx);
 
     let route = RouteBuilder::from("direct:input")
         .route_id("test-script-read-header")
@@ -257,8 +260,7 @@ async fn test_script_sets_property() {
     let mut ctx = CamelContext::new();
     ctx.register_component(direct);
     ctx.register_component(mock.clone());
-    ctx.register_language("rhai", Box::new(RhaiLanguage::new()))
-        .unwrap();
+    ensure_rhai_registered(&mut ctx);
 
     let route = RouteBuilder::from("direct:input")
         .route_id("test-script-property")
@@ -302,16 +304,14 @@ async fn test_script_unregistered_language_fails_at_route_add() {
     let mut ctx = CamelContext::new();
     ctx.register_component(direct);
     ctx.register_component(mock.clone());
-    // Intentionally do NOT register "rhai" language
-
+    // Use a language name that is guaranteed not to be registered
     let route = RouteBuilder::from("direct:input-noreg")
         .route_id("test-script-noreg")
-        .script("rhai", r#"headers["x"] = "y""#)
+        .script("nonexistent-lang", r#"headers["x"] = "y""#)
         .to("mock:noreg-output")
         .build()
         .unwrap();
 
-    // Should fail because "rhai" language is not registered
     let result = ctx.add_route_definition(route).await;
     assert!(
         result.is_err(),
@@ -319,7 +319,7 @@ async fn test_script_unregistered_language_fails_at_route_add() {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("rhai"),
+        err_msg.contains("nonexistent-lang"),
         "Error should mention the language name, got: {}",
         err_msg
     );
@@ -336,8 +336,7 @@ async fn test_script_empty_body_handled() {
     let mut ctx = CamelContext::new();
     ctx.register_component(direct);
     ctx.register_component(mock.clone());
-    ctx.register_language("rhai", Box::new(RhaiLanguage::new()))
-        .unwrap();
+    ensure_rhai_registered(&mut ctx);
 
     let route = RouteBuilder::from("direct:input")
         .route_id("test-script-empty-body")
