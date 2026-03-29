@@ -114,7 +114,7 @@ cargo run -p hello-world
 
 | Crate                   | Description                                                                                                                              |
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `camel-api`             | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent` |
+| `camel-api`             | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent`, `FromBody`, `impl_from_body_via_serde!` |
 | `camel-core`            | Runtime engine with DDD/CQRS: `CamelContext`, domain aggregates, ports, adapters, event journal                                          |
 | `camel-config`          | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns                                                         |
 | `camel-builder`         | Fluent `RouteBuilder` API                                                                                                                |
@@ -154,6 +154,14 @@ cargo bench --workspace
 ```
 
 The benchmark suite uses [Criterion](https://bheisler.github.io/criterion.rs/book/) with HTML reports. Per-crate inline benchmarks cover core types, processors, and the DSL. The `camel-bench` crate provides integration pipeline benchmarks.
+
+### Test Coverage
+
+```sh
+scripts/coverage.sh
+```
+
+Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (currently 75% minimum). Adjust the baseline there if coverage changes intentionally.
 
 ## Implemented EIP Patterns
 
@@ -358,6 +366,36 @@ RouteBuilder::from("timer:monitor")
 See `examples/lazy-route` for a complete example.
 
 Canonical route compile support in Facade V1 is intentionally limited to `to/log/stop`.
+
+## Type Converters
+
+The pipeline automatically coerces the exchange body to the type a component endpoint declares via `body_contract()`. No manual casting needed in `.process()` closures.
+
+```rust
+// Declare what your endpoint expects (component author):
+fn body_contract(&self) -> Option<BodyType> {
+    Some(BodyType::Text)  // pipeline coerces to Text before calling producer
+}
+
+// Deserialize body into any type (route author):
+use camel_api::impl_from_body_via_serde;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Order { id: u64, amount: f64 }
+impl_from_body_via_serde!(Order);
+
+RouteBuilder::from("direct:orders")
+    .process(|ex| async move {
+        let order: Order = ex.body_as::<Order>()?;
+        // ...
+        Ok(ex)
+    })
+    .to("sql:insert into orders ...")
+    .build()?;
+```
+
+Built-in `FromBody` impls: `String`, `Vec<u8>`, `Bytes`, `serde_json::Value`.
 
 ## Error Handling
 
