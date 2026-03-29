@@ -2,13 +2,13 @@
 
 A Rust integration framework inspired by [Apache Camel](https://camel.apache.org/), built on [Tower](https://docs.rs/tower).
 
-> **Status:** Pre-release (`0.4.0`). APIs will change.
+> **Status:** Pre-release (`0.5.0`). APIs will change.
 
 ## Overview
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `kafka`, `redis`, `sql`, `container`.
+Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `kafka`, `redis`, `sql`, `container`, `controlbus`.
 
 ## Architecture
 
@@ -39,7 +39,7 @@ rust-camel implements **Domain-Driven Design (DDD)** with **CQRS** and **Hexagon
 │                                    ▼                                        │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                        Adapters Layer                               │    │
-│  │   InMemory* adapters, FileRuntimeEventJournal, RuntimeExecutionAdap │    │
+│  │   InMemory* adapters, RedbRuntimeEventJournal, RuntimeExecutionAdap │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -72,8 +72,11 @@ let status = ctx.runtime_route_status("my-route").await?;
 ### Optional Durability
 
 ```rust
-// Enable file-backed event journal for runtime state recovery
-let ctx = CamelContext::new_with_runtime_journal_path(".camel/runtime.jsonl");
+// Enable redb-backed event journal for runtime state recovery
+let ctx = CamelContext::new_with_redb_journal(
+    ".camel/runtime.redb",
+    RedbJournalOptions::default(),
+).await?;
 ```
 
 ## Quick Example
@@ -143,7 +146,8 @@ cargo run -p hello-world
 | `camel-container`       | Docker container producer/consumer via `bollard`                                                                                         |
 | `camel-language-api`    | Language trait API: `Language`, `Expression`, `Predicate`                                                                                |
 | `camel-language-simple` | Simple Language: `${header.x}`, `${body}`, operators                                                                                     |
-| `camel-language-rhai`   | Rhai scripting language for full expression power                                                                                        |
+| `camel-language-js`     | JavaScript scripting language for expressions and side effects                                                                            |
+| `camel-language-rhai`   | Rhai scripting language for full expression power                                                                                         |
 | `camel-prometheus`      | Prometheus metrics exporter with /metrics endpoint                                                                                       |
 | `camel-otel`            | OpenTelemetry tracing and metrics exporter                                                                                               |
 
