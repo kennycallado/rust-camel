@@ -31,6 +31,7 @@ Create a `Camel.toml` file in your project root:
 routes = ["routes/*.yaml"]
 watch = false
 log_level = "info"
+drain_timeout_ms = 10000  # Graceful drain timeout for hot-reload restart/remove (default: 10s)
 
 [default.supervision]
 initial_delay_ms = 1000
@@ -112,6 +113,7 @@ allow_private_ips = true  # Allow internal services in dev
 | `runtime_journal_path` | `String?` | Optional durability flag: when set, enables local runtime journal replay |
 | `log_level` | `String` | Logging level (trace/debug/info/warn/error) |
 | `timeout_ms` | `u64` | Default operation timeout |
+| `drain_timeout_ms` | `u64` | Max time to wait for in-flight exchanges to complete on Restart/Remove (default: 10000) |
 | `supervision.*` | - | Retry and backoff settings |
 
 ## Component Defaults
