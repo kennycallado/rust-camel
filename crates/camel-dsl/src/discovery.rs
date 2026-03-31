@@ -5,6 +5,7 @@ use glob::glob;
 use std::fs;
 use std::io;
 
+use crate::env_interpolation::interpolate_env;
 use crate::yaml::parse_yaml;
 
 /// Errors that can occur during route discovery.
@@ -59,6 +60,12 @@ pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, Disc
                 source: e,
             })?;
 
+            let yaml_content =
+                interpolate_env(&yaml_content).map_err(|var_name| DiscoveryError::Yaml {
+                    path: path_str.clone(),
+                    error: format!("Environment variable '{var_name}' is not set"),
+                })?;
+
             // Parse YAML into route definitions
             let file_routes = parse_yaml(&yaml_content).map_err(|e| DiscoveryError::Yaml {
                 path: path_str,
@@ -70,4 +77,53 @@ pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, Disc
     }
 
     Ok(routes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn discovers_route_with_env_var_in_uri() {
+        unsafe { env::set_var("TEST_DISC_TIMER_NAME", "my-tick") };
+
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "routes:").unwrap();
+        writeln!(f, "  - id: \"disc-route-1\"").unwrap();
+        writeln!(f, "    from: \"timer:${{env:TEST_DISC_TIMER_NAME}}\"").unwrap();
+        writeln!(f, "    steps:").unwrap();
+        writeln!(f, "      - to: \"log:out\"").unwrap();
+
+        let pattern = f.path().to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].from_uri(), "timer:my-tick");
+
+        unsafe { env::remove_var("TEST_DISC_TIMER_NAME") };
+    }
+
+    #[test]
+    fn discover_fails_when_env_var_missing() {
+        unsafe { env::remove_var("TEST_DISC_MISSING_VAR") };
+
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "routes:").unwrap();
+        writeln!(f, "  - id: \"disc-route-missing\"").unwrap();
+        writeln!(f, "    from: \"timer:${{env:TEST_DISC_MISSING_VAR}}\"").unwrap();
+        writeln!(f, "    steps: []").unwrap();
+
+        let pattern = f.path().to_string_lossy().to_string();
+        let err = match discover_routes(&[pattern]) {
+            Ok(_) => panic!("expected discover_routes to fail"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TEST_DISC_MISSING_VAR"),
+            "error should mention var name, got: {msg}"
+        );
+    }
 }

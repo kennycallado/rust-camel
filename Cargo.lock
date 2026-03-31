@@ -951,6 +951,7 @@ dependencies = [
  "camel-processor",
  "criterion",
  "glob",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1804,6 +1805,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "env-interpolation"
+version = "0.5.1"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-config",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2329,6 +2343,7 @@ dependencies = [
  "camel-component-log",
  "camel-component-mock",
  "camel-component-timer",
+ "camel-config",
  "camel-core",
  "camel-dsl",
  "tokio",

@@ -21,6 +21,8 @@ async fn main() -> Result<(), CamelError> {
             exchange.input.body = Body::Text("hello world".to_string());
             Ok(exchange)
         })
+        // .transform() is an alias for .set_body() — sets body to a static value
+        .transform(Value::String("hello world (via transform)".into()))
         .map_body(|body: Body| {
             if let Some(text) = body.as_text() {
                 Body::Text(text.to_uppercase())

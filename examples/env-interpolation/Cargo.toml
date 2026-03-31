@@ -1,0 +1,15 @@
+[package]
+name = "env-interpolation"
+description = "Environment variable interpolation in YAML routes using ${env:VAR_NAME}"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-config.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

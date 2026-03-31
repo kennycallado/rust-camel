@@ -39,11 +39,20 @@ impl ReloadWatcher {
         discover_fn: F,
         shutdown: Option<CancellationToken>,
         drain_timeout: Duration,
+        debounce: Duration,
     ) -> Result<(), CamelError>
     where
         F: Fn() -> Result<Vec<RouteDefinition>, CamelError> + Send + 'static,
     {
-        watch_and_reload(watch_dirs, controller, discover_fn, shutdown, drain_timeout).await
+        watch_and_reload(
+            watch_dirs,
+            controller,
+            discover_fn,
+            shutdown,
+            drain_timeout,
+            debounce,
+        )
+        .await
     }
 
     pub fn resolve_watch_dirs(patterns: &[String]) -> Vec<PathBuf> {
@@ -73,6 +82,7 @@ pub async fn watch_and_reload<F>(
     discover_fn: F,
     shutdown: Option<CancellationToken>,
     drain_timeout: Duration,
+    debounce: Duration,
 ) -> Result<(), CamelError>
 where
     F: Fn() -> Result<Vec<RouteDefinition>, CamelError> + Send + 'static,
@@ -102,8 +112,7 @@ where
 
     // Debounce duration to coalesce rapid successive file events from editors
     // (e.g., when saving a file, multiple events may fire in quick succession).
-    // TODO: make this configurable via Camel.toml
-    let debounce = Duration::from_millis(300);
+    // debounce duration is passed by the caller (configured via CamelConfig.watch_debounce_ms)
 
     // Helper: check if shutdown was requested
     let is_cancelled = || shutdown.as_ref().map(|t| t.is_cancelled()).unwrap_or(false);

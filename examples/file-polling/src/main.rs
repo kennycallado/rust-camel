@@ -5,6 +5,9 @@ use camel_component_file::FileComponent;
 use camel_component_log::LogComponent;
 use camel_core::context::CamelContext;
 
+// noop=true enables the idempotent consumer: files are never deleted or moved,
+// and files already seen in the current run are automatically skipped.
+
 fn chrono_timestamp() -> String {
     chrono::Local::now()
         .format("%Y-%m-%d %H:%M:%S%.3f")

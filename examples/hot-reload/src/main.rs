@@ -94,6 +94,7 @@ async fn main() -> Result<(), CamelError> {
             },
             Some(shutdown_watcher),
             std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(300),
         )
         .await;
         if let Err(e) = result {

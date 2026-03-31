@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 camel-api.workspace = true
 camel-core.workspace = true
+camel-config.workspace = true
 camel-dsl.workspace = true
 camel-component-log.workspace = true
 camel-component-timer.workspace = true

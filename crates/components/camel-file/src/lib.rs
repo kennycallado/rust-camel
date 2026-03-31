@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -359,6 +360,7 @@ impl Endpoint for FileEndpoint {
     fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
         Ok(Box::new(FileConsumer {
             config: self.config.clone(),
+            seen: HashSet::new(),
         }))
     }
 
@@ -375,6 +377,7 @@ impl Endpoint for FileEndpoint {
 
 struct FileConsumer {
     config: FileConfig,
+    seen: HashSet<PathBuf>,
 }
 
 #[async_trait]
@@ -419,6 +422,7 @@ impl Consumer for FileConsumer {
                         &context,
                         &include_re,
                         &exclude_re,
+                        &mut self.seen,
                     ).await {
                         warn!(directory = config.directory, error = %e, "Error polling directory");
                     }
@@ -439,6 +443,7 @@ async fn poll_directory(
     context: &ConsumerContext,
     include_re: &Option<Regex>,
     exclude_re: &Option<Regex>,
+    seen: &mut HashSet<PathBuf>,
 ) -> Result<(), CamelError> {
     let base_path = std::path::Path::new(&config.directory);
 
@@ -472,6 +477,11 @@ async fn poll_directory(
         if let Some(ref move_dir) = config.move_to
             && file_path.starts_with(base_path.join(move_dir))
         {
+            continue;
+        }
+
+        // Idempotent consumer: skip already-seen files when noop=true
+        if config.noop && seen.contains(&file_path) {
             continue;
         }
 
@@ -561,6 +571,10 @@ async fn poll_directory(
 
         if context.send(exchange).await.is_err() {
             break;
+        }
+
+        if config.noop {
+            seen.insert(file_path.clone());
         }
 
         if config.noop {
@@ -983,6 +997,77 @@ mod tests {
             assert!(ex.input.header("CamelFileLength").is_some());
             assert!(ex.input.header("CamelFileLastModified").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn noop_second_poll_does_not_re_emit_seen_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        tokio::fs::write(&file_path, b"hello").await.unwrap();
+
+        let uri = format!(
+            "file:{}?noop=true&initialDelay=0&delay=50",
+            dir.path().display()
+        );
+        let config = FileConfig::from_uri(&uri).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token);
+
+        let include_re = None;
+        let exclude_re = None;
+        let mut seen = std::collections::HashSet::new();
+
+        poll_directory(&config, &ctx, &include_re, &exclude_re, &mut seen)
+            .await
+            .unwrap();
+        assert!(rx.try_recv().is_ok(), "first poll should emit file");
+        assert!(rx.try_recv().is_err(), "should only emit once");
+
+        poll_directory(&config, &ctx, &include_re, &exclude_re, &mut seen)
+            .await
+            .unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "second poll should not re-emit seen file"
+        );
+    }
+
+    #[tokio::test]
+    async fn noop_new_files_picked_up_after_first_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let file1 = dir.path().join("a.txt");
+        tokio::fs::write(&file1, b"a").await.unwrap();
+
+        let uri = format!(
+            "file:{}?noop=true&initialDelay=0&delay=50",
+            dir.path().display()
+        );
+        let config = FileConfig::from_uri(&uri).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token);
+
+        let include_re = None;
+        let exclude_re = None;
+        let mut seen = std::collections::HashSet::new();
+
+        poll_directory(&config, &ctx, &include_re, &exclude_re, &mut seen)
+            .await
+            .unwrap();
+        let _ = rx.try_recv();
+
+        let file2 = dir.path().join("b.txt");
+        tokio::fs::write(&file2, b"b").await.unwrap();
+
+        poll_directory(&config, &ctx, &include_re, &exclude_re, &mut seen)
+            .await
+            .unwrap();
+        assert!(
+            rx.try_recv().is_ok(),
+            "b.txt should be emitted on second poll"
+        );
+        assert!(rx.try_recv().is_err(), "a.txt should not be re-emitted");
     }
 
     #[tokio::test]

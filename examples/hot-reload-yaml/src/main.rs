@@ -7,6 +7,7 @@
 //!
 //! - Loading initial routes from a YAML file via `camel_dsl::discover_routes`
 //! - Starting `watch_and_reload` with a `CancellationToken` for graceful shutdown
+//! - Reading `watch_debounce_ms` from `Camel.toml` to configure debounce delay
 //! - Editing the YAML file while the example is running → the pipeline swaps
 //!   atomically without stopping the route or losing messages
 //!
@@ -18,7 +19,7 @@
 //!
 //! While it is running, edit `routes/route.yaml` in a separate terminal — for
 //! example change `V1` to `V2` — and save the file. The running context will
-//! pick up the change within ~300 ms.
+//! pick up the change within the configured debounce window (default 300 ms).
 //!
 //! ## How it works
 //!
@@ -27,7 +28,7 @@
 //! │  File system                                                    │
 //! │  routes/route.yaml  ──(inotify/FSEvents)──► watch_and_reload   │
 //! │                                               │                 │
-//! │                                        debounce 300 ms         │
+//! │                                   debounce (watch_debounce_ms) │
 //! │                                               │                 │
 //! │                                      discover_routes()         │
 //! │                                               │                 │
@@ -43,6 +44,7 @@ use camel_api::CamelError;
 use camel_component_log::LogComponent;
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
+use camel_config::CamelConfig;
 use camel_core::reload_watcher::{resolve_watch_dirs, watch_and_reload};
 use camel_core::CamelContext;
 use tokio_util::sync::CancellationToken;
@@ -58,6 +60,13 @@ async fn main() -> Result<(), CamelError> {
     println!("║        Hot Reload YAML — File-Watcher Live Route Updates       ║");
     println!("╚════════════════════════════════════════════════════════════════╝");
     println!();
+
+    // ── 0. Load configuration (watch_debounce_ms etc.) ───────────────────────
+    // Falls back to the CamelConfig field default (300 ms) if Camel.toml is absent.
+    let debounce_ms = CamelConfig::from_file("Camel.toml")
+        .map(|c| c.watch_debounce_ms)
+        .unwrap_or(300);
+    println!("[0] watch_debounce_ms = {debounce_ms} ms  (set in Camel.toml)");
 
     // ── 1. Resolve the routes directory ──────────────────────────────────────
     //
@@ -124,6 +133,8 @@ async fn main() -> Result<(), CamelError> {
             },
             Some(shutdown_watcher),
             std::time::Duration::from_secs(10),
+            // debounce loaded from Camel.toml → watch_debounce_ms
+            std::time::Duration::from_millis(debounce_ms),
         )
         .await;
         if let Err(e) = result {

@@ -30,6 +30,9 @@ pub struct CamelConfig {
     #[serde(default = "default_drain_timeout_ms")]
     pub drain_timeout_ms: u64,
 
+    #[serde(default = "default_watch_debounce_ms")]
+    pub watch_debounce_ms: u64,
+
     #[serde(default)]
     pub components: ComponentsConfig,
 
@@ -404,6 +407,9 @@ fn default_timeout_ms() -> u64 {
 fn default_drain_timeout_ms() -> u64 {
     10_000
 }
+fn default_watch_debounce_ms() -> u64 {
+    300
+}
 fn default_timer_period() -> u64 {
     1000
 }
@@ -652,6 +658,23 @@ impl CamelConfig {
         let path = env::var("CAMEL_CONFIG_FILE").unwrap_or_else(|_| "Camel.toml".to_string());
 
         Self::from_file(&path)
+    }
+}
+
+#[cfg(test)]
+mod camel_config_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn watch_debounce_ms_default_is_300() {
+        let config: CamelConfig = toml::from_str("").unwrap();
+        assert_eq!(config.watch_debounce_ms, 300);
+    }
+
+    #[test]
+    fn watch_debounce_ms_custom_value() {
+        let config: CamelConfig = toml::from_str("watch_debounce_ms = 50").unwrap();
+        assert_eq!(config.watch_debounce_ms, 50);
     }
 }
 

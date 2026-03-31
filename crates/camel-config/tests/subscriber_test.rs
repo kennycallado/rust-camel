@@ -11,6 +11,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
         log_level: "INFO".to_string(),
         timeout_ms: 5000,
         drain_timeout_ms: 10_000,
+        watch_debounce_ms: 300,
         components: ComponentsConfig::default(),
         observability: ObservabilityConfig {
             tracer: TracerConfig {

@@ -79,6 +79,17 @@ pub trait StepAccumulator: Sized {
         self
     }
 
+    /// Apache Camel-compatible alias for [`set_body`](Self::set_body).
+    ///
+    /// Transforms the message body using the given value. Semantically identical
+    /// to `set_body` — provided for familiarity with Apache Camel route DSLs.
+    fn transform<B>(self, body: B) -> Self
+    where
+        B: Into<Body> + Clone + Send + Sync + 'static,
+    {
+        self.set_body(body)
+    }
+
     fn set_body_fn<F>(mut self, expr: F) -> Self
     where
         F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
@@ -1682,6 +1693,23 @@ mod tests {
             .build()
             .unwrap();
         assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn transform_alias_produces_same_as_set_body() {
+        let route_transform = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .transform("hello")
+            .build()
+            .unwrap();
+
+        let route_set_body = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .set_body("hello")
+            .build()
+            .unwrap();
+
+        assert_eq!(route_transform.steps().len(), route_set_body.steps().len());
     }
 
     #[test]

@@ -231,6 +231,7 @@ let route = RouteBuilder::from("timer:tick")
 | `set_header_fn(k, fn)` | Set dynamic header |
 | `set_body(v)` | Set static body |
 | `set_body_fn(fn)` | Set dynamic body |
+| `transform(v)` | Alias for `set_body` |
 | `map_body(fn)` | Transform body |
 | `filter(pred)` | Conditional routing |
 | `choice()` | Open content-based router block |

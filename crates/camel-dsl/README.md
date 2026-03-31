@@ -20,7 +20,8 @@
 - **Language expressions**: Use `simple:` and `rhai:` syntax for dynamic values
 - **Route-level configuration**: Auto-startup, startup ordering, concurrency, error handling, circuit breaker, unit-of-work hooks
 
-- **All step types**: to, log, set_header, set_body, filter, choice, split, aggregate, wire_tap, multicast, stop, script, bean
+- **Environment variable interpolation**: Inject env vars in route files using `${env:VAR_NAME}` syntax
+- **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, wire_tap, multicast, stop, script, bean
 
 ## Installation
 Add to your `Cargo.toml`:
@@ -90,6 +91,7 @@ routes:
 | `log` | Log message | `- log: "Processing"` |
 | `set_header` | Set header | `- set_header: { key: "x", value: "y" }` |
 | `set_body` | Set body | `- set_body: { value: "content" }` |
+| `transform` | Transform body (alias for `set_body`) | `- transform: { simple: "${body}" }` |
 | `filter` | Filter messages | `- filter: { simple: "${header.type} == 'allowed'", steps: [...] }` |
 | `choice` | Content-based router | `- choice: { when: [...], otherwise: [...] }` |
 | `split` | Split message | `- split: { expression: "body_lines", steps: [...] }` |
@@ -132,6 +134,21 @@ let controller = DefaultRouteController::with_beans(bean_registry);
 ```
 
 See `examples/bean-demo` for a complete example.
+
+## Environment Variable Interpolation
+
+Use `${env:VAR_NAME}` anywhere in a YAML route file to inject an environment variable at load time:
+
+```yaml
+routes:
+  - id: "env-demo"
+    from: "timer:tick?period=1000"
+    steps:
+      - log: "Broker: ${env:BROKER_URL}"
+      - to: "${env:OUTPUT_ENDPOINT}"
+```
+
+The substitution happens before YAML parsing, so it works in any position — URIs, log messages, header values, etc. Unset variables are left as-is (the literal `${env:VAR_NAME}` string).
 
 ## Language Expressions
 Many steps support language expressions for dynamic values:

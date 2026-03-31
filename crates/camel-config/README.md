@@ -32,6 +32,7 @@ routes = ["routes/*.yaml"]
 watch = false
 log_level = "info"
 drain_timeout_ms = 10000  # Graceful drain timeout for hot-reload restart/remove (default: 10s)
+watch_debounce_ms = 300  # Debounce window for hot-reload file watcher (ms)
 
 [default.supervision]
 initial_delay_ms = 1000
@@ -106,15 +107,16 @@ allow_private_ips = true  # Allow internal services in dev
 
 ## Core Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `routes` | `[String]` | Glob patterns for route files |
-| `watch` | `bool` | Enable hot reload on file changes |
-| `runtime_journal_path` | `String?` | Optional durability flag: when set, enables local runtime journal replay |
-| `log_level` | `String` | Logging level (trace/debug/info/warn/error) |
-| `timeout_ms` | `u64` | Default operation timeout |
-| `drain_timeout_ms` | `u64` | Max time to wait for in-flight exchanges to complete on Restart/Remove (default: 10000) |
-| `supervision.*` | - | Retry and backoff settings |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `routes` | `[String]` |  | Glob patterns for route files |
+| `watch` | `bool` |  | Enable hot reload on file changes |
+| `runtime_journal_path` | `String?` |  | Optional durability flag: when set, enables local runtime journal replay |
+| `log_level` | `String` |  | Logging level (trace/debug/info/warn/error) |
+| `timeout_ms` | `u64` |  | Default operation timeout |
+| `drain_timeout_ms` | `u64` |  | Max time to wait for in-flight exchanges to complete on Restart/Remove (default: 10000) |
+| `watch_debounce_ms` | `u64` | `300` | Debounce window in ms for the hot-reload file watcher. Set to `0` to disable debouncing. |
+| `supervision.*` | - |  | Retry and backoff settings |
 
 ## Component Defaults
 

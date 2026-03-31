@@ -1,6 +1,7 @@
 pub mod compile;
 pub mod contract;
 pub mod discovery;
+pub mod env_interpolation;
 pub mod model;
 pub mod yaml;
 pub mod yaml_ast;

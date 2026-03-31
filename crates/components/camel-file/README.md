@@ -11,7 +11,7 @@ The File component provides file system integration for rust-camel. It can read 
 - **Consumer**: Poll directories for new files
 - **Producer**: Write files with various strategies, streaming directly to disk (zero-copy)
 - **File filtering**: Include/exclude patterns (regex)
-- **Post-processing**: Delete, move, or no-op after processing
+- **Idempotent consumer**: With `noop=true`, files already seen in the current run are skipped automatically (in-memory deduplication)
 - **Recursive directory scanning**
 - **Atomic writes**: Override strategy writes to a temp file then renames (panic-safe cleanup)
 - **Streaming**: Zero-copy reads (consumer) and writes (producer) via `Body::into_async_read()`
@@ -38,7 +38,7 @@ file:directoryPath[?options]
 |--------|---------|-------------|
 | `delay` | `500` | Poll interval in milliseconds |
 | `initialDelay` | `1000` | Initial delay before first poll |
-| `noop` | `false` | Don't delete or move files after processing |
+| `noop` | `false` | Don't delete or move files; enables idempotent consumer (seen files are skipped) |
 | `delete` | `false` | Delete files after processing |
 | `move` | `.camel` | Directory to move processed files to |
 | `include` | - | Regex pattern for files to include |

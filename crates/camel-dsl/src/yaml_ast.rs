@@ -109,6 +109,7 @@ fn default_open_duration_ms() -> u64 {
 pub enum YamlStep {
     To(ToStep),
     SetHeader(SetHeaderStep),
+    Transform(TransformStep),
     SetBody(SetBodyStep),
     Log(LogStep),
     Filter(FilterStep),
@@ -151,6 +152,12 @@ pub struct SetHeaderData {
 #[derive(Deserialize, Debug)]
 pub struct SetBodyStep {
     pub set_body: SetBodyData,
+}
+
+/// `transform:` step — alias for `set_body:`, reuses all SetBodyData types.
+#[derive(Deserialize, Debug)]
+pub struct TransformStep {
+    pub transform: SetBodyData,
 }
 
 #[derive(Deserialize, Debug)]

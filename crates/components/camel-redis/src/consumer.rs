@@ -560,5 +560,4 @@ mod tests {
         let stop_result = consumer.stop().await;
         assert!(stop_result.is_ok());
     }
-
 }

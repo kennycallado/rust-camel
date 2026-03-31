@@ -8,12 +8,8 @@ use crate::context::RuntimeExecutionHandle;
 const DRAIN_POLL_INTERVAL_MS: u64 = 50;
 
 pub(crate) enum DrainResult {
-    Drained { waited_ms: u64 },
-    Timeout {
-        waited_ms: u64,
-        timeout_ms: u64,
-        remaining: u64,
-    },
+    Drained,
+    Timeout,
 }
 
 pub(crate) async fn drain_route(
@@ -31,7 +27,7 @@ pub(crate) async fn drain_route(
                 action = %action,
                 "hot-reload: no in-flight exchanges, proceeding"
             );
-            return DrainResult::Drained { waited_ms: 0 };
+            return DrainResult::Drained;
         }
         Ok(n) => n,
         Err(CamelError::RouteError(_)) => {
@@ -40,7 +36,7 @@ pub(crate) async fn drain_route(
                 action = %action,
                 "hot-reload: route not found during drain, skipping"
             );
-            return DrainResult::Drained { waited_ms: 0 };
+            return DrainResult::Drained;
         }
         Err(e) => {
             debug!(
@@ -49,7 +45,7 @@ pub(crate) async fn drain_route(
                 error = %e,
                 "hot-reload: error querying in-flight count, skipping drain"
             );
-            return DrainResult::Drained { waited_ms: 0 };
+            return DrainResult::Drained;
         }
     };
 
@@ -61,7 +57,6 @@ pub(crate) async fn drain_route(
     );
 
     let start = Instant::now();
-    let mut last_count = initial;
 
     loop {
         tokio::time::sleep(Duration::from_millis(DRAIN_POLL_INTERVAL_MS)).await;
@@ -76,37 +71,30 @@ pub(crate) async fn drain_route(
                     in_flight = 0,
                     "hot-reload: route drained"
                 );
-                return DrainResult::Drained { waited_ms: waited };
+                return DrainResult::Drained;
             }
             Ok(n) => {
-                last_count = n;
+                if start.elapsed() >= timeout {
+                    let waited = start.elapsed().as_millis() as u64;
+                    warn!(
+                        route_id = %route_id,
+                        action = %action,
+                        waited_ms = waited,
+                        timeout_ms = timeout_ms,
+                        remaining = n,
+                        "hot-reload: drain timeout expired, forcing stop"
+                    );
+                    return DrainResult::Timeout;
+                }
             }
             Err(_) => {
-                let waited = start.elapsed().as_millis() as u64;
                 debug!(
                     route_id = %route_id,
                     action = %action,
                     "hot-reload: route not found during drain, skipping"
                 );
-                return DrainResult::Drained { waited_ms: waited };
+                return DrainResult::Drained;
             }
-        }
-
-        if start.elapsed() >= timeout {
-            let waited = start.elapsed().as_millis() as u64;
-            warn!(
-                route_id = %route_id,
-                action = %action,
-                waited_ms = waited,
-                timeout_ms = timeout_ms,
-                remaining = last_count,
-                "hot-reload: drain timeout expired, forcing stop"
-            );
-            return DrainResult::Timeout {
-                waited_ms: waited,
-                timeout_ms,
-                remaining: last_count,
-            };
         }
     }
 }
@@ -117,12 +105,8 @@ mod tests {
 
     #[test]
     fn drain_result_variants_exist() {
-        let _ = DrainResult::Drained { waited_ms: 0 };
-        let _ = DrainResult::Timeout {
-            waited_ms: 100,
-            timeout_ms: 200,
-            remaining: 5,
-        };
+        let _ = DrainResult::Drained;
+        let _ = DrainResult::Timeout;
     }
 
     #[test]

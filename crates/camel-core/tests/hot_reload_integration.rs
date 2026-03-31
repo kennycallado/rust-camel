@@ -102,6 +102,7 @@ async fn test_watcher_swaps_pipeline_on_file_change() {
             },
             Some(shutdown_clone),
             std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(50),
         )
         .await
         .ok();
@@ -182,6 +183,7 @@ async fn test_watcher_removes_route_on_file_deletion() {
             },
             Some(shutdown_clone),
             std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(50),
         )
         .await
         .ok();
@@ -278,6 +280,7 @@ async fn test_watcher_restart_preserves_non_running_route_state() {
             },
             Some(shutdown_clone),
             std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(50),
         )
         .await
         .ok();
@@ -361,6 +364,7 @@ async fn test_restart_with_from_uri_change_processes_exchanges_via_new_endpoint(
             },
             Some(shutdown_clone),
             Duration::from_secs(10),
+            Duration::from_millis(50),
         )
         .await
         .ok();
@@ -392,7 +396,10 @@ async fn test_restart_with_from_uri_change_processes_exchanges_via_new_endpoint(
     } else {
         0
     };
-    assert!(v2_count > 0, "restarted route should process exchanges via v2");
+    assert!(
+        v2_count > 0,
+        "restarted route should process exchanges via v2"
+    );
 
     shutdown.cancel();
     watcher_handle.await.ok();

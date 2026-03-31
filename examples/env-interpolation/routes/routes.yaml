@@ -1,0 +1,24 @@
+# =============================================================================
+# env-interpolation example routes
+#
+# Uses ${env:VAR_NAME} to inject runtime environment variables.
+# Substitution happens before YAML parsing — works in URIs, messages, values.
+#
+# Try setting these before running:
+#   GREET_TARGET=log:my-app
+#   POLL_PERIOD_MS=2000
+#   LOG_PREFIX="[demo]"
+# =============================================================================
+
+routes:
+  # ---------------------------------------------------------------------------
+  # Route 1: env var in log message and endpoint URI
+  # ---------------------------------------------------------------------------
+  - id: "env-greet"
+    from: "timer:env-tick?period=${env:POLL_PERIOD_MS}&repeatCount=3"
+    steps:
+      - log: "${env:LOG_PREFIX} Firing env-interpolation route"
+      - set_header:
+          key: "app"
+          value: "${env:APP_NAME}"
+      - to: "${env:GREET_TARGET}"

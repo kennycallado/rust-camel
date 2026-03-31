@@ -65,6 +65,7 @@ members = [
     "examples/hot-reload-yaml",
     "examples/xml-body",
     "examples/yaml-dsl",
+    "examples/env-interpolation",
     "examples/config-basic",
     "examples/config-profiles",
     "examples/auto-restart",

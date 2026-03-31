@@ -19,8 +19,8 @@ pub use crate::yaml_ast::{
     AggregateData, AggregateStep, ChoiceData, ChoiceStep, FilterStep, LogConfig, LogMessageData,
     LogMessageExpr, LogStep, MulticastData, MulticastStep, PredicateBlock, ScriptData, ScriptStep,
     SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData,
-    SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, ToStep, WireTapStep,
-    YamlRoute, YamlRoutes, YamlStep,
+    SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, ToStep, TransformStep,
+    WireTapStep, YamlRoute, YamlRoutes, YamlStep,
 };
 
 const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 13] = [
@@ -232,6 +232,19 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     simple,
                     rhai,
                 }) => parse_value_source(value, language, source, simple, rhai, "set_body")?,
+            };
+            Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
+        }
+        YamlStep::Transform(TransformStep { transform }) => {
+            let value = match transform {
+                SetBodyData::Literal(value) => ValueSourceDef::Literal(value),
+                SetBodyData::Config(SetBodyConfig {
+                    value,
+                    language,
+                    source,
+                    simple,
+                    rhai,
+                }) => parse_value_source(value, language, source, simple, rhai, "transform")?,
             };
             Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
         }
@@ -889,6 +902,50 @@ routes:
             },
             _ => panic!("expected Log step, got {:?}", step),
         }
+    }
+
+    #[test]
+    fn transform_step_sets_body() {
+        let yaml = r#"
+routes:
+  - id: "transform-step"
+    from: "timer:tick"
+    steps:
+      - transform:
+          simple: "hello"
+      - to: "log:out"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        let steps = &routes[0].steps;
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(&steps[0], DeclarativeStep::SetBody(_)));
+    }
+
+    #[test]
+    fn transform_same_output_as_set_body() {
+        let yaml_transform = r#"
+routes:
+  - id: "transform-eq"
+    from: "timer:tick"
+    steps:
+      - transform:
+          simple: "world"
+"#;
+        let yaml_set_body = r#"
+routes:
+  - id: "transform-eq"
+    from: "timer:tick"
+    steps:
+      - set_body:
+          simple: "world"
+"#;
+        let routes_t = parse_yaml_to_declarative(yaml_transform).unwrap();
+        let routes_s = parse_yaml_to_declarative(yaml_set_body).unwrap();
+        assert_eq!(
+            format!("{:?}", routes_t[0].steps[0]),
+            format!("{:?}", routes_s[0].steps[0])
+        );
     }
 
     #[test]

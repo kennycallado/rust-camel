@@ -1,0 +1,7 @@
+[default]
+routes = ["routes/**/*.yaml"]
+log_level = "INFO"
+
+# Debounce delay for the file watcher (milliseconds).
+# Increase if you see multiple rapid reloads on a single save.
+watch_debounce_ms = 300

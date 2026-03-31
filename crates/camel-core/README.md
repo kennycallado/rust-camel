@@ -293,6 +293,7 @@ watch_and_reload(
         .map_err(|e| CamelError::RouteError(e.to_string())),
     Some(cancel_token),
     Duration::from_secs(10),
+    Duration::from_millis(300),
 ).await?;
 ```
 

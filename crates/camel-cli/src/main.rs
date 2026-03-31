@@ -244,6 +244,7 @@ async fn run(
         let ctrl = ctx.runtime_execution_handle();
         let watch_patterns = patterns.clone();
         let drain_timeout = std::time::Duration::from_millis(camel_config.drain_timeout_ms);
+        let debounce = std::time::Duration::from_millis(camel_config.watch_debounce_ms);
         let watcher_token = watcher_shutdown.clone();
         tokio::spawn(async move {
             let watch_dirs = camel_core::reload_watcher::resolve_watch_dirs(&watch_patterns);
@@ -256,6 +257,7 @@ async fn run(
                 },
                 Some(watcher_token),
                 drain_timeout,
+                debounce,
             )
             .await;
             if let Err(e) = result {
