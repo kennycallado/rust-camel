@@ -8,6 +8,8 @@
 
 #![cfg(feature = "integration-tests")]
 
+mod support;
+
 use camel_api::Value;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_builder::{RouteBuilder, StepAccumulator};
@@ -15,6 +17,8 @@ use camel_component_mock::MockComponent;
 use camel_component_redis::RedisComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
+use redis::AsyncCommands;
+use support::wait::wait_until;
 use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::redis::Redis;
@@ -58,7 +62,19 @@ async fn test_redis_string_commands() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let endpoint = mock.get_endpoint("result").unwrap();
+    wait_until(
+        "redis string route delivery",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+        },
+    )
+    .await
+    .unwrap();
+
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -68,7 +84,6 @@ async fn test_redis_string_commands() {
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 }
 
@@ -100,7 +115,19 @@ async fn test_redis_list_commands() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let endpoint = mock.get_endpoint("result").unwrap();
+    wait_until(
+        "redis list route delivery",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+        },
+    )
+    .await
+    .unwrap();
+
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -110,7 +137,6 @@ async fn test_redis_list_commands() {
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 }
 
@@ -143,7 +169,19 @@ async fn test_redis_hash_commands() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let endpoint = mock.get_endpoint("result").unwrap();
+    wait_until(
+        "redis hash route delivery",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+        },
+    )
+    .await
+    .unwrap();
+
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -153,7 +191,6 @@ async fn test_redis_hash_commands() {
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 }
 
@@ -185,7 +222,19 @@ async fn test_redis_set_commands() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let endpoint = mock.get_endpoint("result").unwrap();
+    wait_until(
+        "redis set route delivery",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+        },
+    )
+    .await
+    .unwrap();
+
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -195,7 +244,6 @@ async fn test_redis_set_commands() {
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 }
 
@@ -227,7 +275,19 @@ async fn test_redis_pubsub_producer() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let endpoint = mock.get_endpoint("result").unwrap();
+    wait_until(
+        "redis pubsub producer route delivery",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+        },
+    )
+    .await
+    .unwrap();
+
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -237,7 +297,6 @@ async fn test_redis_pubsub_producer() {
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 }
 
@@ -279,7 +338,19 @@ async fn test_redis_consumer_queue_mode() {
     ctx.add_route_definition(producer_route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let endpoint = mock.get_endpoint("consumed").unwrap();
+    wait_until(
+        "redis queue consumer receives item",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -289,12 +360,169 @@ async fn test_redis_consumer_queue_mode() {
         }
     }
 
-    let endpoint = mock.get_endpoint("consumed").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
     assert!(
         !exchanges.is_empty(),
         "Consumer should have received the item"
     );
+}
+
+#[tokio::test]
+async fn test_redis_consumer_blpop_reads_left_side_first() {
+    let container = setup_redis_container().await;
+    let conn_str = get_connection_string(&container).await;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(RedisComponent::new());
+    ctx.register_component(mock.clone());
+    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+
+    let consumer_route = RouteBuilder::from(&format!(
+        "redis://{}?command=BLPOP&key=myqueue&timeout=1",
+        conn_str
+    ))
+    .to("mock:consumed")
+    .route_id("redis-blpop-consumer")
+    .build()
+    .unwrap();
+
+    // Seed queue before starting consumer so BLPOP side is observable.
+    let client = redis::Client::open(format!("redis://{}", conn_str)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let _: i64 = conn
+        .rpush("myqueue", vec!["item-a", "item-b"])
+        .await
+        .unwrap();
+
+    ctx.add_route_definition(consumer_route).await.unwrap();
+    ctx.start().await.unwrap();
+
+    let endpoint = mock.get_endpoint("consumed").unwrap();
+    wait_until(
+        "redis BLPOP receives two items",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(50),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 2) }
+        },
+    )
+    .await
+    .unwrap();
+
+    ctx.stop().await.unwrap();
+
+    if let Some(error_ep) = mock.get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("Route had errors: {:?}", errors[0].error);
+        }
+    }
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert_eq!(
+        exchanges.len(),
+        2,
+        "BLPOP consumer should receive exactly two items"
+    );
+
+    let first = exchanges[0]
+        .input
+        .body
+        .as_text()
+        .map(|s| s.trim_matches('"').to_string());
+    let second = exchanges[1]
+        .input
+        .body
+        .as_text()
+        .map(|s| s.trim_matches('"').to_string());
+    assert_eq!(
+        first.as_deref(),
+        Some("item-a"),
+        "BLPOP should pop left-most item first"
+    );
+    assert_eq!(second.as_deref(), Some("item-b"));
+}
+
+#[tokio::test]
+async fn test_redis_consumer_brpop_reads_right_side_first() {
+    let container = setup_redis_container().await;
+    let conn_str = get_connection_string(&container).await;
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(RedisComponent::new());
+    ctx.register_component(mock.clone());
+    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+
+    let consumer_route = RouteBuilder::from(&format!(
+        "redis://{}?command=BRPOP&key=myqueue&timeout=1",
+        conn_str
+    ))
+    .to("mock:consumed")
+    .route_id("redis-brpop-consumer")
+    .build()
+    .unwrap();
+
+    // Seed queue before starting consumer so BRPOP/BLPOP side is observable.
+    let client = redis::Client::open(format!("redis://{}", conn_str)).unwrap();
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let _: i64 = conn
+        .rpush("myqueue", vec!["item-a", "item-b"])
+        .await
+        .unwrap();
+
+    ctx.add_route_definition(consumer_route).await.unwrap();
+    ctx.start().await.unwrap();
+
+    let endpoint = mock.get_endpoint("consumed").unwrap();
+    wait_until(
+        "redis BRPOP receives two items",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(50),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 2) }
+        },
+    )
+    .await
+    .unwrap();
+
+    ctx.stop().await.unwrap();
+
+    if let Some(error_ep) = mock.get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("Route had errors: {:?}", errors[0].error);
+        }
+    }
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert_eq!(
+        exchanges.len(),
+        2,
+        "BRPOP consumer should receive exactly two items"
+    );
+
+    let first = exchanges[0]
+        .input
+        .body
+        .as_text()
+        .map(|s| s.trim_matches('"').to_string());
+    let second = exchanges[1]
+        .input
+        .body
+        .as_text()
+        .map(|s| s.trim_matches('"').to_string());
+    assert_eq!(
+        first.as_deref(),
+        Some("item-b"),
+        "BRPOP should pop right-most item first"
+    );
+    assert_eq!(second.as_deref(), Some("item-a"));
 }
 
 // ===========================================================================
@@ -336,18 +564,17 @@ async fn test_redis_consumer_pubsub_mode() {
     ctx.start().await.unwrap();
 
     let endpoint = mock.get_endpoint("received").unwrap();
-    let mut received = false;
-    let timeout = std::time::Duration::from_secs(5);
-    let start = std::time::Instant::now();
-
-    while start.elapsed() < timeout {
-        let exchanges = endpoint.get_received_exchanges().await;
-        if !exchanges.is_empty() {
-            received = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    wait_until(
+        "redis pubsub receives message",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
 
     ctx.stop().await.unwrap();
 
@@ -359,7 +586,7 @@ async fn test_redis_consumer_pubsub_mode() {
     }
 
     assert!(
-        received,
+        !endpoint.get_received_exchanges().await.is_empty(),
         "Subscriber should have received the message within 5s"
     );
 }

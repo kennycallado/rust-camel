@@ -8,6 +8,8 @@
 
 #![cfg(feature = "integration-tests")]
 
+mod support;
+
 use camel_api::CamelError;
 use camel_api::Value;
 use camel_api::body::Body;
@@ -18,6 +20,7 @@ use camel_component_sql::SqlComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
 use sqlx::AnyPool;
+use support::wait::wait_until;
 use testcontainers::ContainerAsync;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
@@ -47,6 +50,24 @@ async fn create_pool(conn_str: &str) -> AnyPool {
         .expect("Failed to connect to database")
 }
 
+async fn wait_for_mock_exchanges(mock: &MockComponent, endpoint_name: &str, min_count: usize) {
+    let endpoint = mock
+        .get_endpoint(endpoint_name)
+        .unwrap_or_else(|| panic!("missing mock endpoint: {endpoint_name}"));
+
+    wait_until(
+        "sql mock exchange arrival",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= min_count) }
+        },
+    )
+    .await
+    .unwrap();
+}
+
 async fn setup_test_table(pool: &AnyPool, table_name: &str) {
     sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
         .execute(pool)
@@ -63,7 +84,6 @@ async fn setup_test_table(pool: &AnyPool, table_name: &str) {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_select() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -95,7 +115,7 @@ async fn test_producer_select() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    wait_for_mock_exchanges(&mock, "result", 1).await;
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -130,7 +150,6 @@ async fn test_producer_select() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_insert() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -160,7 +179,7 @@ async fn test_producer_insert() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    wait_for_mock_exchanges(&mock, "result", 1).await;
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -189,7 +208,6 @@ async fn test_producer_insert() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_update() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -223,7 +241,7 @@ async fn test_producer_update() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    wait_for_mock_exchanges(&mock, "result", 1).await;
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -252,7 +270,6 @@ async fn test_producer_update() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_delete() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -285,7 +302,7 @@ async fn test_producer_delete() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    wait_for_mock_exchanges(&mock, "result", 1).await;
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -314,7 +331,6 @@ async fn test_producer_delete() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_select_one() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -346,7 +362,7 @@ async fn test_producer_select_one() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    wait_for_mock_exchanges(&mock, "result", 1).await;
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -372,7 +388,6 @@ async fn test_producer_select_one() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_batch() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -403,7 +418,7 @@ async fn test_producer_batch() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    wait_for_mock_exchanges(&mock, "result", 1).await;
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -432,7 +447,6 @@ async fn test_producer_batch() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_producer_noop() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -465,7 +479,7 @@ async fn test_producer_noop() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    wait_for_mock_exchanges(&mock, "result", 1).await;
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -501,7 +515,6 @@ async fn test_producer_noop() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_consumer_polling() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -532,7 +545,7 @@ async fn test_consumer_polling() {
     ctx.add_route_definition(consumer_route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    wait_for_mock_exchanges(&mock, "consumed", 1).await;
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -563,7 +576,6 @@ async fn test_consumer_polling() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_consumer_on_consume() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -599,7 +611,7 @@ async fn test_consumer_on_consume() {
     ctx.add_route_definition(consumer_route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    wait_for_mock_exchanges(&mock, "consumed", 1).await;
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {
@@ -621,7 +633,6 @@ async fn test_consumer_on_consume() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_consumer_empty_result() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -668,7 +679,6 @@ async fn test_consumer_empty_result() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_consumer_on_consume_failed() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -724,7 +734,6 @@ async fn test_consumer_on_consume_failed() {
 }
 
 #[tokio::test]
-#[ignore = "Requires Docker"]
 async fn test_consumer_empty_result_routed() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -751,7 +760,7 @@ async fn test_consumer_empty_result_routed() {
     ctx.add_route_definition(consumer_route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    wait_for_mock_exchanges(&mock, "consumed", 1).await;
     ctx.stop().await.unwrap();
 
     if let Some(error_ep) = mock.get_endpoint("error") {

@@ -44,6 +44,7 @@ tempfile = "3"
 wiremock = "0.6"
 reqwest = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+redis = { version = "1", features = ["tokio-comp", "aio"] }
 
 [features]
 integration-tests = [

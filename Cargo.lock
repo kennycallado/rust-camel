@@ -1122,6 +1122,7 @@ dependencies = [
  "camel-language-api",
  "camel-language-rhai",
  "camel-processor",
+ "redis",
  "reqwest",
  "serde_json",
  "sqlx",

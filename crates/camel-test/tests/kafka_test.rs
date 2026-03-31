@@ -8,11 +8,14 @@
 
 #![cfg(feature = "integration-tests")]
 
+mod support;
+
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_kafka::{KafkaComponent, KafkaEndpointConfig, KafkaProducer};
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
+use support::wait::wait_until;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::kafka::apache;
 use tower::{Service, ServiceExt};
@@ -23,7 +26,7 @@ fn init_tracing() {
     let _ = fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("rdkafka=debug,camel=debug,warn")),
+                .unwrap_or_else(|_| EnvFilter::new("warn,camel=info,rdkafka=off")),
         )
         .with_test_writer()
         .try_init();
@@ -67,29 +70,15 @@ async fn kafka_probe_send(brokers: &str) -> Result<(), String> {
 
 async fn wait_for_kafka_ready(brokers: &str) {
     let timeout = std::time::Duration::from_secs(60);
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut attempt: u32 = 0;
-    let mut last_error = String::new();
-
-    loop {
-        attempt += 1;
-        match kafka_probe_send(brokers).await {
-            Ok(()) => {
-                eprintln!("Kafka ready after {attempt} probe attempt(s): {brokers}");
-                return;
-            }
-            Err(err) => {
-                last_error = err;
-                if tokio::time::Instant::now() >= deadline {
-                    panic!(
-                        "Kafka broker at {brokers} did not become ready within {:?}. Last error: {}",
-                        timeout, last_error
-                    );
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-            }
-        }
-    }
+    wait_until(
+        "kafka broker readiness",
+        timeout,
+        std::time::Duration::from_millis(750),
+        || async { kafka_probe_send(brokers).await.map(|_| true) },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("Kafka broker at {brokers} did not become ready: {e}"));
+    eprintln!("Kafka ready: {brokers}");
 }
 
 // ===========================================================================
@@ -117,7 +106,19 @@ async fn test_kafka_producer_sends_without_error() {
     ctx.add_route_definition(route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let endpoint = mock.get_endpoint("result").unwrap();
+    wait_until(
+        "kafka producer route delivery",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+        },
+    )
+    .await
+    .unwrap();
+
     ctx.stop().await.unwrap();
 
     // No errors expected
@@ -129,7 +130,6 @@ async fn test_kafka_producer_sends_without_error() {
     }
 
     // Exchange reached mock:result → produce succeeded
-    let endpoint = mock.get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 }
 
@@ -170,12 +170,21 @@ async fn test_kafka_consumer_receives_message() {
     ctx.add_route_definition(producer_route).await.unwrap();
     ctx.start().await.unwrap();
 
-    // Give consumer time to assign partitions (5s delay before producer fires),
-    // then consumer receives. 15s total budget is comfortable.
-    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+    let endpoint = mock.get_endpoint("consumed").unwrap();
+    wait_until(
+        "kafka consumer receives message",
+        std::time::Duration::from_secs(20),
+        std::time::Duration::from_millis(200),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
     ctx.stop().await.unwrap();
 
-    let endpoint = mock.get_endpoint("consumed").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
     assert!(
         !exchanges.is_empty(),
@@ -217,10 +226,21 @@ async fn test_kafka_consumer_sets_headers() {
     ctx.add_route_definition(producer_route).await.unwrap();
     ctx.start().await.unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+    let endpoint = mock.get_endpoint("headers").unwrap();
+    wait_until(
+        "kafka headers consumer receives message",
+        std::time::Duration::from_secs(20),
+        std::time::Duration::from_millis(200),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
     ctx.stop().await.unwrap();
 
-    let endpoint = mock.get_endpoint("headers").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
     assert!(
         !exchanges.is_empty(),

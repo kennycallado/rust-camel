@@ -10,6 +10,19 @@ use tracing::{error, info, warn};
 
 use crate::config::{RedisCommand, RedisEndpointConfig};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuePopCommand {
+    Blpop,
+    Brpop,
+}
+
+fn queue_command_name(pop_command: QueuePopCommand) -> &'static str {
+    match pop_command {
+        QueuePopCommand::Blpop => "BLPOP",
+        QueuePopCommand::Brpop => "BRPOP",
+    }
+}
+
 /// Mode of operation for the Redis consumer.
 #[derive(Debug, Clone)]
 pub enum RedisConsumerMode {
@@ -24,8 +37,10 @@ pub enum RedisConsumerMode {
     Queue {
         /// Key to watch for items
         key: String,
-        /// Timeout in seconds for BLPOP
+        /// Timeout in seconds for blocking pop
         timeout: u64,
+        /// Blocking pop command to use (left or right)
+        pop_command: QueuePopCommand,
     },
 }
 
@@ -58,9 +73,15 @@ impl RedisConsumer {
             },
             RedisCommand::Blpop | RedisCommand::Brpop => {
                 let key = config.key.clone().unwrap_or_else(|| "queue".to_string());
+                let pop_command = if config.command == RedisCommand::Brpop {
+                    QueuePopCommand::Brpop
+                } else {
+                    QueuePopCommand::Blpop
+                };
                 RedisConsumerMode::Queue {
                     key,
                     timeout: config.timeout,
+                    pop_command,
                 }
             }
             _ => {
@@ -71,6 +92,7 @@ impl RedisConsumer {
                 RedisConsumerMode::Queue {
                     key: config.key.clone().unwrap_or_else(|| "queue".to_string()),
                     timeout: config.timeout,
+                    pop_command: QueuePopCommand::Blpop,
                 }
             }
         };
@@ -103,9 +125,18 @@ impl Consumer for RedisConsumer {
                 RedisConsumerMode::PubSub { channels, patterns } => tokio::spawn(
                     run_pubsub_consumer(config, channels, patterns, ctx, cancel_token),
                 ),
-                RedisConsumerMode::Queue { key, timeout } => {
-                    tokio::spawn(run_queue_consumer(config, key, timeout, ctx, cancel_token))
-                }
+                RedisConsumerMode::Queue {
+                    key,
+                    timeout,
+                    pop_command,
+                } => tokio::spawn(run_queue_consumer(
+                    config,
+                    key,
+                    timeout,
+                    pop_command,
+                    ctx,
+                    cancel_token,
+                )),
             };
 
         self.task_handle = Some(handle);
@@ -221,7 +252,7 @@ async fn run_pubsub_consumer(
     Ok(())
 }
 
-/// Runs a Queue consumer loop using BLPOP.
+/// Runs a Queue consumer loop using BLPOP or BRPOP.
 ///
 /// Creates a dedicated connection and performs blocking list pop operations.
 /// Items are converted to Exchanges and sent through the consumer context.
@@ -229,13 +260,15 @@ async fn run_queue_consumer(
     config: RedisEndpointConfig,
     key: String,
     timeout: u64,
+    pop_command: QueuePopCommand,
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
 ) -> Result<(), CamelError> {
     info!(
-        "Queue consumer connecting to {} for key '{}' with timeout {}s",
+        "Queue consumer connecting to {} for key '{}' with {} timeout {}s",
         config.redis_url(),
         key,
+        queue_command_name(pop_command),
         timeout
     );
 
@@ -250,7 +283,8 @@ async fn run_queue_consumer(
 
     info!("Queue consumer started, waiting for items");
 
-    // BLPOP loop
+    // Blocking pop loop (BLPOP/BRPOP)
+    let queue_cmd = queue_command_name(pop_command);
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -258,7 +292,7 @@ async fn run_queue_consumer(
                 break;
             }
             result = async {
-                let cmd = redis::cmd("BLPOP")
+                let cmd = redis::cmd(queue_cmd)
                     .arg(&key)
                     .arg(timeout)
                     .to_owned();
@@ -275,10 +309,10 @@ async fn run_queue_consumer(
                     }
                     Ok(None) => {
                         // Timeout - continue loop
-                        // This is normal for BLPOP with timeout
+                        // This is normal for blocking POP with timeout
                     }
                     Err(e) => {
-                        error!("BLPOP error: {}", e);
+                        error!("{} error: {}", queue_cmd, e);
                         // Brief pause before retrying to avoid tight error loop
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
@@ -391,9 +425,27 @@ mod tests {
         let consumer = RedisConsumer::new(config);
 
         match consumer.mode {
-            RedisConsumerMode::Queue { key, timeout } => {
+            RedisConsumerMode::Queue {
+                key,
+                timeout,
+                pop_command,
+            } => {
                 assert_eq!(key, "test-queue");
                 assert_eq!(timeout, 1);
+                assert_eq!(pop_command, QueuePopCommand::Blpop);
+            }
+            _ => panic!("Expected Queue mode"),
+        }
+    }
+
+    #[test]
+    fn test_consumer_new_brpop_uses_right_pop_command() {
+        let config = create_test_config(RedisCommand::Brpop);
+        let consumer = RedisConsumer::new(config);
+
+        match consumer.mode {
+            RedisConsumerMode::Queue { pop_command, .. } => {
+                assert_eq!(pop_command, QueuePopCommand::Brpop);
             }
             _ => panic!("Expected Queue mode"),
         }
@@ -406,8 +458,11 @@ mod tests {
         let consumer = RedisConsumer::new(config);
 
         match consumer.mode {
-            RedisConsumerMode::Queue { key, .. } => {
+            RedisConsumerMode::Queue {
+                key, pop_command, ..
+            } => {
                 assert_eq!(key, "queue");
+                assert_eq!(pop_command, QueuePopCommand::Blpop);
             }
             _ => panic!("Expected Queue mode"),
         }
@@ -419,12 +474,23 @@ mod tests {
         let consumer = RedisConsumer::new(config);
 
         match consumer.mode {
-            RedisConsumerMode::Queue { key, timeout } => {
+            RedisConsumerMode::Queue {
+                key,
+                timeout,
+                pop_command,
+            } => {
                 assert_eq!(key, "test-queue");
                 assert_eq!(timeout, 1);
+                assert_eq!(pop_command, QueuePopCommand::Blpop);
             }
             _ => panic!("Expected Queue mode"),
         }
+    }
+
+    #[test]
+    fn test_queue_command_name_matches_pop_side() {
+        assert_eq!(queue_command_name(QueuePopCommand::Blpop), "BLPOP");
+        assert_eq!(queue_command_name(QueuePopCommand::Brpop), "BRPOP");
     }
 
     #[test]
@@ -493,73 +559,5 @@ mod tests {
         // Stop should succeed
         let stop_result = consumer.stop().await;
         assert!(stop_result.is_ok());
-    }
-
-    // Integration tests (require running Redis, marked with #[ignore])
-
-    #[tokio::test]
-    #[ignore] // Requires running Redis
-    async fn test_pubsub_consumer_receives_messages() {
-        // Setup: create consumer with SUBSCRIBE
-        let config = create_test_config(RedisCommand::Subscribe);
-        let mut consumer = RedisConsumer::new(config);
-
-        let (tx, _rx) = mpsc::channel(16);
-        let cancel_token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, cancel_token.clone());
-
-        // Start consumer
-        consumer.start(ctx).await.unwrap();
-
-        // Give consumer time to subscribe
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Publish test message (would need a separate Redis client)
-        // let publish_client = redis::Client::open("redis://localhost:6379").unwrap();
-        // let mut pub_conn = publish_client.get_connection().unwrap();
-        // redis::cmd("PUBLISH").arg("test").arg("hello").query(&mut pub_conn).unwrap();
-
-        // Verify exchange received (would check rx)
-        // let envelope = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-        //     .await
-        //     .expect("Should receive message")
-        //     .expect("Message should exist");
-        // assert_eq!(envelope.exchange.input.body.as_text(), Some("hello"));
-
-        // Cleanup
-        consumer.stop().await.unwrap();
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires running Redis
-    async fn test_queue_consumer_processes_items() {
-        // Setup: create consumer with BLPOP
-        let config = create_test_config(RedisCommand::Blpop);
-        let mut consumer = RedisConsumer::new(config);
-
-        let (tx, _rx) = mpsc::channel(16);
-        let cancel_token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, cancel_token.clone());
-
-        // Start consumer
-        consumer.start(ctx).await.unwrap();
-
-        // Give consumer time to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // LPUSH test item (would need a separate Redis client)
-        // let push_client = redis::Client::open("redis://localhost:6379").unwrap();
-        // let mut push_conn = push_client.get_connection().unwrap();
-        // redis::cmd("LPUSH").arg("test-queue").arg("item1").query(&mut push_conn).unwrap();
-
-        // Verify exchange received (would check rx)
-        // let envelope = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-        //     .await
-        //     .expect("Should receive message")
-        //     .expect("Message should exist");
-        // assert_eq!(envelope.exchange.input.body.as_text(), Some("item1"));
-
-        // Cleanup
-        consumer.stop().await.unwrap();
     }
 }
