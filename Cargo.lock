@@ -851,6 +851,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
 ]
@@ -1852,6 +1853,20 @@ dependencies = [
  "concurrent-queue",
  "parking",
  "pin-project-lite",
+]
+
+[[package]]
+name = "exchange-uow"
+version = "0.5.1"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

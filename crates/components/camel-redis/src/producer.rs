@@ -161,6 +161,31 @@ impl RedisProducer {
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| config.command.clone())
     }
+
+    fn apply_default_key(exchange: &mut Exchange, config: &RedisEndpointConfig) {
+        if exchange.input.header("CamelRedis.Key").is_none()
+            && let Some(ref key) = config.key
+        {
+            exchange
+                .input
+                .set_header("CamelRedis.Key", serde_json::Value::String(key.clone()));
+        }
+    }
+
+    fn apply_default_channels(exchange: &mut Exchange, config: &RedisEndpointConfig) {
+        if exchange.input.header("CamelRedis.Channels").is_none() && !config.channels.is_empty() {
+            exchange.input.set_header(
+                "CamelRedis.Channels",
+                serde_json::Value::Array(
+                    config
+                        .channels
+                        .iter()
+                        .map(|c| serde_json::Value::String(c.clone()))
+                        .collect(),
+                ),
+            );
+        }
+    }
 }
 
 impl Service<Exchange> for RedisProducer {
@@ -220,29 +245,9 @@ impl Service<Exchange> for RedisProducer {
             // 2. Resolve command from header or config
             let cmd = Self::resolve_command(&exchange, &config);
 
-            // 3. Set default key from config if not provided in headers
-            if exchange.input.header("CamelRedis.Key").is_none()
-                && let Some(ref key) = config.key
-            {
-                exchange
-                    .input
-                    .set_header("CamelRedis.Key", serde_json::Value::String(key.clone()));
-            }
-
-            // 4. Set default channels from config for pub/sub commands
-            if exchange.input.header("CamelRedis.Channels").is_none() && !config.channels.is_empty()
-            {
-                exchange.input.set_header(
-                    "CamelRedis.Channels",
-                    serde_json::Value::Array(
-                        config
-                            .channels
-                            .iter()
-                            .map(|c| serde_json::Value::String(c.clone()))
-                            .collect(),
-                    ),
-                );
-            }
+            // 3. Set defaults from config if missing in headers
+            Self::apply_default_key(&mut exchange, &config);
+            Self::apply_default_channels(&mut exchange, &config);
 
             // 5. Dispatch to appropriate command handler
             Self::dispatch_command(&cmd, &mut connection, &mut exchange).await?;
@@ -303,6 +308,78 @@ mod tests {
 
         let cmd = RedisProducer::resolve_command(&exchange, &config);
         assert_eq!(cmd, RedisCommand::Incr);
+    }
+
+    #[test]
+    fn test_resolve_command_invalid_header_falls_back_to_config() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=DECR").unwrap();
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Command", serde_json::json!("NOT_A_COMMAND"));
+        let exchange = Exchange::new(msg);
+
+        let cmd = RedisProducer::resolve_command(&exchange, &config);
+        assert_eq!(cmd, RedisCommand::Decr);
+    }
+
+    #[test]
+    fn test_resolve_command_non_string_header_falls_back_to_config() {
+        let config =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=EXISTS").unwrap();
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Command", serde_json::json!(123));
+        let exchange = Exchange::new(msg);
+
+        let cmd = RedisProducer::resolve_command(&exchange, &config);
+        assert_eq!(cmd, RedisCommand::Exists);
+    }
+
+    #[test]
+    fn test_apply_default_key_sets_when_missing() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?key=cfg-key").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+
+        RedisProducer::apply_default_key(&mut exchange, &config);
+        assert_eq!(
+            exchange.input.header("CamelRedis.Key"),
+            Some(&serde_json::json!("cfg-key"))
+        );
+    }
+
+    #[test]
+    fn test_apply_default_key_preserves_existing_header() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?key=cfg-key").unwrap();
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Key", serde_json::json!("header-key"));
+        let mut exchange = Exchange::new(msg);
+
+        RedisProducer::apply_default_key(&mut exchange, &config);
+        assert_eq!(
+            exchange.input.header("CamelRedis.Key"),
+            Some(&serde_json::json!("header-key"))
+        );
+    }
+
+    #[test]
+    fn test_apply_default_channels_sets_when_missing() {
+        let config =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=SUBSCRIBE&channels=a,b")
+                .unwrap();
+        let mut exchange = Exchange::new(Message::default());
+
+        RedisProducer::apply_default_channels(&mut exchange, &config);
+        assert_eq!(
+            exchange.input.header("CamelRedis.Channels"),
+            Some(&serde_json::json!(["a", "b"]))
+        );
+    }
+
+    #[test]
+    fn test_apply_default_channels_skips_when_empty() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+
+        RedisProducer::apply_default_channels(&mut exchange, &config);
+        assert!(exchange.input.header("CamelRedis.Channels").is_none());
     }
 
     #[tokio::test]

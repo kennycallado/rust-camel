@@ -14,3 +14,15 @@ impl RouteSpec {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_spec_new_sets_fields() {
+        let spec = RouteSpec::new("r1", "direct:start");
+        assert_eq!(spec.route_id, "r1");
+        assert_eq!(spec.from_uri, "direct:start");
+    }
+}

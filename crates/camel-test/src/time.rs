@@ -27,3 +27,25 @@ impl TimeController {
         tokio::time::resume();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn advance_unblocks_sleep() {
+        tokio::time::pause();
+        let controller = TimeController;
+
+        let sleeper = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            42
+        });
+
+        controller.advance(Duration::from_millis(100)).await;
+        let got = sleeper.await.unwrap();
+        assert_eq!(got, 42);
+
+        controller.resume();
+    }
+}

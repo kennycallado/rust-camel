@@ -18,7 +18,7 @@
 - **Declarative integration flows**: Use all available EIPs and DSL
 - **External configuration**: Load routes from files at runtime
 - **Language expressions**: Use `simple:` and `rhai:` syntax for dynamic values
-- **Route-level configuration**: Auto-startup, startup ordering, concurrency, error handling, circuit breaker
+- **Route-level configuration**: Auto-startup, startup ordering, concurrency, error handling, circuit breaker, unit-of-work hooks
 
 - **All step types**: to, log, set_header, set_body, filter, choice, split, aggregate, wire_tap, multicast, stop, script, bean
 
@@ -192,10 +192,23 @@ routes:
     circuit_breaker:           # Optional circuit breaker
       failure_threshold: 5
       open_duration_ms: 30000
+    on_complete: "direct:on-complete"  # Optional completion hook URI
+    on_failure: "direct:on-failure"    # Optional failure hook URI
+```
+
+### Unit of Work Hooks (YAML)
+
+```yaml
+routes:
+  - id: my-route
+    from: "timer:tick"
+    on_complete: "log:done"
+    on_failure: "log:failed"
+    steps:
+      - log: "processing"
 ```
 
 ## Documentation
 - [API Documentation](https://docs.rs/camel-dsl)
 - [Examples](https://github.com/kennycallado/rust-camel/tree/main/examples)
 - [Repository](https://github.com/kennycallado/rust-camel)
-

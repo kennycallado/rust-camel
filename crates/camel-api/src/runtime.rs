@@ -342,12 +342,22 @@ pub enum RuntimeCommandResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeQuery {
-    GetRouteStatus { route_id: String },
+    GetRouteStatus {
+        route_id: String,
+    },
+    /// **Note:** This variant is intercepted by `RuntimeBus::ask` *before* reaching
+    /// `execute_query`. Do not handle it in `execute_query` — it has no access to
+    /// the in-flight counter. See `runtime_bus.rs` for the intercept.
+    InFlightCount {
+        route_id: String,
+    },
     ListRoutes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeQueryResult {
+    InFlightCount { route_id: String, count: u64 },
+    RouteNotFound { route_id: String },
     RouteStatus { route_id: String, status: String },
     Routes { route_ids: Vec<String> },
 }

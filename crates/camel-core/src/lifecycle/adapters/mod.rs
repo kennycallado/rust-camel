@@ -1,4 +1,5 @@
 pub(crate) mod body_coercing;
+pub mod exchange_uow;
 pub mod in_memory;
 pub mod redb_journal;
 pub(crate) mod route_compiler;

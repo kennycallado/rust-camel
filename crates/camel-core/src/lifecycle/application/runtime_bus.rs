@@ -115,8 +115,20 @@ impl RuntimeCommandBus for RuntimeBus {
 impl RuntimeQueryBus for RuntimeBus {
     async fn ask(&self, query: RuntimeQuery) -> Result<RuntimeQueryResult, CamelError> {
         self.ensure_journal_recovered().await?;
-        let deps = self.query_deps();
-        execute_query(&deps, query).await
+
+        match query {
+            RuntimeQuery::InFlightCount { route_id } => {
+                if let Some(execution) = &self.execution {
+                    execution.in_flight_count(&route_id).await
+                } else {
+                    Ok(RuntimeQueryResult::RouteNotFound { route_id })
+                }
+            }
+            other => {
+                let deps = self.query_deps();
+                execute_query(&deps, other).await
+            }
+        }
     }
 }
 
@@ -258,6 +270,12 @@ mod tests {
         seen: Arc<Mutex<HashSet<String>>>,
     }
 
+    #[derive(Clone, Default)]
+    struct InspectableDedup {
+        seen: Arc<Mutex<HashSet<String>>>,
+        forget_calls: Arc<Mutex<u32>>,
+    }
+
     #[async_trait]
     impl CommandDedupPort for InMemoryTestDedup {
         async fn first_seen(&self, command_id: &str) -> Result<bool, CamelError> {
@@ -271,6 +289,21 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl CommandDedupPort for InspectableDedup {
+        async fn first_seen(&self, command_id: &str) -> Result<bool, CamelError> {
+            let mut seen = self.seen.lock().expect("lock dedup set");
+            Ok(seen.insert(command_id.to_string()))
+        }
+
+        async fn forget_seen(&self, command_id: &str) -> Result<(), CamelError> {
+            self.seen.lock().expect("lock dedup set").remove(command_id);
+            let mut calls = self.forget_calls.lock().expect("forget calls");
+            *calls += 1;
+            Ok(())
+        }
+    }
+
     fn build_test_runtime_bus() -> RuntimeBus {
         let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
         let projections: Arc<dyn ProjectionStorePort> =
@@ -278,6 +311,106 @@ mod tests {
         let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher);
         let dedup: Arc<dyn CommandDedupPort> = Arc::new(InMemoryTestDedup::default());
         RuntimeBus::new(repo, projections, events, dedup)
+    }
+
+    #[derive(Default)]
+    struct CountingUow {
+        recover_calls: Arc<Mutex<u32>>,
+    }
+
+    #[derive(Default)]
+    struct FailingRecoverUow;
+
+    #[async_trait]
+    impl RuntimeUnitOfWorkPort for CountingUow {
+        async fn persist_upsert(
+            &self,
+            _aggregate: RouteRuntimeAggregate,
+            _expected_version: Option<u64>,
+            _projection: RouteStatusProjection,
+            _events: &[RuntimeEvent],
+        ) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn persist_delete(
+            &self,
+            _route_id: &str,
+            _events: &[RuntimeEvent],
+        ) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn recover_from_journal(&self) -> Result<(), CamelError> {
+            let mut calls = self.recover_calls.lock().expect("recover_calls");
+            *calls += 1;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeUnitOfWorkPort for FailingRecoverUow {
+        async fn persist_upsert(
+            &self,
+            _aggregate: RouteRuntimeAggregate,
+            _expected_version: Option<u64>,
+            _projection: RouteStatusProjection,
+            _events: &[RuntimeEvent],
+        ) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn persist_delete(
+            &self,
+            _route_id: &str,
+            _events: &[RuntimeEvent],
+        ) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn recover_from_journal(&self) -> Result<(), CamelError> {
+            Err(CamelError::RouteError("recover failed".into()))
+        }
+    }
+
+    #[derive(Default)]
+    struct InFlightExecutionPort;
+
+    #[async_trait]
+    impl RuntimeExecutionPort for InFlightExecutionPort {
+        async fn register_route(&self, _definition: RouteDefinition) -> Result<(), CamelError> {
+            Ok(())
+        }
+        async fn start_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+        async fn stop_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+        async fn suspend_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+        async fn resume_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+        async fn reload_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+        async fn remove_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+        async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, CamelError> {
+            if route_id == "known" {
+                Ok(RuntimeQueryResult::InFlightCount {
+                    route_id: route_id.to_string(),
+                    count: 3,
+                })
+            } else {
+                Ok(RuntimeQueryResult::RouteNotFound {
+                    route_id: route_id.to_string(),
+                })
+            }
+        }
     }
 
     #[tokio::test]
@@ -303,5 +436,190 @@ mod tests {
             }
             _ => panic!("unexpected query result"),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_returns_duplicate_for_replayed_command_id() {
+        use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec, RuntimeCommand};
+
+        let bus = build_test_runtime_bus();
+
+        let mut spec = CanonicalRouteSpec::new("dup-route", "timer:tick");
+        spec.steps = vec![CanonicalStepSpec::Stop];
+
+        let cmd = RuntimeCommand::RegisterRoute {
+            spec: spec.clone(),
+            command_id: "dup-cmd".into(),
+            causation_id: None,
+        };
+        let first = bus.execute(cmd).await.unwrap();
+        assert!(matches!(
+            first,
+            RuntimeCommandResult::RouteRegistered { route_id } if route_id == "dup-route"
+        ));
+
+        let second = bus
+            .execute(RuntimeCommand::RegisterRoute {
+                spec,
+                command_id: "dup-cmd".into(),
+                causation_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            second,
+            RuntimeCommandResult::Duplicate { command_id } if command_id == "dup-cmd"
+        ));
+    }
+
+    #[tokio::test]
+    async fn ask_in_flight_count_without_execution_returns_route_not_found() {
+        let bus = build_test_runtime_bus();
+        let res = bus
+            .ask(RuntimeQuery::InFlightCount {
+                route_id: "missing".into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            res,
+            RuntimeQueryResult::RouteNotFound { route_id } if route_id == "missing"
+        ));
+    }
+
+    #[tokio::test]
+    async fn ask_in_flight_count_with_execution_delegates_to_adapter() {
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher);
+        let dedup: Arc<dyn CommandDedupPort> = Arc::new(InMemoryTestDedup::default());
+        let execution: Arc<dyn RuntimeExecutionPort> = Arc::new(InFlightExecutionPort);
+        let bus = RuntimeBus::new(repo, projections, events, dedup).with_execution(execution);
+
+        let known = bus
+            .ask(RuntimeQuery::InFlightCount {
+                route_id: "known".into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            known,
+            RuntimeQueryResult::InFlightCount { route_id, count }
+            if route_id == "known" && count == 3
+        ));
+    }
+
+    #[tokio::test]
+    async fn journal_recovery_runs_once_even_with_multiple_commands() {
+        use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec, RuntimeCommand};
+
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher);
+        let dedup: Arc<dyn CommandDedupPort> = Arc::new(InMemoryTestDedup::default());
+        let uow = Arc::new(CountingUow::default());
+        let bus = RuntimeBus::new(repo, projections, events, dedup).with_uow(uow.clone());
+
+        let mut spec_a = CanonicalRouteSpec::new("a", "timer:a");
+        spec_a.steps = vec![CanonicalStepSpec::Stop];
+        let mut spec_b = CanonicalRouteSpec::new("b", "timer:b");
+        spec_b.steps = vec![CanonicalStepSpec::Stop];
+
+        bus.execute(RuntimeCommand::RegisterRoute {
+            spec: spec_a,
+            command_id: "c-a".into(),
+            causation_id: None,
+        })
+        .await
+        .unwrap();
+
+        bus.execute(RuntimeCommand::RegisterRoute {
+            spec: spec_b,
+            command_id: "c-b".into(),
+            causation_id: None,
+        })
+        .await
+        .unwrap();
+
+        let calls = *uow.recover_calls.lock().expect("recover calls");
+        assert_eq!(calls, 1, "journal recovery should run once");
+    }
+
+    #[tokio::test]
+    async fn execute_on_command_error_forgets_dedup_marker() {
+        use camel_api::runtime::{CanonicalRouteSpec, RuntimeCommand};
+
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher);
+        let dedup = Arc::new(InspectableDedup::default());
+        let dedup_port: Arc<dyn CommandDedupPort> = dedup.clone();
+
+        let bus = RuntimeBus::new(repo, projections, events, dedup_port);
+
+        // Invalid canonical contract: empty route_id -> execute_command should fail.
+        let cmd = RuntimeCommand::RegisterRoute {
+            spec: CanonicalRouteSpec::new("", "timer:tick"),
+            command_id: "err-cmd".into(),
+            causation_id: None,
+        };
+
+        let err = bus.execute(cmd).await.expect_err("must fail");
+        assert!(err.to_string().contains("route_id cannot be empty"));
+
+        assert_eq!(*dedup.forget_calls.lock().expect("forget calls"), 1);
+        assert!(!dedup.seen.lock().expect("seen").contains("err-cmd"));
+    }
+
+    #[tokio::test]
+    async fn execute_propagates_recover_error_from_uow() {
+        use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec, RuntimeCommand};
+
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher);
+        let dedup: Arc<dyn CommandDedupPort> = Arc::new(InMemoryTestDedup::default());
+        let uow: Arc<dyn RuntimeUnitOfWorkPort> = Arc::new(FailingRecoverUow);
+
+        let bus = RuntimeBus::new(repo, projections, events, dedup).with_uow(uow);
+
+        let mut spec = CanonicalRouteSpec::new("x", "timer:x");
+        spec.steps = vec![CanonicalStepSpec::Stop];
+        let err = bus
+            .execute(RuntimeCommand::RegisterRoute {
+                spec,
+                command_id: "recover-err".into(),
+                causation_id: None,
+            })
+            .await
+            .expect_err("recover should fail");
+
+        assert!(err.to_string().contains("recover failed"));
+    }
+
+    #[tokio::test]
+    async fn ask_in_flight_count_with_execution_handles_unknown_route() {
+        let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+        let projections: Arc<dyn ProjectionStorePort> =
+            Arc::new(InMemoryTestProjectionStore::default());
+        let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher);
+        let dedup: Arc<dyn CommandDedupPort> = Arc::new(InMemoryTestDedup::default());
+        let execution: Arc<dyn RuntimeExecutionPort> = Arc::new(InFlightExecutionPort);
+        let bus = RuntimeBus::new(repo, projections, events, dedup).with_execution(execution);
+
+        let unknown = bus
+            .ask(RuntimeQuery::InFlightCount {
+                route_id: "unknown".into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            unknown,
+            RuntimeQueryResult::RouteNotFound { route_id } if route_id == "unknown"
+        ));
     }
 }

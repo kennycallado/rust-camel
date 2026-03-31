@@ -290,6 +290,21 @@ async fn run_queue_consumer(
     Ok(())
 }
 
+fn build_pubsub_exchange(payload: String, channel: String, pattern: Option<String>) -> Exchange {
+    let mut exchange = Exchange::new(Message::new(Body::Text(payload)));
+    exchange
+        .input
+        .set_header("CamelRedis.Channel", serde_json::Value::String(channel));
+
+    if let Some(pattern) = pattern {
+        exchange
+            .input
+            .set_header("CamelRedis.Pattern", serde_json::Value::String(pattern));
+    }
+
+    exchange
+}
+
 /// Builds an Exchange from a Pub/Sub message.
 ///
 /// Sets the following headers:
@@ -299,25 +314,14 @@ fn build_exchange_from_pubsub(msg: Msg) -> Exchange {
     let payload: String = msg
         .get_payload()
         .unwrap_or_else(|_| "<error decoding payload>".to_string());
+    let channel = msg.get_channel_name().to_string();
+    let pattern = if msg.from_pattern() {
+        msg.get_pattern::<String>().ok()
+    } else {
+        None
+    };
 
-    let mut exchange = Exchange::new(Message::new(Body::Text(payload)));
-
-    // Set channel header
-    exchange.input.set_header(
-        "CamelRedis.Channel",
-        serde_json::Value::String(msg.get_channel_name().to_string()),
-    );
-
-    // Set pattern header if this is from a pattern subscription
-    if msg.from_pattern()
-        && let Ok(pattern) = msg.get_pattern::<String>()
-    {
-        exchange
-            .input
-            .set_header("CamelRedis.Pattern", serde_json::Value::String(pattern));
-    }
-
-    exchange
+    build_pubsub_exchange(payload, channel, pattern)
 }
 
 /// Builds an Exchange from a BLPOP result.
@@ -410,6 +414,27 @@ mod tests {
     }
 
     #[test]
+    fn test_consumer_new_non_consumer_command_defaults_to_queue_mode() {
+        let config = create_test_config(RedisCommand::Set);
+        let consumer = RedisConsumer::new(config);
+
+        match consumer.mode {
+            RedisConsumerMode::Queue { key, timeout } => {
+                assert_eq!(key, "test-queue");
+                assert_eq!(timeout, 1);
+            }
+            _ => panic!("Expected Queue mode"),
+        }
+    }
+
+    #[test]
+    fn test_consumer_concurrency_model_is_sequential() {
+        let config = create_test_config(RedisCommand::Subscribe);
+        let consumer = RedisConsumer::new(config);
+        assert_eq!(consumer.concurrency_model(), ConcurrencyModel::Sequential);
+    }
+
+    #[test]
     fn test_build_exchange_from_blpop() {
         let exchange = build_exchange_from_blpop("mykey".to_string(), "myvalue".to_string());
 
@@ -419,6 +444,32 @@ mod tests {
         assert_eq!(
             header,
             Some(&serde_json::Value::String("mykey".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_build_pubsub_exchange_without_pattern() {
+        let exchange = build_pubsub_exchange("hello".to_string(), "news".to_string(), None);
+
+        assert_eq!(exchange.input.body.as_text(), Some("hello"));
+        assert_eq!(
+            exchange.input.header("CamelRedis.Channel"),
+            Some(&serde_json::json!("news"))
+        );
+        assert!(exchange.input.header("CamelRedis.Pattern").is_none());
+    }
+
+    #[test]
+    fn test_build_pubsub_exchange_with_pattern() {
+        let exchange = build_pubsub_exchange(
+            "hello".to_string(),
+            "news.eu".to_string(),
+            Some("news.*".to_string()),
+        );
+
+        assert_eq!(
+            exchange.input.header("CamelRedis.Pattern"),
+            Some(&serde_json::json!("news.*"))
         );
     }
 

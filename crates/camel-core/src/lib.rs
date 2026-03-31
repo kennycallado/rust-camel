@@ -85,6 +85,7 @@ pub mod reload_watcher {
 }
 
 pub use crate::hot_reload::adapters::ReloadWatcher;
+pub use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
 pub use crate::lifecycle::adapters::redb_journal::{
     JournalDurability, JournalEntry, JournalInspectFilter, RedbJournalOptions,
     RedbRuntimeEventJournal,

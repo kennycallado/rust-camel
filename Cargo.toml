@@ -55,6 +55,7 @@ members = [
     "examples/log-eip",
     "examples/lazy-route",
     "examples/circuit-breaker",
+    "examples/exchange-uow",
     "examples/metrics-demo",
     "examples/controlbus",
     "examples/language-simple",

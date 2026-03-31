@@ -4,11 +4,93 @@ use camel_api::{CamelError, Exchange, body::Body};
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 
+pub(crate) fn is_list_command(cmd: &RedisCommand) -> bool {
+    matches!(
+        cmd,
+        RedisCommand::Lpush
+            | RedisCommand::Rpush
+            | RedisCommand::Lpushx
+            | RedisCommand::Rpushx
+            | RedisCommand::Lpop
+            | RedisCommand::Rpop
+            | RedisCommand::Blpop
+            | RedisCommand::Brpop
+            | RedisCommand::Llen
+            | RedisCommand::Lrange
+            | RedisCommand::Lindex
+            | RedisCommand::Linsert
+            | RedisCommand::Lset
+            | RedisCommand::Lrem
+            | RedisCommand::Ltrim
+            | RedisCommand::Rpoplpush
+    )
+}
+
+pub(crate) fn resolve_destination(exchange: &Exchange) -> Result<String, CamelError> {
+    get_str_header(exchange, "CamelRedis.Destination")
+        .map(|s| s.to_string())
+        .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Destination".into()))
+}
+
+pub(crate) fn resolve_linsert_mode(exchange: &Exchange) -> &'static str {
+    let position = get_str_header(exchange, "CamelRedis.Position").unwrap_or("BEFORE");
+    if position.eq_ignore_ascii_case("BEFORE") {
+        "BEFORE"
+    } else {
+        "AFTER"
+    }
+}
+
+pub(crate) fn resolve_blocking_timeout(exchange: &Exchange) -> f64 {
+    get_u64_header(exchange, "CamelRedis.Timeout").unwrap_or(0) as f64
+}
+
+pub(crate) fn resolve_index(exchange: &Exchange) -> isize {
+    get_i64_header(exchange, "CamelRedis.Index").unwrap_or(0) as isize
+}
+
+pub(crate) fn resolve_range_bounds(exchange: &Exchange) -> (isize, isize) {
+    (
+        get_i64_header(exchange, "CamelRedis.Start").unwrap_or(0) as isize,
+        get_i64_header(exchange, "CamelRedis.End").unwrap_or(-1) as isize,
+    )
+}
+
+pub(crate) fn resolve_lrem_count(exchange: &Exchange) -> isize {
+    get_i64_header(exchange, "CamelRedis.Count").unwrap_or(0) as isize
+}
+
+pub(crate) fn resolve_linsert_operands(
+    exchange: &Exchange,
+) -> Result<(&'static str, String), CamelError> {
+    let mode = resolve_linsert_mode(exchange);
+    let pivot = get_str_header(exchange, "CamelRedis.Pivot")
+        .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Pivot".into()))?
+        .to_string();
+    Ok((mode, pivot))
+}
+
+pub(crate) fn json_from_optional_string(value: Option<String>) -> serde_json::Value {
+    value
+        .map(serde_json::Value::String)
+        .unwrap_or(serde_json::Value::Null)
+}
+
+pub(crate) fn json_from_optional_pair_value(value: Option<(String, String)>) -> serde_json::Value {
+    value
+        .map(|(_, v)| serde_json::Value::String(v))
+        .unwrap_or(serde_json::Value::Null)
+}
+
 pub async fn dispatch(
     cmd: &RedisCommand,
     conn: &mut MultiplexedConnection,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
+    if !is_list_command(cmd) {
+        return Err(CamelError::ProcessorError("Not a list command".into()));
+    }
+
     let result: serde_json::Value = match cmd {
         RedisCommand::Lpush => {
             let key = require_key(exchange)?;
@@ -52,8 +134,7 @@ pub async fn dispatch(
                 .lpop(&key, None)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LPOP failed: {e}")))?;
-            val.map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null)
+            json_from_optional_string(val)
         }
         RedisCommand::Rpop => {
             let key = require_key(exchange)?;
@@ -61,28 +142,25 @@ pub async fn dispatch(
                 .rpop(&key, None)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis RPOP failed: {e}")))?;
-            val.map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null)
+            json_from_optional_string(val)
         }
         RedisCommand::Blpop => {
             let key = require_key(exchange)?;
-            let timeout = get_u64_header(exchange, "CamelRedis.Timeout").unwrap_or(0) as f64;
+            let timeout = resolve_blocking_timeout(exchange);
             let val: Option<(String, String)> = conn
                 .blpop(&key, timeout)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis BLPOP failed: {e}")))?;
-            val.map(|(_, v)| serde_json::Value::String(v))
-                .unwrap_or(serde_json::Value::Null)
+            json_from_optional_pair_value(val)
         }
         RedisCommand::Brpop => {
             let key = require_key(exchange)?;
-            let timeout = get_u64_header(exchange, "CamelRedis.Timeout").unwrap_or(0) as f64;
+            let timeout = resolve_blocking_timeout(exchange);
             let val: Option<(String, String)> = conn
                 .brpop(&key, timeout)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis BRPOP failed: {e}")))?;
-            val.map(|(_, v)| serde_json::Value::String(v))
-                .unwrap_or(serde_json::Value::Null)
+            json_from_optional_pair_value(val)
         }
         RedisCommand::Llen => {
             let key = require_key(exchange)?;
@@ -94,8 +172,7 @@ pub async fn dispatch(
         }
         RedisCommand::Lrange => {
             let key = require_key(exchange)?;
-            let start = get_i64_header(exchange, "CamelRedis.Start").unwrap_or(0) as isize;
-            let end = get_i64_header(exchange, "CamelRedis.End").unwrap_or(-1) as isize;
+            let (start, end) = resolve_range_bounds(exchange);
             let vals: Vec<String> = conn
                 .lrange(&key, start, end)
                 .await
@@ -104,44 +181,31 @@ pub async fn dispatch(
         }
         RedisCommand::Lindex => {
             let key = require_key(exchange)?;
-            let idx = get_i64_header(exchange, "CamelRedis.Index").unwrap_or(0) as isize;
+            let idx = resolve_index(exchange);
             let val: Option<String> = conn
                 .lindex(&key, idx)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LINDEX failed: {e}")))?;
-            val.map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null)
+            json_from_optional_string(val)
         }
         RedisCommand::Linsert => {
             let key = require_key(exchange)?;
-            let position = get_str_header(exchange, "CamelRedis.Position").unwrap_or("BEFORE");
-            let pivot = get_str_header(exchange, "CamelRedis.Pivot")
-                .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Pivot".into()))?;
+            let (mode, pivot) = resolve_linsert_operands(exchange)?;
             let value = require_value(exchange)?;
             // Use redis::cmd for LINSERT since AsyncCommands doesn't have a direct method
-            let n: i64 = if position.eq_ignore_ascii_case("BEFORE") {
-                redis::cmd("LINSERT")
-                    .arg(&key)
-                    .arg("BEFORE")
-                    .arg(pivot)
-                    .arg(value.to_string())
-                    .query_async(conn)
-                    .await
-            } else {
-                redis::cmd("LINSERT")
-                    .arg(&key)
-                    .arg("AFTER")
-                    .arg(pivot)
-                    .arg(value.to_string())
-                    .query_async(conn)
-                    .await
-            }
-            .map_err(|e| CamelError::ProcessorError(format!("Redis LINSERT failed: {e}")))?;
+            let n: i64 = redis::cmd("LINSERT")
+                .arg(&key)
+                .arg(mode)
+                .arg(pivot)
+                .arg(value.to_string())
+                .query_async(conn)
+                .await
+                .map_err(|e| CamelError::ProcessorError(format!("Redis LINSERT failed: {e}")))?;
             serde_json::json!(n)
         }
         RedisCommand::Lset => {
             let key = require_key(exchange)?;
-            let idx = get_i64_header(exchange, "CamelRedis.Index").unwrap_or(0) as isize;
+            let idx = resolve_index(exchange);
             let value = require_value(exchange)?;
             conn.lset::<_, _, ()>(&key, idx, value.to_string())
                 .await
@@ -150,7 +214,7 @@ pub async fn dispatch(
         }
         RedisCommand::Lrem => {
             let key = require_key(exchange)?;
-            let count = get_i64_header(exchange, "CamelRedis.Count").unwrap_or(0) as isize;
+            let count = resolve_lrem_count(exchange);
             let value = require_value(exchange)?;
             let n: usize = conn
                 .lrem(&key, count, value.to_string())
@@ -160,8 +224,7 @@ pub async fn dispatch(
         }
         RedisCommand::Ltrim => {
             let key = require_key(exchange)?;
-            let start = get_i64_header(exchange, "CamelRedis.Start").unwrap_or(0) as isize;
-            let end = get_i64_header(exchange, "CamelRedis.End").unwrap_or(-1) as isize;
+            let (start, end) = resolve_range_bounds(exchange);
             conn.ltrim::<_, ()>(&key, start, end)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis LTRIM failed: {e}")))?;
@@ -169,17 +232,14 @@ pub async fn dispatch(
         }
         RedisCommand::Rpoplpush => {
             let key = require_key(exchange)?;
-            let dest = get_str_header(exchange, "CamelRedis.Destination").ok_or_else(|| {
-                CamelError::ProcessorError("Missing CamelRedis.Destination".into())
-            })?;
+            let dest = resolve_destination(exchange)?;
             let val: Option<String> = conn
                 .rpoplpush(&key, dest)
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis RPOPLPUSH failed: {e}")))?;
-            val.map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null)
+            json_from_optional_string(val)
         }
-        _ => return Err(CamelError::ProcessorError("Not a list command".into())),
+        _ => unreachable!("non-list commands rejected above"),
     };
     exchange.input.body = Body::Json(result);
     Ok(())
@@ -247,6 +307,101 @@ mod tests {
         msg.set_header("CamelRedis.Key", serde_json::json!("src"));
         msg.set_header("CamelRedis.Destination", serde_json::json!("dest"));
         let ex = Exchange::new(msg);
-        assert_eq!(get_str_header(&ex, "CamelRedis.Destination"), Some("dest"));
+        assert_eq!(resolve_destination(&ex).unwrap(), "dest");
+    }
+
+    #[test]
+    fn test_list_command_classification() {
+        assert!(is_list_command(&RedisCommand::Lpush));
+        assert!(is_list_command(&RedisCommand::Rpoplpush));
+        assert!(!is_list_command(&RedisCommand::Set));
+    }
+
+    #[test]
+    fn test_resolve_linsert_mode_defaults_before() {
+        let ex = Exchange::new(Message::default());
+        assert_eq!(resolve_linsert_mode(&ex), "BEFORE");
+    }
+
+    #[test]
+    fn test_resolve_linsert_mode_after_for_non_before_values() {
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Position", serde_json::json!("AFTER"));
+        let ex = Exchange::new(msg);
+        assert_eq!(resolve_linsert_mode(&ex), "AFTER");
+    }
+
+    #[test]
+    fn test_resolve_destination_requires_header() {
+        let ex = Exchange::new(Message::default());
+        let err = resolve_destination(&ex).expect_err("destination should be required");
+        assert!(err.to_string().contains("CamelRedis.Destination"));
+    }
+
+    #[test]
+    fn test_resolve_blocking_timeout_defaults_and_values() {
+        let ex_default = Exchange::new(Message::default());
+        assert_eq!(resolve_blocking_timeout(&ex_default), 0.0);
+
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Timeout", serde_json::json!(7));
+        let ex = Exchange::new(msg);
+        assert_eq!(resolve_blocking_timeout(&ex), 7.0);
+    }
+
+    #[test]
+    fn test_resolve_index_default_and_value() {
+        let ex_default = Exchange::new(Message::default());
+        assert_eq!(resolve_index(&ex_default), 0);
+
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Index", serde_json::json!(4));
+        let ex = Exchange::new(msg);
+        assert_eq!(resolve_index(&ex), 4);
+    }
+
+    #[test]
+    fn test_resolve_range_bounds_defaults_and_values() {
+        let ex_default = Exchange::new(Message::default());
+        assert_eq!(resolve_range_bounds(&ex_default), (0, -1));
+
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Start", serde_json::json!(2));
+        msg.set_header("CamelRedis.End", serde_json::json!(5));
+        let ex = Exchange::new(msg);
+        assert_eq!(resolve_range_bounds(&ex), (2, 5));
+    }
+
+    #[test]
+    fn test_resolve_lrem_count_default_and_value() {
+        let ex_default = Exchange::new(Message::default());
+        assert_eq!(resolve_lrem_count(&ex_default), 0);
+
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Count", serde_json::json!(3));
+        let ex = Exchange::new(msg);
+        assert_eq!(resolve_lrem_count(&ex), 3);
+    }
+
+    #[test]
+    fn test_resolve_linsert_operands_requires_pivot() {
+        let ex = Exchange::new(Message::default());
+        let err = resolve_linsert_operands(&ex).expect_err("pivot should be required");
+        assert!(err.to_string().contains("CamelRedis.Pivot"));
+    }
+
+    #[test]
+    fn test_json_from_optional_helpers() {
+        assert_eq!(
+            json_from_optional_string(Some("a".to_string())),
+            serde_json::json!("a")
+        );
+        assert_eq!(json_from_optional_string(None), serde_json::Value::Null);
+
+        assert_eq!(
+            json_from_optional_pair_value(Some(("k".to_string(), "v".to_string()))),
+            serde_json::json!("v")
+        );
+        assert_eq!(json_from_optional_pair_value(None), serde_json::Value::Null);
     }
 }

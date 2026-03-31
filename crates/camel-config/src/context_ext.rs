@@ -514,4 +514,49 @@ mod configure_context_smoke_tests {
             "JournalConfig without 'path' field must fail deserialization"
         );
     }
+
+    #[test]
+    fn parse_log_level_covers_all_branches() {
+        assert_eq!(parse_log_level("trace"), Level::TRACE);
+        assert_eq!(parse_log_level("debug"), Level::DEBUG);
+        assert_eq!(parse_log_level("info"), Level::INFO);
+        assert_eq!(parse_log_level("warn"), Level::WARN);
+        assert_eq!(parse_log_level("warning"), Level::WARN);
+        assert_eq!(parse_log_level("error"), Level::ERROR);
+        assert_eq!(parse_log_level("unknown"), Level::INFO);
+    }
+
+    #[test]
+    fn load_routes_returns_empty_when_routes_not_declared() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
+log_level = "info"
+"#,
+        )
+        .unwrap();
+
+        let routes = CamelConfig::load_routes(file.path().to_str().unwrap()).unwrap();
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn load_routes_propagates_discovery_error_for_invalid_glob() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
+routes = ["["]
+"#,
+        )
+        .unwrap();
+
+        let err = CamelConfig::load_routes(file.path().to_str().unwrap())
+            .err()
+            .expect("invalid glob should error");
+        assert!(matches!(err, CamelError::Config(_)));
+    }
 }

@@ -23,6 +23,10 @@ pub struct YamlRoute {
     pub error_handler: Option<YamlErrorHandler>,
     #[serde(default)]
     pub circuit_breaker: Option<YamlCircuitBreaker>,
+    #[serde(default)]
+    pub on_complete: Option<String>,
+    #[serde(default)]
+    pub on_failure: Option<String>,
 }
 
 #[derive(Deserialize)]

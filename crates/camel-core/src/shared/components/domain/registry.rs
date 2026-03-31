@@ -49,3 +49,52 @@ impl Default for Registry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camel_component_log::LogComponent;
+    use camel_component_timer::TimerComponent;
+
+    #[test]
+    fn registry_starts_empty() {
+        let registry = Registry::new();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+        assert!(registry.get("timer").is_none());
+    }
+
+    #[test]
+    fn registry_registers_and_gets_components() {
+        let mut registry = Registry::new();
+        registry.register(TimerComponent::new());
+        registry.register(LogComponent::new());
+
+        assert_eq!(registry.len(), 2);
+        assert!(registry.get("timer").is_some());
+        assert!(registry.get("log").is_some());
+        assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn registry_get_or_err_reports_missing_component() {
+        let mut registry = Registry::new();
+        registry.register(TimerComponent::new());
+
+        let err = match registry.get_or_err("missing") {
+            Ok(_) => panic!("must fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, CamelError::ComponentNotFound(_)));
+    }
+
+    #[test]
+    fn registry_replaces_component_with_same_scheme() {
+        let mut registry = Registry::new();
+        registry.register(TimerComponent::new());
+        registry.register(TimerComponent::new());
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.get("timer").is_some());
+    }
+}

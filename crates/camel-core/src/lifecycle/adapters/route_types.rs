@@ -53,3 +53,38 @@ impl Route {
         (self.pipeline, self.concurrency)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camel_api::IdentityProcessor;
+
+    #[test]
+    fn route_accessors_and_parts_work() {
+        let route = Route::new("direct:a", BoxProcessor::new(IdentityProcessor));
+        assert_eq!(route.from_uri(), "direct:a");
+        assert!(route.concurrency_override().is_none());
+    }
+
+    #[test]
+    fn route_with_concurrency_sets_override() {
+        let route = Route::new("direct:b", BoxProcessor::new(IdentityProcessor))
+            .with_concurrency(ConcurrencyModel::Concurrent { max: Some(3) });
+        assert!(matches!(
+            route.concurrency_override(),
+            Some(ConcurrencyModel::Concurrent { max: Some(3) })
+        ));
+
+        let (_pipeline, concurrency) = route.into_parts();
+        assert!(matches!(
+            concurrency,
+            Some(ConcurrencyModel::Concurrent { max: Some(3) })
+        ));
+    }
+
+    #[test]
+    fn into_pipeline_consumes_route() {
+        let route = Route::new("direct:c", BoxProcessor::new(IdentityProcessor));
+        let _pipeline = route.into_pipeline();
+    }
+}

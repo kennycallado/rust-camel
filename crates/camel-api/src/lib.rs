@@ -24,6 +24,7 @@ pub mod runtime;
 pub mod splitter;
 pub mod supervision;
 pub mod throttler;
+pub mod unit_of_work;
 pub mod value;
 
 // Re-export core types at crate root for convenience.
@@ -69,4 +70,5 @@ pub use splitter::{
 };
 pub use supervision::SupervisionConfig;
 pub use throttler::{ThrottleStrategy, ThrottlerConfig};
+pub use unit_of_work::UnitOfWorkConfig;
 pub use value::{Headers, Value};

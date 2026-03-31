@@ -930,3 +930,151 @@ mod http_from_tests {
         assert!(cfg.allow_private_ips);
     }
 }
+
+#[cfg(test)]
+mod profile_loading_tests {
+    use super::*;
+
+    fn write_temp_config(contents: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(contents.as_bytes()).expect("write config");
+        f
+    }
+
+    #[test]
+    fn test_merge_toml_values_merges_nested_tables() {
+        let mut base: toml::Value = toml::from_str(
+            r#"
+[components.http]
+connect_timeout_ms = 1000
+max_connections = 50
+"#,
+        )
+        .unwrap();
+
+        let overlay: toml::Value = toml::from_str(
+            r#"
+[components.http]
+response_timeout_ms = 2000
+max_connections = 99
+"#,
+        )
+        .unwrap();
+
+        merge_toml_values(&mut base, &overlay);
+
+        let http = base
+            .get("components")
+            .and_then(|v| v.get("http"))
+            .expect("merged http table");
+        assert_eq!(
+            http.get("connect_timeout_ms").and_then(|v| v.as_integer()),
+            Some(1000)
+        );
+        assert_eq!(
+            http.get("response_timeout_ms").and_then(|v| v.as_integer()),
+            Some(2000)
+        );
+        assert_eq!(
+            http.get("max_connections").and_then(|v| v.as_integer()),
+            Some(99)
+        );
+    }
+
+    #[test]
+    fn test_from_file_with_profile_merges_default_and_profile() {
+        let file = write_temp_config(
+            r#"
+[default]
+watch = false
+[default.components.http]
+connect_timeout_ms = 1000
+max_connections = 50
+
+[prod]
+watch = true
+[prod.components.http]
+max_connections = 200
+"#,
+        );
+
+        let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), Some("prod"))
+            .expect("config should load");
+
+        assert!(cfg.watch);
+        let http = cfg.components.http.expect("http config");
+        assert_eq!(http.connect_timeout_ms, 1000);
+        assert_eq!(http.max_connections, 200);
+    }
+
+    #[test]
+    fn test_from_file_with_profile_uses_profile_when_no_default() {
+        let file = write_temp_config(
+            r#"
+[dev]
+watch = true
+timeout_ms = 777
+"#,
+        );
+
+        let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), Some("dev"))
+            .expect("config should load");
+        assert!(cfg.watch);
+        assert_eq!(cfg.timeout_ms, 777);
+    }
+
+    #[test]
+    fn test_from_file_with_profile_unknown_profile_returns_error() {
+        let file = write_temp_config(
+            r#"
+[default]
+watch = false
+"#,
+        );
+
+        let err = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), Some("qa"))
+            .expect_err("should fail");
+        assert!(err.to_string().contains("Unknown profile: qa"));
+    }
+
+    #[test]
+    fn test_from_file_without_profile_uses_default_section() {
+        let file = write_temp_config(
+            r#"
+[default]
+watch = true
+timeout_ms = 321
+"#,
+        );
+
+        let cfg =
+            CamelConfig::from_file(file.path().to_str().unwrap()).expect("config should load");
+        assert!(cfg.watch);
+        assert_eq!(cfg.timeout_ms, 321);
+    }
+
+    #[test]
+    fn test_from_file_with_env_overrides_timeout() {
+        let file = write_temp_config(
+            r#"
+[default]
+timeout_ms = 1000
+"#,
+        );
+
+        // SAFETY: tests run in controlled process; we set and immediately restore env var.
+        unsafe {
+            std::env::set_var("CAMEL_TIMEOUT_MS", "9999");
+        }
+
+        let cfg = CamelConfig::from_file_with_env(file.path().to_str().unwrap())
+            .expect("config should load with env override");
+        assert_eq!(cfg.timeout_ms, 9999);
+
+        // SAFETY: restore process env for test isolation.
+        unsafe {
+            std::env::remove_var("CAMEL_TIMEOUT_MS");
+        }
+    }
+}

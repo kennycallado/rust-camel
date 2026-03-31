@@ -2496,11 +2496,12 @@ async fn test_xml_body_pipeline() {
 
     // Create a producer to send an exchange with XML body
     let producer_ctx = ctx.producer_context();
-    let registry = ctx.registry();
-    let component = registry.get("direct").unwrap();
-    let endpoint = component.create_endpoint("direct:xml-in").unwrap();
-    let producer = endpoint.create_producer(&producer_ctx).unwrap();
-    drop(registry); // Release the registry lock
+    let producer = {
+        let registry = ctx.registry();
+        let component = registry.get("direct").unwrap();
+        let endpoint = component.create_endpoint("direct:xml-in").unwrap();
+        endpoint.create_producer(&producer_ctx).unwrap()
+    };
 
     // Send exchange with Body::Xml
     let xml_content = "<root><msg>hello</msg></root>";

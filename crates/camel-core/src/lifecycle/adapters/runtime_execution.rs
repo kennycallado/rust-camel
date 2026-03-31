@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use camel_api::CamelError;
+use camel_api::{CamelError, RuntimeQueryResult};
 
 use crate::lifecycle::adapters::route_controller::RouteControllerInternal;
 use crate::lifecycle::application::RouteDefinition;
@@ -56,5 +56,18 @@ impl RuntimeExecutionPort for RuntimeExecutionAdapter {
     async fn remove_route(&self, route_id: &str) -> Result<(), CamelError> {
         let mut controller = self.controller.lock().await;
         controller.remove_route(route_id)
+    }
+
+    async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, CamelError> {
+        let controller = self.controller.lock().await;
+        Ok(match controller.in_flight_count(route_id) {
+            Some(count) => RuntimeQueryResult::InFlightCount {
+                route_id: route_id.to_string(),
+                count,
+            },
+            None => RuntimeQueryResult::RouteNotFound {
+                route_id: route_id.to_string(),
+            },
+        })
     }
 }

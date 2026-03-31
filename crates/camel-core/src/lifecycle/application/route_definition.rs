@@ -1,6 +1,7 @@
 // lifecycle/application/route_definition.rs
 // Route definition and builder-step types. Route (compiled artifact) lives in adapters.
 
+use camel_api::UnitOfWorkConfig;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, SplitterConfig};
@@ -212,6 +213,8 @@ pub struct RouteDefinition {
     pub(crate) error_handler: Option<ErrorHandlerConfig>,
     /// Optional circuit breaker config. Applied between error handler and step pipeline.
     pub(crate) circuit_breaker: Option<CircuitBreakerConfig>,
+    /// Optional Unit of Work config for in-flight tracking and completion hooks.
+    pub(crate) unit_of_work: Option<UnitOfWorkConfig>,
     /// User override for the consumer's concurrency model. `None` means
     /// "use whatever the consumer declares".
     pub(crate) concurrency: Option<ConcurrencyModel>,
@@ -231,6 +234,7 @@ impl RouteDefinition {
             steps,
             error_handler: None,
             circuit_breaker: None,
+            unit_of_work: None,
             concurrency: None,
             route_id: String::new(), // Will be set by with_route_id()
             auto_startup: true,
@@ -263,6 +267,17 @@ impl RouteDefinition {
     pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
         self.circuit_breaker = Some(config);
         self
+    }
+
+    /// Set a unit of work config for this route.
+    pub fn with_unit_of_work(mut self, config: UnitOfWorkConfig) -> Self {
+        self.unit_of_work = Some(config);
+        self
+    }
+
+    /// Get the unit of work config, if set.
+    pub fn unit_of_work_config(&self) -> Option<&UnitOfWorkConfig> {
+        self.unit_of_work.as_ref()
     }
 
     /// Get the circuit breaker config, if set.
@@ -390,6 +405,152 @@ mod tests {
     }
 
     #[test]
+    fn test_route_definition_accessors_cover_core_fields() {
+        let def = RouteDefinition::new("direct:in", vec![BuilderStep::To("mock:out".into())])
+            .with_route_id("accessor-route");
+
+        assert_eq!(def.from_uri(), "direct:in");
+        assert_eq!(def.steps().len(), 1);
+        assert!(matches!(def.steps()[0], BuilderStep::To(_)));
+    }
+
+    #[test]
+    fn test_route_definition_error_handler_circuit_breaker_and_concurrency_accessors() {
+        use camel_api::circuit_breaker::CircuitBreakerConfig;
+        use camel_api::error_handler::ErrorHandlerConfig;
+        use camel_component::ConcurrencyModel;
+
+        let def = RouteDefinition::new("direct:test", vec![])
+            .with_route_id("eh-route")
+            .with_error_handler(ErrorHandlerConfig::dead_letter_channel("log:dlc"))
+            .with_circuit_breaker(CircuitBreakerConfig::new())
+            .with_concurrency(ConcurrencyModel::Concurrent { max: Some(4) });
+
+        let eh = def
+            .error_handler_config()
+            .expect("error handler should be set");
+        assert_eq!(eh.dlc_uri.as_deref(), Some("log:dlc"));
+        assert!(def.circuit_breaker_config().is_some());
+        assert!(matches!(
+            def.concurrency_override(),
+            Some(ConcurrencyModel::Concurrent { max: Some(4) })
+        ));
+    }
+
+    #[test]
+    fn test_builder_step_debug_covers_many_variants() {
+        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
+        use camel_api::{
+            DynamicRouterConfig, Exchange, IdentityProcessor, RoutingSlipConfig, Value,
+        };
+        use std::sync::Arc;
+
+        let expr = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body}".into(),
+        };
+
+        let steps = vec![
+            BuilderStep::Processor(BoxProcessor::new(IdentityProcessor)),
+            BuilderStep::To("mock:out".into()),
+            BuilderStep::Stop,
+            BuilderStep::Log {
+                level: camel_processor::LogLevel::Info,
+                message: "hello".into(),
+            },
+            BuilderStep::DeclarativeSetHeader {
+                key: "k".into(),
+                value: ValueSourceDef::Literal(Value::String("v".into())),
+            },
+            BuilderStep::DeclarativeSetBody {
+                value: ValueSourceDef::Expression(expr.clone()),
+            },
+            BuilderStep::DeclarativeFilter {
+                predicate: expr.clone(),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::DeclarativeChoice {
+                whens: vec![DeclarativeWhenStep {
+                    predicate: expr.clone(),
+                    steps: vec![BuilderStep::Stop],
+                }],
+                otherwise: Some(vec![BuilderStep::Stop]),
+            },
+            BuilderStep::DeclarativeScript {
+                expression: expr.clone(),
+            },
+            BuilderStep::DeclarativeSplit {
+                expression: expr.clone(),
+                aggregation: AggregationStrategy::Original,
+                parallel: false,
+                parallel_limit: Some(2),
+                stop_on_exception: true,
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::Split {
+                config: SplitterConfig::new(split_body_lines()),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::Aggregate {
+                config: camel_api::AggregatorConfig::correlate_by("id")
+                    .complete_when_size(1)
+                    .build(),
+            },
+            BuilderStep::Filter {
+                predicate: Arc::new(|_: &Exchange| true),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::WireTap {
+                uri: "mock:tap".into(),
+            },
+            BuilderStep::DeclarativeLog {
+                level: camel_processor::LogLevel::Info,
+                message: ValueSourceDef::Expression(expr.clone()),
+            },
+            BuilderStep::Bean {
+                name: "bean".into(),
+                method: "call".into(),
+            },
+            BuilderStep::Script {
+                language: "rhai".into(),
+                script: "body".into(),
+            },
+            BuilderStep::Throttle {
+                config: camel_api::ThrottlerConfig::new(10, std::time::Duration::from_millis(10)),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::LoadBalance {
+                config: camel_api::LoadBalancerConfig::round_robin(),
+                steps: vec![BuilderStep::To("mock:l1".into())],
+            },
+            BuilderStep::DynamicRouter {
+                config: DynamicRouterConfig::new(Arc::new(|_| Some("mock:dr".into()))),
+            },
+            BuilderStep::RoutingSlip {
+                config: RoutingSlipConfig::new(Arc::new(|_| Some("mock:rs".into()))),
+            },
+        ];
+
+        for step in steps {
+            let dbg = format!("{step:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_route_definition_to_info_preserves_metadata() {
+        let info = RouteDefinition::new("direct:test", vec![])
+            .with_route_id("meta-route")
+            .with_auto_startup(false)
+            .with_startup_order(7)
+            .to_info();
+
+        assert_eq!(info.route_id(), "meta-route");
+        assert!(!info.auto_startup());
+        assert_eq!(info.startup_order(), 7);
+    }
+
+    #[test]
     fn test_choice_builder_step_debug() {
         use camel_api::{Exchange, FilterPredicate};
         use std::sync::Arc;
@@ -407,5 +568,28 @@ mod tests {
         };
         let debug = format!("{step:?}");
         assert!(debug.contains("Choice"));
+    }
+
+    #[test]
+    fn test_route_definition_unit_of_work() {
+        use camel_api::UnitOfWorkConfig;
+        let config = UnitOfWorkConfig {
+            on_complete: Some("log:complete".into()),
+            on_failure: Some("log:failed".into()),
+        };
+        let def = RouteDefinition::new("direct:test", vec![])
+            .with_route_id("uow-test")
+            .with_unit_of_work(config.clone());
+        assert_eq!(
+            def.unit_of_work_config().unwrap().on_complete.as_deref(),
+            Some("log:complete")
+        );
+        assert_eq!(
+            def.unit_of_work_config().unwrap().on_failure.as_deref(),
+            Some("log:failed")
+        );
+
+        let def_no_uow = RouteDefinition::new("direct:test", vec![]).with_route_id("no-uow");
+        assert!(def_no_uow.unit_of_work_config().is_none());
     }
 }

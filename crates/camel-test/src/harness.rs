@@ -273,3 +273,81 @@ impl CamelTestContext {
         &self.ctx
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camel_builder::{RouteBuilder, StepAccumulator};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn builder_without_time_control_builds_context() {
+        let harness = CamelTestContext::builder()
+            .with_mock()
+            .with_timer()
+            .with_log()
+            .build()
+            .await;
+
+        assert!(harness.mock().get_endpoint("result").is_none());
+        let guard = harness.ctx().lock().await;
+        let _ = &*guard;
+    }
+
+    #[tokio::test]
+    async fn builder_with_time_control_builds_and_advances_clock() {
+        let (_harness, time) = CamelTestContext::builder()
+            .with_mock()
+            .with_timer()
+            .with_time_control()
+            .build()
+            .await;
+
+        time.advance(Duration::from_millis(1)).await;
+        time.resume();
+    }
+
+    #[tokio::test]
+    async fn stop_is_idempotent_and_shutdown_is_safe() {
+        let harness = CamelTestContext::builder().with_mock().build().await;
+        harness.stop().await;
+        harness.stop().await;
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn add_route_returns_error_for_invalid_step_uri() {
+        let harness = CamelTestContext::builder().with_mock().build().await;
+
+        let route = RouteBuilder::from("direct:start")
+            .route_id("bad-route")
+            .to("not-a-uri")
+            .build()
+            .unwrap();
+
+        let err = harness.add_route(route).await.expect_err("must fail");
+        assert!(err.to_string().contains("Invalid") || err.to_string().contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn with_component_registers_custom_component() {
+        let harness = CamelTestContext::builder()
+            .with_component(camel_component_direct::DirectComponent::new())
+            .with_mock()
+            .build()
+            .await;
+
+        let route = RouteBuilder::from("direct:start")
+            .route_id("direct-route")
+            .to("mock:out")
+            .build()
+            .unwrap();
+
+        harness.add_route(route).await.unwrap();
+        harness.start().await;
+        harness.stop().await;
+
+        // Harness context remains accessible after lifecycle.
+        let _guard = harness.ctx().lock().await;
+    }
+}

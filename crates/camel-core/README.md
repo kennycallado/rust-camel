@@ -34,6 +34,7 @@ crates/camel-core/src/
 - **Hexagonal Architecture**: Clean separation via ports and adapters
 - **Hot-reload**: Live route updates with zero downtime
 - **Supervision**: Auto-recovery with configurable exponential backoff
+- **Exchange UoW layer**: `ExchangeUoWLayer` for per-route in-flight tracking and completion/failure hooks
 - **Tracer EIP**: Automatic message-flow tracing with configurable detail levels
 - **Metrics**: Pluggable `MetricsCollector` integration
 - **Optional languages**: `lang-js` and `lang-rhai` feature flags
@@ -112,6 +113,26 @@ ctx.runtime().execute(RuntimeCommand::StartRoute {
 // Query route status (reads from projection)
 let status = ctx.runtime_route_status("my-route").await?;
 println!("Status: {:?}", status);
+```
+
+### Exchange Unit of Work (UoW)
+
+Attach per-route exchange lifecycle hooks and in-flight tracking via `UnitOfWorkConfig`:
+
+```rust
+use camel_api::UnitOfWorkConfig;
+use camel_builder::{RouteBuilder, StepAccumulator};
+
+let route = RouteBuilder::from("direct:orders")
+    .route_id("orders-uow")
+    .to("log:orders")
+    .build()?
+    .with_unit_of_work(UnitOfWorkConfig {
+        on_complete: Some("direct:on-complete".to_string()),
+        on_failure: Some("direct:on-failure".to_string()),
+    });
+
+ctx.add_route_definition(route).await?;
 ```
 
 ### Optional Durability

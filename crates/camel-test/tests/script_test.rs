@@ -381,17 +381,18 @@ async fn test_script_empty_body_handled() {
 /// Helper function to send an exchange to a direct endpoint.
 async fn send_to_direct(ctx: &CamelContext, endpoint_uri: &str, exchange: Exchange) {
     let producer_ctx = ctx.producer_context();
-    let registry = ctx.registry();
-    let component = registry
-        .get("direct")
-        .expect("direct component not registered");
-    let endpoint = component
-        .create_endpoint(endpoint_uri)
-        .expect("failed to create direct endpoint");
-    let producer = endpoint
-        .create_producer(&producer_ctx)
-        .expect("failed to create direct producer");
-    drop(registry); // Release the registry lock
+    let producer = {
+        let registry = ctx.registry();
+        let component = registry
+            .get("direct")
+            .expect("direct component not registered");
+        let endpoint = component
+            .create_endpoint(endpoint_uri)
+            .expect("failed to create direct endpoint");
+        endpoint
+            .create_producer(&producer_ctx)
+            .expect("failed to create direct producer")
+    };
 
     producer
         .oneshot(exchange)
@@ -403,17 +404,18 @@ async fn send_to_direct(ctx: &CamelContext, endpoint_uri: &str, exchange: Exchan
 /// Used for tests where the script is expected to throw.
 async fn send_to_direct_ignore_error(ctx: &CamelContext, endpoint_uri: &str, exchange: Exchange) {
     let producer_ctx = ctx.producer_context();
-    let registry = ctx.registry();
-    let component = registry
-        .get("direct")
-        .expect("direct component not registered");
-    let endpoint = component
-        .create_endpoint(endpoint_uri)
-        .expect("failed to create direct endpoint");
-    let producer = endpoint
-        .create_producer(&producer_ctx)
-        .expect("failed to create direct producer");
-    drop(registry); // Release the registry lock
+    let producer = {
+        let registry = ctx.registry();
+        let component = registry
+            .get("direct")
+            .expect("direct component not registered");
+        let endpoint = component
+            .create_endpoint(endpoint_uri)
+            .expect("failed to create direct endpoint");
+        endpoint
+            .create_producer(&producer_ctx)
+            .expect("failed to create direct producer")
+    };
 
     let _ = producer.oneshot(exchange).await;
 }

@@ -80,6 +80,28 @@ impl KafkaProducer {
         }
         Ok(&config.topic)
     }
+
+    pub fn resolve_record_key(exchange: &Exchange) -> Option<String> {
+        exchange
+            .input
+            .header("CamelKafkaKey")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+    }
+
+    pub fn resolve_record_partition(exchange: &Exchange) -> Option<i32> {
+        exchange
+            .input
+            .header("CamelKafkaPartition")
+            .and_then(|v| v.as_i64().map(|n| n as i32))
+    }
+
+    pub fn resolve_request_timeout(config: &KafkaEndpointConfig) -> Duration {
+        Duration::from_millis(
+            config
+                .request_timeout_ms
+                .expect("request_timeout_ms must be resolved") as u64,
+        )
+    }
 }
 
 impl Service<Exchange> for KafkaProducer {
@@ -99,21 +121,9 @@ impl Service<Exchange> for KafkaProducer {
             let topic = Self::resolve_topic(&exchange, &config)?.to_string();
             let payload = Self::body_to_bytes(&exchange.input.body)?;
 
-            let key: Option<String> = exchange
-                .input
-                .header("CamelKafkaKey")
-                .and_then(|v| v.as_str().map(|s| s.to_string()));
-
-            let partition: Option<i32> = exchange
-                .input
-                .header("CamelKafkaPartition")
-                .and_then(|v| v.as_i64().map(|n| n as i32));
-
-            let timeout = Duration::from_millis(
-                config
-                    .request_timeout_ms
-                    .expect("request_timeout_ms must be resolved") as u64,
-            );
+            let key = Self::resolve_record_key(&exchange);
+            let partition = Self::resolve_record_partition(&exchange);
+            let timeout = Self::resolve_request_timeout(&config);
 
             // Inject W3C TraceContext headers for distributed tracing (otel feature only)
             #[cfg(feature = "otel")]
@@ -271,6 +281,109 @@ mod tests {
         let exchange = Exchange::new(msg);
         let topic = KafkaProducer::resolve_topic(&exchange, &config).unwrap();
         assert_eq!(topic, "test-topic");
+    }
+
+    #[test]
+    fn test_resolve_topic_errors_when_config_topic_empty() {
+        let mut config = make_config();
+        config.topic.clear();
+        let exchange = Exchange::new(Message::default());
+
+        let err = KafkaProducer::resolve_topic(&exchange, &config)
+            .expect_err("empty topic should be rejected");
+        assert!(err.to_string().contains("No Kafka topic specified"));
+    }
+
+    #[test]
+    fn test_body_xml_to_bytes() {
+        let body = Body::Xml("<root>ok</root>".to_string());
+        let bytes = KafkaProducer::body_to_bytes(&body).expect("xml to bytes");
+        assert_eq!(bytes, b"<root>ok</root>");
+    }
+
+    #[tokio::test]
+    async fn test_call_fails_fast_when_topic_missing() {
+        let mut config = make_config();
+        config.resolve_defaults();
+        config.topic.clear();
+
+        let mut producer = KafkaProducer::new(config).expect("producer should build");
+        let exchange = Exchange::new(Message::new(Body::Text("hello".to_string())));
+
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("missing topic must fail");
+        assert!(err.to_string().contains("No Kafka topic specified"));
+    }
+
+    #[tokio::test]
+    async fn test_call_fails_fast_for_stream_body() {
+        let mut config = make_config();
+        config.resolve_defaults();
+        let mut producer = KafkaProducer::new(config).expect("producer should build");
+
+        let stream = stream::iter(vec![Ok(Bytes::from("chunk"))]);
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
+            metadata: Default::default(),
+        });
+        let exchange = Exchange::new(Message::new(body));
+
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("stream body must fail before network send");
+        assert!(
+            err.to_string()
+                .contains("Body::Stream must be materialized before sending to Kafka")
+        );
+    }
+
+    #[test]
+    fn test_resolve_record_key_from_header() {
+        let mut msg = Message::default();
+        msg.set_header("CamelKafkaKey", serde_json::json!("k-1"));
+        let ex = Exchange::new(msg);
+        assert_eq!(
+            KafkaProducer::resolve_record_key(&ex),
+            Some("k-1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_record_key_ignores_non_string() {
+        let mut msg = Message::default();
+        msg.set_header("CamelKafkaKey", serde_json::json!(123));
+        let ex = Exchange::new(msg);
+        assert_eq!(KafkaProducer::resolve_record_key(&ex), None);
+    }
+
+    #[test]
+    fn test_resolve_record_partition_from_header() {
+        let mut msg = Message::default();
+        msg.set_header("CamelKafkaPartition", serde_json::json!(3));
+        let ex = Exchange::new(msg);
+        assert_eq!(KafkaProducer::resolve_record_partition(&ex), Some(3));
+    }
+
+    #[test]
+    fn test_resolve_record_partition_ignores_non_numeric() {
+        let mut msg = Message::default();
+        msg.set_header("CamelKafkaPartition", serde_json::json!("p1"));
+        let ex = Exchange::new(msg);
+        assert_eq!(KafkaProducer::resolve_record_partition(&ex), None);
+    }
+
+    #[test]
+    fn test_resolve_request_timeout_from_config() {
+        let mut config = make_config();
+        config.resolve_defaults();
+        config.request_timeout_ms = Some(4321);
+        assert_eq!(
+            KafkaProducer::resolve_request_timeout(&config),
+            Duration::from_millis(4321)
+        );
     }
 
     // Integration tests — require running Kafka

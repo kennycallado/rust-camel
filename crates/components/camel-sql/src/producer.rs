@@ -412,8 +412,31 @@ mod tests {
     use super::*;
     use camel_api::Message;
     use camel_endpoint::UriConfig;
+    use sqlx::any::AnyPoolOptions;
     use std::sync::Arc;
     use tokio::sync::OnceCell;
+
+    async fn sqlite_pool() -> AnyPool {
+        sqlx::any::install_default_drivers();
+        AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool")
+    }
+
+    async fn seed_items_table(pool: &AnyPool) {
+        sqlx::query(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, done INTEGER DEFAULT 0)",
+        )
+        .execute(pool)
+        .await
+        .expect("create table");
+        sqlx::query("INSERT INTO items (id, name, done) VALUES (1, 'a', 0), (2, 'b', 0)")
+            .execute(pool)
+            .await
+            .expect("seed rows");
+    }
 
     fn test_config() -> SqlEndpointConfig {
         let mut c =
@@ -593,5 +616,119 @@ mod tests {
         // Should remain unchanged
         assert_eq!(prepared2.bindings.len(), 1);
         assert_eq!(prepared2.bindings[0], serde_json::json!(42));
+    }
+
+    #[tokio::test]
+    async fn test_execute_select_one_sets_body_and_row_count() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, name from items order by id?db_url=sqlite::memory:&outputType=SelectOne",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let prepared = PreparedQuery {
+            sql: "select id, name from items order by id".to_string(),
+            bindings: vec![],
+        };
+        let mut exchange = Exchange::new(Message::default());
+
+        execute_select(&pool, &prepared, &config, &mut exchange)
+            .await
+            .expect("select one");
+
+        assert_eq!(exchange.input.header(headers::ROW_COUNT), Some(&json!(2)));
+        assert_eq!(
+            exchange.input.body,
+            Body::Json(json!({"id": 1, "name": "a"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_stream_list_materializes_ndjson() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id from items order by id?db_url=sqlite::memory:&outputType=StreamList",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let prepared = PreparedQuery {
+            sql: "select id from items order by id".to_string(),
+            bindings: vec![],
+        };
+        let mut exchange = Exchange::new(Message::default());
+
+        execute_select(&pool, &prepared, &config, &mut exchange)
+            .await
+            .expect("stream list");
+
+        let bytes = exchange
+            .input
+            .body
+            .clone()
+            .into_bytes(1024)
+            .await
+            .expect("stream bytes");
+        let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(text.contains("{\"id\":1}"));
+        assert!(text.contains("{\"id\":2}"));
+        assert_eq!(exchange.input.header(headers::ROW_COUNT), None);
+    }
+
+    #[tokio::test]
+    async fn test_execute_modify_expected_update_count_mismatch_returns_error() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:update items set done=1 where id = #?db_url=sqlite::memory:&expectedUpdateCount=2",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let prepared = PreparedQuery {
+            sql: "update items set done=1 where id = $1".to_string(),
+            bindings: vec![json!(1)],
+        };
+        let mut exchange = Exchange::new(Message::default());
+
+        let err = execute_modify(&pool, &prepared, &config, &mut exchange)
+            .await
+            .expect_err("must fail due expected row count mismatch");
+        assert!(err.to_string().contains("Expected 2 rows affected, got 1"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_batch_rollback_when_any_item_fails_expected_count() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:update items set done=1 where id = #?db_url=sqlite::memory:&batch=true&expectedUpdateCount=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let mut exchange = Exchange::new(Message::new(Body::Json(json!([[1], [999]]))));
+
+        let err = execute_batch(&pool, &config, &mut exchange)
+            .await
+            .expect_err("second batch item should fail expectedUpdateCount");
+        assert!(
+            err.to_string()
+                .contains("Batch item 1: expected 1 rows affected, got 0")
+        );
+
+        let row = sqlx::query("select done from items where id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("query row");
+        let done: i64 = sqlx::Row::try_get(&row, 0).expect("done column");
+        assert_eq!(done, 0, "transaction must rollback first update");
     }
 }

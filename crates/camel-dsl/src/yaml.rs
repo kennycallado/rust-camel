@@ -123,6 +123,15 @@ fn yaml_route_to_declarative_route(route: YamlRoute) -> Result<DeclarativeRoute,
         open_duration_ms: cb.open_duration_ms,
     });
 
+    let unit_of_work = if route.on_complete.is_some() || route.on_failure.is_some() {
+        Some(camel_api::UnitOfWorkConfig {
+            on_complete: route.on_complete,
+            on_failure: route.on_failure,
+        })
+    } else {
+        None
+    };
+
     let steps = route
         .steps
         .into_iter()
@@ -137,6 +146,7 @@ fn yaml_route_to_declarative_route(route: YamlRoute) -> Result<DeclarativeRoute,
         concurrency,
         error_handler,
         circuit_breaker,
+        unit_of_work,
         steps,
     })
 }
@@ -662,7 +672,16 @@ routes:
             .error_handler
             .as_ref()
             .expect("error handler should be present");
-        assert!(eh.on_exceptions.is_some());
+        let clauses = eh
+            .on_exceptions
+            .as_ref()
+            .expect("on_exceptions should be present");
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].kind.as_deref(), Some("Io"));
+        assert!(clauses[0].message_contains.is_none());
+        let retry = clauses[0].retry.as_ref().expect("retry should be present");
+        assert_eq!(retry.max_attempts, 3);
+        assert_eq!(retry.handled_by.as_deref(), Some("log:io"));
     }
 
     #[test]

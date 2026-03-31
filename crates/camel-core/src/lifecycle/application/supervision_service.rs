@@ -171,6 +171,10 @@ impl RouteControllerInternal for SupervisingRouteController {
         self.inner.route_ids()
     }
 
+    fn in_flight_count(&self, route_id: &str) -> Option<u64> {
+        self.inner.in_flight_count(route_id)
+    }
+
     fn auto_startup_route_ids(&self) -> Vec<String> {
         self.inner.auto_startup_route_ids()
     }
@@ -440,6 +444,62 @@ mod tests {
         let runtime_handle: StdArc<dyn RuntimeHandle> = runtime.clone();
         controller.lock().await.set_runtime_handle(runtime_handle);
         runtime
+    }
+
+    #[test]
+    fn supervision_command_id_is_unique_and_well_formed() {
+        let id1 = next_supervision_command_id("start", "route-a");
+        let id2 = next_supervision_command_id("start", "route-a");
+        assert_ne!(id1, id2);
+        assert!(id1.starts_with("supervision:start:route-a:"));
+    }
+
+    #[tokio::test]
+    async fn supervision_loop_exits_cleanly_without_runtime_handle() {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let config = SupervisionConfig {
+            max_attempts: Some(1),
+            initial_delay: Duration::from_millis(5),
+            backoff_multiplier: 1.0,
+            max_delay: Duration::from_millis(5),
+        };
+        let handle = tokio::spawn(supervision_loop(rx, None, config, None));
+
+        tx.send(CrashNotification {
+            route_id: "r-no-runtime".into(),
+            error: "boom".into(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let join = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("supervision loop should terminate");
+        join.expect("supervision task should not panic");
+    }
+
+    #[test]
+    fn with_metrics_stores_collector() {
+        let registry = StdArc::new(std::sync::Mutex::new(Registry::new()));
+        let controller = SupervisingRouteController::new(registry, SupervisionConfig::default())
+            .with_metrics(StdArc::new(camel_api::NoOpMetrics));
+        assert!(controller.metrics.is_some());
+    }
+
+    #[tokio::test]
+    async fn ensure_supervision_loop_started_is_idempotent() {
+        let registry = StdArc::new(std::sync::Mutex::new(Registry::new()));
+        let mut controller =
+            SupervisingRouteController::new(registry, SupervisionConfig::default());
+
+        assert!(controller.crash_rx.is_some());
+        controller.ensure_supervision_loop_started();
+        assert!(controller.crash_rx.is_none());
+
+        // Second call must be a no-op and keep receiver consumed.
+        controller.ensure_supervision_loop_started();
+        assert!(controller.crash_rx.is_none());
     }
 
     /// A consumer that crashes on first call, then blocks indefinitely.

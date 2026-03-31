@@ -80,3 +80,51 @@ impl Endpoint for RedisEndpoint {
         Ok(Box::new(RedisConsumer::new(self.config.clone())))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_component_scheme() {
+        let component = RedisComponent::new();
+        assert_eq!(component.scheme(), "redis");
+    }
+
+    #[test]
+    fn test_component_creates_endpoint() {
+        let component = RedisComponent::new();
+        let endpoint = component
+            .create_endpoint("redis://localhost:6379?command=GET")
+            .expect("endpoint should be created");
+        assert_eq!(endpoint.uri(), "redis://localhost:6379?command=GET");
+    }
+
+    #[test]
+    fn test_component_rejects_wrong_scheme() {
+        let component = RedisComponent::new();
+        let result = component.create_endpoint("kafka:topic?brokers=localhost:9092");
+        assert!(result.is_err(), "wrong scheme should fail");
+        let err = result.err().expect("error must exist");
+        assert!(err.to_string().contains("expected scheme 'redis'"));
+    }
+
+    #[test]
+    fn test_component_applies_global_defaults() {
+        let global = RedisConfig::default()
+            .with_host("redis-global")
+            .with_port(6380);
+        let component = RedisComponent::with_config(global);
+
+        let endpoint = component
+            .create_endpoint("redis://?command=GET")
+            .expect("endpoint should be created with defaults");
+
+        let _producer = endpoint
+            .create_producer(&ProducerContext::default())
+            .expect("producer should be created");
+        let _consumer = endpoint
+            .create_consumer()
+            .expect("consumer should be created");
+    }
+}

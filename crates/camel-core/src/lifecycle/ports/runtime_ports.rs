@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use camel_api::RuntimeQueryResult;
 
 use crate::CamelError;
 
@@ -113,4 +114,60 @@ pub trait RuntimeExecutionPort: Send + Sync {
     async fn resume_route(&self, route_id: &str) -> Result<(), CamelError>;
     async fn reload_route(&self, route_id: &str) -> Result<(), CamelError>;
     async fn remove_route(&self, route_id: &str) -> Result<(), CamelError>;
+    async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, CamelError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyJournal;
+
+    #[async_trait]
+    impl RuntimeEventJournalPort for DummyJournal {
+        async fn append_batch(&self, _events: &[RuntimeEvent]) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn load_all(&self) -> Result<Vec<RuntimeEvent>, CamelError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct DummyUow;
+
+    #[async_trait]
+    impl RuntimeUnitOfWorkPort for DummyUow {
+        async fn persist_upsert(
+            &self,
+            _aggregate: RouteRuntimeAggregate,
+            _expected_version: Option<u64>,
+            _projection: RouteStatusProjection,
+            _events: &[RuntimeEvent],
+        ) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn persist_delete(
+            &self,
+            _route_id: &str,
+            _events: &[RuntimeEvent],
+        ) -> Result<(), CamelError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_journal_methods_are_noop_ok() {
+        let journal = DummyJournal;
+        journal.append_command_id("c1").await.unwrap();
+        journal.remove_command_id("c1").await.unwrap();
+        assert!(journal.load_command_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn default_uow_recover_is_noop_ok() {
+        let uow = DummyUow;
+        uow.recover_from_journal().await.unwrap();
+    }
 }

@@ -4,6 +4,7 @@
 //! including starting, stopping, suspending, and resuming routes.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
@@ -12,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service, ServiceExt};
 use tracing::{error, info, warn};
 
+use camel_api::UnitOfWorkConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
@@ -26,6 +28,7 @@ use camel_processor::error_handler::ErrorHandlerLayer;
 use camel_processor::script_mutator::ScriptMutator;
 use camel_processor::{ChoiceService, WhenClause};
 
+use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
 use crate::lifecycle::adapters::route_compiler::{
     compose_pipeline, compose_traced_pipeline_with_contracts,
 };
@@ -97,6 +100,9 @@ pub trait RouteControllerInternal: RouteController + Send {
     /// Returns the number of routes in the controller.
     fn route_count(&self) -> usize;
 
+    /// Returns the current in-flight count for a route, or `None` if route not found.
+    fn in_flight_count(&self, route_id: &str) -> Option<u64>;
+
     /// Returns all route IDs.
     fn route_ids(&self) -> Vec<String>;
 
@@ -146,6 +152,8 @@ struct ManagedRoute {
     /// Channel sender for sending exchanges to the pipeline.
     /// Stored to allow resuming a suspended route without recreating the channel.
     channel_sender: Option<mpsc::Sender<ExchangeEnvelope>>,
+    /// In-flight exchange counter. `None` when UoW is not configured for this route.
+    in_flight: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 fn handle_is_running(handle: &Option<JoinHandle<()>>) -> bool {
@@ -395,6 +403,32 @@ impl DefaultRouteController {
         }
 
         Ok(ErrorHandlerLayer::new(dlc_producer, resolved_policies))
+    }
+
+    /// Resolve a `UnitOfWorkConfig` into an `(ExchangeUoWLayer, Arc<AtomicU64>)`.
+    /// Returns `Err` if any hook URI cannot be resolved.
+    fn resolve_uow_layer(
+        &self,
+        config: &UnitOfWorkConfig,
+        producer_ctx: &ProducerContext,
+        registry: &Registry,
+        counter: Option<Arc<AtomicU64>>,
+    ) -> Result<(ExchangeUoWLayer, Arc<AtomicU64>), CamelError> {
+        let resolve_uri = |uri: &str| -> Result<BoxProcessor, CamelError> {
+            let parsed = parse_uri(uri)?;
+            let component = registry.get_or_err(&parsed.scheme)?;
+            let endpoint = component.create_endpoint(uri)?;
+            endpoint.create_producer(producer_ctx).map_err(|e| {
+                CamelError::RouteError(format!("UoW hook URI '{uri}' could not be resolved: {e}"))
+            })
+        };
+
+        let on_complete = config.on_complete.as_deref().map(resolve_uri).transpose()?;
+        let on_failure = config.on_failure.as_deref().map(resolve_uri).transpose()?;
+
+        let counter = counter.unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+        let layer = ExchangeUoWLayer::new(Arc::clone(&counter), on_complete, on_failure);
+        Ok((layer, counter))
     }
 
     fn resolve_language(&self, language: &str) -> Result<Arc<dyn Language>, CamelError> {
@@ -953,6 +987,20 @@ impl DefaultRouteController {
             pipeline = BoxProcessor::new(layer.layer(pipeline));
         }
 
+        // Apply UoW layer outermost (after error handler)
+        let uow_counter = if let Some(uow_config) = &definition.unit_of_work {
+            let registry = self
+                .registry
+                .lock()
+                .expect("mutex poisoned: registry lock in add_route uow");
+            let (uow_layer, counter) =
+                self.resolve_uow_layer(uow_config, &producer_ctx, &registry, None)?;
+            pipeline = BoxProcessor::new(uow_layer.layer(pipeline));
+            Some(counter)
+        } else {
+            None
+        };
+
         self.routes.insert(
             route_id.clone(),
             ManagedRoute {
@@ -965,6 +1013,7 @@ impl DefaultRouteController {
                 consumer_cancel_token: CancellationToken::new(),
                 pipeline_cancel_token: CancellationToken::new(),
                 channel_sender: None,
+                in_flight: uow_counter,
             },
         );
 
@@ -1000,6 +1049,7 @@ impl DefaultRouteController {
 
         let eh_config = def
             .error_handler
+            .clone()
             .or_else(|| self.global_error_handler.clone());
         if let Some(config) = eh_config {
             // Lock registry for error handler resolution
@@ -1009,6 +1059,24 @@ impl DefaultRouteController {
                 .expect("mutex poisoned: registry lock in compile_route_definition");
             let layer = self.resolve_error_handler(config, &producer_ctx, &registry)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
+        }
+
+        // Apply UoW layer outermost
+        if let Some(uow_config) = &def.unit_of_work {
+            let existing_counter = self
+                .routes
+                .get(&route_id)
+                .and_then(|r| r.in_flight.as_ref().map(Arc::clone));
+
+            let registry = self
+                .registry
+                .lock()
+                .expect("mutex poisoned: registry lock in compile_route_definition uow");
+
+            let (uow_layer, _counter) =
+                self.resolve_uow_layer(uow_config, &producer_ctx, &registry, existing_counter)?;
+
+            pipeline = BoxProcessor::new(uow_layer.layer(pipeline));
         }
 
         Ok(pipeline)
@@ -1040,6 +1108,14 @@ impl DefaultRouteController {
     /// Returns the number of routes in the controller.
     pub fn route_count(&self) -> usize {
         self.routes.len()
+    }
+
+    pub fn in_flight_count(&self, route_id: &str) -> Option<u64> {
+        self.routes.get(route_id).map(|r| {
+            r.in_flight
+                .as_ref()
+                .map_or(0, |c| c.load(Ordering::Relaxed))
+        })
     }
 
     /// Returns all route IDs.
@@ -1633,6 +1709,10 @@ impl RouteControllerInternal for DefaultRouteController {
         DefaultRouteController::route_count(self)
     }
 
+    fn in_flight_count(&self, route_id: &str) -> Option<u64> {
+        DefaultRouteController::in_flight_count(self, route_id)
+    }
+
     fn route_ids(&self) -> Vec<String> {
         DefaultRouteController::route_ids(self)
     }
@@ -1669,9 +1749,490 @@ impl RouteControllerInternal for DefaultRouteController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::components::domain::Registry;
+
+    fn build_controller() -> DefaultRouteController {
+        DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new())))
+    }
+
+    fn build_controller_with_components() -> DefaultRouteController {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        {
+            let mut guard = registry.lock().expect("registry lock");
+            guard.register(camel_component_timer::TimerComponent::new());
+            guard.register(camel_component_mock::MockComponent::new());
+            guard.register(camel_component_log::LogComponent::new());
+        }
+        DefaultRouteController::new(registry)
+    }
+
+    fn set_self_ref(controller: &mut DefaultRouteController) {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let other: Arc<Mutex<dyn RouteController>> =
+            Arc::new(Mutex::new(DefaultRouteController::new(registry)));
+        controller.set_self_ref(other);
+    }
+
+    fn register_simple_language(controller: &mut DefaultRouteController) {
+        controller.languages.lock().expect("languages lock").insert(
+            "simple".into(),
+            Arc::new(camel_language_simple::SimpleLanguage),
+        );
+    }
 
     #[test]
     fn test_route_controller_internal_is_object_safe() {
         let _: Option<Box<dyn RouteControllerInternal>> = None;
+    }
+
+    #[test]
+    fn helper_functions_cover_non_async_branches() {
+        let managed = ManagedRoute {
+            definition: RouteDefinition::new("timer:a", vec![])
+                .with_route_id("r")
+                .to_info(),
+            from_uri: "timer:a".into(),
+            pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(BoxProcessor::new(
+                IdentityProcessor,
+            )))),
+            concurrency: None,
+            consumer_handle: None,
+            pipeline_handle: None,
+            consumer_cancel_token: CancellationToken::new(),
+            pipeline_cancel_token: CancellationToken::new(),
+            channel_sender: None,
+            in_flight: None,
+        };
+
+        assert_eq!(inferred_lifecycle_label(&managed), "Stopped");
+        assert!(!handle_is_running(&managed.consumer_handle));
+
+        let cmd = runtime_failure_command("route-x", "boom");
+        match cmd {
+            RuntimeCommand::FailRoute {
+                route_id, error, ..
+            } => {
+                assert_eq!(route_id, "route-x");
+                assert_eq!(error, "boom");
+            }
+            _ => panic!("expected FailRoute command"),
+        }
+    }
+
+    #[test]
+    fn add_route_detects_duplicates() {
+        let mut controller = build_controller();
+        set_self_ref(&mut controller);
+
+        controller
+            .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
+            .expect("add route");
+
+        let dup_err = controller
+            .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
+            .expect_err("duplicate must fail");
+        assert!(dup_err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn route_introspection_and_ordering_helpers_work() {
+        let mut controller = build_controller();
+        set_self_ref(&mut controller);
+
+        controller
+            .add_route(
+                RouteDefinition::new("timer:a", vec![])
+                    .with_route_id("a")
+                    .with_startup_order(20),
+            )
+            .unwrap();
+        controller
+            .add_route(
+                RouteDefinition::new("timer:b", vec![])
+                    .with_route_id("b")
+                    .with_startup_order(10),
+            )
+            .unwrap();
+        controller
+            .add_route(
+                RouteDefinition::new("timer:c", vec![])
+                    .with_route_id("c")
+                    .with_auto_startup(false)
+                    .with_startup_order(5),
+            )
+            .unwrap();
+
+        assert_eq!(controller.route_count(), 3);
+        assert_eq!(controller.route_from_uri("a"), Some("timer:a".into()));
+        assert!(controller.route_ids().contains(&"a".to_string()));
+        assert_eq!(
+            controller.auto_startup_route_ids(),
+            vec!["b".to_string(), "a".to_string()]
+        );
+        assert_eq!(
+            controller.shutdown_route_ids(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn swap_pipeline_and_remove_route_behaviors() {
+        let mut controller = build_controller();
+        set_self_ref(&mut controller);
+
+        controller
+            .add_route(RouteDefinition::new("timer:a", vec![]).with_route_id("swap"))
+            .unwrap();
+
+        controller
+            .swap_pipeline("swap", BoxProcessor::new(IdentityProcessor))
+            .unwrap();
+        assert!(controller.get_pipeline("swap").is_some());
+
+        controller.remove_route("swap").unwrap();
+        assert_eq!(controller.route_count(), 0);
+
+        let err = controller
+            .remove_route("swap")
+            .expect_err("missing route must fail");
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn resolve_steps_covers_declarative_and_eip_variants() {
+        use camel_api::LanguageExpressionDef;
+        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
+
+        let mut controller = build_controller_with_components();
+        set_self_ref(&mut controller);
+        register_simple_language(&mut controller);
+
+        let expr = |source: &str| LanguageExpressionDef {
+            language: "simple".into(),
+            source: source.into(),
+        };
+
+        let steps = vec![
+            BuilderStep::To("mock:out".into()),
+            BuilderStep::Stop,
+            BuilderStep::Log {
+                level: camel_processor::LogLevel::Info,
+                message: "log".into(),
+            },
+            BuilderStep::DeclarativeSetHeader {
+                key: "k".into(),
+                value: ValueSourceDef::Literal(Value::String("v".into())),
+            },
+            BuilderStep::DeclarativeSetHeader {
+                key: "k2".into(),
+                value: ValueSourceDef::Expression(expr("${body}")),
+            },
+            BuilderStep::DeclarativeSetBody {
+                value: ValueSourceDef::Expression(expr("${body}")),
+            },
+            BuilderStep::DeclarativeFilter {
+                predicate: expr("${body} != null"),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::DeclarativeChoice {
+                whens: vec![
+                    crate::lifecycle::application::route_definition::DeclarativeWhenStep {
+                        predicate: expr("${body} == 'x'"),
+                        steps: vec![BuilderStep::Stop],
+                    },
+                ],
+                otherwise: Some(vec![BuilderStep::Stop]),
+            },
+            BuilderStep::DeclarativeScript {
+                expression: expr("${body}"),
+            },
+            BuilderStep::Split {
+                config: SplitterConfig::new(split_body_lines())
+                    .aggregation(AggregationStrategy::CollectAll),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::DeclarativeSplit {
+                expression: expr("${body}"),
+                aggregation: AggregationStrategy::Original,
+                parallel: false,
+                parallel_limit: Some(2),
+                stop_on_exception: true,
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::Aggregate {
+                config: camel_api::AggregatorConfig::correlate_by("id")
+                    .complete_when_size(1)
+                    .build(),
+            },
+            BuilderStep::Filter {
+                predicate: Arc::new(|_| true),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::Choice {
+                whens: vec![crate::lifecycle::application::route_definition::WhenStep {
+                    predicate: Arc::new(|_| true),
+                    steps: vec![BuilderStep::Stop],
+                }],
+                otherwise: Some(vec![BuilderStep::Stop]),
+            },
+            BuilderStep::WireTap {
+                uri: "mock:tap".into(),
+            },
+            BuilderStep::Multicast {
+                steps: vec![
+                    BuilderStep::To("mock:m1".into()),
+                    BuilderStep::To("mock:m2".into()),
+                ],
+                config: camel_api::MulticastConfig::new(),
+            },
+            BuilderStep::DeclarativeLog {
+                level: camel_processor::LogLevel::Info,
+                message: ValueSourceDef::Expression(expr("${body}")),
+            },
+            BuilderStep::Throttle {
+                config: camel_api::ThrottlerConfig::new(10, Duration::from_millis(100)),
+                steps: vec![BuilderStep::To("mock:t".into())],
+            },
+            BuilderStep::LoadBalance {
+                config: camel_api::LoadBalancerConfig::round_robin(),
+                steps: vec![
+                    BuilderStep::To("mock:l1".into()),
+                    BuilderStep::To("mock:l2".into()),
+                ],
+            },
+            BuilderStep::DynamicRouter {
+                config: camel_api::DynamicRouterConfig::new(Arc::new(|_| Some("mock:dr".into()))),
+            },
+            BuilderStep::RoutingSlip {
+                config: camel_api::RoutingSlipConfig::new(Arc::new(|_| Some("mock:rs".into()))),
+            },
+        ];
+
+        let producer_ctx = ProducerContext::new();
+        let resolved = controller
+            .resolve_steps(steps, &producer_ctx, &controller.registry)
+            .expect("resolve should succeed");
+        assert!(!resolved.is_empty());
+    }
+
+    #[test]
+    fn resolve_steps_script_requires_mutating_language_support() {
+        use camel_api::LanguageExpressionDef;
+
+        let mut controller = build_controller_with_components();
+        set_self_ref(&mut controller);
+        register_simple_language(&mut controller);
+
+        let steps = vec![BuilderStep::Script {
+            language: "simple".into(),
+            script: "${body}".into(),
+        }];
+
+        let err = controller
+            .resolve_steps(steps, &ProducerContext::new(), &controller.registry)
+            .expect_err("simple script should fail for mutating expression");
+        assert!(err.to_string().contains("does not support"));
+
+        let bean_missing = vec![BuilderStep::Bean {
+            name: "unknown".into(),
+            method: "run".into(),
+        }];
+        let bean_err = controller
+            .resolve_steps(bean_missing, &ProducerContext::new(), &controller.registry)
+            .expect_err("missing bean must fail");
+        assert!(bean_err.to_string().contains("Bean not found"));
+
+        let bad_declarative = vec![BuilderStep::DeclarativeScript {
+            expression: LanguageExpressionDef {
+                language: "unknown".into(),
+                source: "x".into(),
+            },
+        }];
+        let lang_err = controller
+            .resolve_steps(
+                bad_declarative,
+                &ProducerContext::new(),
+                &controller.registry,
+            )
+            .expect_err("unknown language must fail");
+        assert!(lang_err.to_string().contains("not registered"));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_methods_report_missing_routes() {
+        let mut controller = build_controller();
+
+        assert!(controller.start_route("missing").await.is_err());
+        assert!(controller.stop_route("missing").await.is_err());
+        assert!(controller.suspend_route("missing").await.is_err());
+        assert!(controller.resume_route("missing").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn start_stop_route_happy_path_with_timer_and_mock() {
+        let mut controller = build_controller_with_components();
+        set_self_ref(&mut controller);
+
+        let route = RouteDefinition::new(
+            "timer:tick?period=10&repeatCount=1",
+            vec![BuilderStep::To("mock:out".into())],
+        )
+        .with_route_id("rt-1");
+        controller.add_route(route).unwrap();
+
+        controller.start_route("rt-1").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        controller.stop_route("rt-1").await.unwrap();
+
+        controller.remove_route("rt-1").unwrap();
+    }
+
+    #[tokio::test]
+    async fn suspend_resume_and_restart_cover_execution_transitions() {
+        let mut controller = build_controller_with_components();
+        set_self_ref(&mut controller);
+
+        let route = RouteDefinition::new(
+            "timer:tick?period=30",
+            vec![BuilderStep::To("mock:out".into())],
+        )
+        .with_route_id("rt-2");
+        controller.add_route(route).unwrap();
+
+        controller.start_route("rt-2").await.unwrap();
+        controller.suspend_route("rt-2").await.unwrap();
+        controller.resume_route("rt-2").await.unwrap();
+        controller.restart_route("rt-2").await.unwrap();
+        controller.stop_route("rt-2").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_route_rejects_running_route() {
+        let mut controller = build_controller_with_components();
+        set_self_ref(&mut controller);
+
+        let route = RouteDefinition::new(
+            "timer:tick?period=25",
+            vec![BuilderStep::To("mock:out".into())],
+        )
+        .with_route_id("rt-running");
+        controller.add_route(route).unwrap();
+        controller.start_route("rt-running").await.unwrap();
+
+        let err = controller
+            .remove_route("rt-running")
+            .expect_err("running route removal must fail");
+        assert!(err.to_string().contains("must be stopped before removal"));
+
+        controller.stop_route("rt-running").await.unwrap();
+        controller.remove_route("rt-running").unwrap();
+    }
+
+    #[tokio::test]
+    async fn start_route_on_suspended_state_returns_guidance_error() {
+        let mut controller = build_controller_with_components();
+        set_self_ref(&mut controller);
+
+        let route = RouteDefinition::new(
+            "timer:tick?period=40",
+            vec![BuilderStep::To("mock:out".into())],
+        )
+        .with_route_id("rt-suspend");
+        controller.add_route(route).unwrap();
+
+        controller.start_route("rt-suspend").await.unwrap();
+        controller.suspend_route("rt-suspend").await.unwrap();
+
+        let err = controller
+            .start_route("rt-suspend")
+            .await
+            .expect_err("start from suspended must fail");
+        assert!(err.to_string().contains("use resume_route"));
+
+        controller.resume_route("rt-suspend").await.unwrap();
+        controller.stop_route("rt-suspend").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn suspend_and_resume_validate_execution_state() {
+        let mut controller = build_controller_with_components();
+        set_self_ref(&mut controller);
+
+        controller
+            .add_route(
+                RouteDefinition::new("timer:tick?period=50", vec![]).with_route_id("rt-state"),
+            )
+            .unwrap();
+
+        let suspend_err = controller
+            .suspend_route("rt-state")
+            .await
+            .expect_err("suspend before start must fail");
+        assert!(suspend_err.to_string().contains("Cannot suspend route"));
+
+        controller.start_route("rt-state").await.unwrap();
+        let resume_err = controller
+            .resume_route("rt-state")
+            .await
+            .expect_err("resume while started must fail");
+        assert!(resume_err.to_string().contains("Cannot resume route"));
+
+        controller.stop_route("rt-state").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_concurrency_override_path_executes() {
+        let mut controller = build_controller_with_components();
+        set_self_ref(&mut controller);
+
+        let route = RouteDefinition::new(
+            "timer:tick?period=10&repeatCount=2",
+            vec![BuilderStep::To("mock:out".into())],
+        )
+        .with_route_id("rt-concurrent")
+        .with_concurrency(ConcurrencyModel::Concurrent { max: Some(2) });
+
+        controller.add_route(route).unwrap();
+        controller.start_route("rt-concurrent").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        controller.stop_route("rt-concurrent").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_route_with_circuit_breaker_and_error_handler_compiles() {
+        use camel_api::circuit_breaker::CircuitBreakerConfig;
+        use camel_api::error_handler::ErrorHandlerConfig;
+
+        let mut controller = build_controller_with_components();
+        set_self_ref(&mut controller);
+
+        let route = RouteDefinition::new("timer:tick?period=25", vec![BuilderStep::Stop])
+            .with_route_id("rt-eh")
+            .with_circuit_breaker(CircuitBreakerConfig::new())
+            .with_error_handler(ErrorHandlerConfig::dead_letter_channel("log:dlq"));
+
+        controller
+            .add_route(route)
+            .expect("route with layers should compile");
+        controller.start_route("rt-eh").await.unwrap();
+        controller.stop_route("rt-eh").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compile_and_swap_errors_for_missing_route() {
+        let mut controller = build_controller_with_components();
+        set_self_ref(&mut controller);
+
+        let compiled = controller
+            .compile_route_definition(
+                RouteDefinition::new("timer:tick?period=10", vec![BuilderStep::Stop])
+                    .with_route_id("compiled"),
+            )
+            .expect("compile should work");
+
+        let err = controller
+            .swap_pipeline("nope", compiled)
+            .expect_err("missing route swap must fail");
+        assert!(err.to_string().contains("not found"));
     }
 }

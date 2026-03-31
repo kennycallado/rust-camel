@@ -111,3 +111,47 @@ fn default_format() -> OutputFormat {
 fn default_true() -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracer_config_defaults_are_stable() {
+        let cfg = TracerConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.detail_level, DetailLevel::Minimal);
+        assert!(cfg.outputs.stdout.enabled);
+        assert!(matches!(cfg.outputs.stdout.format, OutputFormat::Json));
+        assert!(cfg.outputs.file.is_none());
+        assert!(cfg.metrics_collector.is_none());
+    }
+
+    #[test]
+    fn tracer_config_deserializes_lowercase_enums() {
+        let cfg: TracerConfig = serde_json::from_str(
+            r#"{
+  "enabled": true,
+  "detail_level": "full",
+  "outputs": {
+    "stdout": { "enabled": false, "format": "plain" },
+    "file": { "enabled": true, "path": "/tmp/trace.log", "format": "json" }
+  }
+}"#,
+        )
+        .unwrap();
+
+        assert!(cfg.enabled);
+        assert_eq!(cfg.detail_level, DetailLevel::Full);
+        assert!(!cfg.outputs.stdout.enabled);
+        assert!(matches!(cfg.outputs.stdout.format, OutputFormat::Plain));
+        assert_eq!(cfg.outputs.file.as_ref().unwrap().path, "/tmp/trace.log");
+    }
+
+    #[test]
+    fn tracer_config_debug_redacts_metrics_collector() {
+        let dbg = format!("{:?}", TracerConfig::default());
+        assert!(dbg.contains("TracerConfig"));
+        assert!(dbg.contains("metrics_collector"));
+    }
+}

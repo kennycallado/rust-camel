@@ -56,6 +56,10 @@ pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinit
         definition = definition.with_circuit_breaker(compile_circuit_breaker(circuit_breaker));
     }
 
+    if let Some(uow) = route.unit_of_work {
+        definition = definition.with_unit_of_work(uow);
+    }
+
     Ok(definition)
 }
 
@@ -736,5 +740,110 @@ mod tests {
         );
         assert_eq!(config.policies[1].handled_by.as_deref(), Some("log:io"));
         assert_eq!(config.dlc_uri.as_deref(), Some("log:dlc"));
+    }
+
+    #[test]
+    fn test_compile_error_handler_message_contains_only_clause() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: None,
+                message_contains: Some("validation".into()),
+                retry: None,
+            }]),
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(config.policies.len(), 1);
+        assert!((config.policies[0].matches)(&CamelError::ProcessorError(
+            "validation failed".into()
+        )));
+        assert!(!(config.policies[0].matches)(&CamelError::ProcessorError(
+            "other error".into()
+        )));
+    }
+
+    #[test]
+    fn test_compile_error_handler_on_exceptions_without_retry_builds_policy() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: Some("log:dlc".into()),
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("Stopped".into()),
+                message_contains: None,
+                retry: None,
+            }]),
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(config.policies.len(), 1);
+        assert!(config.policies[0].retry.is_none());
+        assert!((config.policies[0].matches)(&CamelError::Stopped));
+    }
+
+    #[test]
+    fn test_exception_kind_matches_all_supported_variants() {
+        assert!(exception_kind_matches(
+            "ComponentNotFound",
+            &CamelError::ComponentNotFound("x".into())
+        ));
+        assert!(exception_kind_matches(
+            "EndpointCreationFailed",
+            &CamelError::EndpointCreationFailed("x".into())
+        ));
+        assert!(exception_kind_matches(
+            "ProcessorError",
+            &CamelError::ProcessorError("x".into())
+        ));
+        assert!(exception_kind_matches(
+            "TypeConversionFailed",
+            &CamelError::TypeConversionFailed("x".into())
+        ));
+        assert!(exception_kind_matches(
+            "InvalidUri",
+            &CamelError::InvalidUri("x".into())
+        ));
+        assert!(exception_kind_matches(
+            "ChannelClosed",
+            &CamelError::ChannelClosed
+        ));
+        assert!(exception_kind_matches(
+            "RouteError",
+            &CamelError::RouteError("x".into())
+        ));
+        assert!(exception_kind_matches("Io", &CamelError::Io("x".into())));
+        assert!(exception_kind_matches(
+            "DeadLetterChannelFailed",
+            &CamelError::DeadLetterChannelFailed("x".into())
+        ));
+        assert!(exception_kind_matches(
+            "CircuitOpen",
+            &CamelError::CircuitOpen("x".into())
+        ));
+        assert!(exception_kind_matches(
+            "HttpOperationFailed",
+            &CamelError::HttpOperationFailed {
+                method: "GET".into(),
+                url: "https://example.com".into(),
+                status_code: 500,
+                status_text: "boom".into(),
+                response_body: None,
+            }
+        ));
+        assert!(exception_kind_matches("Stopped", &CamelError::Stopped));
+        assert!(exception_kind_matches(
+            "Config",
+            &CamelError::Config("x".into())
+        ));
+        assert!(exception_kind_matches(
+            "AlreadyConsumed",
+            &CamelError::AlreadyConsumed
+        ));
+        assert!(exception_kind_matches(
+            "StreamLimitExceeded",
+            &CamelError::StreamLimitExceeded(1)
+        ));
+        assert!(!exception_kind_matches("NoSuchKind", &CamelError::Stopped));
     }
 }

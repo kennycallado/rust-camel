@@ -21,6 +21,41 @@ If you're building custom components or processors for rust-camel, you'll need t
 - **Streaming**: Lazy `Body::Stream` variant with `materialize()`, `into_bytes()`, and `into_async_read()` for zero-copy I/O
 - **Health monitoring**: Service health status tracking and Kubernetes-ready endpoints
 
+## Unit of Work (UoW)
+
+`UnitOfWorkConfig` enables per-route exchange lifecycle hooks.
+
+- `on_complete`: optional producer URI invoked when an exchange finishes without error
+- `on_failure`: optional producer URI invoked when processing returns an error or the exchange carries an error
+
+```rust
+use camel_api::{UnitOfWorkConfig, RuntimeQuery, RuntimeQueryResult};
+use camel_core::{BuilderStep, RouteDefinition};
+
+let route = RouteDefinition::new("direct:input", vec![BuilderStep::To("log:info".into())])
+    .with_route_id("uow-route")
+    .with_unit_of_work(UnitOfWorkConfig {
+        on_complete: Some("direct:on-complete".to_string()),
+        on_failure: Some("direct:on-failure".to_string()),
+    });
+
+// Runtime query example
+let query = RuntimeQuery::InFlightCount {
+    route_id: "uow-route".to_string(),
+};
+
+let _result = match query {
+    RuntimeQuery::InFlightCount { route_id } => {
+        RuntimeQueryResult::InFlightCount { route_id, count: 0 }
+    }
+    _ => unreachable!(),
+};
+```
+
+Use `RuntimeQuery::InFlightCount { route_id }` to inspect current in-flight exchanges for a route.
+The runtime returns either `RuntimeQueryResult::InFlightCount { route_id, count }` or
+`RuntimeQueryResult::RouteNotFound { route_id }`.
+
 ## Health Monitoring
 
 The health monitoring system provides Kubernetes-ready endpoints for monitoring service status.

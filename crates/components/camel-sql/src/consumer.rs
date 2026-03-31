@@ -311,7 +311,32 @@ impl Consumer for SqlConsumer {
 mod tests {
     use super::*;
     use crate::config::SqlEndpointConfig;
+    use camel_component::ExchangeEnvelope;
     use camel_endpoint::UriConfig;
+    use sqlx::any::AnyPoolOptions;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    async fn sqlite_pool() -> AnyPool {
+        sqlx::any::install_default_drivers();
+        AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool")
+    }
+
+    async fn seed_consumer_table(pool: &AnyPool) {
+        sqlx::query("CREATE TABLE jobs (id INTEGER PRIMARY KEY, processed INTEGER DEFAULT 0, failed INTEGER DEFAULT 0)")
+            .execute(pool)
+            .await
+            .expect("create table");
+        sqlx::query("INSERT INTO jobs (id, processed, failed) VALUES (1, 0, 0), (2, 0, 0)")
+            .execute(pool)
+            .await
+            .expect("seed rows");
+    }
 
     fn test_config() -> SqlEndpointConfig {
         let mut c =
@@ -336,5 +361,143 @@ mod tests {
         let c = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
         assert_eq!(c.config.delay_ms, 2000);
         assert!(c.config.on_consume.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_poll_database_runs_on_consume_for_successful_rows() {
+        let pool = sqlite_pool().await;
+        seed_consumer_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, processed, failed from jobs where processed = 0 order by id?db_url=sqlite::memory:&onConsume=update jobs set processed=1 where id=:#id&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange));
+                }
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+        consumer
+            .poll_database(&pool, &ctx, &template)
+            .await
+            .expect("poll must succeed");
+
+        let row = sqlx::query("select processed from jobs where id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("row 1");
+        let processed_1: i64 = sqlx::Row::try_get(&row, 0).expect("processed");
+
+        let row = sqlx::query("select processed from jobs where id = 2")
+            .fetch_one(&pool)
+            .await
+            .expect("row 2");
+        let processed_2: i64 = sqlx::Row::try_get(&row, 0).expect("processed");
+
+        assert_eq!(processed_1, 1);
+        assert_eq!(processed_2, 1);
+    }
+
+    #[tokio::test]
+    async fn test_poll_database_runs_on_consume_failed_when_downstream_fails() {
+        let pool = sqlite_pool().await;
+        seed_consumer_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, processed, failed from jobs where processed = 0 order by id?db_url=sqlite::memory:&onConsumeFailed=update jobs set failed=1 where id=:#id&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ =
+                        reply_tx.send(Err(CamelError::ProcessorError("downstream boom".into())));
+                }
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+        consumer
+            .poll_database(&pool, &ctx, &template)
+            .await
+            .expect("consumer should swallow downstream errors when breakBatchOnConsumeFail=false");
+
+        let row = sqlx::query("select failed from jobs where id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("row 1");
+        let failed_1: i64 = sqlx::Row::try_get(&row, 0).expect("failed");
+
+        let row = sqlx::query("select failed from jobs where id = 2")
+            .fetch_one(&pool)
+            .await
+            .expect("row 2");
+        let failed_2: i64 = sqlx::Row::try_get(&row, 0).expect("failed");
+
+        assert_eq!(failed_1, 1);
+        assert_eq!(failed_2, 1);
+    }
+
+    #[tokio::test]
+    async fn test_poll_database_breaks_batch_on_consume_fail() {
+        let pool = sqlite_pool().await;
+        seed_consumer_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, processed, failed from jobs where processed = 0 order by id?db_url=sqlite::memory:&onConsumeFailed=update jobs set failed=1 where id=:#id&breakBatchOnConsumeFail=true&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ =
+                        reply_tx.send(Err(CamelError::ProcessorError("downstream boom".into())));
+                }
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+        let err = consumer
+            .poll_database(&pool, &ctx, &template)
+            .await
+            .expect_err("must stop on first downstream failure");
+        assert!(err.to_string().contains("downstream boom"));
+
+        let row = sqlx::query("select failed from jobs where id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("row 1");
+        let failed_1: i64 = sqlx::Row::try_get(&row, 0).expect("failed");
+
+        let row = sqlx::query("select failed from jobs where id = 2")
+            .fetch_one(&pool)
+            .await
+            .expect("row 2");
+        let failed_2: i64 = sqlx::Row::try_get(&row, 0).expect("failed");
+
+        assert_eq!(failed_1, 1);
+        assert_eq!(failed_2, 0, "second row must not be processed");
     }
 }

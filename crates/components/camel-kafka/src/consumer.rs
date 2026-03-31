@@ -122,22 +122,27 @@ impl Consumer for KafkaConsumer {
     }
 }
 
-/// Build an Exchange from an OwnedMessage.
-///
-/// Sets headers: CamelKafkaTopic, CamelKafkaPartition, CamelKafkaOffset,
-/// CamelKafkaKey (if present), CamelKafkaTimestamp (if present), CamelKafkaGroupId
-pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
-    // Payload
-    let body = match msg.payload() {
+pub fn resolve_payload_body(msg: &OwnedMessage) -> Body {
+    match msg.payload() {
         Some(bytes) => match std::str::from_utf8(bytes) {
             Ok(s) => Body::Text(s.to_string()),
             Err(_) => Body::Bytes(bytes::Bytes::copy_from_slice(bytes)),
         },
         None => Body::Empty,
-    };
+    }
+}
 
-    let mut exchange = Exchange::new(Message::new(body));
+pub fn resolve_utf8_key(msg: &OwnedMessage) -> Option<String> {
+    msg.key()
+        .and_then(|key_bytes| std::str::from_utf8(key_bytes).ok())
+        .map(|s| s.to_string())
+}
 
+pub fn resolve_timestamp_millis(msg: &OwnedMessage) -> Option<i64> {
+    msg.timestamp().to_millis()
+}
+
+fn set_core_headers(exchange: &mut Exchange, msg: &OwnedMessage, group_id: &str) {
     exchange
         .input
         .set_header("CamelKafkaTopic", Value::String(msg.topic().to_string()));
@@ -147,27 +152,37 @@ pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
     exchange
         .input
         .set_header("CamelKafkaOffset", Value::Number(msg.offset().into()));
-    // let-chains: stable in Rust edition 2024
-    if let Some(key_bytes) = msg.key()
-        && let Ok(key_str) = std::str::from_utf8(key_bytes)
-    {
+    exchange
+        .input
+        .set_header("CamelKafkaGroupId", Value::String(group_id.to_string()));
+}
+
+/// Build an Exchange from an OwnedMessage.
+///
+/// Sets headers: CamelKafkaTopic, CamelKafkaPartition, CamelKafkaOffset,
+/// CamelKafkaKey (if present), CamelKafkaTimestamp (if present), CamelKafkaGroupId
+pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
+    let body = resolve_payload_body(msg);
+    let mut exchange = Exchange::new(Message::new(body));
+
+    set_core_headers(&mut exchange, msg, group_id);
+
+    if let Some(key) = resolve_utf8_key(msg) {
         exchange
             .input
-            .set_header("CamelKafkaKey", Value::String(key_str.to_string()));
+            .set_header("CamelKafkaKey", Value::String(key));
     } else if msg.key().is_some() {
         warn!(
             topic = %msg.topic(),
             "Kafka message key is non-UTF-8 bytes; CamelKafkaKey header not set"
         );
     }
-    if let Some(ts) = msg.timestamp().to_millis() {
+
+    if let Some(ts) = resolve_timestamp_millis(msg) {
         exchange
             .input
             .set_header("CamelKafkaTimestamp", Value::Number(ts.into()));
     }
-    exchange
-        .input
-        .set_header("CamelKafkaGroupId", Value::String(group_id.to_string()));
 
     // Extract W3C TraceContext headers for distributed tracing (otel feature only)
     #[cfg(feature = "otel")]
@@ -444,6 +459,64 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_payload_body_variants() {
+        let msg_empty = make_msg(None, None, "t", Timestamp::NotAvailable, 0, 0);
+        assert!(matches!(resolve_payload_body(&msg_empty), Body::Empty));
+
+        let msg_text = make_msg(
+            Some(b"hello".to_vec()),
+            None,
+            "t",
+            Timestamp::NotAvailable,
+            0,
+            0,
+        );
+        assert!(matches!(resolve_payload_body(&msg_text), Body::Text(ref s) if s == "hello"));
+
+        let msg_bin = make_msg(
+            Some(vec![0xFF, 0x00]),
+            None,
+            "t",
+            Timestamp::NotAvailable,
+            0,
+            0,
+        );
+        assert!(matches!(resolve_payload_body(&msg_bin), Body::Bytes(_)));
+    }
+
+    #[test]
+    fn test_resolve_utf8_key_variants() {
+        let msg_utf8 = make_msg(
+            None,
+            Some(b"my-key".to_vec()),
+            "t",
+            Timestamp::NotAvailable,
+            0,
+            0,
+        );
+        assert_eq!(resolve_utf8_key(&msg_utf8), Some("my-key".to_string()));
+
+        let msg_bin = make_msg(
+            None,
+            Some(vec![0xFF, 0xFE]),
+            "t",
+            Timestamp::NotAvailable,
+            0,
+            0,
+        );
+        assert_eq!(resolve_utf8_key(&msg_bin), None);
+    }
+
+    #[test]
+    fn test_resolve_timestamp_millis_variants() {
+        let msg_ts = make_msg(None, None, "t", Timestamp::CreateTime(777), 0, 0);
+        assert_eq!(resolve_timestamp_millis(&msg_ts), Some(777));
+
+        let msg_none = make_msg(None, None, "t", Timestamp::NotAvailable, 0, 0);
+        assert_eq!(resolve_timestamp_millis(&msg_none), None);
+    }
+
+    #[test]
     fn test_build_exchange_with_key_sets_header() {
         let msg = make_msg(
             None,
@@ -489,6 +562,43 @@ mod tests {
             ex.input.header("CamelKafkaGroupId"),
             Some(&Value::String("my-group".to_string()))
         );
+    }
+
+    #[test]
+    fn test_build_exchange_sets_core_metadata_headers() {
+        let msg = make_msg(None, None, "orders", Timestamp::NotAvailable, 7, 42);
+        let ex = build_exchange(&msg, "group-a");
+
+        assert_eq!(
+            ex.input.header("CamelKafkaTopic"),
+            Some(&Value::String("orders".to_string()))
+        );
+        assert_eq!(
+            ex.input.header("CamelKafkaPartition"),
+            Some(&Value::Number(7.into()))
+        );
+        assert_eq!(
+            ex.input.header("CamelKafkaOffset"),
+            Some(&Value::Number(42.into()))
+        );
+    }
+
+    #[test]
+    fn test_build_exchange_sets_timestamp_when_available() {
+        let msg = make_msg(None, None, "t", Timestamp::CreateTime(123456), 0, 0);
+        let ex = build_exchange(&msg, "g");
+        assert_eq!(
+            ex.input.header("CamelKafkaTimestamp"),
+            Some(&Value::Number(123456.into()))
+        );
+    }
+
+    #[test]
+    fn test_ready_signal_returns_shared_notify_handle() {
+        let consumer = KafkaConsumer::new(make_config());
+        let ready_a = consumer.ready_signal();
+        let ready_b = consumer.ready_signal();
+        assert!(Arc::ptr_eq(&ready_a, &ready_b));
     }
 
     // Integration tests — require running Kafka

@@ -525,6 +525,7 @@ fn canonical_step_to_builder_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::RuntimeQueryResult;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -655,6 +656,57 @@ mod tests {
         removed: Arc<Mutex<Vec<String>>>,
     }
 
+    #[derive(Clone, Default)]
+    struct ConfigurableExecutionPort {
+        fail_start: Arc<Mutex<bool>>,
+        fail_suspend_once: Arc<Mutex<bool>>,
+        fail_suspend_retry: Arc<Mutex<bool>>,
+        fail_resume: Arc<Mutex<bool>>,
+        fail_remove_must_stopped: Arc<Mutex<bool>>,
+        fail_remove_retry: Arc<Mutex<bool>>,
+        stop_called: Arc<Mutex<u32>>,
+    }
+
+    impl ConfigurableExecutionPort {
+        fn with_suspend_failure_once() -> Self {
+            Self {
+                fail_suspend_once: Arc::new(Mutex::new(true)),
+                ..Self::default()
+            }
+        }
+
+        fn with_suspend_failure_once_and_retry() -> Self {
+            Self {
+                fail_suspend_once: Arc::new(Mutex::new(true)),
+                fail_suspend_retry: Arc::new(Mutex::new(true)),
+                ..Self::default()
+            }
+        }
+
+        fn with_start_and_resume_failure() -> Self {
+            Self {
+                fail_start: Arc::new(Mutex::new(true)),
+                fail_resume: Arc::new(Mutex::new(true)),
+                ..Self::default()
+            }
+        }
+
+        fn with_remove_requires_stop() -> Self {
+            Self {
+                fail_remove_must_stopped: Arc::new(Mutex::new(true)),
+                ..Self::default()
+            }
+        }
+
+        fn with_remove_requires_stop_and_retry_failure() -> Self {
+            Self {
+                fail_remove_must_stopped: Arc::new(Mutex::new(true)),
+                fail_remove_retry: Arc::new(Mutex::new(true)),
+                ..Self::default()
+            }
+        }
+    }
+
     impl TrackingExecutionPort {
         fn new() -> Self {
             Self::default()
@@ -705,6 +757,76 @@ mod tests {
                 .expect("lock removed routes")
                 .push(route_id.to_string());
             Ok(())
+        }
+
+        async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, CamelError> {
+            Ok(RuntimeQueryResult::RouteNotFound {
+                route_id: route_id.to_string(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeExecutionPort for ConfigurableExecutionPort {
+        async fn register_route(&self, _definition: RouteDefinition) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn start_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            if *self.fail_start.lock().expect("fail_start") {
+                return Err(CamelError::RouteError("start failed".into()));
+            }
+            Ok(())
+        }
+
+        async fn stop_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            let mut calls = self.stop_called.lock().expect("stop_called");
+            *calls += 1;
+            Ok(())
+        }
+
+        async fn suspend_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            let mut fail_once = self.fail_suspend_once.lock().expect("fail_suspend_once");
+            if *fail_once {
+                *fail_once = false;
+                return Err(CamelError::RouteError("suspend failed".into()));
+            }
+            if *self.fail_suspend_retry.lock().expect("fail_suspend_retry") {
+                return Err(CamelError::RouteError("suspend retry failed".into()));
+            }
+            Ok(())
+        }
+
+        async fn resume_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            if *self.fail_resume.lock().expect("fail_resume") {
+                return Err(CamelError::RouteError("resume failed".into()));
+            }
+            Ok(())
+        }
+
+        async fn reload_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn remove_route(&self, _route_id: &str) -> Result<(), CamelError> {
+            let mut first = self
+                .fail_remove_must_stopped
+                .lock()
+                .expect("fail_remove_must_stopped");
+            if *first {
+                *first = false;
+                return Err(CamelError::RouteError("must be stopped first".into()));
+            }
+            if *self.fail_remove_retry.lock().expect("fail_remove_retry") {
+                return Err(CamelError::RouteError("remove retry failed".into()));
+            }
+            Ok(())
+        }
+
+        async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, CamelError> {
+            Ok(RuntimeQueryResult::RouteNotFound {
+                route_id: route_id.to_string(),
+            })
         }
     }
 
@@ -804,6 +926,171 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("already registered")
+        );
+    }
+
+    #[test]
+    fn canonical_step_conversion_covers_common_variants() {
+        use camel_api::LanguageExpressionDef;
+        use camel_api::runtime::{
+            CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
+            CanonicalWhenSpec,
+        };
+
+        let to = canonical_step_to_builder_step(CanonicalStepSpec::To {
+            uri: "log:out".into(),
+        })
+        .unwrap();
+        assert!(matches!(to, BuilderStep::To(_)));
+
+        let log = canonical_step_to_builder_step(CanonicalStepSpec::Log {
+            message: "hello".into(),
+        })
+        .unwrap();
+        assert!(matches!(log, BuilderStep::Log { .. }));
+
+        let filter = canonical_step_to_builder_step(CanonicalStepSpec::Filter {
+            predicate: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${body} != null".into(),
+            },
+            steps: vec![CanonicalStepSpec::Stop],
+        })
+        .unwrap();
+        assert!(matches!(filter, BuilderStep::DeclarativeFilter { .. }));
+
+        let choice = canonical_step_to_builder_step(CanonicalStepSpec::Choice {
+            whens: vec![CanonicalWhenSpec {
+                predicate: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: "${body} == 1".into(),
+                },
+                steps: vec![CanonicalStepSpec::To {
+                    uri: "mock:a".into(),
+                }],
+            }],
+            otherwise: Some(vec![CanonicalStepSpec::To {
+                uri: "mock:b".into(),
+            }]),
+        })
+        .unwrap();
+        assert!(matches!(choice, BuilderStep::DeclarativeChoice { .. }));
+
+        let split_lines = canonical_step_to_builder_step(CanonicalStepSpec::Split {
+            expression: CanonicalSplitExpressionSpec::BodyLines,
+            aggregation: CanonicalSplitAggregationSpec::CollectAll,
+            parallel: true,
+            parallel_limit: Some(4),
+            stop_on_exception: true,
+            steps: vec![CanonicalStepSpec::Stop],
+        })
+        .unwrap();
+        assert!(matches!(split_lines, BuilderStep::Split { .. }));
+
+        let split_language = canonical_step_to_builder_step(CanonicalStepSpec::Split {
+            expression: CanonicalSplitExpressionSpec::Language(LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${body.items}".into(),
+            }),
+            aggregation: CanonicalSplitAggregationSpec::Original,
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: false,
+            steps: vec![CanonicalStepSpec::Stop],
+        })
+        .unwrap();
+        assert!(matches!(
+            split_language,
+            BuilderStep::DeclarativeSplit { .. }
+        ));
+    }
+
+    #[test]
+    fn canonical_route_conversion_with_circuit_breaker() {
+        use camel_api::runtime::{
+            CanonicalCircuitBreakerSpec, CanonicalRouteSpec, CanonicalStepSpec,
+        };
+
+        let spec = CanonicalRouteSpec {
+            route_id: "route-x".into(),
+            from: "timer:tick".into(),
+            steps: vec![CanonicalStepSpec::Stop],
+            circuit_breaker: Some(CanonicalCircuitBreakerSpec {
+                failure_threshold: 3,
+                open_duration_ms: 500,
+            }),
+            version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+        };
+
+        let route = canonical_to_route_definition(spec).unwrap();
+        assert_eq!(route.route_id(), "route-x");
+        assert_eq!(route.from_uri(), "timer:tick");
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_lifecycle_start_recovery_error_path() {
+        let execution = ConfigurableExecutionPort::with_start_and_resume_failure();
+        let err = apply_runtime_lifecycle(&execution, "r1", &RouteLifecycleCommand::Start)
+            .await
+            .expect_err("must fail");
+        assert!(
+            err.to_string()
+                .contains("runtime execution recovery failed for Start")
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_lifecycle_suspend_recovery_paths() {
+        let ok_after_retry = ConfigurableExecutionPort::with_suspend_failure_once();
+        apply_runtime_lifecycle(&ok_after_retry, "r1", &RouteLifecycleCommand::Suspend)
+            .await
+            .expect("second suspend attempt should succeed");
+
+        let fail_retry = ConfigurableExecutionPort::with_suspend_failure_once_and_retry();
+        let err = apply_runtime_lifecycle(&fail_retry, "r1", &RouteLifecycleCommand::Suspend)
+            .await
+            .expect_err("retry failure expected");
+        assert!(err.to_string().contains("retry_error"));
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_lifecycle_resume_recovery_error_path() {
+        let execution = ConfigurableExecutionPort::with_start_and_resume_failure();
+        let err = apply_runtime_lifecycle(&execution, "r1", &RouteLifecycleCommand::Resume)
+            .await
+            .expect_err("must fail");
+        assert!(
+            err.to_string()
+                .contains("runtime execution recovery failed for Resume")
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_runtime_route_with_recovery_paths() {
+        let execution = ConfigurableExecutionPort::with_remove_requires_stop();
+        remove_runtime_route_with_recovery(&execution, "r1")
+            .await
+            .expect("remove after stop should succeed");
+        assert_eq!(*execution.stop_called.lock().unwrap(), 1);
+
+        let fail_retry = ConfigurableExecutionPort::with_remove_requires_stop_and_retry_failure();
+        let err = remove_runtime_route_with_recovery(&fail_retry, "r2")
+            .await
+            .expect_err("retry remove should fail");
+        assert!(err.to_string().contains("retry_remove_error"));
+    }
+
+    #[test]
+    fn state_label_covers_all_states() {
+        assert_eq!(state_label(&RouteRuntimeState::Registered), "Registered");
+        assert_eq!(state_label(&RouteRuntimeState::Starting), "Starting");
+        assert_eq!(state_label(&RouteRuntimeState::Started), "Started");
+        assert_eq!(state_label(&RouteRuntimeState::Suspended), "Suspended");
+        assert_eq!(state_label(&RouteRuntimeState::Stopping), "Stopping");
+        assert_eq!(state_label(&RouteRuntimeState::Stopped), "Stopped");
+        assert_eq!(
+            state_label(&RouteRuntimeState::Failed("e".into())),
+            "Failed"
         );
     }
 }

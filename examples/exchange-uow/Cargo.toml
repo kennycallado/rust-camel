@@ -1,0 +1,16 @@
+[package]
+name = "exchange-uow"
+description = "Exchange Unit of Work example — in-flight tracking and on_complete/on_failure hooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-component-direct.workspace = true
+camel-component-log.workspace = true
+camel-component-timer.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

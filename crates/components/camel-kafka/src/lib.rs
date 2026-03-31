@@ -81,3 +81,52 @@ impl Endpoint for KafkaEndpoint {
         Ok(Box::new(KafkaConsumer::new(self.config.clone())))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_component_scheme() {
+        let component = KafkaComponent::new();
+        assert_eq!(component.scheme(), "kafka");
+    }
+
+    #[test]
+    fn test_component_creates_endpoint_with_defaults() {
+        let component = KafkaComponent::new();
+        let endpoint = component
+            .create_endpoint("kafka:orders?brokers=localhost:9092&groupId=test-group")
+            .expect("endpoint should be created");
+        assert_eq!(
+            endpoint.uri(),
+            "kafka:orders?brokers=localhost:9092&groupId=test-group"
+        );
+    }
+
+    #[test]
+    fn test_component_rejects_wrong_scheme() {
+        let component = KafkaComponent::new();
+        let result = component.create_endpoint("sql:select 1?db_url=postgres://localhost/test");
+        assert!(result.is_err(), "wrong scheme should fail");
+        let err = result.err().expect("error must exist");
+        assert!(err.to_string().contains("expected scheme 'kafka'"));
+    }
+
+    #[test]
+    fn test_component_applies_global_defaults_when_missing_in_uri() {
+        let global = KafkaConfig::default()
+            .with_brokers("broker-1:9092")
+            .with_group_id("global-group");
+        let component = KafkaComponent::with_config(global);
+
+        let endpoint = component
+            .create_endpoint("kafka:orders")
+            .expect("endpoint should be created with global defaults");
+
+        let producer = endpoint
+            .create_producer(&ProducerContext::default())
+            .expect("producer should be created from endpoint");
+        drop(producer);
+    }
+}

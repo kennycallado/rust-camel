@@ -1480,6 +1480,67 @@ mod tests {
         assert!(cfg.policies.is_empty());
     }
 
+    #[test]
+    fn test_builder_dead_letter_channel_called_twice_uses_latest_and_keeps_policies() {
+        let definition = RouteBuilder::from("direct:start")
+            .route_id("test-route")
+            .dead_letter_channel("log:first")
+            .on_exception(|e| matches!(e, CamelError::Io(_)))
+            .retry(2)
+            .end_on_exception()
+            .dead_letter_channel("log:second")
+            .to("mock:out")
+            .build()
+            .expect("route should build");
+
+        let cfg = definition
+            .error_handler_config()
+            .expect("error handler should be set");
+        assert_eq!(cfg.dlc_uri.as_deref(), Some("log:second"));
+        assert_eq!(cfg.policies.len(), 1);
+        assert_eq!(
+            cfg.policies[0].retry.as_ref().map(|p| p.max_attempts),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_builder_on_exception_without_dlc_defaults_to_log_only() {
+        let definition = RouteBuilder::from("direct:start")
+            .route_id("test-route")
+            .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
+            .retry(1)
+            .end_on_exception()
+            .to("mock:out")
+            .build()
+            .expect("route should build");
+
+        let cfg = definition
+            .error_handler_config()
+            .expect("error handler should be set");
+        assert!(cfg.dlc_uri.is_none());
+        assert_eq!(cfg.policies.len(), 1);
+    }
+
+    #[test]
+    fn test_builder_error_handler_explicit_overwrite_stays_explicit_mode() {
+        let first = ErrorHandlerConfig::dead_letter_channel("log:first");
+        let second = ErrorHandlerConfig::dead_letter_channel("log:second");
+
+        let definition = RouteBuilder::from("direct:start")
+            .route_id("test-route")
+            .error_handler(first)
+            .error_handler(second)
+            .to("mock:out")
+            .build()
+            .expect("route should build");
+
+        let cfg = definition
+            .error_handler_config()
+            .expect("error handler should be set");
+        assert_eq!(cfg.dlc_uri.as_deref(), Some("log:second"));
+    }
+
     // --- Splitter builder tests ---
 
     #[test]

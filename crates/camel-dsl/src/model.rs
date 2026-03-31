@@ -45,6 +45,7 @@ pub struct DeclarativeRoute {
     pub concurrency: Option<DeclarativeConcurrency>,
     pub error_handler: Option<DeclarativeErrorHandler>,
     pub circuit_breaker: Option<DeclarativeCircuitBreaker>,
+    pub unit_of_work: Option<camel_api::UnitOfWorkConfig>,
     pub steps: Vec<DeclarativeStep>,
 }
 
