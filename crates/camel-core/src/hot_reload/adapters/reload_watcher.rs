@@ -38,11 +38,12 @@ impl ReloadWatcher {
         controller: RuntimeExecutionHandle,
         discover_fn: F,
         shutdown: Option<CancellationToken>,
+        drain_timeout: Duration,
     ) -> Result<(), CamelError>
     where
         F: Fn() -> Result<Vec<RouteDefinition>, CamelError> + Send + 'static,
     {
-        watch_and_reload(watch_dirs, controller, discover_fn, shutdown).await
+        watch_and_reload(watch_dirs, controller, discover_fn, shutdown, drain_timeout).await
     }
 
     pub fn resolve_watch_dirs(patterns: &[String]) -> Vec<PathBuf> {
@@ -71,6 +72,7 @@ pub async fn watch_and_reload<F>(
     controller: RuntimeExecutionHandle,
     discover_fn: F,
     shutdown: Option<CancellationToken>,
+    drain_timeout: Duration,
 ) -> Result<(), CamelError>
 where
     F: Fn() -> Result<Vec<RouteDefinition>, CamelError> + Send + 'static,
@@ -198,7 +200,7 @@ where
 
         tracing::info!("hot-reload: applying {} reload action(s)", actions.len());
 
-        let errors = execute_reload_actions(actions, new_defs, &controller).await;
+        let errors = execute_reload_actions(actions, new_defs, &controller, drain_timeout).await;
         for err in &errors {
             tracing::warn!(
                 "hot-reload: error on route '{}' ({}): {}",

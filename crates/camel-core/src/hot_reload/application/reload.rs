@@ -15,8 +15,10 @@
 
 use camel_api::CamelError;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::context::RuntimeExecutionHandle;
+use crate::hot_reload::application::drain::drain_route;
 use crate::hot_reload::domain::ReloadAction;
 #[cfg(test)]
 use crate::lifecycle::adapters::route_controller::RouteControllerInternal;
@@ -137,6 +139,7 @@ pub(crate) async fn execute_reload_actions(
     actions: Vec<ReloadAction>,
     mut new_definitions: Vec<RouteDefinition>,
     controller: &RuntimeExecutionHandle,
+    drain_timeout: Duration,
 ) -> Vec<ReloadError> {
     let mut errors = Vec::new();
 
@@ -162,6 +165,8 @@ pub(crate) async fn execute_reload_actions(
                     }
                 };
 
+                let in_flight = controller.in_flight_count(&route_id).await.unwrap_or(0);
+
                 // Compile new pipeline then swap using explicit execution handle operations.
                 let pipeline = controller.compile_route_definition(def).await;
                 match pipeline {
@@ -174,7 +179,17 @@ pub(crate) async fn execute_reload_actions(
                                 error: e,
                             });
                         } else {
-                            tracing::info!(route_id = %route_id, "hot-reload: swapped route pipeline");
+                            if in_flight > 0 {
+                                tracing::info!(
+                                    route_id = %route_id,
+                                    action = "swap",
+                                    in_flight = in_flight,
+                                    "hot-reload: swapped route pipeline ({} exchanges continuing with previous pipeline)",
+                                    in_flight
+                                );
+                            } else {
+                                tracing::info!(route_id = %route_id, "hot-reload: swapped route pipeline");
+                            }
                         }
                     }
                     Err(e) => {
@@ -264,6 +279,8 @@ pub(crate) async fn execute_reload_actions(
                         });
                         continue;
                     }
+
+                    let _ = drain_route(&route_id, "remove", controller, drain_timeout).await;
                 }
 
                 let remove_result = controller
@@ -339,6 +356,8 @@ pub(crate) async fn execute_reload_actions(
                         });
                         continue;
                     }
+
+                    let _ = drain_route(&route_id, "restart", controller, drain_timeout).await;
                 }
 
                 if let Err(e) = controller
@@ -405,6 +424,7 @@ mod tests {
     use crate::lifecycle::adapters::route_controller::DefaultRouteController;
     use crate::shared::components::domain::Registry;
     use camel_api::RouteController;
+    use std::time::Duration;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -539,7 +559,13 @@ mod tests {
             route_id: "exec-add-test".into(),
         }];
         let errors =
-            execute_reload_actions(actions, vec![def], &ctx.runtime_execution_handle()).await;
+            execute_reload_actions(
+                actions,
+                vec![def],
+                &ctx.runtime_execution_handle(),
+                Duration::from_secs(10),
+            )
+            .await;
         assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
 
         assert_eq!(
@@ -575,7 +601,13 @@ mod tests {
         let actions = vec![ReloadAction::Remove {
             route_id: "exec-remove-test".into(),
         }];
-        let errors = execute_reload_actions(actions, vec![], &ctx.runtime_execution_handle()).await;
+        let errors = execute_reload_actions(
+            actions,
+            vec![],
+            &ctx.runtime_execution_handle(),
+            Duration::from_secs(10),
+        )
+        .await;
         assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
 
         assert_eq!(
@@ -609,7 +641,13 @@ mod tests {
             route_id: "exec-swap-test".into(),
         }];
         let errors =
-            execute_reload_actions(actions, vec![new_def], &ctx.runtime_execution_handle()).await;
+            execute_reload_actions(
+                actions,
+                vec![new_def],
+                &ctx.runtime_execution_handle(),
+                Duration::from_secs(10),
+            )
+            .await;
         assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
 
         // Route should still exist after swap
@@ -657,8 +695,13 @@ mod tests {
             route_id: "exec-restart-test".into(),
         }];
         let errors =
-            execute_reload_actions(actions, vec![replacement], &ctx.runtime_execution_handle())
-                .await;
+            execute_reload_actions(
+                actions,
+                vec![replacement],
+                &ctx.runtime_execution_handle(),
+                Duration::from_secs(10),
+            )
+            .await;
         assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
 
         // Restart re-adds through RuntimeExecutionHandle::add_route_definition,

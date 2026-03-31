@@ -103,6 +103,9 @@ pub trait RouteControllerInternal: RouteController + Send {
     /// Returns the current in-flight count for a route, or `None` if route not found.
     fn in_flight_count(&self, route_id: &str) -> Option<u64>;
 
+    /// Returns `true` if a route with the given ID exists.
+    fn route_exists(&self, route_id: &str) -> bool;
+
     /// Returns all route IDs.
     fn route_ids(&self) -> Vec<String>;
 
@@ -1118,6 +1121,11 @@ impl DefaultRouteController {
         })
     }
 
+    /// Returns `true` if a route with the given ID exists.
+    pub fn route_exists(&self, route_id: &str) -> bool {
+        self.routes.contains_key(route_id)
+    }
+
     /// Returns all route IDs.
     pub fn route_ids(&self) -> Vec<String> {
         self.routes.keys().cloned().collect()
@@ -1711,6 +1719,10 @@ impl RouteControllerInternal for DefaultRouteController {
 
     fn in_flight_count(&self, route_id: &str) -> Option<u64> {
         DefaultRouteController::in_flight_count(self, route_id)
+    }
+
+    fn route_exists(&self, route_id: &str) -> bool {
+        DefaultRouteController::route_exists(self, route_id)
     }
 
     fn route_ids(&self) -> Vec<String> {

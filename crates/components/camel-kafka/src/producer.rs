@@ -385,4 +385,5 @@ mod tests {
             Duration::from_millis(4321)
         );
     }
+
 }

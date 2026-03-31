@@ -121,6 +121,20 @@ impl RuntimeExecutionHandle {
         }
     }
 
+    pub(crate) async fn in_flight_count(&self, route_id: &str) -> Result<u64, CamelError> {
+        let controller = self.controller.lock().await;
+        if !controller.route_exists(route_id) {
+            return Err(CamelError::RouteError(format!(
+                "Route '{}' not found",
+                route_id
+            )));
+        }
+        // in_flight_count returns Some(N) when route exists.
+        // Some(0) means either "truly zero in-flight" or "no UoW tracking configured".
+        // Both cases are safe to treat as "drained, proceed immediately".
+        Ok(controller.in_flight_count(route_id).unwrap_or(0))
+    }
+
     #[cfg(test)]
     pub(crate) async fn force_start_route_for_test(
         &self,

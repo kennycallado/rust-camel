@@ -101,6 +101,7 @@ async fn test_watcher_swaps_pipeline_on_file_change() {
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
             Some(shutdown_clone),
+            std::time::Duration::from_secs(10),
         )
         .await
         .ok();
@@ -180,6 +181,7 @@ async fn test_watcher_removes_route_on_file_deletion() {
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
             Some(shutdown_clone),
+            std::time::Duration::from_secs(10),
         )
         .await
         .ok();
@@ -275,6 +277,7 @@ async fn test_watcher_restart_preserves_non_running_route_state() {
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
             Some(shutdown_clone),
+            std::time::Duration::from_secs(10),
         )
         .await
         .ok();
@@ -309,6 +312,87 @@ async fn test_watcher_restart_preserves_non_running_route_state() {
         v2_count, 0,
         "restart of a non-running route must preserve non-running state"
     );
+
+    shutdown.cancel();
+    watcher_handle.await.ok();
+    ctx.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_restart_with_from_uri_change_processes_exchanges_via_new_endpoint() {
+    let dir = tempdir().unwrap();
+    let route_file = dir.path().join("route.yaml");
+
+    write_route_yaml(&route_file, "drain-test", 30, "drain-v1");
+
+    let mock = MockComponent::new();
+    let mut ctx = CamelContext::new();
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(mock.clone());
+
+    let pattern = format!("{}/*.yaml", dir.path().display());
+    let defs = camel_dsl::discover_routes(std::slice::from_ref(&pattern)).unwrap();
+    for def in defs {
+        ctx.add_route_definition(def).await.unwrap();
+    }
+    ctx.start().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let v1_count = if let Some(ep) = mock.get_endpoint("drain-v1") {
+        ep.get_received_exchanges().await.len()
+    } else {
+        0
+    };
+    assert!(v1_count > 0, "route should have processed exchanges");
+
+    let ctrl = ctx.runtime_execution_handle();
+    let patterns_clone = vec![pattern.clone()];
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+    let watcher_handle = tokio::spawn(async move {
+        let dirs = resolve_watch_dirs(&patterns_clone);
+        watch_and_reload(
+            dirs,
+            ctrl,
+            move || {
+                camel_dsl::discover_routes(&patterns_clone)
+                    .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
+            },
+            Some(shutdown_clone),
+            Duration::from_secs(10),
+        )
+        .await
+        .ok();
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Change from_uri to force Restart action (requires consumer stop + drain)
+    write_route_yaml_custom(
+        &route_file,
+        "drain-test",
+        "timer:tock?period=30",
+        "drain-v2",
+        true,
+    );
+
+    tokio::time::sleep(Duration::from_millis(700)).await;
+
+    // Route should be running with new from_uri
+    let status = ctx.runtime_route_status("drain-test").await.unwrap();
+    assert!(
+        matches!(status.as_deref(), Some("Started")),
+        "route should be running after restart, got: {:?}",
+        status
+    );
+
+    let v2_count = if let Some(ep) = mock.get_endpoint("drain-v2") {
+        ep.get_received_exchanges().await.len()
+    } else {
+        0
+    };
+    assert!(v2_count > 0, "restarted route should process exchanges via v2");
 
     shutdown.cancel();
     watcher_handle.await.ok();

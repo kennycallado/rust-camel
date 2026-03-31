@@ -96,6 +96,7 @@ async fn main() -> Result<(), CamelError> {
                     .map_err(|e| CamelError::RouteError(e.to_string()))
             },
             Some(shutdown_watcher),
+            std::time::Duration::from_secs(10),
         )
         .await;
         if let Err(e) = result {

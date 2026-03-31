@@ -27,6 +27,9 @@ pub struct CamelConfig {
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 
+    #[serde(default = "default_drain_timeout_ms")]
+    pub drain_timeout_ms: u64,
+
     #[serde(default)]
     pub components: ComponentsConfig,
 
@@ -397,6 +400,9 @@ fn default_log_level() -> String {
 }
 fn default_timeout_ms() -> u64 {
     5000
+}
+fn default_drain_timeout_ms() -> u64 {
+    10_000
 }
 fn default_timer_period() -> u64 {
     1000

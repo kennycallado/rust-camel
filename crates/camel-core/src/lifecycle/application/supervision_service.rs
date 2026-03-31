@@ -175,6 +175,10 @@ impl RouteControllerInternal for SupervisingRouteController {
         self.inner.in_flight_count(route_id)
     }
 
+    fn route_exists(&self, route_id: &str) -> bool {
+        self.inner.route_exists(route_id)
+    }
+
     fn auto_startup_route_ids(&self) -> Vec<String> {
         self.inner.auto_startup_route_ids()
     }
