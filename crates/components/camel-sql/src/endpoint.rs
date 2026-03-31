@@ -54,7 +54,7 @@ impl Endpoint for SqlEndpoint {
 }
 
 #[cfg(test)]
-mod body_contract_tests {
+mod tests {
     use super::*;
     use crate::config::SqlEndpointConfig;
     use camel_component::Endpoint;

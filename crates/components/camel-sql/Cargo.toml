@@ -27,8 +27,4 @@ async-stream = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
-camel-core = { workspace = true }
-camel-builder = { workspace = true }
-camel-component-mock = { workspace = true }
-camel-component-timer = { workspace = true }
 tokio-util = { workspace = true }

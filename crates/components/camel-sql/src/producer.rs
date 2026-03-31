@@ -438,7 +438,7 @@ mod tests {
             .expect("seed rows");
     }
 
-    fn test_config() -> SqlEndpointConfig {
+    fn config() -> SqlEndpointConfig {
         let mut c =
             SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
         c.resolve_defaults();
@@ -446,23 +446,23 @@ mod tests {
     }
 
     #[test]
-    fn test_producer_clone_shares_pool() {
-        let p1 = SqlProducer::new(test_config(), Arc::new(OnceCell::new()));
+    fn producer_clone_shares_pool() {
+        let p1 = SqlProducer::new(config(), Arc::new(OnceCell::new()));
         let p2 = p1.clone();
         assert!(Arc::ptr_eq(&p1.pool, &p2.pool));
     }
 
     #[test]
-    fn test_resolve_query_from_config() {
-        let config = test_config();
+    fn resolve_query_from_config() {
+        let config = config();
         let ex = Exchange::new(Message::default());
         let q = SqlProducer::resolve_query_source(&ex, &config);
         assert_eq!(q, "select 1");
     }
 
     #[test]
-    fn test_resolve_query_from_header() {
-        let config = test_config();
+    fn resolve_query_from_header() {
+        let config = config();
         let mut msg = Message::default();
         msg.set_header(headers::QUERY, serde_json::json!("select 2"));
         let ex = Exchange::new(msg);
@@ -471,8 +471,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_query_from_body() {
-        let mut config = test_config();
+    fn resolve_query_from_body() {
+        let mut config = config();
         config.use_message_body_for_sql = true;
         let msg = Message::new(Body::Text("select 3".to_string()));
         let ex = Exchange::new(msg);
@@ -481,8 +481,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_query_header_priority_over_body() {
-        let mut config = test_config();
+    fn resolve_query_header_priority_over_body() {
+        let mut config = config();
         config.use_message_body_for_sql = true;
         let mut msg = Message::new(Body::Text("select from body".to_string()));
         msg.set_header(headers::QUERY, serde_json::json!("select from header"));
@@ -492,8 +492,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_query_body_priority_over_config() {
-        let mut config = test_config();
+    fn resolve_query_body_priority_over_config() {
+        let mut config = config();
         config.use_message_body_for_sql = true;
         let msg = Message::new(Body::Text("select from body".to_string()));
         let ex = Exchange::new(msg);
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bind_json_null() {
+    fn bind_json_null() {
         let query = sqlx::query("SELECT ?");
         let values = vec![serde_json::Value::Null];
         let _bound = bind_json_values(query, &values);
@@ -510,49 +510,49 @@ mod tests {
     }
 
     #[test]
-    fn test_bind_json_bool() {
+    fn bind_json_bool() {
         let query = sqlx::query("SELECT ?");
         let values = vec![serde_json::Value::Bool(true)];
         let _bound = bind_json_values(query, &values);
     }
 
     #[test]
-    fn test_bind_json_number_i64() {
+    fn bind_json_number_i64() {
         let query = sqlx::query("SELECT ?");
         let values = vec![serde_json::json!(42)];
         let _bound = bind_json_values(query, &values);
     }
 
     #[test]
-    fn test_bind_json_number_f64() {
+    fn bind_json_number_f64() {
         let query = sqlx::query("SELECT ?");
         let values = vec![serde_json::json!(std::f64::consts::PI)];
         let _bound = bind_json_values(query, &values);
     }
 
     #[test]
-    fn test_bind_json_string() {
+    fn bind_json_string() {
         let query = sqlx::query("SELECT ?");
         let values = vec![serde_json::json!("hello world")];
         let _bound = bind_json_values(query, &values);
     }
 
     #[test]
-    fn test_bind_json_array() {
+    fn bind_json_array() {
         let query = sqlx::query("SELECT ?");
         let values = vec![serde_json::json!([1, 2, 3])];
         let _bound = bind_json_values(query, &values);
     }
 
     #[test]
-    fn test_bind_json_object() {
+    fn bind_json_object() {
         let query = sqlx::query("SELECT ?");
         let values = vec![serde_json::json!({"key": "value"})];
         let _bound = bind_json_values(query, &values);
     }
 
     #[test]
-    fn test_bind_multiple_values() {
+    fn bind_multiple_values() {
         let query = sqlx::query("SELECT ?, ?, ?");
         let values = vec![
             serde_json::json!(1),
@@ -564,7 +564,7 @@ mod tests {
 
     // Test for Fix 4: expected_update_count config field presence
     #[test]
-    fn test_expected_update_count_validation() {
+    fn expected_update_count_validation() {
         // Test that expected_update_count is parsed from URI
         let config = SqlEndpointConfig::from_uri(
             "sql:update t set x=1?db_url=postgres://localhost/test&expectedUpdateCount=5",
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(config.expected_update_count, Some(5));
 
         // Test default (no expected_update_count)
-        let config_default = test_config();
+        let config_default = self::config();
         assert_eq!(config_default.expected_update_count, None);
 
         // Test negative value (should parse)
@@ -586,7 +586,7 @@ mod tests {
 
     // Test for Fix 3: parameters header override logic
     #[test]
-    fn test_parameters_header_override_logic() {
+    fn parameters_header_override_logic() {
         // Create a PreparedQuery manually
         let mut prepared = PreparedQuery {
             sql: "SELECT * FROM t WHERE id = $1".to_string(),
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_select_one_sets_body_and_row_count() {
+    async fn execute_select_one_sets_body_and_row_count() {
         let pool = sqlite_pool().await;
         seed_items_table(&pool).await;
 
@@ -647,7 +647,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_stream_list_materializes_ndjson() {
+    async fn execute_stream_list_materializes_ndjson() {
         let pool = sqlite_pool().await;
         seed_items_table(&pool).await;
 
@@ -681,7 +681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_modify_expected_update_count_mismatch_returns_error() {
+    async fn execute_modify_expected_update_count_mismatch_returns_error() {
         let pool = sqlite_pool().await;
         seed_items_table(&pool).await;
 
@@ -704,7 +704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_batch_rollback_when_any_item_fails_expected_count() {
+    async fn execute_batch_rollback_when_any_item_fails_expected_count() {
         let pool = sqlite_pool().await;
         seed_items_table(&pool).await;
 

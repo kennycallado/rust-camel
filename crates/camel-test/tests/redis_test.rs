@@ -13,10 +13,8 @@ mod support;
 use camel_api::Value;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_mock::MockComponent;
 use camel_component_redis::RedisComponent;
-use camel_component_timer::TimerComponent;
-use camel_core::CamelContext;
+use camel_test::CamelTestContext;
 use redis::AsyncCommands;
 use support::wait::wait_until;
 use testcontainers::ContainerAsync;
@@ -39,16 +37,20 @@ async fn get_connection_string(container: &ContainerAsync<Redis>) -> String {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_redis_string_commands() {
+async fn redis_string_commands() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(RedisComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("testkey".into()))
@@ -59,10 +61,10 @@ async fn test_redis_string_commands() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     wait_until(
         "redis string route delivery",
         std::time::Duration::from_secs(5),
@@ -75,9 +77,9 @@ async fn test_redis_string_commands() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
@@ -92,16 +94,20 @@ async fn test_redis_string_commands() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_redis_list_commands() {
+async fn redis_list_commands() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(RedisComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("mylist".into()))
@@ -112,10 +118,10 @@ async fn test_redis_list_commands() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     wait_until(
         "redis list route delivery",
         std::time::Duration::from_secs(5),
@@ -128,9 +134,9 @@ async fn test_redis_list_commands() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
@@ -145,16 +151,20 @@ async fn test_redis_list_commands() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_redis_hash_commands() {
+async fn redis_hash_commands() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(RedisComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("myhash".into()))
@@ -166,10 +176,10 @@ async fn test_redis_hash_commands() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     wait_until(
         "redis hash route delivery",
         std::time::Duration::from_secs(5),
@@ -182,9 +192,9 @@ async fn test_redis_hash_commands() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
@@ -199,16 +209,20 @@ async fn test_redis_hash_commands() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_redis_set_commands() {
+async fn redis_set_commands() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(RedisComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("myset".into()))
@@ -219,10 +233,10 @@ async fn test_redis_set_commands() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     wait_until(
         "redis set route delivery",
         std::time::Duration::from_secs(5),
@@ -235,9 +249,9 @@ async fn test_redis_set_commands() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
@@ -252,16 +266,20 @@ async fn test_redis_set_commands() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_redis_pubsub_producer() {
+async fn redis_pubsub_producer() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(RedisComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Channel", Value::String("mychannel".into()))
@@ -272,10 +290,10 @@ async fn test_redis_pubsub_producer() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     wait_until(
         "redis pubsub producer route delivery",
         std::time::Duration::from_secs(5),
@@ -288,9 +306,9 @@ async fn test_redis_pubsub_producer() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
@@ -305,16 +323,20 @@ async fn test_redis_pubsub_producer() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_redis_consumer_queue_mode() {
+async fn redis_consumer_queue_mode() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(RedisComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let consumer_route = RouteBuilder::from(&format!(
         "redis://{}?command=BRPOP&key=myqueue&timeout=1",
@@ -325,7 +347,7 @@ async fn test_redis_consumer_queue_mode() {
     .build()
     .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
 
     let producer_route = RouteBuilder::from("timer:push?period=100&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("myqueue".into()))
@@ -335,10 +357,10 @@ async fn test_redis_consumer_queue_mode() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(producer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(producer_route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("consumed").unwrap();
+    let endpoint = h.mock().get_endpoint("consumed").unwrap();
     wait_until(
         "redis queue consumer receives item",
         std::time::Duration::from_secs(5),
@@ -351,9 +373,9 @@ async fn test_redis_consumer_queue_mode() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
@@ -368,16 +390,20 @@ async fn test_redis_consumer_queue_mode() {
 }
 
 #[tokio::test]
-async fn test_redis_consumer_blpop_reads_left_side_first() {
+async fn redis_consumer_blpop_reads_left_side_first() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(RedisComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let consumer_route = RouteBuilder::from(&format!(
         "redis://{}?command=BLPOP&key=myqueue&timeout=1",
@@ -396,10 +422,10 @@ async fn test_redis_consumer_blpop_reads_left_side_first() {
         .await
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("consumed").unwrap();
+    let endpoint = h.mock().get_endpoint("consumed").unwrap();
     wait_until(
         "redis BLPOP receives two items",
         std::time::Duration::from_secs(5),
@@ -412,9 +438,9 @@ async fn test_redis_consumer_blpop_reads_left_side_first() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
@@ -447,16 +473,20 @@ async fn test_redis_consumer_blpop_reads_left_side_first() {
 }
 
 #[tokio::test]
-async fn test_redis_consumer_brpop_reads_right_side_first() {
+async fn redis_consumer_brpop_reads_right_side_first() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(RedisComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let consumer_route = RouteBuilder::from(&format!(
         "redis://{}?command=BRPOP&key=myqueue&timeout=1",
@@ -475,10 +505,10 @@ async fn test_redis_consumer_brpop_reads_right_side_first() {
         .await
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("consumed").unwrap();
+    let endpoint = h.mock().get_endpoint("consumed").unwrap();
     wait_until(
         "redis BRPOP receives two items",
         std::time::Duration::from_secs(5),
@@ -491,9 +521,9 @@ async fn test_redis_consumer_brpop_reads_right_side_first() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
@@ -530,16 +560,20 @@ async fn test_redis_consumer_brpop_reads_right_side_first() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_redis_consumer_pubsub_mode() {
+async fn redis_consumer_pubsub_mode() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(RedisComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let consumer_route = RouteBuilder::from(&format!(
         "redis://{}?command=SUBSCRIBE&channels=testchannel",
@@ -550,7 +584,7 @@ async fn test_redis_consumer_pubsub_mode() {
     .build()
     .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
 
     let producer_route = RouteBuilder::from("timer:pub?period=2000&repeatCount=1")
         .set_header("CamelRedis.Channel", Value::String("testchannel".into()))
@@ -560,10 +594,10 @@ async fn test_redis_consumer_pubsub_mode() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(producer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(producer_route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("received").unwrap();
+    let endpoint = h.mock().get_endpoint("received").unwrap();
     wait_until(
         "redis pubsub receives message",
         std::time::Duration::from_secs(5),
@@ -576,9 +610,9 @@ async fn test_redis_consumer_pubsub_mode() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);

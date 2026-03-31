@@ -13,20 +13,19 @@ use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_file::FileComponent;
 use camel_component_http::HttpComponent;
 use camel_component_log::LogComponent;
-use camel_component_mock::MockComponent;
-use camel_component_timer::TimerComponent;
-use camel_core::CamelContext;
+use camel_test::CamelTestContext;
 
 // ---------------------------------------------------------------------------
 // Test 1: Timer → Mock (verify exchanges received)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_timer_to_mock() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn timer_to_mock() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
         .route_id("test-route-1")
@@ -34,13 +33,13 @@ async fn test_timer_to_mock() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(3).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -60,11 +59,12 @@ async fn test_timer_to_mock() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_timer_filter_mock() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn timer_filter_mock() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     // Filter: only allow even-numbered ticks through to mock:result.
     // With the typestate FilterBuilder, the filter scope only executes
@@ -85,13 +85,13 @@ async fn test_timer_filter_mock() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(2).await;
 
     // Verify that only even-numbered exchanges passed through.
@@ -117,11 +117,12 @@ async fn test_timer_filter_mock() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_filter_matching_exchanges_reach_inner_mock() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn filter_matching_exchanges_reach_inner_mock() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     // 4 exchanges, alternate active=true/false (n=0,1,2,3 → even=true).
     // Only active=true exchanges should reach mock:matched.
@@ -145,13 +146,13 @@ async fn test_filter_matching_exchanges_reach_inner_mock() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("matched").unwrap();
+    let endpoint = h.mock().get_endpoint("matched").unwrap();
     endpoint.assert_exchange_count(2).await;
 }
 
@@ -160,11 +161,12 @@ async fn test_filter_matching_exchanges_reach_inner_mock() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_filter_non_matching_continue_outer_pipeline() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn filter_non_matching_continue_outer_pipeline() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let counter_clone = std::sync::Arc::clone(&counter);
@@ -187,14 +189,14 @@ async fn test_filter_non_matching_continue_outer_pipeline() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let inner = mock.get_endpoint("inner").unwrap();
-    let outer = mock.get_endpoint("outer").unwrap();
+    let inner = h.mock().get_endpoint("inner").unwrap();
+    let outer = h.mock().get_endpoint("outer").unwrap();
 
     inner.assert_exchange_count(2).await; // only active=true exchanges
     outer.assert_exchange_count(4).await; // ALL exchanges continue past filter
@@ -205,11 +207,12 @@ async fn test_filter_non_matching_continue_outer_pipeline() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_timer_set_header_mock() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn timer_set_header_mock() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
         .route_id("test-route-5")
@@ -219,13 +222,13 @@ async fn test_timer_set_header_mock() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(3).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -253,10 +256,12 @@ async fn test_timer_set_header_mock() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_timer_to_log() {
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(LogComponent::new());
+async fn timer_to_log() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_component(LogComponent::new())
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=2")
         .route_id("test-route-6")
@@ -265,12 +270,12 @@ async fn test_timer_to_log() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     // Just verify it doesn't panic — the log producer writes to tracing
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,11 +283,12 @@ async fn test_timer_to_log() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_multiple_routes() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn multiple_routes() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route_a = RouteBuilder::from("timer:routeA?period=50&repeatCount=2")
         .route_id("test-route-7")
@@ -298,15 +304,15 @@ async fn test_multiple_routes() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route_a).await.unwrap();
-    ctx.add_route_definition(route_b).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route_a).await.unwrap();
+    h.add_route(route_b).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint_a = mock.get_endpoint("resultA").unwrap();
-    let endpoint_b = mock.get_endpoint("resultB").unwrap();
+    let endpoint_a = h.mock().get_endpoint("resultA").unwrap();
+    let endpoint_b = h.mock().get_endpoint("resultB").unwrap();
 
     endpoint_a.assert_exchange_count(2).await;
     endpoint_b.assert_exchange_count(3).await;
@@ -347,13 +353,14 @@ fn failing_step(msg: &'static str) -> BoxProcessor {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_dlc_receives_failed_exchange() {
+async fn dlc_receives_failed_exchange() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
-    let mut ctx = CamelContext::new();
-    let mock = MockComponent::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-route-9")
@@ -362,12 +369,12 @@ async fn test_dlc_receives_failed_exchange() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let dlc = mock.get_endpoint("dlc").unwrap();
+    let dlc = h.mock().get_endpoint("dlc").unwrap();
     let exchanges = dlc.get_received_exchanges().await;
     assert!(!exchanges.is_empty());
     assert!(exchanges[0].has_error());
@@ -378,7 +385,7 @@ async fn test_dlc_receives_failed_exchange() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_retry_recovers_before_dlc() {
+async fn retry_recovers_before_dlc() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
     let attempt = Arc::new(AtomicU32::new(0));
@@ -395,10 +402,11 @@ async fn test_retry_recovers_before_dlc() {
         })
     });
 
-    let mut ctx = CamelContext::new();
-    let mock = MockComponent::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let eh = ErrorHandlerConfig::dead_letter_channel("mock:dlc")
         .on_exception(|_| true)
@@ -413,13 +421,13 @@ async fn test_retry_recovers_before_dlc() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(400)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // DLC should be empty — retry succeeded.
-    if let Some(ep) = mock.get_endpoint("dlc") {
+    if let Some(ep) = h.mock().get_endpoint("dlc") {
         assert_eq!(ep.get_received_exchanges().await.len(), 0);
     }
 }
@@ -429,13 +437,14 @@ async fn test_retry_recovers_before_dlc() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_on_exception_handled_by_specific_endpoint() {
+async fn on_exception_handled_by_specific_endpoint() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
-    let mut ctx = CamelContext::new();
-    let mock = MockComponent::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let eh = ErrorHandlerConfig::dead_letter_channel("mock:default-dlc")
         .on_exception(|e| matches!(e, CamelError::ProcessorError(_)))
@@ -449,17 +458,17 @@ async fn test_on_exception_handled_by_specific_endpoint() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Specific handler received it.
-    let specific = mock.get_endpoint("processor-errors").unwrap();
+    let specific = h.mock().get_endpoint("processor-errors").unwrap();
     assert!(!specific.get_received_exchanges().await.is_empty());
 
     // Default DLC did NOT receive it.
-    if let Some(ep) = mock.get_endpoint("default-dlc") {
+    if let Some(ep) = h.mock().get_endpoint("default-dlc") {
         assert_eq!(ep.get_received_exchanges().await.len(), 0);
     }
 }
@@ -469,15 +478,19 @@ async fn test_on_exception_handled_by_specific_endpoint() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_global_error_handler_fallback() {
+async fn global_error_handler_fallback() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
-    let mut ctx = CamelContext::new();
-    let mock = MockComponent::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-route-12")
@@ -485,12 +498,12 @@ async fn test_global_error_handler_fallback() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let dlc = mock.get_endpoint("global-dlc").unwrap();
+    let dlc = h.mock().get_endpoint("global-dlc").unwrap();
     assert!(!dlc.get_received_exchanges().await.is_empty());
 }
 
@@ -499,15 +512,19 @@ async fn test_global_error_handler_fallback() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_per_route_overrides_global() {
+async fn per_route_overrides_global() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
-    let mut ctx = CamelContext::new();
-    let mock = MockComponent::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-route-13")
@@ -516,17 +533,17 @@ async fn test_per_route_overrides_global() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Per-route DLC got it.
-    let route_dlc = mock.get_endpoint("route-dlc").unwrap();
+    let route_dlc = h.mock().get_endpoint("route-dlc").unwrap();
     assert!(!route_dlc.get_received_exchanges().await.is_empty());
 
     // Global DLC got nothing.
-    if let Some(ep) = mock.get_endpoint("global-dlc") {
+    if let Some(ep) = h.mock().get_endpoint("global-dlc") {
         assert_eq!(ep.get_received_exchanges().await.len(), 0);
     }
 }
@@ -536,15 +553,15 @@ async fn test_per_route_overrides_global() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_direct_error_bubbles_to_caller() {
+async fn direct_error_bubbles_to_caller() {
     use camel_api::error_handler::ErrorHandlerConfig;
-    use camel_component_direct::DirectComponent;
 
-    let mut ctx = CamelContext::new();
-    let mock = MockComponent::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(DirectComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
 
     // Subroute: direct:sub → failing processor (no error handler).
     let sub_route = RouteBuilder::from("direct:sub")
@@ -552,7 +569,7 @@ async fn test_direct_error_bubbles_to_caller() {
         .process_fn(failing_step("subroute failure"))
         .build()
         .unwrap();
-    ctx.add_route_definition(sub_route).await.unwrap();
+    h.add_route(sub_route).await.unwrap();
 
     // Calling route: timer → direct:sub → DLC catches the bubble.
     let main_route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
@@ -561,13 +578,18 @@ async fn test_direct_error_bubbles_to_caller() {
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:caller-dlc"))
         .build()
         .unwrap();
-    ctx.add_route_definition(main_route).await.unwrap();
+    h.ctx()
+        .lock()
+        .await
+        .add_route_definition(main_route)
+        .await
+        .unwrap();
 
-    ctx.start().await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(400)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let dlc = mock.get_endpoint("caller-dlc").unwrap();
+    let dlc = h.mock().get_endpoint("caller-dlc").unwrap();
     let exchanges = dlc.get_received_exchanges().await;
     assert!(!exchanges.is_empty());
     assert!(exchanges[0].has_error());
@@ -578,15 +600,15 @@ async fn test_direct_error_bubbles_to_caller() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_direct_error_contained_in_subroute() {
+async fn direct_error_contained_in_subroute() {
     use camel_api::error_handler::ErrorHandlerConfig;
-    use camel_component_direct::DirectComponent;
 
-    let mut ctx = CamelContext::new();
-    let mock = MockComponent::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(DirectComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
 
     // Subroute has its own DLC → absorbs the error.
     let sub_route = RouteBuilder::from("direct:sub2")
@@ -595,7 +617,7 @@ async fn test_direct_error_contained_in_subroute() {
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:sub-dlc"))
         .build()
         .unwrap();
-    ctx.add_route_definition(sub_route).await.unwrap();
+    h.add_route(sub_route).await.unwrap();
 
     // Calling route continues after subroute (error was absorbed).
     let main_route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
@@ -604,18 +626,23 @@ async fn test_direct_error_contained_in_subroute() {
         .to("mock:caller-received")
         .build()
         .unwrap();
-    ctx.add_route_definition(main_route).await.unwrap();
+    h.ctx()
+        .lock()
+        .await
+        .add_route_definition(main_route)
+        .await
+        .unwrap();
 
-    ctx.start().await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(400)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Sub DLC got the error.
-    let sub_dlc = mock.get_endpoint("sub-dlc").unwrap();
+    let sub_dlc = h.mock().get_endpoint("sub-dlc").unwrap();
     assert!(!sub_dlc.get_received_exchanges().await.is_empty());
 
     // Caller continued — mock:caller-received got the exchange (with error marked).
-    let caller = mock.get_endpoint("caller-received").unwrap();
+    let caller = h.mock().get_endpoint("caller-received").unwrap();
     assert!(!caller.get_received_exchanges().await.is_empty());
 }
 
@@ -624,9 +651,11 @@ async fn test_direct_error_contained_in_subroute() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_no_error_handler_logs_and_continues() {
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
+async fn no_error_handler_logs_and_continues() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
         .route_id("test-route-18")
@@ -634,10 +663,10 @@ async fn test_no_error_handler_logs_and_continues() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
     // No panic — test passes if we get here.
 }
 
@@ -659,13 +688,14 @@ async fn test_no_error_handler_logs_and_continues() {
 /// - Result: DLC receives exactly `failure_threshold` exchanges; `mock:sink`
 ///   receives zero.
 #[tokio::test]
-async fn test_circuit_breaker_with_error_handler() {
+async fn circuit_breaker_with_error_handler() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=5")
         .route_id("test-route-19")
@@ -680,19 +710,19 @@ async fn test_circuit_breaker_with_error_handler() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     // Give enough time for all 5 timer ticks to fire (5 × 50ms = 250ms).
     // The circuit opens after 2 failures. The pipeline backs off in a
     // retry loop (1s sleep) rather than breaking, but since open_duration
     // is 60s, no further exchanges are processed during this window.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // DLC received exactly the 2 exchanges that passed through the CB
     // before it opened — each marked with an error.
-    let dlc = mock.get_endpoint("dlc").unwrap();
+    let dlc = h.mock().get_endpoint("dlc").unwrap();
     let dlc_exchanges = dlc.get_received_exchanges().await;
     assert_eq!(
         dlc_exchanges.len(),
@@ -704,7 +734,7 @@ async fn test_circuit_breaker_with_error_handler() {
     }
 
     // mock:sink received nothing — every exchange failed before reaching it.
-    if let Some(sink) = mock.get_endpoint("sink") {
+    if let Some(sink) = h.mock().get_endpoint("sink") {
         assert_eq!(
             sink.get_received_exchanges().await.len(),
             0,
@@ -722,11 +752,12 @@ async fn test_circuit_breaker_with_error_handler() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_split_with_timer_and_mock() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn split_with_timer_and_mock() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     // Timer fires once, body = "line1\nline2\nline3"
     // Split by lines, each fragment goes to mock:per-line
@@ -744,14 +775,14 @@ async fn test_split_with_timer_and_mock() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Each line should have been sent to mock:per-line
-    let per_line = mock.get_endpoint("per-line").unwrap();
+    let per_line = h.mock().get_endpoint("per-line").unwrap();
     let per_line_count = per_line.get_received_exchanges().await.len();
     assert_eq!(
         per_line_count, 3,
@@ -759,7 +790,7 @@ async fn test_split_with_timer_and_mock() {
     );
 
     // The aggregated result should have been sent to mock:final
-    let final_ep = mock.get_endpoint("final").unwrap();
+    let final_ep = h.mock().get_endpoint("final").unwrap();
     let final_exchanges = final_ep.get_received_exchanges().await;
     assert_eq!(
         final_exchanges.len(),
@@ -784,13 +815,14 @@ async fn test_split_with_timer_and_mock() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_split_with_error_handler() {
+async fn split_with_error_handler() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:split-err?period=100&repeatCount=1")
         .route_id("test-route-21")
@@ -806,14 +838,14 @@ async fn test_split_with_error_handler() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // The split error should propagate up to the route's error handler (DLC)
-    let dlc = mock.get_endpoint("dlc").unwrap();
+    let dlc = h.mock().get_endpoint("dlc").unwrap();
     let dlc_count = dlc.get_received_exchanges().await.len();
     assert_eq!(
         dlc_count, 1,
@@ -821,7 +853,7 @@ async fn test_split_with_error_handler() {
     );
 
     // The sink should NOT have received anything (error stops pipeline)
-    let sink = mock.get_endpoint("sink").unwrap();
+    let sink = h.mock().get_endpoint("sink").unwrap();
     let sink_count = sink.get_received_exchanges().await.len();
     assert_eq!(sink_count, 0, "Expected 0 sink exchanges, got {sink_count}");
 }
@@ -835,17 +867,18 @@ async fn test_split_with_error_handler() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_file_consumer_to_mock() {
+async fn file_consumer_to_mock() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_str().unwrap();
 
     std::fs::write(dir.path().join("a.txt"), "alpha").unwrap();
     std::fs::write(dir.path().join("b.txt"), "beta").unwrap();
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(FileComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_component(FileComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from(&format!(
         "file:{dir_path}?noop=true&initialDelay=0&delay=100"
@@ -855,13 +888,13 @@ async fn test_file_consumer_to_mock() {
     .build()
     .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
     assert!(
         exchanges.len() >= 2,
@@ -880,13 +913,15 @@ async fn test_file_consumer_to_mock() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_timer_to_file_producer() {
+async fn timer_to_file_producer() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_str().unwrap();
 
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(FileComponent::new());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_component(FileComponent::new())
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:write-test?period=50&repeatCount=2")
         .route_id("test-route-22")
@@ -895,11 +930,11 @@ async fn test_timer_to_file_producer() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     assert!(
         dir.path().join("output.txt").exists(),
@@ -912,7 +947,7 @@ async fn test_timer_to_file_producer() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_file_to_file_pipeline() {
+async fn file_to_file_pipeline() {
     let input_dir = tempfile::tempdir().unwrap();
     let output_dir = tempfile::tempdir().unwrap();
     let input_path = input_dir.path().to_str().unwrap();
@@ -920,8 +955,10 @@ async fn test_file_to_file_pipeline() {
 
     std::fs::write(input_dir.path().join("source.txt"), "hello world").unwrap();
 
-    let mut ctx = CamelContext::new();
-    ctx.register_component(FileComponent::new());
+    let h = CamelTestContext::builder()
+        .with_component(FileComponent::new())
+        .build()
+        .await;
 
     let route = RouteBuilder::from(&format!(
         "file:{input_path}?noop=true&initialDelay=0&delay=100"
@@ -931,11 +968,11 @@ async fn test_file_to_file_pipeline() {
     .build()
     .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     assert!(
         output_dir.path().join("source.txt").exists(),
@@ -954,7 +991,7 @@ async fn test_file_to_file_pipeline() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_component_registration_and_endpoint_creation() {
+async fn http_component_registration_and_endpoint_creation() {
     use camel_component::Component;
 
     let component = HttpComponent::new();
@@ -974,7 +1011,7 @@ async fn test_http_component_registration_and_endpoint_creation() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_query_params_forwarding_config() {
+async fn http_query_params_forwarding_config() {
     use camel_component_http::HttpEndpointConfig;
     use camel_endpoint::UriConfig;
 
@@ -1020,7 +1057,7 @@ async fn test_http_query_params_forwarding_config() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_get_e2e() {
+async fn http_get_e2e() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1039,11 +1076,12 @@ async fn test_http_get_e2e() {
         server.address().port()
     );
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-route-23")
@@ -1052,13 +1090,13 @@ async fn test_http_get_e2e() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Verify mock captured the exchange with response body
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -1085,7 +1123,7 @@ async fn test_http_get_e2e() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_post_with_body_e2e() {
+async fn http_post_with_body_e2e() {
     use wiremock::matchers::{body_string, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1103,11 +1141,12 @@ async fn test_http_post_with_body_e2e() {
         server.address().port()
     );
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-route-24")
@@ -1117,12 +1156,12 @@ async fn test_http_post_with_body_e2e() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -1148,7 +1187,7 @@ async fn test_http_post_with_body_e2e() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_response_headers_mapped_e2e() {
+async fn http_response_headers_mapped_e2e() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1170,11 +1209,12 @@ async fn test_http_response_headers_mapped_e2e() {
         server.address().port()
     );
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-route-25")
@@ -1183,12 +1223,12 @@ async fn test_http_response_headers_mapped_e2e() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -1210,7 +1250,7 @@ async fn test_http_response_headers_mapped_e2e() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_error_handling_e2e() {
+async fn http_error_handling_e2e() {
     use camel_api::error_handler::ErrorHandlerConfig;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1229,11 +1269,12 @@ async fn test_http_error_handling_e2e() {
         server.address().port()
     );
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-route-26")
@@ -1243,13 +1284,13 @@ async fn test_http_error_handling_e2e() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // The exchange should have been routed to the DLC, not mock:result
-    let dlc = mock.get_endpoint("dlc").unwrap();
+    let dlc = h.mock().get_endpoint("dlc").unwrap();
     let dlc_exchanges = dlc.get_received_exchanges().await;
     assert_eq!(
         dlc_exchanges.len(),
@@ -1262,7 +1303,7 @@ async fn test_http_error_handling_e2e() {
     );
 
     // mock:result should NOT have received anything
-    if let Some(result) = mock.get_endpoint("result") {
+    if let Some(result) = h.mock().get_endpoint("result") {
         assert_eq!(
             result.get_received_exchanges().await.len(),
             0,
@@ -1281,11 +1322,12 @@ async fn test_http_error_handling_e2e() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_aggregator_collect_all() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn aggregator_collect_all() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let counter_clone = std::sync::Arc::clone(&counter);
@@ -1313,14 +1355,14 @@ async fn test_aggregator_collect_all() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // 9 exchanges total: 6 pending (Body::Empty) + 3 completed (Body::Json).
     // The aggregator emits all exchanges; pending ones have Body::Empty.
-    let endpoint = mock.get_endpoint("aggregated").unwrap();
+    let endpoint = h.mock().get_endpoint("aggregated").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
 
     let completed: Vec<_> = exchanges
@@ -1350,11 +1392,12 @@ async fn test_aggregator_collect_all() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_aggregator_custom_strategy() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn aggregator_custom_strategy() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let counter_clone = std::sync::Arc::clone(&counter);
@@ -1390,12 +1433,12 @@ async fn test_aggregator_custom_strategy() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("custom-agg").unwrap();
+    let endpoint = h.mock().get_endpoint("custom-agg").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
 
     // 4 exchanges total: 3 pending (Body::Empty) + 1 completed (Body::Text "0+1+2+3").
@@ -1419,11 +1462,12 @@ async fn test_aggregator_custom_strategy() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_aggregator_scatter_gather() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn aggregator_scatter_gather() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     // Timer fires 3 times with the same timer name "scatter".
     // The aggregator groups by CamelTimerName (all 3 share key "scatter")
@@ -1439,13 +1483,13 @@ async fn test_aggregator_scatter_gather() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // 3 exchanges: 2 pending + 1 completed (Body::Json array of 3).
-    let endpoint = mock.get_endpoint("scatter-gather").unwrap();
+    let endpoint = h.mock().get_endpoint("scatter-gather").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
 
     let completed: Vec<_> = exchanges
@@ -1469,11 +1513,12 @@ async fn test_aggregator_scatter_gather() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_route_set_body_static() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn route_set_body_static() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:set-body-static?period=50&repeatCount=1")
         .route_id("test-route-30")
@@ -1482,13 +1527,13 @@ async fn test_route_set_body_static() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("set-body-static").unwrap();
+    let endpoint = h.mock().get_endpoint("set-body-static").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -1504,13 +1549,14 @@ async fn test_route_set_body_static() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_route_set_body_fn() {
+async fn route_set_body_fn() {
     use camel_api::body::Body;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:set-body-fn?period=50&repeatCount=1")
         .route_id("test-route-31")
@@ -1524,13 +1570,13 @@ async fn test_route_set_body_fn() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("set-body-fn").unwrap();
+    let endpoint = h.mock().get_endpoint("set-body-fn").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -1546,11 +1592,12 @@ async fn test_route_set_body_fn() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_route_set_header_fn() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn route_set_header_fn() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:set-header-fn?period=50&repeatCount=1")
         .route_id("test-route-32")
@@ -1563,13 +1610,13 @@ async fn test_route_set_header_fn() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("set-header-fn").unwrap();
+    let endpoint = h.mock().get_endpoint("set-header-fn").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -1585,7 +1632,7 @@ async fn test_route_set_header_fn() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_query_params_forwarded_e2e() {
+async fn http_query_params_forwarded_e2e() {
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1605,11 +1652,12 @@ async fn test_http_query_params_forwarded_e2e() {
         server.address().port()
     );
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-route-33")
@@ -1618,12 +1666,12 @@ async fn test_http_query_params_forwarded_e2e() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -1651,13 +1699,14 @@ async fn test_http_query_params_forwarded_e2e() {
 ///     .end_filter()
 ///     .to("mock:outer")     ← only active=false exchanges reach here
 #[tokio::test]
-async fn test_stop_inside_filter_prevents_outer_pipeline() {
+async fn stop_inside_filter_prevents_outer_pipeline() {
     use std::time::Duration;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let counter_clone = std::sync::Arc::clone(&counter);
@@ -1681,13 +1730,13 @@ async fn test_stop_inside_filter_prevents_outer_pipeline() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(Duration::from_millis(400)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let inner = mock.get_endpoint("inner").unwrap();
-    let outer = mock.get_endpoint("outer").unwrap();
+    let inner = h.mock().get_endpoint("inner").unwrap();
+    let outer = h.mock().get_endpoint("outer").unwrap();
 
     inner.assert_exchange_count(2).await; // active=true: exchanges 0 and 2
     outer.assert_exchange_count(2).await; // active=false: exchanges 1 and 3 (stopped exchanges never reach outer)
@@ -1704,11 +1753,12 @@ async fn test_stop_inside_filter_prevents_outer_pipeline() {
 // of the exchange to each endpoint defined in the multicast scope.
 
 #[tokio::test]
-async fn test_multicast_sends_to_multiple_endpoints() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn multicast_sends_to_multiple_endpoints() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     // Multicast: timer → [mock:a, mock:b, mock:c] → mock:final
     // Each endpoint in the multicast should receive the exchange.
@@ -1723,17 +1773,17 @@ async fn test_multicast_sends_to_multiple_endpoints() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Each multicast endpoint should have received 1 exchange
-    let endpoint_a = mock.get_endpoint("a").unwrap();
-    let endpoint_b = mock.get_endpoint("b").unwrap();
-    let endpoint_c = mock.get_endpoint("c").unwrap();
-    let endpoint_final = mock.get_endpoint("final").unwrap();
+    let endpoint_a = h.mock().get_endpoint("a").unwrap();
+    let endpoint_b = h.mock().get_endpoint("b").unwrap();
+    let endpoint_c = h.mock().get_endpoint("c").unwrap();
+    let endpoint_final = h.mock().get_endpoint("final").unwrap();
 
     endpoint_a.assert_exchange_count(1).await;
     endpoint_b.assert_exchange_count(1).await;
@@ -1748,13 +1798,14 @@ async fn test_multicast_sends_to_multiple_endpoints() {
 // and CAMEL_MULTICAST_COMPLETE properties on each cloned exchange.
 
 #[tokio::test]
-async fn test_multicast_metadata_properties() {
+async fn multicast_metadata_properties() {
     use camel_processor::CAMEL_MULTICAST_INDEX;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     // Multicast with 3 endpoints - each should receive exchange with correct index
     let route = RouteBuilder::from("timer:multicast-meta?period=50&repeatCount=1")
@@ -1767,24 +1818,27 @@ async fn test_multicast_metadata_properties() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Verify that each endpoint received an exchange with the correct index property
-    let exchanges_a = mock
+    let exchanges_a = h
+        .mock()
         .get_endpoint("meta-a")
         .unwrap()
         .get_received_exchanges()
         .await;
-    let exchanges_b = mock
+    let exchanges_b = h
+        .mock()
         .get_endpoint("meta-b")
         .unwrap()
         .get_received_exchanges()
         .await;
-    let exchanges_c = mock
+    let exchanges_c = h
+        .mock()
         .get_endpoint("meta-c")
         .unwrap()
         .get_received_exchanges()
@@ -1818,14 +1872,15 @@ async fn test_multicast_metadata_properties() {
 // a JSON array body containing the results from all endpoints.
 
 #[tokio::test]
-async fn test_multicast_parallel_collect_all() {
+async fn multicast_parallel_collect_all() {
     use camel_api::body::Body;
     use camel_api::multicast::MulticastStrategy;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:multicast-parallel?period=50&repeatCount=1")
         .route_id("test-route-37")
@@ -1839,16 +1894,16 @@ async fn test_multicast_parallel_collect_all() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Each parallel endpoint received one exchange
-    let endpoint_a = mock.get_endpoint("p-a").unwrap();
-    let endpoint_b = mock.get_endpoint("p-b").unwrap();
-    let endpoint_result = mock.get_endpoint("p-result").unwrap();
+    let endpoint_a = h.mock().get_endpoint("p-a").unwrap();
+    let endpoint_b = h.mock().get_endpoint("p-b").unwrap();
+    let endpoint_result = h.mock().get_endpoint("p-result").unwrap();
 
     endpoint_a.assert_exchange_count(1).await;
     endpoint_b.assert_exchange_count(1).await;
@@ -1869,11 +1924,12 @@ async fn test_multicast_parallel_collect_all() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_concurrent_pipeline() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+async fn http_concurrent_pipeline() {
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("http://0.0.0.0:18080/concurrent-test")
         .route_id("test-route-38")
@@ -1885,8 +1941,8 @@ async fn test_http_concurrent_pipeline() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     // Give server time to start
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1912,7 +1968,7 @@ async fn test_http_concurrent_pipeline() {
     }
     let elapsed = start.elapsed();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // With concurrent pipeline: ~100ms (all 5 run in parallel).
     // With sequential pipeline: ~500ms (one at a time).
@@ -1924,7 +1980,7 @@ async fn test_http_concurrent_pipeline() {
         elapsed
     );
 
-    let endpoint = mock.get_endpoint("concurrent-result").unwrap();
+    let endpoint = h.mock().get_endpoint("concurrent-result").unwrap();
     endpoint.assert_exchange_count(5).await;
 }
 
@@ -1933,11 +1989,12 @@ async fn test_http_concurrent_pipeline() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_sequential_override() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+async fn http_sequential_override() {
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     // Same slow processor, but forced sequential via .sequential()
     let route = RouteBuilder::from("http://0.0.0.0:18081/sequential-test")
@@ -1951,8 +2008,8 @@ async fn test_http_sequential_override() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -1977,7 +2034,7 @@ async fn test_http_sequential_override() {
     }
     let elapsed = start.elapsed();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Sequential: ~300ms (3 * 100ms). Must be clearly above concurrent threshold.
     assert!(
@@ -1987,7 +2044,7 @@ async fn test_http_sequential_override() {
         elapsed
     );
 
-    let endpoint = mock.get_endpoint("sequential-result").unwrap();
+    let endpoint = h.mock().get_endpoint("sequential-result").unwrap();
     endpoint.assert_exchange_count(3).await;
 }
 
@@ -1996,14 +2053,15 @@ async fn test_http_sequential_override() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_concurrent_with_semaphore_limit() {
+async fn http_concurrent_with_semaphore_limit() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     let peak = Arc::new(AtomicUsize::new(0));
     let current = Arc::new(AtomicUsize::new(0));
@@ -2030,8 +2088,8 @@ async fn test_http_concurrent_with_semaphore_limit() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -2054,7 +2112,7 @@ async fn test_http_concurrent_with_semaphore_limit() {
         assert_eq!(resp.status(), 200);
     }
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Peak concurrency should be exactly 2 (semaphore limit)
     let peak_val = peak.load(Ordering::SeqCst);
@@ -2064,7 +2122,7 @@ async fn test_http_concurrent_with_semaphore_limit() {
         peak_val
     );
 
-    let endpoint = mock.get_endpoint("semaphore-result").unwrap();
+    let endpoint = h.mock().get_endpoint("semaphore-result").unwrap();
     endpoint.assert_exchange_count(6).await;
 }
 
@@ -2073,13 +2131,14 @@ async fn test_http_concurrent_with_semaphore_limit() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_concurrent_with_circuit_breaker() {
+async fn http_concurrent_with_circuit_breaker() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     // Use short open_duration (1s) so circuit closes quickly and requests can complete
     let route = RouteBuilder::from("http://0.0.0.0:18083/cb-test")
@@ -2095,8 +2154,8 @@ async fn test_http_concurrent_with_circuit_breaker() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     // Give server time to start
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2127,12 +2186,12 @@ async fn test_http_concurrent_with_circuit_breaker() {
         );
     }
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Due to race conditions in concurrent mode, the circuit breaker
     // may see 2-5 failures before opening (multiple requests may be
     // in-flight simultaneously when threshold is reached)
-    let dlc = mock.get_endpoint("dlc").unwrap();
+    let dlc = h.mock().get_endpoint("dlc").unwrap();
     let dlc_exchanges = dlc.get_received_exchanges().await;
     assert!(
         dlc_exchanges.len() >= 2,
@@ -2151,7 +2210,7 @@ async fn test_http_concurrent_with_circuit_breaker() {
     }
 
     // Mock sink receives 0 exchanges (all fail before reaching it)
-    if let Some(sink) = mock.get_endpoint("sink") {
+    if let Some(sink) = h.mock().get_endpoint("sink") {
         assert_eq!(
             sink.get_received_exchanges().await.len(),
             0,
@@ -2165,11 +2224,12 @@ async fn test_http_concurrent_with_circuit_breaker() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_concurrent_shutdown_drains_inflight() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+async fn http_concurrent_shutdown_drains_inflight() {
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("http://0.0.0.0:18084/shutdown-test")
         .route_id("test-route-42")
@@ -2181,8 +2241,8 @@ async fn test_http_concurrent_shutdown_drains_inflight() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     // Give server time to start
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2205,7 +2265,7 @@ async fn test_http_concurrent_shutdown_drains_inflight() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Stop should wait for in-flight exchanges to drain (default 30s timeout)
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // All 3 requests should complete
     for handle in handles {
@@ -2214,7 +2274,7 @@ async fn test_http_concurrent_shutdown_drains_inflight() {
     }
 
     // Mock should have received all 3 exchanges (drain completed)
-    let endpoint = mock.get_endpoint("shutdown-result").unwrap();
+    let endpoint = h.mock().get_endpoint("shutdown-result").unwrap();
     endpoint.assert_exchange_count(3).await;
 }
 
@@ -2223,11 +2283,12 @@ async fn test_http_concurrent_shutdown_drains_inflight() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_http_concurrent_error_propagation() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(HttpComponent::new());
-    ctx.register_component(mock.clone());
+async fn http_concurrent_error_propagation() {
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("http://0.0.0.0:18085/error-test")
         .route_id("test-route-43")
@@ -2250,8 +2311,8 @@ async fn test_http_concurrent_error_propagation() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     // Give server time to start
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2296,10 +2357,10 @@ async fn test_http_concurrent_error_propagation() {
         }
     }
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Mock sink receives exactly 2 exchanges (the successful ones)
-    let endpoint = mock.get_endpoint("error-result").unwrap();
+    let endpoint = h.mock().get_endpoint("error-result").unwrap();
     endpoint.assert_exchange_count(2).await;
 }
 
@@ -2309,11 +2370,12 @@ async fn test_http_concurrent_error_propagation() {
 
 // Test A: when clause routes matching exchange
 #[tokio::test]
-async fn test_choice_when_routes_matching_exchange() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn choice_when_routes_matching_exchange() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     // 4 ticks: counters 1,2,3,4. Even → mock:even, odd → mock:odd.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
@@ -2341,24 +2403,25 @@ async fn test_choice_when_routes_matching_exchange() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let even = mock.get_endpoint("even").unwrap();
-    let odd = mock.get_endpoint("odd").unwrap();
+    let even = h.mock().get_endpoint("even").unwrap();
+    let odd = h.mock().get_endpoint("odd").unwrap();
     even.assert_exchange_count(2).await; // counters 2, 4
     odd.assert_exchange_count(2).await; // counters 1, 3
 }
 
 // Test B: otherwise fires when no when matches
 #[tokio::test]
-async fn test_choice_otherwise_fires_when_no_when_matches() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn choice_otherwise_fires_when_no_when_matches() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     // Counter is always set — when predicate never true (impossible header).
     // All 3 ticks go to mock:fallback via otherwise.
@@ -2375,29 +2438,30 @@ async fn test_choice_otherwise_fires_when_no_when_matches() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let fallback = mock.get_endpoint("fallback").unwrap();
+    let fallback = h.mock().get_endpoint("fallback").unwrap();
     fallback.assert_exchange_count(3).await;
 
     // The "never" endpoint must not have received anything.
     // Note: MockComponent registers endpoints during route resolution, so
     // get_endpoint("never") returns Some, but with 0 exchanges.
-    if let Some(never) = mock.get_endpoint("never") {
+    if let Some(never) = h.mock().get_endpoint("never") {
         never.assert_exchange_count(0).await;
     }
 }
 
 // Test C: no match and no otherwise → exchange continues past choice
 #[tokio::test]
-async fn test_choice_no_match_no_otherwise_continues() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn choice_no_match_no_otherwise_continues() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     // when predicate never true. No otherwise. Exchange continues to mock:after.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
@@ -2411,27 +2475,28 @@ async fn test_choice_no_match_no_otherwise_continues() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let after = mock.get_endpoint("after").unwrap();
+    let after = h.mock().get_endpoint("after").unwrap();
     after.assert_exchange_count(3).await;
 
     // Verify the "never" endpoint (registered during route resolution) received nothing.
-    if let Some(never) = mock.get_endpoint("never") {
+    if let Some(never) = h.mock().get_endpoint("never") {
         never.assert_exchange_count(0).await;
     }
 }
 
 // Test D: short-circuit — only first matching when fires
 #[tokio::test]
-async fn test_choice_short_circuits_first_match() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn choice_short_circuits_first_match() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     // Both whens always match (|_| true). First should always win.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=4")
@@ -2447,18 +2512,18 @@ async fn test_choice_short_circuits_first_match() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let first = mock.get_endpoint("first").unwrap();
+    let first = h.mock().get_endpoint("first").unwrap();
     first.assert_exchange_count(4).await; // all 4 go to first
 
     // "second" must not have received anything.
     // Note: MockComponent registers endpoints during route resolution, so
     // get_endpoint("second") returns Some, but with 0 exchanges.
-    if let Some(second) = mock.get_endpoint("second") {
+    if let Some(second) = h.mock().get_endpoint("second") {
         second.assert_exchange_count(0).await;
     }
 }
@@ -2468,17 +2533,18 @@ async fn test_choice_short_circuits_first_match() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_xml_body_pipeline() {
+async fn xml_body_pipeline() {
     use camel_api::body::Body;
     use camel_api::{Exchange, Message};
     use camel_component_direct::DirectComponent;
     use tower::util::ServiceExt;
 
-    let mock = MockComponent::new();
     let direct = DirectComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(direct);
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_component(direct)
+        .with_mock()
+        .build()
+        .await;
 
     // Route: direct:xml-in → convert_body_to(Text) → mock:xml-out
     let route = RouteBuilder::from("direct:xml-in")
@@ -2488,15 +2554,16 @@ async fn test_xml_body_pipeline() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     // Give the route a moment to start
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Create a producer to send an exchange with XML body
-    let producer_ctx = ctx.producer_context();
     let producer = {
+        let ctx = h.ctx().lock().await;
+        let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();
         let endpoint = component.create_endpoint("direct:xml-in").unwrap();
@@ -2510,10 +2577,10 @@ async fn test_xml_body_pipeline() {
 
     // Wait for the exchange to be processed
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // Assert mock received 1 exchange
-    let endpoint = mock.get_endpoint("xml-out").unwrap();
+    let endpoint = h.mock().get_endpoint("xml-out").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     // Assert the received body is Body::Text (since we converted Xml→Text)
@@ -2547,13 +2614,14 @@ async fn test_xml_body_pipeline() {
 ///
 /// Timer body format: `"timer://<name> tick #<n>"` (e.g. `"timer://tick tick #1"`).
 #[tokio::test(flavor = "multi_thread")]
-async fn test_mock_new_assertion_api() {
+async fn mock_new_assertion_api() {
     use std::time::Duration;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
         .route_id("test-mock-new-assertion-api")
@@ -2561,10 +2629,10 @@ async fn test_mock_new_assertion_api() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    let ep = mock.get_endpoint("assert-api-result").unwrap();
+    let ep = h.mock().get_endpoint("assert-api-result").unwrap();
 
     // Wait for exactly 3 exchanges — no sleep needed.
     ep.await_exchanges(3, Duration::from_millis(2000)).await;
@@ -2574,5 +2642,5 @@ async fn test_mock_new_assertion_api() {
     ep.exchange(1).assert_body_text("timer://tick tick #2");
     ep.exchange(2).assert_body_text("timer://tick tick #3");
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 }

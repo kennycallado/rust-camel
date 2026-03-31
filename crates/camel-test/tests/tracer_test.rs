@@ -1,18 +1,16 @@
 use camel_api::Value;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_mock::MockComponent;
-use camel_component_timer::TimerComponent;
-use camel_core::CamelContext;
+use camel_test::CamelTestContext;
 use std::time::Duration;
 
 #[tokio::test]
-async fn test_tracer_enabled_spans_emitted() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.set_tracing(true);
-
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
+async fn tracer_enabled_spans_emitted() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
+    h.ctx().lock().await.set_tracing(true);
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-trace-route")
@@ -21,25 +19,25 @@ async fn test_tracer_enabled_spans_emitted() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 }
 
 #[tokio::test]
-async fn test_tracer_disabled_zero_overhead() {
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
+async fn tracer_disabled_zero_overhead() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
     // Tracing disabled by default
-
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(mock.clone());
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-no-trace")
@@ -47,19 +45,19 @@ async fn test_tracer_disabled_zero_overhead() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 }
 
 #[tokio::test]
-async fn test_tracer_file_output_invalid_path_returns_error() {
+async fn tracer_file_output_invalid_path_returns_error() {
     use camel_config::config::{CamelConfig, ComponentsConfig, ObservabilityConfig};
     use camel_core::{
         DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,

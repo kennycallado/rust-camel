@@ -338,7 +338,7 @@ mod tests {
             .expect("seed rows");
     }
 
-    fn test_config() -> SqlEndpointConfig {
+    fn config() -> SqlEndpointConfig {
         let mut c =
             SqlEndpointConfig::from_uri("sql:select * from t?db_url=postgres://localhost/test")
                 .unwrap();
@@ -347,13 +347,13 @@ mod tests {
     }
 
     #[test]
-    fn test_consumer_concurrency_model() {
-        let c = SqlConsumer::new(test_config(), Arc::new(OnceCell::new()));
+    fn consumer_concurrency_model() {
+        let c = SqlConsumer::new(config(), Arc::new(OnceCell::new()));
         assert_eq!(c.concurrency_model(), ConcurrencyModel::Sequential);
     }
 
     #[test]
-    fn test_consumer_stores_config() {
+    fn consumer_stores_config() {
         let mut config = SqlEndpointConfig::from_uri(
             "sql:select * from t?db_url=postgres://localhost/test&delay=2000&onConsume=update t set done=true"
         ).unwrap();
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_poll_database_runs_on_consume_for_successful_rows() {
+    async fn poll_database_runs_on_consume_for_successful_rows() {
         let pool = sqlite_pool().await;
         seed_consumer_table(&pool).await;
 
@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_poll_database_runs_on_consume_failed_when_downstream_fails() {
+    async fn poll_database_runs_on_consume_failed_when_downstream_fails() {
         let pool = sqlite_pool().await;
         seed_consumer_table(&pool).await;
 
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_poll_database_breaks_batch_on_consume_fail() {
+    async fn poll_database_breaks_batch_on_consume_fail() {
         let pool = sqlite_pool().await;
         seed_consumer_table(&pool).await;
 

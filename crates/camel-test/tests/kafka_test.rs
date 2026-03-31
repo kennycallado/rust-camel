@@ -12,9 +12,7 @@ mod support;
 
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_kafka::{KafkaComponent, KafkaEndpointConfig, KafkaProducer};
-use camel_component_mock::MockComponent;
-use camel_component_timer::TimerComponent;
-use camel_core::CamelContext;
+use camel_test::CamelTestContext;
 use support::wait::wait_until;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::kafka::apache;
@@ -86,14 +84,15 @@ async fn wait_for_kafka_ready(brokers: &str) {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_kafka_producer_sends_without_error() {
+async fn kafka_producer_sends_without_error() {
     let (_container, brokers) = start_kafka().await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(KafkaComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(KafkaComponent::new())
+        .build()
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(camel_api::Value::String("hello-kafka".to_string()))
@@ -103,10 +102,10 @@ async fn test_kafka_producer_sends_without_error() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     wait_until(
         "kafka producer route delivery",
         std::time::Duration::from_secs(5),
@@ -119,10 +118,10 @@ async fn test_kafka_producer_sends_without_error() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     // No errors expected
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Producer route had errors: {:?}", errors[0].error);
@@ -138,14 +137,15 @@ async fn test_kafka_producer_sends_without_error() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_kafka_consumer_receives_message() {
+async fn kafka_consumer_receives_message() {
     let (_container, brokers) = start_kafka().await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(KafkaComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(KafkaComponent::new())
+        .build()
+        .await;
 
     // Consumer route: kafka:test-consume → mock:consumed
     let consumer_route = RouteBuilder::from(&format!(
@@ -166,11 +166,11 @@ async fn test_kafka_consumer_receives_message() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
-    ctx.add_route_definition(producer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
+    h.add_route(producer_route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("consumed").unwrap();
+    let endpoint = h.mock().get_endpoint("consumed").unwrap();
     wait_until(
         "kafka consumer receives message",
         std::time::Duration::from_secs(20),
@@ -183,7 +183,7 @@ async fn test_kafka_consumer_receives_message() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     let exchanges = endpoint.get_received_exchanges().await;
     assert!(
@@ -197,14 +197,15 @@ async fn test_kafka_consumer_receives_message() {
 // ===========================================================================
 
 #[tokio::test]
-async fn test_kafka_consumer_sets_headers() {
+async fn kafka_consumer_sets_headers() {
     let (_container, brokers) = start_kafka().await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(KafkaComponent::new());
-    ctx.register_component(mock.clone());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(KafkaComponent::new())
+        .build()
+        .await;
 
     let consumer_route = RouteBuilder::from(&format!(
         "kafka:test-headers?brokers={brokers}&groupId=hdr-group&autoOffsetReset=earliest"
@@ -222,11 +223,11 @@ async fn test_kafka_consumer_sets_headers() {
             .build()
             .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
-    ctx.add_route_definition(producer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
+    h.add_route(producer_route).await.unwrap();
+    h.start().await;
 
-    let endpoint = mock.get_endpoint("headers").unwrap();
+    let endpoint = h.mock().get_endpoint("headers").unwrap();
     wait_until(
         "kafka headers consumer receives message",
         std::time::Duration::from_secs(20),
@@ -239,7 +240,7 @@ async fn test_kafka_consumer_sets_headers() {
     .await
     .unwrap();
 
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     let exchanges = endpoint.get_received_exchanges().await;
     assert!(

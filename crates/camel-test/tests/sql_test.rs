@@ -17,8 +17,7 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_mock::MockComponent;
 use camel_component_sql::SqlComponent;
-use camel_component_timer::TimerComponent;
-use camel_core::CamelContext;
+use camel_test::CamelTestContext;
 use sqlx::AnyPool;
 use support::wait::wait_until;
 use testcontainers::ContainerAsync;
@@ -84,7 +83,7 @@ async fn setup_test_table(pool: &AnyPool, table_name: &str) {
 }
 
 #[tokio::test]
-async fn test_producer_select() {
+async fn producer_select() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -95,12 +94,13 @@ async fn test_producer_select() {
         .await
         .expect("Failed to insert test data");
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .to(format!(
@@ -112,20 +112,20 @@ async fn test_producer_select() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    wait_for_mock_exchanges(&mock, "result", 1).await;
-    ctx.stop().await.unwrap();
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -150,19 +150,20 @@ async fn test_producer_select() {
 }
 
 #[tokio::test]
-async fn test_producer_insert() {
+async fn producer_insert() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_insert").await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("name", Value::String("Charlie".into()))
@@ -176,20 +177,20 @@ async fn test_producer_insert() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    wait_for_mock_exchanges(&mock, "result", 1).await;
-    ctx.stop().await.unwrap();
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -208,7 +209,7 @@ async fn test_producer_insert() {
 }
 
 #[tokio::test]
-async fn test_producer_update() {
+async fn producer_update() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -219,12 +220,13 @@ async fn test_producer_update() {
         .await
         .expect("Failed to insert test data");
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("new_value", Value::Number(999.into()))
@@ -238,20 +240,20 @@ async fn test_producer_update() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    wait_for_mock_exchanges(&mock, "result", 1).await;
-    ctx.stop().await.unwrap();
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -270,7 +272,7 @@ async fn test_producer_update() {
 }
 
 #[tokio::test]
-async fn test_producer_delete() {
+async fn producer_delete() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -281,12 +283,13 @@ async fn test_producer_delete() {
         .await
         .expect("Failed to insert test data");
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("target_name", Value::String("ToDelete".into()))
@@ -299,20 +302,20 @@ async fn test_producer_delete() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    wait_for_mock_exchanges(&mock, "result", 1).await;
-    ctx.stop().await.unwrap();
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -331,7 +334,7 @@ async fn test_producer_delete() {
 }
 
 #[tokio::test]
-async fn test_producer_select_one() {
+async fn producer_select_one() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -342,12 +345,13 @@ async fn test_producer_select_one() {
         .await
         .expect("Failed to insert test data");
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .to(format!(
@@ -359,20 +363,20 @@ async fn test_producer_select_one() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    wait_for_mock_exchanges(&mock, "result", 1).await;
-    ctx.stop().await.unwrap();
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -388,19 +392,20 @@ async fn test_producer_select_one() {
 }
 
 #[tokio::test]
-async fn test_producer_batch() {
+async fn producer_batch() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_batch").await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let batch_body = serde_json::json!([["Alice", 100], ["Bob", 200], ["Charlie", 300]]);
 
@@ -415,20 +420,20 @@ async fn test_producer_batch() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    wait_for_mock_exchanges(&mock, "result", 1).await;
-    ctx.stop().await.unwrap();
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -447,7 +452,7 @@ async fn test_producer_batch() {
 }
 
 #[tokio::test]
-async fn test_producer_noop() {
+async fn producer_noop() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -458,12 +463,13 @@ async fn test_producer_noop() {
         .await
         .expect("Failed to insert test data");
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(TimerComponent::new());
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(Body::Text("OriginalBody".into()))
@@ -476,20 +482,20 @@ async fn test_producer_noop() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(route).await.unwrap();
+    h.start().await;
 
-    wait_for_mock_exchanges(&mock, "result", 1).await;
-    ctx.stop().await.unwrap();
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
         }
     }
 
-    let endpoint = mock.get_endpoint("result").unwrap();
+    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(1).await;
 
     let exchanges = endpoint.get_received_exchanges().await;
@@ -515,7 +521,7 @@ async fn test_producer_noop() {
 }
 
 #[tokio::test]
-async fn test_consumer_polling() {
+async fn consumer_polling() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -526,11 +532,13 @@ async fn test_consumer_polling() {
         .await
         .expect("Failed to insert test data");
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_consumer WHERE name = 'ConsumerRow'?db_url={}&delay=100&initialDelay=50",
@@ -542,20 +550,20 @@ async fn test_consumer_polling() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
+    h.start().await;
 
-    wait_for_mock_exchanges(&mock, "consumed", 1).await;
-    ctx.stop().await.unwrap();
+    wait_for_mock_exchanges(h.mock(), "consumed", 1).await;
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
         }
     }
 
-    let endpoint = mock.get_endpoint("consumed").unwrap();
+    let endpoint = h.mock().get_endpoint("consumed").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
 
     assert!(
@@ -576,7 +584,7 @@ async fn test_consumer_polling() {
 }
 
 #[tokio::test]
-async fn test_consumer_on_consume() {
+async fn consumer_on_consume() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -592,11 +600,13 @@ async fn test_consumer_on_consume() {
         .await
         .expect("Failed to insert test data");
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_on_consume?db_url={}&delay=100&initialDelay=50&onConsume=INSERT INTO processed_rows (id, name) VALUES (:#id, :#name)",
@@ -608,13 +618,13 @@ async fn test_consumer_on_consume() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
+    h.start().await;
 
-    wait_for_mock_exchanges(&mock, "consumed", 1).await;
-    ctx.stop().await.unwrap();
+    wait_for_mock_exchanges(h.mock(), "consumed", 1).await;
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
@@ -633,18 +643,20 @@ async fn test_consumer_on_consume() {
 }
 
 #[tokio::test]
-async fn test_consumer_empty_result() {
+async fn consumer_empty_result() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_empty").await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_empty?db_url={}&delay=100&initialDelay=50&routeEmptyResultSet=false",
@@ -656,20 +668,20 @@ async fn test_consumer_empty_result() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
         }
     }
 
-    let endpoint = mock.get_endpoint("consumed").unwrap();
+    let endpoint = h.mock().get_endpoint("consumed").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
 
     assert!(
@@ -679,7 +691,7 @@ async fn test_consumer_empty_result() {
 }
 
 #[tokio::test]
-async fn test_consumer_on_consume_failed() {
+async fn consumer_on_consume_failed() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
@@ -697,8 +709,12 @@ async fn test_consumer_on_consume_failed() {
         .await
         .expect("Failed to create failed_rows table");
 
-    let mut ctx = CamelContext::new();
-    ctx.register_component(SqlComponent::new());
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_on_consume_failed_src?db_url={}&delay=100&initialDelay=50\
@@ -716,11 +732,11 @@ async fn test_consumer_on_consume_failed() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
+    h.start().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    ctx.stop().await.unwrap();
+    h.stop().await;
 
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM failed_rows")
         .fetch_one(&pool)
@@ -734,18 +750,20 @@ async fn test_consumer_on_consume_failed() {
 }
 
 #[tokio::test]
-async fn test_consumer_empty_result_routed() {
+async fn consumer_empty_result_routed() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
     let pool = create_pool(&conn_str).await;
 
     setup_test_table(&pool, "test_empty_routed").await;
 
-    let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
-    ctx.register_component(SqlComponent::new());
-    ctx.register_component(mock.clone());
-    ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_empty_routed?db_url={}&delay=100&initialDelay=50&routeEmptyResultSet=true&useIterator=false",
@@ -757,20 +775,20 @@ async fn test_consumer_empty_result_routed() {
         .build()
         .unwrap();
 
-    ctx.add_route_definition(consumer_route).await.unwrap();
-    ctx.start().await.unwrap();
+    h.add_route(consumer_route).await.unwrap();
+    h.start().await;
 
-    wait_for_mock_exchanges(&mock, "consumed", 1).await;
-    ctx.stop().await.unwrap();
+    wait_for_mock_exchanges(h.mock(), "consumed", 1).await;
+    h.stop().await;
 
-    if let Some(error_ep) = mock.get_endpoint("error") {
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
         let errors = error_ep.get_received_exchanges().await;
         if !errors.is_empty() {
             panic!("Route had errors: {:?}", errors[0].error);
         }
     }
 
-    let endpoint = mock.get_endpoint("consumed").unwrap();
+    let endpoint = h.mock().get_endpoint("consumed").unwrap();
     let exchanges = endpoint.get_received_exchanges().await;
 
     assert!(

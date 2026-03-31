@@ -300,7 +300,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_config_defaults() {
+    fn config_defaults() {
         let mut c =
             SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
         c.resolve_defaults();
@@ -328,17 +328,17 @@ mod tests {
     }
 
     #[test]
-    fn test_config_wrong_scheme() {
+    fn config_wrong_scheme() {
         assert!(SqlEndpointConfig::from_uri("redis://localhost:6379").is_err());
     }
 
     #[test]
-    fn test_config_missing_db_url() {
+    fn config_missing_db_url() {
         assert!(SqlEndpointConfig::from_uri("sql:select 1").is_err());
     }
 
     #[test]
-    fn test_config_output_type_select_one() {
+    fn config_output_type_select_one() {
         let c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&outputType=SelectOne",
         )
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_output_type_stream_list() {
+    fn config_output_type_stream_list() {
         let c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&outputType=StreamList",
         )
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_consumer_options() {
+    fn config_consumer_options() {
         let c = SqlEndpointConfig::from_uri(
             "sql:select * from t?db_url=postgres://localhost/test&delay=2000&initialDelay=500&maxMessagesPerPoll=10&onConsume=update t set done=true where id=:#id&onConsumeFailed=update t set failed=true where id=:#id&onConsumeBatchComplete=delete from t where done=true&routeEmptyResultSet=true&useIterator=false&expectedUpdateCount=1&breakBatchOnConsumeFail=true"
         ).unwrap();
@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_producer_options() {
+    fn config_producer_options() {
         let c = SqlEndpointConfig::from_uri(
             "sql:insert into t values (#)?db_url=postgres://localhost/test&batch=true&useMessageBodyForSql=true&noop=true"
         ).unwrap();
@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_pool_options() {
+    fn config_pool_options() {
         let c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&maxConnections=20&minConnections=3&idleTimeoutSecs=600&maxLifetimeSecs=3600"
         ).unwrap();
@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_query_with_special_chars() {
+    fn config_query_with_special_chars() {
         let c = SqlEndpointConfig::from_uri(
             "sql:select * from users where name = :#name and age > #?db_url=postgres://localhost/test",
         )
@@ -415,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_type_from_str() {
+    fn output_type_from_str() {
         assert_eq!(
             "SelectList".parse::<SqlOutputType>().unwrap(),
             SqlOutputType::SelectList
@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_file_not_found() {
+    fn config_file_not_found() {
         let result = SqlEndpointConfig::from_uri(
             "sql:file:/nonexistent/path/query.sql?db_url=postgres://localhost/test",
         );
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_file_query() {
+    fn config_file_query() {
         use std::io::Write;
         let unique_name = format!(
             "test_sql_query_{}.sql",
@@ -470,7 +470,7 @@ mod tests {
 
     // New tests for config contract
     #[test]
-    fn test_pool_fields_none_when_not_set() {
+    fn pool_fields_none_when_not_set() {
         let c =
             SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
         assert_eq!(c.max_connections, None);
@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_defaults_fills_none() {
+    fn apply_defaults_fills_none() {
         let mut c =
             SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
         let global = SqlGlobalConfig {
@@ -497,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_defaults_does_not_override() {
+    fn apply_defaults_does_not_override() {
         let mut c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&maxConnections=99&minConnections=5",
         )
@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_defaults_fills_remaining() {
+    fn resolve_defaults_fills_remaining() {
         let mut c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test&maxConnections=7",
         )
@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn test_global_config_builder() {
+    fn global_config_builder() {
         let c = SqlGlobalConfig::default()
             .with_max_connections(20)
             .with_min_connections(3)

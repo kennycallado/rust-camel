@@ -430,14 +430,14 @@ mod tests {
     use camel_api::{Body, Exchange, Message};
 
     #[test]
-    fn test_parse_no_params() {
+    fn parse_no_params() {
         let tpl = parse_query_template("select * from users", '#').unwrap();
         assert_eq!(tpl.fragments.len(), 1);
         assert!(tpl.params.is_empty());
     }
 
     #[test]
-    fn test_parse_positional_params() {
+    fn parse_positional_params() {
         let tpl = parse_query_template("insert into t values (#, #)", '#').unwrap();
         assert_eq!(tpl.params.len(), 2);
         assert!(matches!(tpl.params[0], ParamSlot::Positional(0)));
@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_named_params() {
+    fn parse_named_params() {
         let tpl =
             parse_query_template("select * from t where id = :#id and name = :#name", '#').unwrap();
         assert_eq!(tpl.params.len(), 2);
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_mixed_params() {
+    fn parse_mixed_params() {
         let tpl =
             parse_query_template("select * from t where id = :#id and status = #", '#').unwrap();
         assert_eq!(tpl.params.len(), 2);
@@ -463,14 +463,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_in_clause() {
+    fn parse_in_clause() {
         let tpl = parse_query_template("select * from t where id in (:#in:ids)", '#').unwrap();
         assert_eq!(tpl.params.len(), 1);
         assert!(matches!(&tpl.params[0], ParamSlot::InClause(n) if n == "ids"));
     }
 
     #[test]
-    fn test_resolve_named_from_headers() {
+    fn resolve_named_from_headers() {
         let tpl = parse_query_template("select * from t where id = :#id", '#').unwrap();
         let mut msg = Message::default();
         msg.set_header("id", serde_json::json!(42));
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_named_from_body_map() {
+    fn resolve_named_from_body_map() {
         let tpl = parse_query_template("select * from t where id = :#id", '#').unwrap();
         let msg = Message::new(Body::Json(serde_json::json!({"id": 99})));
         let ex = Exchange::new(msg);
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_positional_from_body_array() {
+    fn resolve_positional_from_body_array() {
         let tpl = parse_query_template("insert into t values (#, #)", '#').unwrap();
         let msg = Message::new(Body::Json(serde_json::json!(["foo", 42])));
         let ex = Exchange::new(msg);
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_named_from_properties() {
+    fn resolve_named_from_properties() {
         let tpl = parse_query_template("select * from t where id = :#myProp", '#').unwrap();
         let mut ex = Exchange::new(Message::default());
         ex.set_property("myProp", serde_json::json!(7));
@@ -515,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_named_not_found() {
+    fn resolve_named_not_found() {
         let tpl = parse_query_template("select * from t where id = :#missing", '#').unwrap();
         let ex = Exchange::new(Message::default());
 
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_in_clause_expansion() {
+    fn resolve_in_clause_expansion() {
         let tpl = parse_query_template("select * from t where id in (:#in:ids)", '#').unwrap();
         let mut msg = Message::default();
         msg.set_header("ids", serde_json::json!([1, 2, 3]));
@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_sql_correct_placeholders() {
+    fn build_sql_correct_placeholders() {
         let tpl = parse_query_template(
             "select * from t where a = :#x and b = # and c in (:#in:ids)",
             '#',
@@ -563,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_select() {
+    fn is_select() {
         assert!(is_select_query("SELECT * FROM t"));
         assert!(is_select_query("  select * from t"));
         // WITH is NOT treated as SELECT because writeable CTEs (WITH ... UPDATE/DELETE) exist
@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_trailing_param() {
+    fn parse_trailing_param() {
         let tpl = parse_query_template("select * from t where id = #", '#').unwrap();
         assert_eq!(tpl.params.len(), 1);
         assert_eq!(tpl.fragments.len(), 2);
@@ -589,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_leading_param() {
+    fn parse_leading_param() {
         let tpl = parse_query_template("# = id", '#').unwrap();
         assert_eq!(tpl.params.len(), 1);
         assert_eq!(tpl.fragments.len(), 2);
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_consecutive_params() {
+    fn parse_consecutive_params() {
         let tpl = parse_query_template("# # #", '#').unwrap();
         assert_eq!(tpl.params.len(), 3);
         assert_eq!(tpl.fragments.len(), 4);
@@ -609,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolution_priority_body_over_headers() {
+    fn resolution_priority_body_over_headers() {
         // Body should take priority over headers
         let tpl = parse_query_template("select * from t where id = :#id", '#').unwrap();
         let mut msg = Message::new(Body::Json(serde_json::json!({"id": 1})));
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolution_priority_headers_over_properties() {
+    fn resolution_priority_headers_over_properties() {
         // Headers should take priority over properties
         let tpl = parse_query_template("select * from t where id = :#id", '#').unwrap();
         let mut msg = Message::default();
@@ -634,21 +634,21 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_placeholder_char() {
+    fn custom_placeholder_char() {
         let tpl = parse_query_template("select * from t where id = :@id", '@').unwrap();
         assert_eq!(tpl.params.len(), 1);
         assert!(matches!(&tpl.params[0], ParamSlot::Named(n) if n == "id"));
     }
 
     #[test]
-    fn test_parse_expression_param() {
+    fn parse_expression_param() {
         let tpl = parse_query_template("select * from t where id = :#${body.id}", '#').unwrap();
         assert_eq!(tpl.params.len(), 1);
         assert!(matches!(&tpl.params[0], ParamSlot::Expression(e) if e == "body.id"));
     }
 
     #[test]
-    fn test_resolve_expression_from_body() {
+    fn resolve_expression_from_body() {
         let tpl = parse_query_template("select * from t where id = :#${body.id}", '#').unwrap();
         let msg = Message::new(Body::Json(serde_json::json!({"id": 42})));
         let ex = Exchange::new(msg);
@@ -658,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_expression_from_header() {
+    fn resolve_expression_from_header() {
         let tpl =
             parse_query_template("select * from t where name = :#${header.name}", '#').unwrap();
         let mut msg = Message::default();
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_expression_from_property() {
+    fn resolve_expression_from_property() {
         let tpl =
             parse_query_template("select * from t where k = :#${property.myKey}", '#').unwrap();
         let mut ex = Exchange::new(Message::default());
@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_hash_in_string_literal() {
+    fn parse_hash_in_string_literal() {
         // # inside a string literal should NOT be treated as a parameter
         let tpl =
             parse_query_template("select * from t where x = '#literal' and id = #", '#').unwrap();
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_escaped_quote_in_literal() {
+    fn parse_escaped_quote_in_literal() {
         // '' inside a string literal is an escaped quote, not end of literal
         let tpl =
             parse_query_template("select * from t where x = 'it''s' and id = #", '#').unwrap();
@@ -697,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_in_clause_produces_null() {
+    fn empty_in_clause_produces_null() {
         let tpl = parse_query_template("select * from t where id in (:#in:ids)", '#').unwrap();
         let mut msg = Message::default();
         msg.set_header("ids", serde_json::json!([]));
