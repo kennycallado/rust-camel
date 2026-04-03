@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
 use tower::Service;
 use tracing::debug;
 
@@ -373,7 +373,7 @@ struct ServerHandle {
 
 /// Process-global registry mapping port → running Axum server handle.
 pub struct ServerRegistry {
-    inner: Mutex<HashMap<u16, ServerHandle>>,
+    inner: Mutex<HashMap<u16, Arc<OnceCell<ServerHandle>>>>,
 }
 
 impl ServerRegistry {
@@ -393,48 +393,38 @@ impl ServerRegistry {
         port: u16,
         max_request_body: usize,
     ) -> Result<DispatchTable, CamelError> {
-        // Fast path: check without spawning.
-        {
-            let guard = self.inner.lock().map_err(|_| {
+        let host_owned = host.to_string();
+
+        let cell = {
+            let mut guard = self.inner.lock().map_err(|_| {
                 CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
             })?;
-            if let Some(handle) = guard.get(&port) {
-                return Ok(Arc::clone(&handle.dispatch));
-            }
-        }
+            guard
+                .entry(port)
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
+        };
 
-        // Slow path: need to bind and spawn.
-        let addr = format!("{}:{}", host, port);
-        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-            CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
-        })?;
+        let handle = cell
+            .get_or_try_init(|| async {
+                let addr = format!("{host_owned}:{port}");
+                let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+                    CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
+                })?;
+                let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
+                let task = tokio::spawn(run_axum_server(
+                    listener,
+                    Arc::clone(&dispatch),
+                    max_request_body,
+                ));
+                Ok::<ServerHandle, CamelError>(ServerHandle {
+                    dispatch,
+                    _task: task,
+                })
+            })
+            .await?;
 
-        let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
-        let dispatch_for_server = Arc::clone(&dispatch);
-        let task = tokio::spawn(run_axum_server(
-            listener,
-            dispatch_for_server,
-            max_request_body,
-        ));
-
-        // Re-acquire lock to insert — handle the race where another task won.
-        let mut guard = self.inner.lock().map_err(|_| {
-            CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
-        })?;
-        // If another task already registered this port while we were binding,
-        // abort our task (it has no routes) and use the winner's dispatch table.
-        if let Some(existing) = guard.get(&port) {
-            task.abort();
-            return Ok(Arc::clone(&existing.dispatch));
-        }
-        guard.insert(
-            port,
-            ServerHandle {
-                dispatch: Arc::clone(&dispatch),
-                _task: task,
-            },
-        );
-        Ok(dispatch)
+        Ok(Arc::clone(&handle.dispatch))
     }
 }
 
@@ -2062,6 +2052,43 @@ mod tests {
         let r1 = ServerRegistry::global();
         let r2 = ServerRegistry::global();
         assert!(std::ptr::eq(r1 as *const _, r2 as *const _));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_get_or_spawn_returns_same_dispatch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let results: Arc<std::sync::Mutex<Vec<DispatchTable>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let results = results.clone();
+            handles.push(tokio::spawn(async move {
+                let dispatch = ServerRegistry::global()
+                    .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024)
+                    .await
+                    .unwrap();
+                results.lock().unwrap().push(dispatch);
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let dispatches = results.lock().unwrap();
+        assert_eq!(dispatches.len(), 4);
+        for i in 1..dispatches.len() {
+            assert!(
+                Arc::ptr_eq(&dispatches[0], &dispatches[i]),
+                "all concurrent callers should get the same dispatch table"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

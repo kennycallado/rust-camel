@@ -14,11 +14,12 @@ async fn main() -> Result<(), CamelError> {
     // The consumer sets CamelWsConnectionKey, and the producer (in server-send
     // mode because a local consumer exists) sends back to that connection key.
     let echo_route = RouteBuilder::from("ws://0.0.0.0:9000/echo")
+        .route_id("ws-echo")
         .to("ws://0.0.0.0:9000/echo")
         .build()?;
 
-    // Chat: broadcast every incoming message to ALL connected clients.
     let chat_route = RouteBuilder::from("ws://0.0.0.0:9000/chat")
+        .route_id("ws-chat")
         .set_header("CamelWsSendToAll", Value::Bool(true))
         .to("ws://0.0.0.0:9000/chat")
         .build()?;

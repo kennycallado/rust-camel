@@ -22,7 +22,7 @@ use futures::{SinkExt, StreamExt};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{OnceCell, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -66,7 +66,7 @@ struct ServerHandle {
 }
 
 pub struct ServerRegistry {
-    inner: Mutex<HashMap<u16, ServerHandle>>,
+    inner: Mutex<HashMap<u16, Arc<OnceCell<ServerHandle>>>>,
 }
 
 impl ServerRegistry {
@@ -83,80 +83,76 @@ impl ServerRegistry {
         port: u16,
         tls_config: Option<WsTlsConfig>,
     ) -> Result<WsAppState, CamelError> {
-        {
-            let guard = self.inner.lock().map_err(|_| {
+        let wants_tls = tls_config.is_some();
+        let host_owned = host.to_string();
+
+        let cell = {
+            let mut guard = self.inner.lock().map_err(|_| {
                 CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
             })?;
-            if let Some(handle) = guard.get(&port) {
-                if tls_config.is_some() != handle.is_tls {
-                    return Err(CamelError::EndpointCreationFailed(format!(
-                        "Server on port {port} already running with different TLS mode"
-                    )));
-                }
-                return Ok(handle.state.clone());
-            }
-        }
-
-        let addr = format!("{host}:{port}");
-        let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
-        let path_configs = Arc::new(DashMap::new());
-        let state = WsAppState {
-            dispatch: Arc::clone(&dispatch),
-            path_configs: Arc::clone(&path_configs),
-        };
-        let app = Router::new().fallback(dispatch_handler).with_state(state);
-        let (task, is_tls) = if let Some(ref tls) = tls_config {
-            let rustls = load_tls_config(&tls.cert_path, &tls.key_path)?;
-            let parsed_addr = addr.parse().map_err(|e| {
-                CamelError::EndpointCreationFailed(format!("Invalid listen address {addr}: {e}"))
-            })?;
-            let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(rustls));
-            let task = tokio::spawn(async move {
-                let _ = axum_server::bind_rustls(parsed_addr, tls_config)
-                    .serve(app.into_make_service())
-                    .await;
-            });
-            (task, true)
-        } else {
-            let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-                CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
-            })?;
-            let task = tokio::spawn(async move {
-                let _ = serve(listener, app).await;
-            });
-            (task, false)
+            guard
+                .entry(port)
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .clone()
         };
 
-        let mut guard = self.inner.lock().map_err(|_| {
-            CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
-        })?;
-        if let Some(existing) = guard.get(&port) {
-            if tls_config.is_some() != existing.is_tls {
-                task.abort();
-                return Err(CamelError::EndpointCreationFailed(format!(
-                    "Server on port {port} already running with different TLS mode"
-                )));
-            }
-            task.abort();
-            return Ok(existing.state.clone());
-        }
-        guard.insert(
-            port,
-            ServerHandle {
-                state: WsAppState {
-                    dispatch,
-                    path_configs,
-                },
-                is_tls,
-                _task: task,
-            },
-        );
+        let handle = cell
+            .get_or_try_init(|| async {
+                spawn_server(&host_owned, port, tls_config).await
+            })
+            .await?;
 
-        let handle = guard
-            .get(&port)
-            .ok_or_else(|| CamelError::EndpointCreationFailed("Server handle missing".into()))?;
+        if wants_tls != handle.is_tls {
+            return Err(CamelError::EndpointCreationFailed(format!(
+                "Server on port {port} already running with different TLS mode"
+            )));
+        }
+
         Ok(handle.state.clone())
     }
+}
+
+async fn spawn_server(
+    host: &str,
+    port: u16,
+    tls_config: Option<WsTlsConfig>,
+) -> Result<ServerHandle, CamelError> {
+    let addr = format!("{host}:{port}");
+    let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
+    let path_configs = Arc::new(DashMap::new());
+    let state = WsAppState {
+        dispatch: Arc::clone(&dispatch),
+        path_configs: Arc::clone(&path_configs),
+    };
+    let app = Router::new().fallback(dispatch_handler).with_state(state.clone());
+
+    let (task, is_tls) = if let Some(ref tls) = tls_config {
+        let rustls = load_tls_config(&tls.cert_path, &tls.key_path)?;
+        let parsed_addr = addr.parse().map_err(|e| {
+            CamelError::EndpointCreationFailed(format!("Invalid listen address {addr}: {e}"))
+        })?;
+        let tls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(rustls));
+        let task = tokio::spawn(async move {
+            let _ = axum_server::bind_rustls(parsed_addr, tls_cfg)
+                .serve(app.into_make_service())
+                .await;
+        });
+        (task, true)
+    } else {
+        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+            CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
+        })?;
+        let task = tokio::spawn(async move {
+            let _ = serve(listener, app).await;
+        });
+        (task, false)
+    };
+
+    Ok(ServerHandle {
+        state,
+        is_tls,
+        _task: task,
+    })
 }
 
 #[derive(Clone)]
@@ -1561,5 +1557,37 @@ mod tests {
         assert_eq!(recv2, "broadcast-msg");
 
         consumer.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_get_or_spawn_returns_same_state() {
+        let port = free_port();
+        let results: Arc<std::sync::Mutex<Vec<WsAppState>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let results = results.clone();
+            handles.push(tokio::spawn(async move {
+                let state = ServerRegistry::global()
+                    .get_or_spawn("127.0.0.1", port, None)
+                    .await
+                    .unwrap();
+                results.lock().unwrap().push(state);
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let states = results.lock().unwrap();
+        assert_eq!(states.len(), 4);
+        for i in 1..states.len() {
+            assert!(
+                Arc::ptr_eq(&states[0].dispatch, &states[i].dispatch),
+                "all concurrent callers should get the same dispatch table"
+            );
+        }
     }
 }
