@@ -21,10 +21,13 @@ impl From<&crate::config::HttpCamelConfig> for camel_component_http::HttpConfig 
         camel_component_http::HttpConfig {
             connect_timeout_ms: c.connect_timeout_ms,
             response_timeout_ms: c.response_timeout_ms,
-            max_connections: c.max_connections,
+            pool_max_idle_per_host: c.pool_max_idle_per_host,
+            pool_idle_timeout_ms: c.pool_idle_timeout_ms,
+            follow_redirects: c.follow_redirects,
             max_body_size: c.max_body_size,
             max_request_body: c.max_request_body,
             allow_private_ips: c.allow_private_ips,
+            blocked_hosts: c.blocked_hosts.clone(),
         }
     }
 }

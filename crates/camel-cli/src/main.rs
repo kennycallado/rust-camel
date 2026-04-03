@@ -166,7 +166,22 @@ async fn run(
     ctx.register_component(camel_component_file::FileComponent::with_optional_config(
         file_cfg,
     ));
-    ctx.register_component(camel_component_http::HttpComponent::new());
+    {
+        let http_cfg = ctx
+            .get_component_config::<camel_component_http::HttpConfig>()
+            .cloned();
+        ctx.register_component(camel_component_http::HttpComponent::with_optional_config(
+            http_cfg,
+        ));
+    }
+    {
+        let http_cfg = ctx
+            .get_component_config::<camel_component_http::HttpConfig>()
+            .cloned();
+        ctx.register_component(camel_component_http::HttpsComponent::with_optional_config(
+            http_cfg,
+        ));
+    }
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
 

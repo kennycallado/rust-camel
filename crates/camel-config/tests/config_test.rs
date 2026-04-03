@@ -106,13 +106,13 @@ timeout_ms = 5000
 
 [default.components.http]
 connect_timeout_ms = 3000
-max_connections = 100
+pool_max_idle_per_host = 100
 
 [production]
 log_level = "ERROR"
 
 [production.components.http]
-max_connections = 1000
+pool_max_idle_per_host = 1000
 "#;
     fs::write(&config_path, content).unwrap();
 
@@ -123,15 +123,18 @@ max_connections = 1000
     assert_eq!(config.log_level, "ERROR");
     assert_eq!(config.timeout_ms, 5000); // From default
     assert_eq!(
-        config.components.http.as_ref().unwrap().max_connections,
+        config
+            .components
+            .http
+            .as_ref()
+            .unwrap()
+            .pool_max_idle_per_host,
         1000
     );
-    // This should fail with current implementation because it uses serde default (5000)
-    // instead of merging from default (3000)
     assert_eq!(
         config.components.http.as_ref().unwrap().connect_timeout_ms,
         3000
-    ); // From default - THIS WILL FAIL
+    );
 }
 
 #[test]

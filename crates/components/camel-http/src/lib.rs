@@ -88,14 +88,10 @@ pub struct HttpEndpointConfig {
     pub http_method: Option<String>,
     pub throw_exception_on_failure: bool,
     pub ok_status_code_range: (u16, u16),
-    pub follow_redirects: bool,
-    pub connect_timeout: Duration,
     pub response_timeout: Option<Duration>,
     pub query_params: HashMap<String, String>,
-    // Security settings
     pub allow_private_ips: bool,
     pub blocked_hosts: Vec<String>,
-    // Memory limit for body materialization (in bytes)
     pub max_body_size: usize,
 }
 
@@ -154,19 +150,6 @@ impl UriConfig for HttpEndpointConfig {
             })
             .unwrap_or((200, 299));
 
-        let follow_redirects = parts
-            .params
-            .get("followRedirects")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        let connect_timeout = parts
-            .params
-            .get("connectTimeout")
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_millis)
-            .unwrap_or(Duration::from_millis(30000));
-
         let response_timeout = parts
             .params
             .get("responseTimeout")
@@ -205,14 +188,32 @@ impl UriConfig for HttpEndpointConfig {
             http_method,
             throw_exception_on_failure,
             ok_status_code_range,
-            follow_redirects,
-            connect_timeout,
             response_timeout,
             query_params,
             allow_private_ips,
             blocked_hosts,
             max_body_size,
         })
+    }
+}
+
+impl HttpEndpointConfig {
+    pub fn from_uri_with_defaults(uri: &str, config: &HttpConfig) -> Result<Self, CamelError> {
+        let parts = parse_uri(uri)?;
+        let mut endpoint = Self::from_components(parts.clone())?;
+        if endpoint.response_timeout.is_none() {
+            endpoint.response_timeout = Some(Duration::from_millis(config.response_timeout_ms));
+        }
+        if !parts.params.contains_key("allowPrivateIps") {
+            endpoint.allow_private_ips = config.allow_private_ips;
+        }
+        if !parts.params.contains_key("blockedHosts") {
+            endpoint.blocked_hosts = config.blocked_hosts.clone();
+        }
+        if !parts.params.contains_key("maxBodySize") {
+            endpoint.max_body_size = config.max_body_size;
+        }
+        Ok(endpoint)
     }
 }
 
@@ -310,6 +311,20 @@ impl UriConfig for HttpServerConfig {
             max_request_body,
             max_response_body,
         })
+    }
+}
+
+impl HttpServerConfig {
+    pub fn from_uri_with_defaults(uri: &str, config: &HttpConfig) -> Result<Self, CamelError> {
+        let parts = parse_uri(uri)?;
+        let mut server = Self::from_components(parts.clone())?;
+        if !parts.params.contains_key("maxRequestBody") {
+            server.max_request_body = config.max_request_body;
+        }
+        if !parts.params.contains_key("maxResponseBody") {
+            server.max_response_body = config.max_body_size;
+        }
+        Ok(server)
     }
 }
 
@@ -834,11 +849,43 @@ impl Consumer for HttpConsumer {
 // HttpComponent / HttpsComponent
 // ---------------------------------------------------------------------------
 
-pub struct HttpComponent;
+pub struct HttpComponent {
+    client: reqwest::Client,
+    config: HttpConfig,
+}
+
+fn build_client(config: &HttpConfig) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+        .pool_max_idle_per_host(config.pool_max_idle_per_host)
+        .pool_idle_timeout(Duration::from_millis(config.pool_idle_timeout_ms));
+
+    if !config.follow_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+
+    builder
+        .build()
+        .expect("reqwest::Client::build() with valid config should not fail")
+}
 
 impl HttpComponent {
     pub fn new() -> Self {
-        Self
+        let config = HttpConfig::default();
+        let client = build_client(&config);
+        Self { client, config }
+    }
+
+    pub fn with_config(config: HttpConfig) -> Self {
+        let client = build_client(&config);
+        Self { client, config }
+    }
+
+    pub fn with_optional_config(config: Option<HttpConfig>) -> Self {
+        match config {
+            Some(cfg) => Self::with_config(cfg),
+            None => Self::new(),
+        }
     }
 }
 
@@ -854,23 +901,39 @@ impl Component for HttpComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let config = HttpEndpointConfig::from_uri(uri)?;
-        let server_config = HttpServerConfig::from_uri(uri)?;
-        let client = build_client(&config)?;
+        let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
+        let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,
             server_config,
-            client,
+            client: self.client.clone(),
         }))
     }
 }
 
-pub struct HttpsComponent;
+pub struct HttpsComponent {
+    client: reqwest::Client,
+    config: HttpConfig,
+}
 
 impl HttpsComponent {
     pub fn new() -> Self {
-        Self
+        let config = HttpConfig::default();
+        let client = build_client(&config);
+        Self { client, config }
+    }
+
+    pub fn with_config(config: HttpConfig) -> Self {
+        let client = build_client(&config);
+        Self { client, config }
+    }
+
+    pub fn with_optional_config(config: Option<HttpConfig>) -> Self {
+        match config {
+            Some(cfg) => Self::with_config(cfg),
+            None => Self::new(),
+        }
     }
 }
 
@@ -886,28 +949,15 @@ impl Component for HttpsComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let config = HttpEndpointConfig::from_uri(uri)?;
-        let server_config = HttpServerConfig::from_uri(uri)?;
-        let client = build_client(&config)?;
+        let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
+        let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,
             server_config,
-            client,
+            client: self.client.clone(),
         }))
     }
-}
-
-fn build_client(config: &HttpEndpointConfig) -> Result<reqwest::Client, CamelError> {
-    let mut builder = reqwest::Client::builder().connect_timeout(config.connect_timeout);
-
-    if !config.follow_redirects {
-        builder = builder.redirect(reqwest::redirect::Policy::none());
-    }
-
-    builder.build().map_err(|e| {
-        CamelError::EndpointCreationFailed(format!("Failed to build HTTP client: {e}"))
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1250,8 +1300,6 @@ mod tests {
         assert!(config.http_method.is_none());
         assert!(config.throw_exception_on_failure);
         assert_eq!(config.ok_status_code_range, (200, 299));
-        assert!(!config.follow_redirects);
-        assert_eq!(config.connect_timeout, Duration::from_millis(30000));
         assert!(config.response_timeout.is_none());
     }
 
@@ -1285,9 +1333,40 @@ mod tests {
         assert_eq!(config.base_url, "https://api.example.com/v1");
         assert_eq!(config.http_method, Some("PUT".to_string()));
         assert!(!config.throw_exception_on_failure);
-        assert!(config.follow_redirects);
-        assert_eq!(config.connect_timeout, Duration::from_millis(5000));
         assert_eq!(config.response_timeout, Some(Duration::from_millis(10000)));
+    }
+
+    #[test]
+    fn test_from_uri_with_defaults_applies_config_when_uri_param_absent() {
+        let config = HttpConfig::default()
+            .with_response_timeout_ms(999)
+            .with_allow_private_ips(true)
+            .with_blocked_hosts(vec!["evil.com".to_string()])
+            .with_max_body_size(12345);
+        let endpoint =
+            HttpEndpointConfig::from_uri_with_defaults("http://example.com/api", &config).unwrap();
+        assert_eq!(endpoint.response_timeout, Some(Duration::from_millis(999)));
+        assert!(endpoint.allow_private_ips);
+        assert_eq!(endpoint.blocked_hosts, vec!["evil.com".to_string()]);
+        assert_eq!(endpoint.max_body_size, 12345);
+    }
+
+    #[test]
+    fn test_from_uri_with_defaults_uri_overrides_config() {
+        let config = HttpConfig::default()
+            .with_response_timeout_ms(999)
+            .with_allow_private_ips(true)
+            .with_blocked_hosts(vec!["evil.com".to_string()])
+            .with_max_body_size(12345);
+        let endpoint = HttpEndpointConfig::from_uri_with_defaults(
+            "http://example.com/api?responseTimeout=500&allowPrivateIps=false&blockedHosts=bad.net&maxBodySize=99",
+            &config,
+        )
+        .unwrap();
+        assert_eq!(endpoint.response_timeout, Some(Duration::from_millis(500)));
+        assert!(!endpoint.allow_private_ips);
+        assert_eq!(endpoint.blocked_hosts, vec!["bad.net".to_string()]);
+        assert_eq!(endpoint.max_body_size, 99);
     }
 
     #[test]
@@ -1663,10 +1742,11 @@ mod tests {
         let (url, _handle) = start_redirect_server().await;
         let ctx = test_producer_ctx();
 
-        let component = HttpComponent::new();
+        let component =
+            HttpComponent::with_config(HttpConfig::default().with_follow_redirects(false));
         let endpoint = component
             .create_endpoint(&format!(
-                "{url}?followRedirects=false&throwExceptionOnFailure=false&allowPrivateIps=true"
+                "{url}?throwExceptionOnFailure=false&allowPrivateIps=true"
             ))
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1693,9 +1773,10 @@ mod tests {
         let (url, _handle) = start_redirect_server().await;
         let ctx = test_producer_ctx();
 
-        let component = HttpComponent::new();
+        let component =
+            HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
         let endpoint = component
-            .create_endpoint(&format!("{url}?followRedirects=true&allowPrivateIps=true"))
+            .create_endpoint(&format!("{url}?allowPrivateIps=true"))
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 

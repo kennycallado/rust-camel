@@ -85,8 +85,14 @@ pub struct HttpCamelConfig {
     #[serde(default = "default_http_response_timeout_ms")]
     pub response_timeout_ms: u64,
 
-    #[serde(default = "default_http_max_connections")]
-    pub max_connections: usize,
+    #[serde(default = "default_http_pool_max_idle_per_host")]
+    pub pool_max_idle_per_host: usize,
+
+    #[serde(default = "default_http_pool_idle_timeout_ms")]
+    pub pool_idle_timeout_ms: u64,
+
+    #[serde(default)]
+    pub follow_redirects: bool,
 
     #[serde(default = "default_http_max_body_size")]
     pub max_body_size: usize,
@@ -96,6 +102,9 @@ pub struct HttpCamelConfig {
 
     #[serde(default)]
     pub allow_private_ips: bool,
+
+    #[serde(default)]
+    pub blocked_hosts: Vec<String>,
 }
 
 impl Default for HttpCamelConfig {
@@ -103,10 +112,13 @@ impl Default for HttpCamelConfig {
         Self {
             connect_timeout_ms: default_http_connect_timeout_ms(),
             response_timeout_ms: default_http_response_timeout_ms(),
-            max_connections: default_http_max_connections(),
+            pool_max_idle_per_host: default_http_pool_max_idle_per_host(),
+            pool_idle_timeout_ms: default_http_pool_idle_timeout_ms(),
+            follow_redirects: false,
             max_body_size: default_http_max_body_size(),
             max_request_body: default_http_max_request_body(),
             allow_private_ips: false,
+            blocked_hosts: Vec::new(),
         }
     }
 }
@@ -458,8 +470,11 @@ fn default_http_connect_timeout_ms() -> u64 {
 fn default_http_response_timeout_ms() -> u64 {
     30_000
 }
-fn default_http_max_connections() -> usize {
+fn default_http_pool_max_idle_per_host() -> usize {
     100
+}
+fn default_http_pool_idle_timeout_ms() -> u64 {
+    90_000
 }
 fn default_http_max_body_size() -> usize {
     10_485_760
@@ -789,10 +804,13 @@ mod http_camel_config_tests {
         let default = HttpCamelConfig::default();
         assert_eq!(default.connect_timeout_ms, 5_000);
         assert_eq!(default.response_timeout_ms, 30_000);
-        assert_eq!(default.max_connections, 100);
+        assert_eq!(default.pool_max_idle_per_host, 100);
+        assert_eq!(default.pool_idle_timeout_ms, 90_000);
+        assert!(!default.follow_redirects);
         assert_eq!(default.max_body_size, 10_485_760);
         assert_eq!(default.max_request_body, 2_097_152);
         assert!(!default.allow_private_ips);
+        assert!(default.blocked_hosts.is_empty());
     }
 
     #[test]
@@ -806,10 +824,13 @@ connect_timeout_ms = 1000
         let http = cfg.components.http.unwrap();
         assert_eq!(http.connect_timeout_ms, 1000);
         assert_eq!(http.response_timeout_ms, 30_000);
-        assert_eq!(http.max_connections, 100);
+        assert_eq!(http.pool_max_idle_per_host, 100);
+        assert_eq!(http.pool_idle_timeout_ms, 90_000);
+        assert!(!http.follow_redirects);
         assert_eq!(http.max_body_size, 10_485_760);
         assert_eq!(http.max_request_body, 2_097_152);
         assert!(!http.allow_private_ips);
+        assert!(http.blocked_hosts.is_empty());
     }
 
     #[test]
@@ -819,19 +840,25 @@ connect_timeout_ms = 1000
 [components.http]
 connect_timeout_ms = 2000
 response_timeout_ms = 60000
-max_connections = 50
+pool_max_idle_per_host = 50
+pool_idle_timeout_ms = 60000
+follow_redirects = true
 max_body_size = 5242880
 max_request_body = 1048576
 allow_private_ips = true
+blocked_hosts = ["evil.com", "malware.net"]
 "#,
         );
         let http = cfg.components.http.unwrap();
         assert_eq!(http.connect_timeout_ms, 2000);
         assert_eq!(http.response_timeout_ms, 60000);
-        assert_eq!(http.max_connections, 50);
+        assert_eq!(http.pool_max_idle_per_host, 50);
+        assert_eq!(http.pool_idle_timeout_ms, 60000);
+        assert!(http.follow_redirects);
         assert_eq!(http.max_body_size, 5_242_880);
         assert_eq!(http.max_request_body, 1_048_576);
         assert!(http.allow_private_ips);
+        assert_eq!(http.blocked_hosts, vec!["evil.com", "malware.net"]);
     }
 }
 
@@ -1083,15 +1110,24 @@ mod http_from_tests {
         let camel_cfg = HttpCamelConfig {
             connect_timeout_ms: 1_000,
             response_timeout_ms: 5_000,
-            max_connections: 20,
+            pool_max_idle_per_host: 20,
+            pool_idle_timeout_ms: 60_000,
+            follow_redirects: true,
             max_body_size: 1_000,
             max_request_body: 500,
             allow_private_ips: true,
+            blocked_hosts: vec!["evil.com".to_string()],
         };
         let cfg = camel_component_http::HttpConfig::from(&camel_cfg);
         assert_eq!(cfg.connect_timeout_ms, 1_000);
-        assert_eq!(cfg.max_connections, 20);
+        assert_eq!(cfg.response_timeout_ms, 5_000);
+        assert_eq!(cfg.pool_max_idle_per_host, 20);
+        assert_eq!(cfg.pool_idle_timeout_ms, 60_000);
+        assert!(cfg.follow_redirects);
+        assert_eq!(cfg.max_body_size, 1_000);
+        assert_eq!(cfg.max_request_body, 500);
         assert!(cfg.allow_private_ips);
+        assert_eq!(cfg.blocked_hosts, vec!["evil.com".to_string()]);
     }
 }
 
@@ -1144,7 +1180,7 @@ mod profile_loading_tests {
             r#"
 [components.http]
 connect_timeout_ms = 1000
-max_connections = 50
+pool_max_idle_per_host = 50
 "#,
         )
         .unwrap();
@@ -1153,7 +1189,7 @@ max_connections = 50
             r#"
 [components.http]
 response_timeout_ms = 2000
-max_connections = 99
+pool_max_idle_per_host = 99
 "#,
         )
         .unwrap();
@@ -1173,7 +1209,8 @@ max_connections = 99
             Some(2000)
         );
         assert_eq!(
-            http.get("max_connections").and_then(|v| v.as_integer()),
+            http.get("pool_max_idle_per_host")
+                .and_then(|v| v.as_integer()),
             Some(99)
         );
     }
@@ -1186,12 +1223,12 @@ max_connections = 99
 watch = false
 [default.components.http]
 connect_timeout_ms = 1000
-max_connections = 50
+pool_max_idle_per_host = 50
 
 [prod]
 watch = true
 [prod.components.http]
-max_connections = 200
+pool_max_idle_per_host = 200
 "#,
         );
 
@@ -1201,7 +1238,7 @@ max_connections = 200
         assert!(cfg.watch);
         let http = cfg.components.http.expect("http config");
         assert_eq!(http.connect_timeout_ms, 1000);
-        assert_eq!(http.max_connections, 200);
+        assert_eq!(http.pool_max_idle_per_host, 200);
     }
 
     #[test]

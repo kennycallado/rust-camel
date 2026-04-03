@@ -11,7 +11,8 @@ The HTTP component provides HTTP client (producer) and HTTP server (consumer) ca
 - **HTTP Server (Consumer)**: Listen for incoming HTTP requests
 - **HTTP Client (Producer)**: Make outgoing HTTP requests
 - **HTTPS Support**: Secure connections with `https` scheme
-- **Configurable Timeouts**: Connect and response timeouts
+- **Configurable Timeouts**: Connect, response, and pool idle timeouts
+- **Connection Pooling**: Shared `reqwest::Client` with configurable pool settings
 - **SSRF Protection**: Optional private IP blocking
 - **Streaming**: Direct stream-to-HTTP piping without materialization
 - **Native Request Streaming**: Incoming bodies arrive as `Body::Stream`, no RAM materialization
@@ -49,11 +50,12 @@ https://host:port/path[?options]
 | `httpMethod` | Auto | HTTP method (GET, POST, etc.) |
 | `throwExceptionOnFailure` | `true` | Throw on non-2xx responses |
 | `okStatusCodeRange` | `200-299` | Success status code range |
-| `followRedirects` | `false` | Follow HTTP redirects |
-| `connectTimeout` | `30000` | Connection timeout (ms) |
-| `responseTimeout` | - | Response timeout (ms) |
-| `allowPrivateIps` | `false` | Allow requests to private IPs |
-| `blockedHosts` | - | Comma-separated blocked hosts |
+| `responseTimeout` | Global default | Response timeout (ms) |
+| `allowPrivateIps` | Global default | Allow requests to private IPs |
+| `blockedHosts` | Global default | Comma-separated blocked hosts |
+| `maxBodySize` | Global default | Max response body size (bytes) |
+
+> **Connection-level settings** (`connect_timeout_ms`, `pool_max_idle_per_host`, `pool_idle_timeout_ms`, `follow_redirects`) are configured globally in `Camel.toml` and cannot be overridden per URI. See [Global Configuration](#global-configuration).
 
 ## Usage
 
@@ -198,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 let route = RouteBuilder::from("direct:api-call")
-    .to("http://api.service.com/endpoint?throwExceptionOnFailure=true&connectTimeout=5000")
+    .to("http://api.service.com/endpoint?throwExceptionOnFailure=true&responseTimeout=5000")
     .build()?;
 
 // With custom error handling
@@ -223,32 +225,29 @@ Configure default HTTP settings in `Camel.toml` that apply to all HTTP endpoints
 
 ```toml
 [default.components.http]
-connect_timeout_ms = 5000        # Connection timeout (default: 30000)
-response_timeout_ms = 30000      # Response timeout (default: none)
-max_connections = 100            # Max concurrent connections (default: 100)
-max_body_size = 10485760         # Max response body size, 10MB (default: 10MB)
-max_request_body = 2097152       # Max request body for server, 2MB (default: 2MB)
-allow_private_ips = false        # Allow requests to private IPs (default: false)
+connect_timeout_ms = 5000           # Connection timeout (default: 5000)
+pool_max_idle_per_host = 100        # Max idle connections per host (default: 100)
+pool_idle_timeout_ms = 90000        # Idle connection timeout (default: 90000)
+follow_redirects = false            # Follow HTTP redirects (default: false)
+response_timeout_ms = 30000         # Response timeout (default: 30000)
+max_body_size = 10485760            # Max response body size, 10MB (default: 10MB)
+max_request_body = 2097152          # Max request body for server, 2MB (default: 2MB)
+allow_private_ips = false           # Allow requests to private IPs (default: false)
+blocked_hosts = []                  # Blocked host list (default: empty)
 ```
 
-URI parameters always override global defaults:
-
-```rust
-// Uses global connect_timeout_ms (5000) but overrides allowPrivateIps
-.to("http://api.example.com?allowPrivateIps=true")
-
-// Overrides both global settings
-.to("http://api.example.com?connectTimeout=10000&allowPrivateIps=true")
-```
+URI parameters override **request-level** defaults (`responseTimeout`, `allowPrivateIps`, `blockedHosts`, `maxBodySize`). Connection-level settings (`connect_timeout_ms`, `pool_*`, `follow_redirects`) are baked into the shared connection pool and cannot be overridden per URI.
 
 ### Profile-Specific Configuration
 
 ```toml
 [default.components.http]
 connect_timeout_ms = 30000
+pool_max_idle_per_host = 100
 
 [production.components.http]
 connect_timeout_ms = 5000   # Faster fail in production
+pool_idle_timeout_ms = 60000
 allow_private_ips = false
 
 [development.components.http]
