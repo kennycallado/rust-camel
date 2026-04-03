@@ -69,6 +69,10 @@ pub struct ComponentsConfig {
 
     #[serde(default)]
     pub container: Option<ContainerCamelConfig>,
+
+    #[cfg(feature = "ws")]
+    #[serde(default)]
+    pub ws: Option<WsCamelConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -254,6 +258,16 @@ impl Default for FileCamelConfig {
 pub struct ContainerCamelConfig {
     #[serde(default = "default_container_docker_host")]
     pub docker_host: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, Default, PartialEq)]
+pub struct WsCamelConfig {
+    pub max_connections: Option<u32>,
+    pub max_message_size: Option<u32>,
+    pub heartbeat_interval_ms: Option<u64>,
+    pub idle_timeout_ms: Option<u64>,
+    pub connect_timeout_ms: Option<u64>,
+    pub response_timeout_ms: Option<u64>,
 }
 
 impl Default for ContainerCamelConfig {

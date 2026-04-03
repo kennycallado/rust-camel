@@ -24,6 +24,7 @@ members = [
     "crates/components/camel-direct",
     "crates/components/camel-mock",
     "crates/components/camel-http",
+    "crates/components/camel-ws",
     "crates/components/camel-redis",
     "crates/components/camel-kafka",
     "crates/components/camel-jms",
@@ -53,6 +54,7 @@ members = [
     "examples/wiretap",
     "examples/multicast",
     "examples/http-server",
+    "examples/ws-server",
     "examples/http-streaming",
     "examples/file-streaming",
     "examples/pipeline-concurrency",
@@ -132,6 +134,7 @@ camel-component-file = { path = "crates/components/camel-file", version = "=0.5.
 camel-component-direct = { path = "crates/components/camel-direct", version = "=0.5.1" }
 camel-component-mock = { path = "crates/components/camel-mock", version = "=0.5.1" }
 camel-component-http = { path = "crates/components/camel-http", version = "=0.5.1" }
+camel-component-ws = { path = "crates/components/camel-ws", version = "=0.5.1" }
 camel-component-redis = { path = "crates/components/camel-redis", version = "=0.5.1" }
 camel-component-kafka = { path = "crates/components/camel-kafka", version = "=0.5.1" }
 camel-component-jms = { path = "crates/components/camel-jms", version = "=0.5.1" }

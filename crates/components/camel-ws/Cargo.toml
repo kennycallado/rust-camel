@@ -1,0 +1,42 @@
+[package]
+name = "camel-component-ws"
+description = "WebSocket component for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-component-ws"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-component.workspace = true
+camel-endpoint.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tower.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+axum = { workspace = true, features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tokio-tungstenite = "0.26"
+tungstenite = "0.26"
+http.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+futures.workspace = true
+dashmap = "6"
+uuid = { version = "1", features = ["v4"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+
+camel-otel = { workspace = true, optional = true }
+
+[features]
+otel = ["dep:camel-otel"]
+
+[dev-dependencies]
+tokio-util.workspace = true

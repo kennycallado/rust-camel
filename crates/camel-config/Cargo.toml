@@ -25,6 +25,7 @@ camel-component-redis = { workspace = true, optional = true }
 camel-component-sql = { workspace = true, optional = true }
 camel-component-file = { workspace = true, optional = true }
 camel-component-container = { workspace = true, optional = true }
+camel-component-ws = { workspace = true, optional = true }
 config = { workspace = true }
 glob = { workspace = true }
 serde = { workspace = true }
@@ -51,4 +52,5 @@ redis = ["dep:camel-component-redis"]
 sql = ["dep:camel-component-sql"]
 file = ["dep:camel-component-file"]
 container = ["dep:camel-component-container"]
-all-components = ["http", "kafka", "jms", "redis", "sql", "file", "container"]
+ws = ["dep:camel-component-ws"]
+all-components = ["http", "kafka", "jms", "redis", "sql", "file", "container", "ws"]

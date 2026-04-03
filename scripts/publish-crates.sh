@@ -125,6 +125,7 @@ publish_crate "camel-component-redis" "crates/components/camel-redis"
 publish_crate "camel-component-kafka" "crates/components/camel-kafka"
 publish_crate "camel-component-sql" "crates/components/camel-sql"
 publish_crate "camel-component-controlbus" "crates/components/camel-controlbus"
+publish_crate "camel-component-ws" "crates/components/camel-ws"
 
 # camel-config depends on camel-otel, camel-prometheus and many component crates
 publish_crate "camel-config" "crates/camel-config"

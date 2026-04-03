@@ -182,6 +182,8 @@ async fn run(
             http_cfg,
         ));
     }
+    ctx.register_component(camel_component_ws::WsComponent);
+    ctx.register_component(camel_component_ws::WssComponent);
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
 

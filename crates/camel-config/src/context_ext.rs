@@ -114,6 +114,20 @@ impl From<&crate::config::ContainerCamelConfig>
     }
 }
 
+#[cfg(feature = "ws")]
+impl From<&crate::config::WsCamelConfig> for camel_component_ws::WsConfig {
+    fn from(cfg: &crate::config::WsCamelConfig) -> Self {
+        Self {
+            max_connections: cfg.max_connections,
+            max_message_size: cfg.max_message_size,
+            heartbeat_interval_ms: cfg.heartbeat_interval_ms,
+            idle_timeout_ms: cfg.idle_timeout_ms,
+            connect_timeout_ms: cfg.connect_timeout_ms,
+            response_timeout_ms: cfg.response_timeout_ms,
+        }
+    }
+}
+
 impl CamelConfig {
     /// Load routes from config file and return them (without adding to context yet)
     /// This allows components to be registered before routes are resolved
@@ -290,6 +304,17 @@ impl CamelConfig {
                 .map(camel_component_container::ContainerGlobalConfig::from)
                 .unwrap_or_default();
             ctx.set_component_config(container_config);
+        }
+
+        #[cfg(feature = "ws")]
+        {
+            let ws_config: camel_component_ws::WsConfig = config
+                .components
+                .ws
+                .as_ref()
+                .map(camel_component_ws::WsConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(ws_config);
         }
 
         ctx.set_tracer_config(tracer_config);
