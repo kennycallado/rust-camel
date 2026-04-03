@@ -66,12 +66,14 @@ No Java runtime is required on the host — the bridge is a native binary.
 ```bash
 # Requires Java 21+ and Gradle
 cd bridges/jms && ./jlink.sh
-# Binary is written to bridges/jms/build/jlink/bin/jms-bridge
+# Binary is written to bridges/jms/build/release/jms-bridge-0.1.0-linux-x86_64/bin/jms-bridge
 
-export CAMEL_JMS_BRIDGE_BINARY_PATH=bridges/jms/build/jlink/bin/jms-bridge
+export CAMEL_JMS_BRIDGE_BINARY_PATH=$(realpath bridges/jms/build/release/jms-bridge-0.1.0-linux-x86_64/bin/jms-bridge)
 cargo run -p jms-example
 cargo test -p camel-test --features integration-tests
 ```
+
+> On NixOS, use `bin/jms-bridge-nix` instead (Java path is hardcoded for the nix store).
 
 ## Known Limitations
 
