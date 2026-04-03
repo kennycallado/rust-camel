@@ -3,6 +3,7 @@ use config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +54,9 @@ pub struct ComponentsConfig {
 
     #[serde(default)]
     pub kafka: Option<KafkaCamelConfig>,
+
+    #[serde(default)]
+    pub jms: Option<JmsCamelConfig>,
 
     #[serde(default)]
     pub redis: Option<RedisCamelConfig>,
@@ -132,6 +136,41 @@ impl Default for KafkaCamelConfig {
             request_timeout_ms: default_kafka_request_timeout_ms(),
             auto_offset_reset: default_kafka_auto_offset_reset(),
             security_protocol: default_kafka_security_protocol(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct JmsCamelConfig {
+    #[serde(default = "default_jms_broker_url")]
+    pub broker_url: String,
+    #[serde(default = "default_jms_broker_type")]
+    pub broker_type: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default = "default_jms_bridge_version")]
+    pub bridge_version: String,
+    #[serde(default = "default_jms_bridge_cache_dir")]
+    pub bridge_cache_dir: PathBuf,
+    #[serde(default = "default_jms_bridge_start_timeout_ms")]
+    pub bridge_start_timeout_ms: u64,
+    #[serde(default = "default_jms_broker_reconnect_interval_ms")]
+    pub broker_reconnect_interval_ms: u64,
+}
+
+impl Default for JmsCamelConfig {
+    fn default() -> Self {
+        Self {
+            broker_url: default_jms_broker_url(),
+            broker_type: default_jms_broker_type(),
+            username: None,
+            password: None,
+            bridge_version: default_jms_bridge_version(),
+            bridge_cache_dir: default_jms_bridge_cache_dir(),
+            bridge_start_timeout_ms: default_jms_bridge_start_timeout_ms(),
+            broker_reconnect_interval_ms: default_jms_broker_reconnect_interval_ms(),
         }
     }
 }
@@ -446,6 +485,55 @@ fn default_kafka_auto_offset_reset() -> String {
 }
 fn default_kafka_security_protocol() -> String {
     "plaintext".to_string()
+}
+
+fn default_jms_broker_url() -> String {
+    "tcp://localhost:61616".to_string()
+}
+
+fn default_jms_broker_type() -> String {
+    "activemq".to_string()
+}
+
+fn default_jms_bridge_version() -> String {
+    #[cfg(feature = "jms")]
+    {
+        camel_component_jms::BRIDGE_VERSION.to_string()
+    }
+    #[cfg(not(feature = "jms"))]
+    {
+        "0.1.0".to_string()
+    }
+}
+
+fn default_jms_bridge_cache_dir() -> PathBuf {
+    #[cfg(feature = "jms")]
+    {
+        camel_component_jms::default_bridge_cache_dir()
+    }
+    #[cfg(not(feature = "jms"))]
+    {
+        if let Some(xdg_cache) = std::env::var_os("XDG_CACHE_HOME") {
+            PathBuf::from(xdg_cache)
+                .join("rust-camel")
+                .join("jms-bridge")
+        } else if let Some(home) = std::env::var_os("HOME") {
+            PathBuf::from(home)
+                .join(".cache")
+                .join("rust-camel")
+                .join("jms-bridge")
+        } else {
+            PathBuf::from("/tmp").join("rust-camel").join("jms-bridge")
+        }
+    }
+}
+
+fn default_jms_bridge_start_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_jms_broker_reconnect_interval_ms() -> u64 {
+    5_000
 }
 
 fn default_redis_host() -> String {
@@ -838,9 +926,36 @@ docker_host = "tcp://remote:2375"
     }
 
     #[test]
+    fn test_jms_partial_override() {
+        let cfg = parse(
+            r#"
+[components.jms]
+broker_url = "tcp://broker:61616"
+"#,
+        );
+        let j = cfg.components.jms.unwrap();
+        assert_eq!(j.broker_url, "tcp://broker:61616");
+        assert_eq!(j.broker_type, "activemq");
+        assert_eq!(j.username, None);
+        assert_eq!(j.password, None);
+        #[cfg(feature = "jms")]
+        assert_eq!(j.bridge_version, camel_component_jms::BRIDGE_VERSION);
+        #[cfg(not(feature = "jms"))]
+        assert_eq!(j.bridge_version, "0.1.0");
+        #[cfg(feature = "jms")]
+        assert_eq!(
+            j.bridge_cache_dir,
+            camel_component_jms::default_bridge_cache_dir()
+        );
+        assert_eq!(j.bridge_start_timeout_ms, 10_000);
+        assert_eq!(j.broker_reconnect_interval_ms, 5_000);
+    }
+
+    #[test]
     fn test_omitted_sections_are_none() {
         let cfg = parse("");
         assert!(cfg.components.kafka.is_none());
+        assert!(cfg.components.jms.is_none());
         assert!(cfg.components.redis.is_none());
         assert!(cfg.components.sql.is_none());
         assert!(cfg.components.file.is_none());
@@ -863,6 +978,26 @@ docker_host = "tcp://remote:2375"
         let d = RedisCamelConfig::default();
         assert_eq!(d.host, "localhost");
         assert_eq!(d.port, 6379);
+    }
+
+    #[test]
+    fn test_jms_camel_config_default_matches_serde() {
+        let d = JmsCamelConfig::default();
+        assert_eq!(d.broker_url, "tcp://localhost:61616");
+        assert_eq!(d.broker_type, "activemq");
+        assert_eq!(d.username, None);
+        assert_eq!(d.password, None);
+        #[cfg(feature = "jms")]
+        assert_eq!(d.bridge_version, camel_component_jms::BRIDGE_VERSION);
+        #[cfg(not(feature = "jms"))]
+        assert_eq!(d.bridge_version, "0.1.0");
+        #[cfg(feature = "jms")]
+        assert_eq!(
+            d.bridge_cache_dir,
+            camel_component_jms::default_bridge_cache_dir()
+        );
+        assert_eq!(d.bridge_start_timeout_ms, 10_000);
+        assert_eq!(d.broker_reconnect_interval_ms, 5_000);
     }
 
     #[test]
@@ -957,6 +1092,38 @@ mod http_from_tests {
         assert_eq!(cfg.connect_timeout_ms, 1_000);
         assert_eq!(cfg.max_connections, 20);
         assert!(cfg.allow_private_ips);
+    }
+}
+
+#[cfg(all(test, feature = "jms"))]
+mod jms_from_tests {
+    use crate::config::JmsCamelConfig;
+
+    #[test]
+    fn test_jms_camel_config_to_jms_config() {
+        let camel_cfg = JmsCamelConfig {
+            broker_url: "tcp://broker:61616".to_string(),
+            broker_type: "artemis".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            bridge_version: "0.2.0".to_string(),
+            bridge_cache_dir: std::path::PathBuf::from("/tmp/camel-jms"),
+            bridge_start_timeout_ms: 11_000,
+            broker_reconnect_interval_ms: 9_000,
+        };
+
+        let cfg = camel_component_jms::JmsConfig::from(&camel_cfg);
+        assert_eq!(cfg.broker_url, "tcp://broker:61616");
+        assert_eq!(cfg.broker_type, camel_component_jms::BrokerType::Artemis);
+        assert_eq!(cfg.username.as_deref(), Some("user"));
+        assert_eq!(cfg.password.as_deref(), Some("pass"));
+        assert_eq!(cfg.bridge_version, "0.2.0");
+        assert_eq!(
+            cfg.bridge_cache_dir,
+            std::path::PathBuf::from("/tmp/camel-jms")
+        );
+        assert_eq!(cfg.bridge_start_timeout_ms, 11_000);
+        assert_eq!(cfg.broker_reconnect_interval_ms, 9_000);
     }
 }
 

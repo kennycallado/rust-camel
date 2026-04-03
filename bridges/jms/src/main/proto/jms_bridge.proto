@@ -1,0 +1,45 @@
+syntax = "proto3";
+package jms_bridge;
+
+option java_package = "jms_bridge";
+option java_multiple_files = true;
+
+service BridgeService {
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc Subscribe(SubscribeRequest) returns (stream JmsMessage);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message SendRequest {
+  string destination = 1;
+  bytes body = 2;
+  map<string, string> headers = 3;
+  string content_type = 4;
+}
+
+message SendResponse {
+  string message_id = 1;
+}
+
+message SubscribeRequest {
+  string destination = 1;
+  string subscription_id = 2;
+}
+
+message JmsMessage {
+  string message_id = 1;
+  string correlation_id = 2;
+  int64 timestamp = 3;
+  string destination = 4;
+  bytes body = 5;
+  map<string, string> headers = 6;
+  string content_type = 7;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  bool broker_connected = 2;
+  string message = 3;
+}

@@ -652,10 +652,7 @@ async fn direct_error_contained_in_subroute() {
 
 #[tokio::test]
 async fn no_error_handler_logs_and_continues() {
-    let h = CamelTestContext::builder()
-        .with_timer()
-        .build()
-        .await;
+    let h = CamelTestContext::builder().with_timer().build().await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
         .route_id("test-route-18")

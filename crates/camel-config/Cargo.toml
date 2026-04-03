@@ -20,6 +20,7 @@ camel-prometheus = { workspace = true }
 camel-processor.workspace = true
 camel-component-http = { workspace = true, optional = true }
 camel-component-kafka = { workspace = true, optional = true }
+camel-component-jms = { workspace = true, optional = true }
 camel-component-redis = { workspace = true, optional = true }
 camel-component-sql = { workspace = true, optional = true }
 camel-component-file = { workspace = true, optional = true }
@@ -45,8 +46,9 @@ camel-component-log.workspace = true
 otel = ["dep:tracing-opentelemetry"]
 http = ["dep:camel-component-http"]
 kafka = ["dep:camel-component-kafka"]
+jms = ["dep:camel-component-jms"]
 redis = ["dep:camel-component-redis"]
 sql = ["dep:camel-component-sql"]
 file = ["dep:camel-component-file"]
 container = ["dep:camel-component-container"]
-all-components = ["http", "kafka", "redis", "sql", "file", "container"]
+all-components = ["http", "kafka", "jms", "redis", "sql", "file", "container"]

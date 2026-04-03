@@ -1,0 +1,62 @@
+name: JMS Bridge Release
+
+on:
+  push:
+    tags:
+      - 'jms-bridge-v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          # linux-aarch64 and macos-x86_64 need cross-compilation/setup not configured in this workflow.
+          - os: macos-latest
+            platform: macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.10'
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#jms-bridge-v}" >> $GITHUB_OUTPUT
+      - name: Build bridge tarball
+        working-directory: bridges/jms
+        run: |
+          chmod +x jlink.sh
+          ./jlink.sh ${{ steps.version.outputs.version }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-${{ matrix.platform }}
+          path: bridges/jms/build/release/*.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bridge-*
+          merge-multiple: true
+          path: artifacts/
+      - name: Create SHA256SUMS
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz > SHA256SUMS
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
+          generate_release_notes: true

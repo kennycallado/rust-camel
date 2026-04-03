@@ -100,7 +100,10 @@ async fn producer_select() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .to(format!(
@@ -163,7 +166,10 @@ async fn producer_insert() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("name", Value::String("Charlie".into()))
@@ -226,7 +232,10 @@ async fn producer_update() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("new_value", Value::Number(999.into()))
@@ -289,7 +298,10 @@ async fn producer_delete() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("target_name", Value::String("ToDelete".into()))
@@ -351,7 +363,10 @@ async fn producer_select_one() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .to(format!(
@@ -405,7 +420,10 @@ async fn producer_batch() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let batch_body = serde_json::json!([["Alice", 100], ["Bob", 200], ["Charlie", 300]]);
 
@@ -469,7 +487,10 @@ async fn producer_noop() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(Body::Text("OriginalBody".into()))
@@ -538,7 +559,10 @@ async fn consumer_polling() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_consumer WHERE name = 'ConsumerRow'?db_url={}&delay=100&initialDelay=50",
@@ -606,7 +630,10 @@ async fn consumer_on_consume() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_on_consume?db_url={}&delay=100&initialDelay=50&onConsume=INSERT INTO processed_rows (id, name) VALUES (:#id, :#name)",
@@ -656,7 +683,10 @@ async fn consumer_empty_result() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_empty?db_url={}&delay=100&initialDelay=50&routeEmptyResultSet=false",
@@ -763,7 +793,10 @@ async fn consumer_empty_result_routed() {
         .with_component(SqlComponent::new())
         .build()
         .await;
-    h.ctx().lock().await.set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+    h.ctx()
+        .lock()
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_empty_routed?db_url={}&delay=100&initialDelay=50&routeEmptyResultSet=true&useIterator=false",

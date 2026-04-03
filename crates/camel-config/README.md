@@ -10,7 +10,7 @@ Configuration management for the Rust Camel framework. Provides profile-based co
 - **Profile support** - Environment-specific settings ([default], [production], etc.)
 - **Environment variables** - Override any setting with `CAMEL_*` variables
 - **Route discovery** - Automatic route file discovery via glob patterns
-- **Component defaults** - Global defaults for HTTP, Kafka, Redis, SQL, File, Container components
+- **Component defaults** - Global defaults for HTTP, Kafka, JMS, Redis, SQL, File, Container components
 - **Supervision configuration** - Retry and backoff settings for route supervision
 
 ## Features
@@ -66,6 +66,10 @@ delay_ms = 500
 initial_delay_ms = 1000
 read_timeout_ms = 30000
 write_timeout_ms = 30000
+
+[default.components.jms]
+broker_url = "tcp://localhost:61616"
+broker_type = "activemq"
 
 [default.components.container]
 docker_host = "unix:///var/run/docker.sock"
@@ -144,6 +148,27 @@ session_timeout_ms = 45000     # Consumer session timeout (default: 45000)
 request_timeout_ms = 30000     # Producer request timeout (default: 30000)
 auto_offset_reset = "latest"   # Offset reset: earliest/latest/none (default: latest)
 security_protocol = "plaintext" # Security protocol (default: plaintext)
+```
+
+### JMS Component
+
+Requires the `jms` feature flag:
+
+```toml
+[dependencies]
+camel-config = { version = "0.1", features = ["jms"] }
+```
+
+```toml
+[default.components.jms]
+broker_url = "tcp://localhost:61616"          # Broker URL (default: tcp://localhost:61616)
+broker_type = "activemq"                      # Broker type: "activemq" or "artemis" (default: activemq)
+username = "admin"                            # Optional broker username
+password = "admin"                            # Optional broker password
+bridge_version = "0.1.0"                      # JMS bridge binary version (default: auto)
+bridge_cache_dir = "/path/to/cache"           # Bridge binary cache directory (default: XDG cache)
+bridge_start_timeout_ms = 10000               # Bridge startup timeout in ms (default: 10000)
+broker_reconnect_interval_ms = 5000           # Reconnect interval in ms (default: 5000)
 ```
 
 ### Redis Component

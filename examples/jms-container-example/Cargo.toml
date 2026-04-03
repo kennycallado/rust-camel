@@ -1,0 +1,17 @@
+[package]
+name = "jms-container-example"
+description = "JMS component example using camel-component-container to manage the broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-component-jms = { workspace = true }
+camel-component-container.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber.workspace = true

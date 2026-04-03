@@ -1,0 +1,6 @@
+quarkus:
+  grpc:
+    server:
+      port: 9090       # overridden at runtime via QUARKUS_GRPC_SERVER_PORT env var
+  http:
+    port: -1           # disable HTTP entirely

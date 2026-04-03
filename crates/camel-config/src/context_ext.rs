@@ -43,6 +43,32 @@ impl From<&crate::config::KafkaCamelConfig> for camel_component_kafka::KafkaConf
     }
 }
 
+#[cfg(feature = "jms")]
+impl From<&crate::config::JmsCamelConfig> for camel_component_jms::JmsConfig {
+    fn from(c: &crate::config::JmsCamelConfig) -> Self {
+        let broker_type: camel_component_jms::BrokerType = c.broker_type.parse().unwrap();
+        if matches!(broker_type, camel_component_jms::BrokerType::Generic)
+            && !matches!(c.broker_type.to_lowercase().as_str(), "" | "generic")
+        {
+            tracing::warn!(
+                "JMS: unrecognized broker_type '{}', falling back to Generic. Valid values: activemq, artemis, generic",
+                c.broker_type
+            );
+        }
+
+        camel_component_jms::JmsConfig {
+            broker_url: c.broker_url.clone(),
+            broker_type,
+            username: c.username.clone(),
+            password: c.password.clone(),
+            bridge_version: c.bridge_version.clone(),
+            bridge_cache_dir: c.bridge_cache_dir.clone(),
+            bridge_start_timeout_ms: c.bridge_start_timeout_ms,
+            broker_reconnect_interval_ms: c.broker_reconnect_interval_ms,
+        }
+    }
+}
+
 #[cfg(feature = "redis")]
 impl From<&crate::config::RedisCamelConfig> for camel_component_redis::RedisConfig {
     fn from(c: &crate::config::RedisCamelConfig) -> Self {
@@ -206,6 +232,17 @@ impl CamelConfig {
                 .map(camel_component_kafka::KafkaConfig::from)
                 .unwrap_or_default();
             ctx.set_component_config(kafka_config);
+        }
+
+        #[cfg(feature = "jms")]
+        {
+            let jms_config: camel_component_jms::JmsConfig = config
+                .components
+                .jms
+                .as_ref()
+                .map(camel_component_jms::JmsConfig::from)
+                .unwrap_or_default();
+            ctx.set_component_config(jms_config);
         }
 
         #[cfg(feature = "redis")]

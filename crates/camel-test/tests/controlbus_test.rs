@@ -13,7 +13,11 @@ use camel_test::CamelTestContext;
 
 async fn route_status(h: &CamelTestContext, route_id: &str) -> Option<RouteStatus> {
     let ctx = h.ctx().lock().await;
-    match ctx.runtime_route_status(route_id).await.expect("runtime route status query failed") {
+    match ctx
+        .runtime_route_status(route_id)
+        .await
+        .expect("runtime route status query failed")
+    {
         Some(status) => match status.as_str() {
             "Stopped" => Some(RouteStatus::Stopped),
             // Registered = pre-start state (route added but never started), equivalent to Stopped for assertions
