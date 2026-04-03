@@ -27,7 +27,7 @@
           overlays = [ (import rust-overlay) ];
         };
 
-        craneLib = crane.mkLib pkgs;
+        craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [
@@ -40,6 +40,7 @@
 
         commonArgs = {
           inherit src;
+          pname = "rust-camel";
           strictDeps = true;
         };
 
@@ -96,10 +97,15 @@
             bacon
             cargo-llvm-cov
             llvm
+            sccache
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";
           LLVM_PROFDATA = "${pkgs.llvm}/bin/llvm-profdata";
+          shellHook = ''
+            export RUSTC_WRAPPER=sccache
+            export CARGO_TARGET_DIR="$HOME/.cache/rust-camel-target"
+          '';
         };
       }
     );

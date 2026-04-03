@@ -200,3 +200,15 @@ opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto",
 opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
 opentelemetry-appender-tracing = { version = "0.31" }
 tracing-opentelemetry = { version = "0.32", features = [] }
+
+[profile.dev]
+debug = 1
+split-debuginfo = "packed"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1

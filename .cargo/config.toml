@@ -1,0 +1,5 @@
+[registry]
+global-credential-providers = ["cargo:token"]
+
+[source.crates-io]
+registry = "sparse+https://index.crates.io/"
