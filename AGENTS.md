@@ -11,7 +11,7 @@
 - When implementing a new feature remember this:
 
   ```txt
-  Usar superpowers siempre y worktree desde main y activar ORCHESTRATE esto es importante, delegando la implementación a @worker_gpt y siempre haciendo spec + code review a @worker_new. no pasamos de tarea si existe critical o important issues y si esta no está contemplada en una tarea posterior. Si un subagente necesita ULTRATHINK debes indicar que lea AGENTS.md
+  Usar superpowers siempre y worktree desde main y activar ORCHESTRATE esto es importante, delegando la implementación a @worker_gpt y siempre haciendo spec + code review a @worker_new. no pasamos de tarea si existe critical o important issues y si esta no está contemplada en una tarea posterior, los minor los consideramos si son relevantes. Si un subagente necesita ULTRATHINK debes indicar que lea AGENTS.md
   ```
 
 - When user ask to merge to main:
