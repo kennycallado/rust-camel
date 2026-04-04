@@ -334,6 +334,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn tarball_filename_contains_version() {
         let name = tarball_filename("0.1.0").unwrap();
         assert!(name.starts_with("jms-bridge-0.1.0-"));
