@@ -765,6 +765,7 @@ dependencies = [
  "camel-component-direct",
  "camel-component-file",
  "camel-component-http",
+ "camel-component-jms",
  "camel-component-kafka",
  "camel-component-log",
  "camel-component-mock",

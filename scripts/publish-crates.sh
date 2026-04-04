@@ -128,6 +128,11 @@ publish_crate "camel-component-sql" "crates/components/camel-sql"
 publish_crate "camel-component-controlbus" "crates/components/camel-controlbus"
 publish_crate "camel-component-ws" "crates/components/camel-ws"
 
+# Bridge (needed by camel-component-jms)
+publish_crate "camel-bridge" "crates/services/camel-bridge"
+
+publish_crate "camel-component-jms" "crates/components/camel-jms"
+
 # camel-config depends on camel-otel, camel-prometheus and many component crates
 publish_crate "camel-config" "crates/camel-config"
 

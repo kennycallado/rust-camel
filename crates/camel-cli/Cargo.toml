@@ -40,6 +40,7 @@ camel-component-container = { workspace = true, optional = true }
 camel-component-redis = { workspace = true, optional = true }
 camel-component-kafka = { workspace = true, optional = true }
 camel-component-sql = { workspace = true, optional = true }
+camel-component-jms = { workspace = true, optional = true }
 camel-language-js = { workspace = true, optional = true }
 camel-language-rhai = { workspace = true, optional = true }
 camel-language-jsonpath = { workspace = true, optional = true }
@@ -54,9 +55,10 @@ container = ["dep:camel-component-container"]
 redis = ["dep:camel-component-redis"]
 kafka = ["dep:camel-component-kafka", "dynamic-linking"]
 sql = ["dep:camel-component-sql"]
+jms = ["dep:camel-component-jms"]
 lang-js = ["camel-core/lang-js", "dep:camel-language-js"]
 lang-rhai = ["camel-core/lang-rhai", "dep:camel-language-rhai"]
 lang-jsonpath = ["camel-core/lang-jsonpath", "dep:camel-language-jsonpath"]
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]
-all-components = ["container", "redis", "kafka", "sql"]
+all-components = ["container", "redis", "kafka", "sql", "jms"]
