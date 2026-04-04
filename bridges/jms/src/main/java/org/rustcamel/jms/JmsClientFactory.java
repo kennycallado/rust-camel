@@ -189,7 +189,9 @@ public class JmsClientFactory {
         // Bound connection and call timeouts so health checks never block indefinitely.
         // GraalVM native image Netty initialization can stall under mandatory auth
         // without these — causing Rust's wait_for_health to time out.
-        params.put(TransportConstants.HANDSHAKE_TIMEOUT, 5);              // seconds (int)
+        // Artemis expects handshake-timeout in milliseconds. Using `5` here
+        // means 5ms (not 5s) and causes connection setup to fail repeatedly.
+        params.put(TransportConstants.HANDSHAKE_TIMEOUT, 5_000);          // ms (int)
         params.put(TransportConstants.NETTY_CONNECT_TIMEOUT, 5_000);       // ms (int)
         params.put(TransportConstants.CONNECTION_TTL, 10_000L);             // ms
 

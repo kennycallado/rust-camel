@@ -85,6 +85,29 @@ impl BridgeProcess {
             listener.local_addr()?.port()
         };
 
+        // If CAMEL_BRIDGE_LOG_STDERR is set, redirect stderr to a file for debugging.
+        // The file path is: /tmp/jms-bridge-<pid>.log
+        let stderr_stdio: std::process::Stdio =
+            if let Ok(log_dir) = std::env::var("CAMEL_BRIDGE_LOG_STDERR") {
+                let log_path = if log_dir.is_empty() {
+                    format!("/tmp/jms-bridge-{}.log", std::process::id())
+                } else {
+                    format!("{}/jms-bridge-{}.log", log_dir, std::process::id())
+                };
+                match std::fs::File::create(&log_path) {
+                    Ok(f) => {
+                        eprintln!("[camel-bridge] stderr → {}", log_path);
+                        f.into()
+                    }
+                    Err(e) => {
+                        eprintln!("[camel-bridge] failed to create log file {}: {}", log_path, e);
+                        std::process::Stdio::inherit()
+                    }
+                }
+            } else {
+                std::process::Stdio::inherit()
+            };
+
         let mut child = Command::new(&config.binary_path)
             .env("BRIDGE_BROKER_URL", &config.broker_url)
             .env("BRIDGE_BROKER_TYPE", config.broker_type.as_env_str())
@@ -95,7 +118,7 @@ impl BridgeProcess {
             .env_opt("BRIDGE_USERNAME", &config.username)
             .env_opt("BRIDGE_PASSWORD", &config.password)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(stderr_stdio)
             .spawn()?;
 
         let stdout = child.stdout.take().ok_or(BridgeError::StdoutClosed)?;
