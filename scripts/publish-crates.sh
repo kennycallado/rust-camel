@@ -82,15 +82,16 @@ publish_crate "camel-support" "crates/camel-support"
 publish_crate "camel-endpoint-macros" "crates/camel-endpoint-macros"
 publish_crate "camel-endpoint" "crates/camel-endpoint"
 
-# Language crates (needed by camel-processor and camel-core)
+# Language crates (needed by camel-core; camel-language-js also needs camel-processor)
 publish_crate "camel-language-api" "crates/languages/camel-language-api"
 publish_crate "camel-language-simple" "crates/languages/camel-language-simple"
 publish_crate "camel-language-rhai" "crates/languages/camel-language-rhai"
-publish_crate "camel-language-js" "crates/languages/camel-language-js"
-publish_crate "camel-language-jsonpath" "crates/languages/camel-language-jsonpath"
 
 publish_crate "camel-component" "crates/camel-component"
 publish_crate "camel-processor" "crates/camel-processor"
+
+publish_crate "camel-language-js" "crates/languages/camel-language-js"
+publish_crate "camel-language-jsonpath" "crates/languages/camel-language-jsonpath"
 
 # Container component (depends on camel-api, camel-component, camel-endpoint)
 publish_crate "camel-component-container" "crates/components/camel-container"
