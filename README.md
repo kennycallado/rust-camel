@@ -8,7 +8,7 @@ A Rust-native, Tower-native integration framework inspired by [Apache Camel](htt
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `kafka`, `redis`, `sql`, `container`, `controlbus`.
+Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `kafka`, `redis`, `sql`, `jms`, `container`, `controlbus`.
 
 ## Architecture
 
@@ -43,7 +43,7 @@ rust-camel separates two planes:
 ┌─────────▼──────────┐   ┌──────────▼─────────────────┐
 │   camel-processor  │   │   Components                │
 │   EIP patterns     │   │   timer, log, http, file,   │
-│   (Tower layers)   │   │   kafka, redis, sql, …      │
+│   (Tower layers)   │   │   kafka, redis, sql, jms, …  │
 └────────────────────┘   └────────────────────────────┘
 ```
 
@@ -137,6 +137,7 @@ cargo run -p hello-world
 | `camel-kafka`           | Kafka producer and consumer with SSL/SASL and manual commit                                                                              |
 | `camel-redis`           | Redis producer and consumer                                                                                                              |
 | `camel-sql`             | SQL producer (query/insert/update) with streaming result support                                                                         |
+| `camel-jms`             | JMS producer and consumer via native-image bridge (ActiveMQ Classic, Artemis)                                                            |
 | `camel-container`       | Docker container producer/consumer via `bollard`                                                                                         |
 | `camel-language-api`    | Language trait API: `Language`, `Expression`, `Predicate`                                                                                |
 | `camel-language-simple` | Simple Language: `${header.x}`, `${body}`, operators                                                                                     |
@@ -201,6 +202,7 @@ Run an example:
  cargo run -p http-server
  cargo run -p http-streaming
  cargo run -p kafka-example
+ cargo run -p jms-example
  cargo run -p language-rhai
  cargo run -p language-simple
  cargo run -p lazy-route
@@ -545,6 +547,7 @@ Supported component configurations:
 - **`[components.kafka]`**: `brokers`, `group_id`, `session_timeout_ms`, `request_timeout_ms`, `auto_offset_reset`, `security_protocol`
 - **`[components.redis]`**: `host`, `port`
 - **`[components.sql]`**: `max_connections`, `min_connections`, `idle_timeout_secs`, `max_lifetime_secs`
+- **`[components.jms]`**: `broker_url`, `broker_type`, `username`, `password`, `bridge_version`, `bridge_cache_dir`, `bridge_start_timeout_ms`, `broker_reconnect_interval_ms`
 - **`[components.file]`**: `delay_ms`, `initial_delay_ms`, `read_timeout_ms`, `write_timeout_ms`
 - **`[components.container]`**: `docker_host`
 

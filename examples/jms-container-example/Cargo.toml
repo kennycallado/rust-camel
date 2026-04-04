@@ -13,5 +13,6 @@ camel-component-jms = { workspace = true }
 camel-component-container.workspace = true
 camel-component-timer.workspace = true
 camel-component-log.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing-subscriber.workspace = true

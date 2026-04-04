@@ -6,7 +6,6 @@ import io.grpc.stub.StreamObserver;
 import io.quarkus.grpc.GrpcService;
 import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
-import javax.jms.Connection;
 import java.util.concurrent.ConcurrentHashMap;
 import jms_bridge.BridgeServiceGrpc;
 import jms_bridge.HealthRequest;
@@ -15,9 +14,12 @@ import jms_bridge.JmsMessage;
 import jms_bridge.SendRequest;
 import jms_bridge.SendResponse;
 import jms_bridge.SubscribeRequest;
+import org.jboss.logging.Logger;
 
 @GrpcService
 public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
+    private static final Logger LOG = Logger.getLogger(JmsBridgeService.class);
+
     @Inject JmsProducer producer;
     @Inject jakarta.enterprise.inject.Instance<JmsConsumer> consumerFactory;
     @Inject JmsClientFactory clientFactory;
@@ -26,7 +28,7 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
     private volatile boolean lastHealthy = false;
     private volatile long lastHealthCheck = 0L;
     private volatile String lastHealthMessage = "ok";
-    private static final long HEALTH_TTL_MS = 5000L;
+    private static final long HEALTH_TTL_MS = 10_000L;
 
     @Override
     public void send(SendRequest request, StreamObserver<SendResponse> responseObserver) {
@@ -42,6 +44,7 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
             lastHealthy = true;
             lastHealthMessage = "ok";
         } catch (Exception e) {
+            LOG.error("JMS send failed for destination '" + request.getDestination() + "': " + e.getMessage(), e);
             responseObserver.onError(Status.INTERNAL.withDescription(e.getMessage()).asException());
         }
     }
@@ -91,13 +94,14 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
             synchronized (this) {
                 now = System.currentTimeMillis();
                 if (now - lastHealthCheck > HEALTH_TTL_MS) {
-                    try (Connection c = clientFactory.get().createConnection()) {
-                        c.start();
+                    try {
+                        clientFactory.checkHealth();
                         lastHealthy = true;
                         lastHealthMessage = "ok";
                     } catch (Exception e) {
                         lastHealthy = false;
-                        lastHealthMessage = e.getMessage() == null ? "connection failed" : e.getMessage();
+                        lastHealthMessage = summarizeThrowable(e);
+                        LOG.warn("JMS broker health check failed: " + lastHealthMessage);
                     }
                     lastHealthCheck = now;
                 }
@@ -119,5 +123,32 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
             consumerFactory.destroy(c);
         }
         activeConsumers.clear();
+    }
+
+    private static String summarizeThrowable(Throwable error) {
+        if (error == null) {
+            return "connection failed";
+        }
+
+        StringBuilder summary = new StringBuilder();
+        Throwable cur = error;
+        int depth = 0;
+        while (cur != null && depth < 6) {
+            if (depth > 0) {
+                summary.append(" <- ");
+            }
+            summary.append(cur.getClass().getName());
+            String msg = cur.getMessage();
+            if (msg != null && !msg.isBlank()) {
+                summary.append(": ").append(msg);
+            }
+            cur = cur.getCause();
+            depth++;
+        }
+
+        if (summary.length() == 0) {
+            return "connection failed";
+        }
+        return summary.toString();
     }
 }

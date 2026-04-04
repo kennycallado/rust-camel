@@ -36,7 +36,7 @@ public class JmsConsumer {
 
         Thread t = new Thread(() -> {
             try {
-                connection = factory.get().createConnection();
+                connection = factory.createConnection();
             } catch (Exception e) {
                 if (running) observer.onError(e);
                 else observer.onCompleted();

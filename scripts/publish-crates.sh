@@ -127,6 +127,8 @@ publish_crate "camel-component-kafka" "crates/components/camel-kafka"
 publish_crate "camel-component-sql" "crates/components/camel-sql"
 publish_crate "camel-component-controlbus" "crates/components/camel-controlbus"
 publish_crate "camel-component-ws" "crates/components/camel-ws"
+publish_crate "camel-bridge" "crates/services/camel-bridge"
+publish_crate "camel-component-jms" "crates/components/camel-jms"
 
 # Bridge (needed by camel-component-jms)
 publish_crate "camel-bridge" "crates/services/camel-bridge"

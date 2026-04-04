@@ -50,7 +50,7 @@ tempfile = "3"
 serde_json.workspace = true
 
 [features]
-default = ["container", "redis", "sql", "lang-js", "lang-rhai", "lang-jsonpath"]
+default = ["container", "redis", "sql", "jms", "lang-js", "lang-rhai", "lang-jsonpath"]
 container = ["dep:camel-component-container"]
 redis = ["dep:camel-component-redis"]
 kafka = ["dep:camel-component-kafka", "dynamic-linking"]

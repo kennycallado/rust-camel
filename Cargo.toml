@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "scripts/xtask",
     "crates/camel-api",
     "crates/camel-bean",
     "crates/camel-bean-macros",

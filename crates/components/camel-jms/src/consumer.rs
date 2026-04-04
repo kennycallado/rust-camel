@@ -1,19 +1,20 @@
 use async_trait::async_trait;
 use camel_api::{Body, CamelError, Exchange, Message};
 use camel_component::{ConcurrencyModel, Consumer, ConsumerContext};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Channel;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::component::JmsComponent;
 use crate::config::JmsEndpointConfig;
 use crate::headers::apply_jms_headers;
 use crate::proto::{JmsMessage, SubscribeRequest, bridge_service_client::BridgeServiceClient};
 
 pub struct JmsConsumer {
-    channel: Channel,
+    component: Arc<JmsComponent>,
     endpoint_config: JmsEndpointConfig,
     reconnect_interval_ms: u64,
     cancel_token: Option<CancellationToken>,
@@ -22,12 +23,12 @@ pub struct JmsConsumer {
 
 impl JmsConsumer {
     pub fn new(
-        channel: Channel,
+        component: Arc<JmsComponent>,
         endpoint_config: JmsEndpointConfig,
         reconnect_interval_ms: u64,
     ) -> Self {
         Self {
-            channel,
+            component,
             endpoint_config,
             reconnect_interval_ms,
             cancel_token: None,
@@ -62,7 +63,7 @@ fn build_exchange(msg: JmsMessage) -> Exchange {
 #[async_trait]
 impl Consumer for JmsConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
-        let channel = self.channel.clone();
+        let component = self.component.clone();
         let destination = self.endpoint_config.destination();
         let reconnect_interval_ms = self.reconnect_interval_ms;
         let subscription_id = Uuid::new_v4().to_string();
@@ -74,13 +75,42 @@ impl Consumer for JmsConsumer {
                 destination: destination.clone(),
                 subscription_id,
             };
+
+            // Obtain an initial channel; re-fetch on each reconnection attempt
+            // so that if the bridge restarts on a different port, we pick up
+            // the new address instead of keeping a stale channel.
+            let mut channel = match component.ensure_bridge().await {
+                Ok(ch) => ch,
+                Err(e) => {
+                    warn!("JMS consumer initial bridge unavailable for {destination}: {e}");
+                    // Fall into the retry loop below
+                    loop {
+                        tokio::select! {
+                            _ = cancel.cancelled() => {
+                                info!("JMS consumer cancelled for {destination}");
+                                return Ok(());
+                            }
+                            _ = tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)) => {}
+                        }
+                        match component.ensure_bridge().await {
+                            Ok(ch) => break ch,
+                            Err(e) => {
+                                warn!(
+                                    "JMS consumer still cannot reach bridge for {destination}: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+            };
+
             loop {
                 let mut client = BridgeServiceClient::new(channel.clone());
                 let mut stream = match client.subscribe(request.clone()).await {
                     Ok(resp) => resp.into_inner(),
                     Err(e) => {
                         warn!(
-                            "JMS subscribe failed for {destination}: {e}, retrying in {reconnect_interval_ms}ms"
+                            "JMS subscribe failed for {destination}: {e}, refreshing bridge and retrying in {reconnect_interval_ms}ms"
                         );
                         tokio::select! {
                             _ = cancel.cancelled() => {
@@ -89,6 +119,16 @@ impl Consumer for JmsConsumer {
                             }
                             _ = tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)) => {}
                         }
+                        // Re-obtain channel from component; this will restart the
+                        // bridge if needed and return a fresh channel pointing to
+                        // the new port.
+                        channel = match component.ensure_bridge().await {
+                            Ok(ch) => ch,
+                            Err(e2) => {
+                                warn!("JMS consumer cannot refresh bridge for {destination}: {e2}");
+                                channel // keep old channel, will retry next iteration
+                            }
+                        };
                         continue;
                     }
                 };
@@ -126,7 +166,20 @@ impl Consumer for JmsConsumer {
                     info!("JMS consumer cancelled for {destination}");
                     return Ok(());
                 }
+
                 tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)).await;
+
+                // After a stream error/close, refresh the channel in case the
+                // bridge was restarted while this consumer was running.
+                channel = match component.ensure_bridge().await {
+                    Ok(ch) => ch,
+                    Err(e) => {
+                        warn!(
+                            "JMS consumer cannot refresh bridge after stream close for {destination}: {e}"
+                        );
+                        channel
+                    }
+                };
             }
         });
 
@@ -139,7 +192,15 @@ impl Consumer for JmsConsumer {
             cancel.cancel();
         }
         if let Some(handle) = self.task_handle.take() {
-            let _ = handle.await;
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!("JMS consumer task returned error on stop: {e}");
+                }
+                Err(join_err) => {
+                    warn!("JMS consumer task panicked on stop: {join_err}");
+                }
+            }
         }
         Ok(())
     }
@@ -152,6 +213,7 @@ impl Consumer for JmsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::JmsConfig;
 
     #[test]
     fn build_exchange_text_body() {
@@ -203,9 +265,9 @@ mod tests {
 
     #[tokio::test]
     async fn stop_without_start_is_noop() {
-        let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let component = Arc::new(JmsComponent::new(JmsConfig::default()));
         let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
-        let mut consumer = JmsConsumer::new(channel, endpoint_cfg, 50);
+        let mut consumer = JmsConsumer::new(component, endpoint_cfg, 50);
         assert!(consumer.stop().await.is_ok());
     }
 }

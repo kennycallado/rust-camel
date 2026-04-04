@@ -227,6 +227,15 @@ async fn run(
         ));
     }
 
+    #[cfg(feature = "jms")]
+    {
+        let jms_cfg = ctx
+            .get_component_config::<camel_component_jms::JmsConfig>()
+            .cloned()
+            .unwrap_or_default();
+        ctx.register_component(camel_component_jms::JmsComponent::new(jms_cfg));
+    }
+
     // 5. Discover and load initial routes
     match camel_dsl::discover_routes(&patterns) {
         Ok(defs) => {

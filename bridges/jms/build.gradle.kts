@@ -3,6 +3,8 @@ plugins {
     id("io.quarkus") version "3.20.0"
 }
 
+version = project.findProperty("version")?.toString() ?: "0.1.0"
+
 repositories {
     mavenCentral()
 }
@@ -23,6 +25,9 @@ dependencies {
 
     // Generic JMS connection pooling (used for Artemis)
     implementation("org.messaginghub:pooled-jms:2.0.8")
+
+    // log4j-api needed at native-image build time (Log4J2LogImpl in artemis-jms-client-all)
+    runtimeOnly("org.apache.logging.log4j:log4j-api:2.24.3")
 
     testImplementation("io.quarkus:quarkus-junit5")
 }

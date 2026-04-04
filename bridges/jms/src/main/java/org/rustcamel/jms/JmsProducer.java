@@ -20,7 +20,7 @@ public class JmsProducer {
     private static final Logger LOG = Logger.getLogger(JmsProducer.class.getName());
 
     public String send(String destination, byte[] body, Map<String, String> headers, String contentType) throws JMSException {
-        try (Connection conn = factory.get().createConnection();
+        try (Connection conn = factory.createConnection();
              Session session = conn.createSession(false, Session.AUTO_ACKNOWLEDGE)) {
             conn.start();
             Destination dest = parseDestination(session, destination);

@@ -98,6 +98,7 @@
             cargo-llvm-cov
             llvm
             sccache
+            patchelf
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";
@@ -105,6 +106,23 @@
           shellHook = ''
             export RUSTC_WRAPPER=sccache
             export CARGO_TARGET_DIR="$HOME/.cache/rust-camel-target"
+
+            # JMS bridge: auto-detect native binary
+            BRIDGE_BIN="$PWD/bridges/jms/build/native/jms-bridge"
+            if [ -x "$BRIDGE_BIN" ]; then
+              export CAMEL_JMS_BRIDGE_BINARY_PATH="$BRIDGE_BIN"
+            fi
+
+            echo ""
+            echo "  rust-camel dev shell"
+            echo ""
+            if [ -x "$BRIDGE_BIN" ]; then
+              echo "  JMS bridge: ready"
+            else
+              echo "  JMS bridge: not built"
+              echo "    run: cargo xtask build-jms-bridge"
+            fi
+            echo ""
           '';
         };
       }

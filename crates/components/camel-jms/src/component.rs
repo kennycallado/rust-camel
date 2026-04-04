@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use camel_api::{BoxProcessor, CamelError, Exchange};
 use camel_bridge::{
@@ -14,7 +14,7 @@ use camel_bridge::{
 use camel_component::{
     Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint, ProducerContext,
 };
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tonic::transport::Channel;
 use tower::Service;
 use tracing::{info, warn};
@@ -29,6 +29,11 @@ pub struct BridgeHandle {
     pub channel: Channel,
 }
 
+/// Cloning a `JmsComponent` shares the same underlying bridge process and
+/// connection pool. This allows multiple Camel contexts (e.g. in parallel
+/// integration tests) to reuse a single bridge instance per broker, avoiding
+/// resource exhaustion from spawning one native process per test.
+#[derive(Clone)]
 pub struct JmsComponent {
     bridge: Arc<RwLock<Option<BridgeHandle>>>,
     config: JmsConfig,
@@ -57,7 +62,6 @@ impl JmsComponent {
     }
 
     pub async fn ensure_bridge(&self) -> Result<Channel, CamelError> {
-        let mut evict_cached = false;
         let cached_channel = {
             let guard = self.bridge.read().await;
             guard.as_ref().map(|handle| handle.channel.clone())
@@ -67,28 +71,45 @@ impl JmsComponent {
             if self.cached_channel_healthy(channel.clone()).await {
                 return Ok(channel);
             }
-            evict_cached = true;
         }
 
-        let mut guard = self.bridge.write().await;
-        if evict_cached && let Some(stale) = guard.take() {
+        // Acquire semaphore before write-lock to keep canonical lock ordering.
+        let permit = self
+            .restart_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| CamelError::ProcessorError(format!("JMS bridge semaphore error: {e}")))?;
+
+        let latest_channel = {
+            let guard = self.bridge.read().await;
+            guard.as_ref().map(|handle| handle.channel.clone())
+        };
+        if let Some(channel) = latest_channel
+            && self.cached_channel_healthy(channel.clone()).await
+        {
+            return Ok(channel);
+        }
+
+        let stale = {
+            let mut guard = self.bridge.write().await;
+            guard.take()
+        };
+        if let Some(stale) = stale {
             let _ = stale.process.stop().await;
         }
-        if let Some(handle) = guard.as_ref() {
-            return Ok(handle.channel.clone());
-        }
 
-        // Acquire semaphore to prevent concurrent bridge starts
-        let _permit =
-            self.restart_semaphore.acquire().await.map_err(|e| {
-                CamelError::ProcessorError(format!("JMS bridge semaphore error: {e}"))
-            })?;
+        let handle = self.start_bridge_inner(&permit).await?;
+        let channel = handle.channel.clone();
+        let mut guard = self.bridge.write().await;
+        *guard = Some(handle);
+        Ok(channel)
+    }
 
-        // Double-check after acquiring semaphore (another caller may have started the bridge)
-        if let Some(handle) = guard.as_ref() {
-            return Ok(handle.channel.clone());
-        }
-
+    async fn start_bridge_inner(
+        &self,
+        _permit: &OwnedSemaphorePermit,
+    ) -> Result<BridgeHandle, CamelError> {
         info!("Starting JMS bridge process...");
         let binary_path = ensure_binary(&self.config.bridge_version, &self.config.bridge_cache_dir)
             .await
@@ -105,9 +126,21 @@ impl JmsComponent {
             start_timeout_ms: self.config.bridge_start_timeout_ms,
         };
 
+        let total_timeout = Duration::from_millis(self.config.bridge_start_timeout_ms);
+        let startup_started_at = Instant::now();
+
         let process = BridgeProcess::start(&process_config)
             .await
             .map_err(|e| CamelError::ProcessorError(format!("JMS bridge start failed: {e}")))?;
+
+        let elapsed = startup_started_at.elapsed();
+        if elapsed >= total_timeout {
+            return Err(CamelError::ProcessorError(format!(
+                "JMS bridge startup exceeded timeout budget before health check (elapsed: {:?}, budget: {:?})",
+                elapsed, total_timeout
+            )));
+        }
+        let remaining_timeout = total_timeout - elapsed;
 
         let port = process.grpc_port();
         let channel = connect_channel(port)
@@ -115,31 +148,30 @@ impl JmsComponent {
             .map_err(|e| CamelError::ProcessorError(format!("JMS bridge channel error: {e}")))?;
 
         let ch = channel.clone();
-        wait_for_health(
-            &channel,
-            Duration::from_millis(self.config.bridge_start_timeout_ms),
-            move |_| {
-                let ch = ch.clone();
-                async move {
-                    let mut client = BridgeServiceClient::new(ch);
-                    let r = client.health(HealthRequest {}).await?;
-                    Ok(r.into_inner().healthy)
+        wait_for_health(&channel, remaining_timeout, move |_| {
+            let ch = ch.clone();
+            async move {
+                let mut client = BridgeServiceClient::new(ch);
+                let r = client.health(HealthRequest {}).await?;
+                let resp = r.into_inner();
+                if !resp.healthy {
+                    tracing::debug!(
+                        "bridge health check: not ready — broker message: {}",
+                        resp.message
+                    );
                 }
-            },
-        )
+                Ok(resp.healthy)
+            }
+        })
         .await
         .map_err(|e| CamelError::ProcessorError(format!("JMS bridge health check failed: {e}")))?;
 
         info!(port, "JMS bridge ready");
-        *guard = Some(BridgeHandle {
-            process,
-            channel: channel.clone(),
-        });
-        Ok(channel)
+        Ok(BridgeHandle { process, channel })
     }
 
     async fn cached_channel_healthy(&self, channel: Channel) -> bool {
-        let timeout = Duration::from_millis(self.config.bridge_start_timeout_ms.min(1_000));
+        let timeout = Duration::from_millis(self.config.bridge_start_timeout_ms.min(5_000));
         match tokio::time::timeout(timeout, async move {
             let mut client = BridgeServiceClient::new(channel);
             client
@@ -158,18 +190,29 @@ impl JmsComponent {
     }
 
     pub async fn restart_bridge(&self) -> Result<(), CamelError> {
-        // Acquire semaphore to prevent concurrent restarts
-        let _permit = self.restart_semaphore.acquire().await.map_err(|e| {
-            CamelError::ProcessorError(format!("JMS bridge restart semaphore error: {e}"))
-        })?;
+        // Acquire semaphore before write-lock to keep canonical lock ordering.
+        let permit = self
+            .restart_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| {
+                CamelError::ProcessorError(format!("JMS bridge restart semaphore error: {e}"))
+            })?;
 
-        let mut guard = self.bridge.write().await;
-        if let Some(handle) = guard.take() {
+        let stale = {
+            let mut guard = self.bridge.write().await;
+            guard.take()
+        };
+        if let Some(handle) = stale {
             let _ = handle.process.stop().await;
         }
         warn!("JMS bridge restarting...");
-        drop(guard);
-        self.ensure_bridge().await.map(|_| ())
+
+        let handle = self.start_bridge_inner(&permit).await?;
+        let mut guard = self.bridge.write().await;
+        *guard = Some(handle);
+        Ok(())
     }
 
     /// Test-only helper: send directly to bridge without a Camel route.
@@ -225,6 +268,9 @@ impl Service<Exchange> for LazyJmsProducer {
             match producer.call(exchange).await {
                 Ok(exchange) => Ok(exchange),
                 Err(err) => {
+                    // On transport error the bridge is restarted so the next caller gets a fresh
+                    // channel, but this call is not retried — the error propagates to the caller.
+                    // The Camel route's error handler / redelivery policy is responsible for retries.
                     if is_bridge_transport_error(&err) {
                         component.restart_bridge().await?;
                     }
@@ -262,28 +308,17 @@ struct LazyJmsConsumer {
     inner: Option<JmsConsumer>,
 }
 
-impl LazyJmsConsumer {
-    async fn start_with_channel(
-        &mut self,
-        ctx: ConsumerContext,
-        channel: Channel,
-    ) -> Result<(), CamelError> {
+#[async_trait::async_trait]
+impl Consumer for LazyJmsConsumer {
+    async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
         let mut inner = JmsConsumer::new(
-            channel,
+            self.component.clone(),
             self.endpoint_config.clone(),
             self.component.config.broker_reconnect_interval_ms,
         );
         inner.start(ctx).await?;
         self.inner = Some(inner);
         Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl Consumer for LazyJmsConsumer {
-    async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
-        let channel = self.component.ensure_bridge().await?;
-        self.start_with_channel(ctx, channel).await
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
@@ -351,13 +386,75 @@ mod tests {
             inner: None,
         };
 
-        let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
         let (tx, _rx) = mpsc::channel(8);
         let cancel = CancellationToken::new();
         let ctx = ConsumerContext::new(tx, cancel);
 
-        consumer.start_with_channel(ctx, channel).await.unwrap();
+        // start() spawns a background task that will try ensure_bridge internally;
+        // since there is no real bridge, the task will keep retrying but we can
+        // still verify stop() is idempotent.
+        consumer.start(ctx).await.unwrap();
         assert!(consumer.stop().await.is_ok());
         assert!(consumer.stop().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_ensure_and_restart_do_not_deadlock() {
+        use tokio::time::{Duration, timeout};
+
+        struct EnvGuard {
+            key: &'static str,
+            prev: Option<std::ffi::OsString>,
+        }
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                if let Some(v) = &self.prev {
+                    // SAFETY: test code restores process env to previous value.
+                    unsafe { std::env::set_var(self.key, v) };
+                } else {
+                    // SAFETY: test code restores process env by removing key.
+                    unsafe { std::env::remove_var(self.key) };
+                }
+            }
+        }
+
+        let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
+        let env_guard = EnvGuard {
+            key: env_key,
+            prev: std::env::var_os(env_key),
+        };
+        // Use a fast-failing executable to avoid network/download latency in this test.
+        // SAFETY: test-scoped env mutation, restored by EnvGuard.
+        unsafe { std::env::set_var(env_key, "/bin/false") };
+
+        // Component without a real bridge process: calls are expected to fail,
+        // but they should still complete without deadlocking.
+        let component = Arc::new(JmsComponent::new(JmsConfig::default()));
+
+        let c1 = component.clone();
+        let c2 = component.clone();
+        let c3 = component.clone();
+
+        let result = timeout(Duration::from_secs(5), async {
+            let t1 = tokio::spawn(async move {
+                let _ = c1.ensure_bridge().await;
+            });
+            let t2 = tokio::spawn(async move {
+                let _ = c2.ensure_bridge().await;
+            });
+            let t3 = tokio::spawn(async move {
+                let _ = c3.restart_bridge().await;
+            });
+            let _ = tokio::join!(t1, t2, t3);
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "concurrent ensure_bridge/restart_bridge deadlocked (timeout after 5s)"
+        );
+
+        drop(env_guard);
     }
 }

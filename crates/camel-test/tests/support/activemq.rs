@@ -21,7 +21,7 @@ static ACTIVEMQ: OnceCell<(ContainerAsync<GenericImage>, String)> = OnceCell::co
 pub async fn shared_activemq() -> &'static (ContainerAsync<GenericImage>, String) {
     ACTIVEMQ
         .get_or_init(|| async {
-            let image = GenericImage::new("apache/activemq-classic", "latest")
+            let image = GenericImage::new("apache/activemq-classic", "5.18.3")
                 .with_exposed_port(ContainerPort::Tcp(ACTIVEMQ_PORT))
                 .with_wait_for(WaitFor::message_on_stdout(
                     "Listening for connections at: tcp://",

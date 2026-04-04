@@ -61,19 +61,35 @@ No Java runtime is required on the host — the bridge is a native binary.
 | `CAMEL_JMS_BRIDGE_BINARY_PATH` | **Development override** — absolute path to a local `jms-bridge` binary; skips download entirely |
 | `CAMEL_JMS_BRIDGE_RELEASE_URL` | Override release download URL (must be `https://github.com/**`) |
 
-## Development: building the bridge locally
+## Development Setup
+
+### Prerequisites
+
+- Docker (daemon running)
+- **NixOS:** `programs.nix-ld.enable = true` must be set in your NixOS configuration
+- **Linux:** glibc ≥ 2.34 (Ubuntu 22.04+, Debian 12+, RHEL 9+)
+
+### Building the JMS Bridge
+
+The bridge binary is built using Docker (no Java required on your host):
 
 ```bash
-# Requires Java 21+ and Gradle
-cd bridges/jms && ./jlink.sh
-# Binary is written to bridges/jms/build/release/jms-bridge-0.1.0-linux-x86_64/bin/jms-bridge
+# One-time build (~5–8 min first time, faster on subsequent runs)
+cargo xtask build-jms-bridge
 
-export CAMEL_JMS_BRIDGE_BINARY_PATH=$(realpath bridges/jms/build/release/jms-bridge-0.1.0-linux-x86_64/bin/jms-bridge)
+# The binary is auto-detected. No env vars needed:
 cargo run -p jms-example
-cargo test -p camel-test --features integration-tests
+cargo test -p camel-test --features integration-tests --test jms_test
 ```
 
-> On NixOS, use `bin/jms-bridge-nix` instead (Java path is hardcoded for the nix store).
+### Override
+
+If you need to use a custom binary:
+
+```bash
+export CAMEL_JMS_BRIDGE_BINARY_PATH=/path/to/your/jms-bridge
+cargo run -p jms-example
+```
 
 ## Known Limitations
 

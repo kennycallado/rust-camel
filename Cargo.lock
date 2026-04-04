@@ -3198,6 +3198,7 @@ dependencies = [
  "camel-component-log",
  "camel-component-timer",
  "camel-core",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
 ]
@@ -7331,6 +7332,16 @@ dependencies = [
  "camel-api",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "xtask"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "hex",
+ "regex",
+ "sha2",
 ]
 
 [[package]]

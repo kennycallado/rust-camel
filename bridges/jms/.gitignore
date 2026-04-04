@@ -2,6 +2,12 @@
 .gradle/
 build/
 
+# Docker build cache (created by cargo xtask build-jms-bridge)
+.gradle-docker-cache/
+
+# musl toolchain (downloaded by build-native.sh --static builds, if used)
+.musl-toolchain/
+
 # IDE
 .idea/
 *.iml
