@@ -179,7 +179,7 @@ fn resolve_release_base_url(
     let url = match override_url {
         Some(u) => u.to_string(),
         None => format!(
-            "https://github.com/rust-camel/rust-camel/releases/download/jms-bridge-{version}"
+            "https://github.com/rust-camel/rust-camel/releases/download/jms-bridge-v{version}"
         ),
     };
     match url::Url::parse(&url) {
@@ -289,7 +289,7 @@ mod tests {
     fn resolve_release_base_url_default_contains_github() {
         let url = resolve_release_base_url(None, "0.1.0").unwrap();
         assert!(url.starts_with("https://github.com/"));
-        assert!(url.contains("jms-bridge-0.1.0"));
+        assert!(url.contains("jms-bridge-v0.1.0"));
     }
 
     #[test]
@@ -376,7 +376,7 @@ mod tests {
         // naming matches what CI produces.
         let version = "0.2.0";
         let base = format!(
-            "https://github.com/rust-camel/rust-camel/releases/download/jms-bridge-{version}"
+            "https://github.com/rust-camel/rust-camel/releases/download/jms-bridge-v{version}"
         );
         let expected = format!("{base}/jms-bridge-{version}-SHA256SUMS");
 
