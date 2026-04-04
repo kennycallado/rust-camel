@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use camel_api::{Exchange, Message};
 use camel_builder::RouteBuilder;
+use camel_builder::StepAccumulator;
 use camel_test::CamelTestContext;
 use tower::ServiceExt;
 
