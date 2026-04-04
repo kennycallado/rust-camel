@@ -17,7 +17,7 @@
 - When user ask to merge to main:
 
   ```txt
-  Usar opción 1 del skill finishing-a-development-branch (merge branch into main) pero con squash de un solo commit con title + body siguiendo patrón de otros commits, luego actualizar documento de implementación y agregar sección postmortem si procede. Limpiar branch y worktree y revisar que README/s esté/n actualizado/s (keep it simple). Por último actualiza si procede docs/roadmap.md y docs/status.md sin dar seguimiento a docs/ en git. También es necesario revisar ./scripts/publish-crates.sh por si es necesario actualiazar
+  Usar opción 1 del skill finishing-a-development-branch (merge branch into main) pero con squash de un solo commit con title + body siguiendo patrón de otros commits, luego actualizar documento de implementación y agregar sección postmortem si procede. Limpiar branch y worktree y revisar que README/s esté/n actualizado/s (keep it simple). Por último actualiza si procede docs/roadmap.md y docs/status.md sin dar seguimiento a docs/ en git. También es necesario revisar ./scripts/publish-crates.sh por si es necesario actualiazar y camel-cli ya que debe incluir todas las características por defecto.
   ```
 
 # context-mode — MANDATORY routing rules
