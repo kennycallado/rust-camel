@@ -221,21 +221,16 @@ mod tests {
 
     #[test]
     fn resolve_release_base_url_override_not_allowed() {
-        let err = resolve_release_base_url(
-            Some("https://evil.com/malware.tar.gz"),
-            "0.1.0",
-        )
-        .unwrap_err();
+        let err =
+            resolve_release_base_url(Some("https://evil.com/malware.tar.gz"), "0.1.0").unwrap_err();
         assert!(matches!(err, BridgeError::UrlNotAllowed(_)));
     }
 
     #[test]
     fn resolve_release_base_url_override_subdomain_not_allowed() {
-        let err = resolve_release_base_url(
-            Some("https://github.com.evil.com/malware.tar.gz"),
-            "0.1.0",
-        )
-        .unwrap_err();
+        let err =
+            resolve_release_base_url(Some("https://github.com.evil.com/malware.tar.gz"), "0.1.0")
+                .unwrap_err();
         assert!(matches!(err, BridgeError::UrlNotAllowed(_)));
     }
 

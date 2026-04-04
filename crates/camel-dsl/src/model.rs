@@ -215,6 +215,11 @@ pub enum BodyTypeDef {
     Empty,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataFormatDef {
+    pub format: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclarativeStep {
     To(ToStepDef),
@@ -230,5 +235,7 @@ pub enum DeclarativeStep {
     Stop,
     Script(ScriptStepDef),
     ConvertBodyTo(BodyTypeDef),
+    Marshal(DataFormatDef),
+    Unmarshal(DataFormatDef),
     Bean(BeanStepDef),
 }

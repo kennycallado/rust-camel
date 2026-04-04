@@ -92,6 +92,8 @@ routes:
 | `set_header` | Set header | `- set_header: { key: "x", value: "y" }` |
 | `set_body` | Set body | `- set_body: { value: "content" }` |
 | `transform` | Transform body (alias for `set_body`) | `- transform: { simple: "${body}" }` |
+| `marshal` | Serialize body using a data format (e.g., Json → Text) | `- marshal: json` |
+| `unmarshal` | Deserialize body using a data format (e.g., Text → Json) | `- unmarshal: xml` |
 | `filter` | Filter messages | `- filter: { simple: "${header.type} == 'allowed'", steps: [...] }` |
 | `choice` | Content-based router | `- choice: { when: [...], otherwise: [...] }` |
 | `split` | Split message | `- split: { expression: "body_lines", steps: [...] }` |
@@ -101,6 +103,20 @@ routes:
 | `stop` | Stop pipeline | `- stop: true` |
 | `script` | Execute script | `- script: { language: "simple", source: "${body}" }` |
 | `bean` | Invoke bean method | `- bean: { name: "orderService", method: "process" }` |
+
+### Marshal/Unmarshal Example
+
+```yaml
+routes:
+  - id: "convert-format"
+    from: "direct:input"
+    steps:
+      - unmarshal: json
+      - marshal: xml
+      - to: "direct:output"
+```
+
+This converts the message body from JSON to XML using the built-in data formats.
 
 ### Bean Step
 

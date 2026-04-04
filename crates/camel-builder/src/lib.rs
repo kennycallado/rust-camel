@@ -20,7 +20,10 @@ use camel_api::{
 };
 use camel_component::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition, WhenStep};
-use camel_processor::{ConvertBodyTo, DynamicSetHeader, LogLevel, MapBody, SetBody, SetHeader};
+use camel_processor::{
+    ConvertBodyTo, DynamicSetHeader, LogLevel, MapBody, MarshalService, SetBody, SetHeader,
+    UnmarshalService, builtin_data_format,
+};
 
 /// Shared step-accumulation methods for all builder types.
 ///
@@ -149,6 +152,44 @@ pub trait StepAccumulator: Sized {
     /// ```
     fn convert_body_to(mut self, target: BodyType) -> Self {
         let svc = ConvertBodyTo::new(IdentityProcessor, target);
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Marshal the message body using the specified data format.
+    ///
+    /// Supported formats: `"json"`, `"xml"`. Panics if the format name is unknown.
+    /// Converts a structured body (e.g., `Body::Json`) to a wire-format body (e.g., `Body::Text`).
+    ///
+    /// # Example
+    /// ```ignore
+    /// route.marshal("json").to("direct:next")
+    /// ```
+    fn marshal(mut self, format: impl Into<String>) -> Self {
+        let name = format.into();
+        let df =
+            builtin_data_format(&name).unwrap_or_else(|| panic!("unknown data format: '{name}'"));
+        let svc = MarshalService::new(IdentityProcessor, df);
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Unmarshal the message body using the specified data format.
+    ///
+    /// Supported formats: `"json"`, `"xml"`. Panics if the format name is unknown.
+    /// Converts a wire-format body (e.g., `Body::Text`) to a structured body (e.g., `Body::Json`).
+    ///
+    /// # Example
+    /// ```ignore
+    /// route.unmarshal("json").to("direct:next")
+    /// ```
+    fn unmarshal(mut self, format: impl Into<String>) -> Self {
+        let name = format.into();
+        let df =
+            builtin_data_format(&name).unwrap_or_else(|| panic!("unknown data format: '{name}'"));
+        let svc = UnmarshalService::new(IdentityProcessor, df);
         self.steps_mut()
             .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
@@ -2333,5 +2374,43 @@ mod tests {
         } else {
             panic!("Expected RoutingSlip step");
         }
+    }
+
+    #[test]
+    fn test_builder_marshal_adds_processor_step() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .marshal("json")
+            .build()
+            .unwrap();
+        assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn test_builder_unmarshal_adds_processor_step() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .unmarshal("json")
+            .build()
+            .unwrap();
+        assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown data format: 'csv'")]
+    fn test_builder_marshal_panics_on_unknown_format() {
+        let _ = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .marshal("csv")
+            .build();
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown data format: 'csv'")]
+    fn test_builder_unmarshal_panics_on_unknown_format() {
+        let _ = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .unmarshal("csv")
+            .build();
     }
 }

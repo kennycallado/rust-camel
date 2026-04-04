@@ -25,6 +25,8 @@ pub const CANONICAL_CONTRACT_EXCLUDED_DECLARATIVE_STEPS: &[&str] = &[
     "multicast",
     "convert_body_to",
     "bean",
+    "marshal",
+    "unmarshal",
 ];
 pub const CANONICAL_CONTRACT_RUST_ONLY_STEPS: &[&str] = &[
     "processor",

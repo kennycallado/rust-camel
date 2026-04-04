@@ -121,6 +121,8 @@ pub enum YamlStep {
     Stop(StopStep),
     Script(ScriptStep),
     ConvertBodyTo(ConvertBodyToStep),
+    Marshal(MarshalStep),
+    Unmarshal(UnmarshalStep),
 }
 
 #[derive(Deserialize, Debug)]
@@ -382,6 +384,16 @@ pub struct ScriptStep {
 #[derive(Deserialize, Debug)]
 pub struct ConvertBodyToStep {
     pub convert_body_to: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct MarshalStep {
+    pub marshal: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct UnmarshalStep {
+    pub unmarshal: String,
 }
 
 #[derive(Deserialize, Debug)]

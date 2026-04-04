@@ -22,6 +22,7 @@
 - **Stop**: Stop processing immediately
 - **Script**: Execute mutating expressions via `ScriptMutator`; changes to headers, properties, and body propagate back with atomic rollback on error
 - **Stream Handling**: Processors that consume streams replace the body with a JSON placeholder `{"placeholder": true}`
+- **Marshal / Unmarshal**: Serialize/deserialize message bodies using pluggable data formats (JSON, XML)
 
 ## Installation
 
@@ -96,6 +97,38 @@ let route = RouteBuilder::from("timer:tick")
 | `ErrorHandlerLayer` | Error handling |
 | `StopService` | Stop processing |
 | `ScriptMutator` | Execute mutating scripts that modify Exchange headers, properties, or body |
+| `MarshalService` | Marshal body using a DataFormat (e.g., Json → Text) |
+| `UnmarshalService` | Unmarshal body using a DataFormat (e.g., Text → Json) |
+
+## Data Formats
+
+The `DataFormat` trait defines serialization/deserialization for message bodies:
+
+| Format | Marshal (structured → wire) | Unmarshal (wire → structured) |
+|--------|---------------------------|------------------------------|
+| `json` | `Body::Json` → `Body::Text` | `Body::Text`/`Body::Bytes` → `Body::Json` |
+| `xml`  | `Body::Xml` → `Body::Text` | `Body::Text`/`Body::Bytes` → `Body::Xml` |
+
+### Usage with RouteBuilder
+
+```rust
+use camel_builder::RouteBuilder;
+
+let route = RouteBuilder::from("direct:in")
+    .unmarshal("json")
+    .marshal("xml")
+    .to("mock:out")
+    .build()
+    .unwrap();
+```
+
+### YAML DSL
+
+```yaml
+steps:
+  - unmarshal: json
+  - marshal: xml
+```
 
 ## Documentation
 

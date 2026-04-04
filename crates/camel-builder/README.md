@@ -220,6 +220,22 @@ let route = RouteBuilder::from("timer:tick")
     .unwrap();
 ```
 
+### Marshal/Unmarshal
+
+```rust
+use camel_builder::RouteBuilder;
+
+let route = RouteBuilder::from("direct:in")
+    .unmarshal("json")
+    .marshal("xml")
+    .to("mock:out")
+    .route_id("marshal-unmarshal-route")
+    .build()
+    .unwrap();
+```
+
+This converts the message body from JSON to XML using the built-in data formats.
+
 ## Builder Methods
 
 | Method | Description |
@@ -233,6 +249,8 @@ let route = RouteBuilder::from("timer:tick")
 | `set_body_fn(fn)` | Set dynamic body |
 | `transform(v)` | Alias for `set_body` |
 | `map_body(fn)` | Transform body |
+| `unmarshal(format)` | Unmarshal body using a data format |
+| `marshal(format)` | Marshal body using a data format |
 | `filter(pred)` | Conditional routing |
 | `choice()` | Open content-based router block |
 | `when(pred)` | Open when-clause (inside `choice`) |

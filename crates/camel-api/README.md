@@ -164,6 +164,7 @@ let reader = body.into_async_read();                      // Zero-copy AsyncRead
 | `Body` | Message body (Empty, Text, Json, Bytes, Xml, Stream) |
 | `Processor` | Trait for processing exchanges |
 | `CamelError` | Comprehensive error type |
+| `DataFormat` | Pluggable serialization trait for marshal/unmarshal EIP (implement to add custom formats; JSON and XML built-in) |
 | `HealthReport` | System-wide health report |
 | `ServiceStatus` | Service lifecycle status enum |
 | `HealthStatus` | Aggregated health status enum |

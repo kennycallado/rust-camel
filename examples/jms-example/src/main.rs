@@ -35,9 +35,7 @@ async fn main() -> Result<(), CamelError> {
     println!("Starting ActiveMQ Classic broker via testcontainers (requires Docker)...");
     let _container = GenericImage::new("apache/activemq-classic", "latest")
         .with_exposed_port(ContainerPort::Tcp(61616))
-        .with_wait_for(WaitFor::message_on_stdout(
-            "Listening for connections at:",
-        ))
+        .with_wait_for(WaitFor::message_on_stdout("Listening for connections at:"))
         .start()
         .await
         .expect("Failed to start ActiveMQ container — is Docker running?");

@@ -5,14 +5,14 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use camel_api::{BoxProcessor, CamelError, Exchange};
-use camel_component::{
-    Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint, ProducerContext,
-};
 use camel_bridge::{
     channel::connect_channel,
     download::ensure_binary,
     health::wait_for_health,
     process::{BridgeProcess, BridgeProcessConfig},
+};
+use camel_component::{
+    Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint, ProducerContext,
 };
 use tokio::sync::{RwLock, Semaphore};
 use tonic::transport::Channel;
@@ -71,9 +71,7 @@ impl JmsComponent {
         }
 
         let mut guard = self.bridge.write().await;
-        if evict_cached
-            && let Some(stale) = guard.take()
-        {
+        if evict_cached && let Some(stale) = guard.take() {
             let _ = stale.process.stop().await;
         }
         if let Some(handle) = guard.as_ref() {
@@ -81,9 +79,10 @@ impl JmsComponent {
         }
 
         // Acquire semaphore to prevent concurrent bridge starts
-        let _permit = self.restart_semaphore.acquire().await.map_err(|e| {
-            CamelError::ProcessorError(format!("JMS bridge semaphore error: {e}"))
-        })?;
+        let _permit =
+            self.restart_semaphore.acquire().await.map_err(|e| {
+                CamelError::ProcessorError(format!("JMS bridge semaphore error: {e}"))
+            })?;
 
         // Double-check after acquiring semaphore (another caller may have started the bridge)
         if let Some(handle) = guard.as_ref() {

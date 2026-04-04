@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{BrokerType, BRIDGE_VERSION};
+use crate::{BRIDGE_VERSION, BrokerType};
 
 pub fn default_bridge_cache_dir() -> PathBuf {
     camel_bridge::download::default_cache_dir()

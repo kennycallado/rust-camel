@@ -20,12 +20,17 @@ pub async fn shared_artemis() -> &'static (ContainerAsync<GenericImage>, String)
         .get_or_init(|| async {
             let image = GenericImage::new("apache/activemq-artemis", "latest-alpine")
                 .with_exposed_port(ContainerPort::Tcp(ARTEMIS_PORT))
-                .with_wait_for(WaitFor::message_on_stdout("AMQ221020: Started EPOLL Acceptor at 0.0.0.0:61616"))
+                .with_wait_for(WaitFor::message_on_stdout(
+                    "AMQ221020: Started EPOLL Acceptor at 0.0.0.0:61616",
+                ))
                 .with_env_var("ARTEMIS_USER", "artemis")
                 .with_env_var("ARTEMIS_PASSWORD", "artemis")
                 .with_startup_timeout(Duration::from_secs(120));
 
-            let container = image.start().await.expect("Artemis container failed to start");
+            let container = image
+                .start()
+                .await
+                .expect("Artemis container failed to start");
             let port = container
                 .get_host_port_ipv4(ARTEMIS_PORT)
                 .await

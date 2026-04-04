@@ -8,22 +8,22 @@ use camel_core::route::RouteDefinition;
 use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical};
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
-    DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeOnException,
-    DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep, LanguageExpressionDef,
-    LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef, ScriptStepDef,
-    SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
-    ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
+    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
+    DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep,
+    LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
+    ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef,
+    SplitStepDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
     AggregateData, AggregateStep, ChoiceData, ChoiceStep, FilterStep, LogConfig, LogMessageData,
-    LogMessageExpr, LogStep, MulticastData, MulticastStep, PredicateBlock, ScriptData, ScriptStep,
-    SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData,
+    LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep, PredicateBlock, ScriptData,
+    ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData,
     SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, ToStep, TransformStep,
-    WireTapStep, YamlRoute, YamlRoutes, YamlStep,
+    UnmarshalStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
 };
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 13] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 15] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -37,6 +37,8 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 13] = [
     DeclarativeStepKind::Stop,
     DeclarativeStepKind::Script,
     DeclarativeStepKind::ConvertBodyTo,
+    DeclarativeStepKind::Marshal,
+    DeclarativeStepKind::Unmarshal,
 ];
 
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
@@ -415,6 +417,14 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 }
             };
             Ok(DeclarativeStep::ConvertBodyTo(def))
+        }
+        YamlStep::Marshal(MarshalStep { marshal }) => {
+            Ok(DeclarativeStep::Marshal(DataFormatDef { format: marshal }))
+        }
+        YamlStep::Unmarshal(UnmarshalStep { unmarshal }) => {
+            Ok(DeclarativeStep::Unmarshal(DataFormatDef {
+                format: unmarshal,
+            }))
         }
     }
 }
@@ -952,5 +962,37 @@ routes:
     fn test_load_from_nonexistent_file() {
         let result = load_from_file(Path::new("/nonexistent/path/routes.yaml"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_marshal_step() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "direct:in"
+    steps:
+      - marshal: json
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let steps = &routes[0].steps;
+        assert!(
+            matches!(&steps[0], DeclarativeStep::Marshal(DataFormatDef { format }) if format == "json")
+        );
+    }
+
+    #[test]
+    fn parse_unmarshal_step() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "direct:in"
+    steps:
+      - unmarshal: xml
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let steps = &routes[0].steps;
+        assert!(
+            matches!(&steps[0], DeclarativeStep::Unmarshal(DataFormatDef { format }) if format == "xml")
+        );
     }
 }

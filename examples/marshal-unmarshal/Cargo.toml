@@ -1,0 +1,19 @@
+[package]
+name = "marshal-unmarshal"
+description = "Marshal/Unmarshal data format example for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-processor.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+camel-component-direct.workspace = true
+camel-component-mock.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

@@ -11,7 +11,7 @@
 //!
 //! ## Features
 //! - Correlation IDs, Error Handlers, Timeouts
-//! - Sequential Processing, Metrics
+//! - Sequential Processing, Metrics, Marshal/Unmarshal
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -259,7 +259,7 @@ async fn main() -> Result<(), CamelError> {
 
     // Create context with supervision + metrics and enable tracing
     let mut ctx = CamelContext::with_supervision_and_metrics(supervision_config, metrics);
-    ctx.set_tracing(true); // spans for all 23 routes → showcase-trace.log
+    ctx.set_tracing(true); // spans for all 24 routes → showcase-trace.log
 
     // Register all components
     ctx.register_component(TimerComponent::new());
@@ -853,6 +853,43 @@ async fn main() -> Result<(), CamelError> {
         .to("mock:log-eip-result")
         .build()?;
 
+    // --- Route 23: Marshal/Unmarshal ---
+    let route23 = RouteBuilder::from("timer:adv-marshal?period=5000&repeatCount=2")
+        .route_id("adv-marshal-unmarshal")
+        .log("=== Starting Marshal/Unmarshal Demo ===", LogLevel::Info)
+        .process(|mut exchange| async move {
+            // Start with JSON as Text
+            exchange.input.body = Body::Text(
+                r#"{"user": "alice", "action": "login", "timestamp": 12345}"#.to_string(),
+            );
+            println!(
+                "[MARSHAL] Body before unmarshal: {:?}",
+                exchange.input.body.as_text().unwrap_or("")
+            );
+            Ok(exchange)
+        })
+        .unmarshal("json")
+        .process(|exchange| async move {
+            // Body is now Json type
+            println!(
+                "[MARSHAL] Body after unmarshal (Json): {:?}",
+                exchange.input.body
+            );
+            Ok(exchange)
+        })
+        .marshal("json")
+        .process(|exchange| async move {
+            // Body is now Text again
+            println!(
+                "[MARSHAL] Body after marshal (Text): {:?}",
+                exchange.input.body.as_text().unwrap_or("")
+            );
+            Ok(exchange)
+        })
+        .log("=== Marshal/Unmarshal complete ===", LogLevel::Info)
+        .to("log:adv-marshal-result?showBody=true&showCorrelationId=true")
+        .build()?;
+
     // =========================================================================
     // Register All Routes
     // =========================================================================
@@ -900,6 +937,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(route21).await?;
     ctx.add_route_definition(route21b).await?;
     ctx.add_route_definition(route22).await?;
+    ctx.add_route_definition(route23).await?;
 
     // Start the context
     ctx.start().await?;
@@ -925,7 +963,7 @@ async fn main() -> Result<(), CamelError> {
 fn print_banner(file_path: &str) {
     println!();
     println!("╔══════════════════════════════════════════════════════════════════════╗");
-    println!("║           rust-camel COMPREHENSIVE SHOWCASE (23 routes)              ║");
+    println!("║           rust-camel COMPREHENSIVE SHOWCASE (24 routes)              ║");
     println!("╚══════════════════════════════════════════════════════════════════════╝");
     println!();
     println!("CATEGORY 1: EIP BASICS");
@@ -960,13 +998,16 @@ fn print_banner(file_path: &str) {
     println!(" 21. adv-metrics          - Metrics Collection");
     println!(" 22. adv-timeout          - Timeout Handling");
     println!(" 23. adv-log-eip          - Log EIP (inline logging)");
+    println!(" 24. adv-marshal-unmarshal - Marshal/Unmarshal (data format conversion)");
     println!();
     println!("COMPONENTS: timer, log, direct, mock, file, http, https, controlbus");
     println!("EIPS: filter, splitter, aggregator, wiretap, multicast, cbr, stop");
-    println!("FEATURES: correlation-ids, error-handlers, timeouts, sequential, metrics, tracer");
+    println!(
+        "FEATURES: correlation-ids, error-handlers, timeouts, sequential, metrics, marshal/unmarshal, tracer"
+    );
     println!();
     println!("File output:  {}/showcase.log", file_path);
-    println!("Trace output: showcase-trace.log (JSON spans for all 23 routes)");
+    println!("Trace output: showcase-trace.log (JSON spans for all 24 routes)");
     println!("HTTP endpoint: http://0.0.0.0:8081/showcase/counter");
     println!();
     println!("────────────────────────────────────────────────────────────────────────");

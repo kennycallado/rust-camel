@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_container::{cleanup_tracked_containers, ContainerComponent};
+use camel_component_container::{ContainerComponent, cleanup_tracked_containers};
 use camel_component_jms::{BrokerType, JmsComponent, JmsConfig};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;

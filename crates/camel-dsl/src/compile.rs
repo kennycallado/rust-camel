@@ -19,10 +19,12 @@ use camel_api::{
 };
 use camel_component::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
-use camel_processor::{ConvertBodyTo, LogLevel, StopService};
+use camel_processor::{
+    ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService, builtin_data_format,
+};
 
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef,
+    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
     DeclarativeStep, LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef,
     MulticastStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
@@ -285,6 +287,28 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
         DeclarativeStep::Bean(BeanStepDef { name, method }) => {
             Ok(BuilderStep::Bean { name, method })
         }
+        DeclarativeStep::Marshal(DataFormatDef { format }) => {
+            let df = builtin_data_format(&format).ok_or_else(|| {
+                CamelError::RouteError(format!(
+                    "unknown data format: '{}'. Expected: json, xml",
+                    format
+                ))
+            })?;
+            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
+                MarshalService::new(camel_api::IdentityProcessor, df),
+            )))
+        }
+        DeclarativeStep::Unmarshal(DataFormatDef { format }) => {
+            let df = builtin_data_format(&format).ok_or_else(|| {
+                CamelError::RouteError(format!(
+                    "unknown data format: '{}'. Expected: json, xml",
+                    format
+                ))
+            })?;
+            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
+                UnmarshalService::new(camel_api::IdentityProcessor, df),
+            )))
+        }
     }
 }
 
@@ -428,6 +452,8 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Script(_) => "script",
         DeclarativeStep::ConvertBodyTo(_) => "convert_body_to",
         DeclarativeStep::Bean(_) => "bean",
+        DeclarativeStep::Marshal(_) => "marshal",
+        DeclarativeStep::Unmarshal(_) => "unmarshal",
     }
 }
 
@@ -845,5 +871,59 @@ mod tests {
             &CamelError::StreamLimitExceeded(1)
         ));
         assert!(!exception_kind_matches("NoSuchKind", &CamelError::Stopped));
+    }
+
+    #[test]
+    fn compile_marshal_json_to_processor() {
+        let step = DeclarativeStep::Marshal(DataFormatDef {
+            format: "json".to_string(),
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn compile_unmarshal_xml_to_processor() {
+        let step = DeclarativeStep::Unmarshal(DataFormatDef {
+            format: "xml".to_string(),
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn compile_marshal_unknown_format_returns_error() {
+        let step = DeclarativeStep::Marshal(DataFormatDef {
+            format: "avro".to_string(),
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_unmarshal_unknown_format_returns_error() {
+        let step = DeclarativeStep::Unmarshal(DataFormatDef {
+            format: "protobuf".to_string(),
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn declarative_step_name_marshal() {
+        let step = DeclarativeStep::Marshal(DataFormatDef {
+            format: "json".to_string(),
+        });
+        assert_eq!(declarative_step_name(&step), "marshal");
+    }
+
+    #[test]
+    fn declarative_step_name_unmarshal() {
+        let step = DeclarativeStep::Unmarshal(DataFormatDef {
+            format: "xml".to_string(),
+        });
+        assert_eq!(declarative_step_name(&step), "unmarshal");
     }
 }

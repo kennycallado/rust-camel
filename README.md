@@ -119,7 +119,7 @@ cargo run -p hello-world
 | `camel-config`          | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns                                                         |
 | `camel-builder`         | Fluent `RouteBuilder` API                                                                                                                |
 | `camel-component`       | `Component`, `Endpoint`, `Consumer` traits                                                                                               |
-| `camel-processor`       | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody` + Tower `Layer` types       |
+| `camel-processor`       | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody`, `Marshal`/`Unmarshal` + Tower `Layer` types       |
 | `camel-endpoint`        | Endpoint URI parsing utilities; `UriConfig` derive macro for typed component config                                                      |
 | `camel-endpoint-macros` | Proc-macro crate backing `#[derive(UriConfig)]`                                                                                          |
 | `camel-bean`            | Bean/Registry system for dependency injection and business logic integration                                                             |
@@ -173,6 +173,7 @@ Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (cu
 | Routing Slip         | `.routing_slip(expr)`    | Route through a sequence of endpoints determined at runtime          |
 | Filter               | `.filter(predicate)`     | Forward exchange only when predicate is true                         |
 | Load Balancer        | `.load_balance()`        | Distribute across endpoints with RoundRobin/Random/Weighted/Failover |
+| Marshal / Unmarshal  | `.marshal(fmt)` / `.unmarshal(fmt)` | Serialize/deserialize bodies using pluggable data formats (JSON, XML) |
 | Multicast            | `.multicast()`           | Send the same exchange to multiple endpoints                         |
 | Splitter             | `.split(config)`         | Split one exchange into multiple fragments                           |
 | Throttler            | `.throttle(n, duration)` | Rate limiting with Delay/Reject/Drop strategies                      |
@@ -204,6 +205,7 @@ Run an example:
  cargo run -p lazy-route
  cargo run -p load-balancer
  cargo run -p log-eip
+ cargo run -p marshal-unmarshal
  cargo run -p metrics-demo
  cargo run -p multicast
  cargo run -p multi-route-direct

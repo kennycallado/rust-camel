@@ -188,13 +188,22 @@ mod tests {
 
     #[test]
     fn broker_type_from_str_activemq() {
-        assert_eq!("activemq".parse::<BrokerType>().unwrap(), BrokerType::ActiveMq);
-        assert_eq!("ACTIVEMQ".parse::<BrokerType>().unwrap(), BrokerType::ActiveMq);
+        assert_eq!(
+            "activemq".parse::<BrokerType>().unwrap(),
+            BrokerType::ActiveMq
+        );
+        assert_eq!(
+            "ACTIVEMQ".parse::<BrokerType>().unwrap(),
+            BrokerType::ActiveMq
+        );
     }
 
     #[test]
     fn broker_type_from_str_artemis() {
-        assert_eq!("artemis".parse::<BrokerType>().unwrap(), BrokerType::Artemis);
+        assert_eq!(
+            "artemis".parse::<BrokerType>().unwrap(),
+            BrokerType::Artemis
+        );
     }
 
     #[test]

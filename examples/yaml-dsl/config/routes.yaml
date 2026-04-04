@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # This file demonstrates all available DSL features including:
-# - Basic steps: to, log, set_header, set_body
+# - Basic steps: to, log, set_header, set_body, marshal, unmarshal
 # - Control flow: filter, choice, stop
 # - EIPs: split, multicast, wire_tap
 # - Route-level: error_handler, circuit_breaker
@@ -249,3 +249,23 @@ routes:
       - convert_body_to: json
       - log: "After conversion - body is now Json type: ${body}"
       - to: "log:converted-json?showBody=true"
+
+  # ===========================================================================
+  # Route 12: Marshal/Unmarshal (Data Format Conversion)
+  # ===========================================================================
+  # Demonstrates marshaling and unmarshaling data between formats.
+  # This route shows Text → Json (unmarshal) → Text (marshal) conversion,
+  # useful for data format transformation scenarios.
+  #
+  - id: "marshal-unmarshal-demo"
+    from: "timer:marshal-tick?period=5000&repeatCount=2"
+    startup_order: 650
+    steps:
+      - set_body:
+          value: '{"user": "alice", "action": "login", "timestamp": 12345}'
+      - log: "Before unmarshal - body is Text"
+      - unmarshal: json
+      - log: "After unmarshal - body is Json type: ${body}"
+      - marshal: json
+      - log: "After marshal - body is Text again"
+      - to: "log:marshal-result?showBody=true"

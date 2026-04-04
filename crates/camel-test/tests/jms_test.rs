@@ -22,8 +22,7 @@ fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
     let _ = fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("warn,camel=info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,camel=info")),
         )
         .with_test_writer()
         .try_init();
@@ -102,12 +101,13 @@ async fn jms_consumer_receives_from_activemq() {
         .build()
         .unwrap();
 
-    let inject_route = RouteBuilder::from("timer:inject-activemq?period=1000&delay=1500&repeatCount=1")
-        .set_body(Value::String("consume-from-activemq".to_string()))
-        .to("jms:queue:test-consume-activemq")
-        .route_id("jms-consumer-activemq-inject")
-        .build()
-        .unwrap();
+    let inject_route =
+        RouteBuilder::from("timer:inject-activemq?period=1000&delay=1500&repeatCount=1")
+            .set_body(Value::String("consume-from-activemq".to_string()))
+            .to("jms:queue:test-consume-activemq")
+            .route_id("jms-consumer-activemq-inject")
+            .build()
+            .unwrap();
 
     h.add_route(consumer_route).await.unwrap();
     h.add_route(inject_route).await.unwrap();
@@ -309,12 +309,13 @@ async fn jms_producer_sends_multiple_messages() {
         .build()
         .unwrap();
 
-    let producer_route = RouteBuilder::from("timer:multi-inject?period=1000&delay=1500&repeatCount=2")
-        .set_body(Value::String("multi-msg".to_string()))
-        .to("jms:queue:test-multi")
-        .route_id("jms-multi-producer")
-        .build()
-        .unwrap();
+    let producer_route =
+        RouteBuilder::from("timer:multi-inject?period=1000&delay=1500&repeatCount=2")
+            .set_body(Value::String("multi-msg".to_string()))
+            .to("jms:queue:test-multi")
+            .route_id("jms-multi-producer")
+            .build()
+            .unwrap();
 
     h.add_route(consumer_route).await.unwrap();
     h.add_route(producer_route).await.unwrap();
