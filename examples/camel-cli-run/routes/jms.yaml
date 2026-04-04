@@ -1,0 +1,61 @@
+routes:
+  # Step 1: Check if artemis-demo already exists, then launch or reuse it.
+  # Fires once after a 1s delay so the rest of the routes are registered first.
+  - id: "artemis-launcher"
+    from: "timer:launch?delay=1000&repeatCount=1"
+    steps:
+      - to: "container:list"
+      - script:
+          language: js
+          source: |
+            var containers = Array.isArray(camel.body) ? camel.body : [];
+            var found = containers.find(function(c) {
+              return c.Names && c.Names.indexOf("/artemis-demo") !== -1;
+            });
+            var status = found ? found.State : "absent";
+            camel.headers.set("artemis-status", status);
+      - choice:
+          when:
+            - simple: "${header.artemis-status} == 'running'"
+              steps:
+                - log: "message=Artemis container already running — starting JMS routes directly"
+                - to: "controlbus:route?routeId=jms-producer&action=start"
+                - to: "controlbus:route?routeId=jms-consumer&action=start"
+            - simple: "${header.artemis-status} == 'exited'"
+              steps:
+                - to: "container:start?containerId=artemis-demo"
+                - log: "message=Artemis container restarted — JMS routes will start once broker is ready"
+          otherwise:
+            - to: "container:run?image=apache/activemq-artemis:2.36.0-alpine&name=artemis-demo&ports=61616:61616&env=ARTEMIS_USER=artemis,ARTEMIS_PASSWORD=artemis,AMQ_USER=artemis,AMQ_PASSWORD=artemis&autoRemove=true"
+            - log: "message=Artemis container started: ${header.CamelContainerId}"
+
+  # Step 2: Tail the Artemis container logs and wait for the broker ready signal.
+  # AMQ221007 = "Server is now active" — only emitted once the broker accepts connections.
+  # Triggers the JMS routes via ControlBus exactly at that moment.
+  - id: "artemis-ready-watcher"
+    from: "container:logs?containerId=artemis-demo&follow=true"
+    steps:
+      - filter:
+          simple: "${body} contains 'AMQ221007'"
+          steps:
+            - log: "message=Artemis broker ready — starting JMS routes"
+            - to: "controlbus:route?routeId=jms-producer&action=start"
+            - to: "controlbus:route?routeId=jms-consumer&action=start"
+
+  # Step 3 (lazy): Sends a message to the JMS queue every 5 seconds.
+  # Started by artemis-ready-watcher once the broker is accepting connections.
+  # On first run, camel-cli will download the JMS bridge binary from GitHub.
+  - id: "jms-producer"
+    auto_startup: false
+    from: "timer:jms-tick?period=5000"
+    steps:
+      - set_body:
+          simple: '{"event":"hello","source":"camel-cli"}'
+      - to: "jms:queue:test"
+
+  # Step 4 (lazy): Reads from the same queue and logs each message.
+  - id: "jms-consumer"
+    auto_startup: false
+    from: "jms:queue:test"
+    steps:
+      - log: "message=Received from JMS: ${body}"
