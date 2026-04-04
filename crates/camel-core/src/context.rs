@@ -169,6 +169,13 @@ impl CamelContext {
             let rhai_lang = camel_language_rhai::RhaiLanguage::new();
             languages.insert("rhai".to_string(), Arc::new(rhai_lang));
         }
+        #[cfg(feature = "lang-jsonpath")]
+        {
+            languages.insert(
+                "jsonpath".to_string(),
+                Arc::new(camel_language_jsonpath::JsonPathLanguage),
+            );
+        }
         Arc::new(std::sync::Mutex::new(languages))
     }
 

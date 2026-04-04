@@ -149,6 +149,8 @@ pub struct SetHeaderData {
     pub simple: Option<String>,
     #[serde(default)]
     pub rhai: Option<String>,
+    #[serde(default)]
+    pub jsonpath: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -186,6 +188,8 @@ pub struct SetBodyConfig {
     pub simple: Option<String>,
     #[serde(default)]
     pub rhai: Option<String>,
+    #[serde(default)]
+    pub jsonpath: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -226,6 +230,8 @@ pub struct LogMessageExpr {
     pub simple: Option<String>,
     #[serde(default)]
     pub rhai: Option<String>,
+    #[serde(default)]
+    pub jsonpath: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -249,6 +255,8 @@ pub struct PredicateBlock {
     pub simple: Option<String>,
     #[serde(default)]
     pub rhai: Option<String>,
+    #[serde(default)]
+    pub jsonpath: Option<String>,
     #[serde(default)]
     pub steps: Vec<YamlStep>,
 }
@@ -307,6 +315,8 @@ pub struct SplitExpressionConfig {
     pub simple: Option<String>,
     #[serde(default)]
     pub rhai: Option<String>,
+    #[serde(default)]
+    pub jsonpath: Option<String>,
 }
 
 fn default_split_aggregation() -> String {

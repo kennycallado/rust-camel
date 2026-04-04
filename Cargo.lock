@@ -1088,6 +1088,7 @@ dependencies = [
  "camel-endpoint",
  "camel-language-api",
  "camel-language-js",
+ "camel-language-jsonpath",
  "camel-language-rhai",
  "camel-language-simple",
  "camel-processor",
@@ -1181,6 +1182,16 @@ dependencies = [
  "tokio",
  "tower 0.5.3",
  "tracing",
+]
+
+[[package]]
+name = "camel-language-jsonpath"
+version = "0.5.1"
+dependencies = [
+ "camel-api",
+ "camel-language-api",
+ "jsonpath-rust",
+ "serde_json",
 ]
 
 [[package]]
@@ -1290,8 +1301,10 @@ dependencies = [
  "camel-component-timer",
  "camel-config",
  "camel-core",
+ "camel-dsl",
  "camel-endpoint",
  "camel-language-api",
+ "camel-language-jsonpath",
  "camel-language-rhai",
  "camel-processor",
  "redis",
@@ -3234,6 +3247,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonpath-rust"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "633a7320c4bb672863a3782e89b9094ad70285e097ff6832cddd0ec615beadfa"
+dependencies = [
+ "pest",
+ "pest_derive",
+ "regex",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "kafka-example"
 version = "0.5.1"
 dependencies = [
@@ -3279,6 +3305,22 @@ dependencies = [
  "camel-component-timer",
  "camel-core",
  "camel-language-js",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "language-jsonpath"
+version = "0.5.1"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-language-api",
+ "camel-language-jsonpath",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
 ]

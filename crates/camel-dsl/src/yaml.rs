@@ -205,6 +205,7 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     expr.source,
                     expr.simple,
                     expr.rhai,
+                    expr.jsonpath,
                     "log.message",
                 )?,
             };
@@ -217,6 +218,7 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 set_header.source,
                 set_header.simple,
                 set_header.rhai,
+                set_header.jsonpath,
                 "set_header",
             )?;
             Ok(DeclarativeStep::SetHeader(SetHeaderStepDef {
@@ -233,7 +235,10 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     source,
                     simple,
                     rhai,
-                }) => parse_value_source(value, language, source, simple, rhai, "set_body")?,
+                    jsonpath,
+                }) => {
+                    parse_value_source(value, language, source, simple, rhai, jsonpath, "set_body")?
+                }
             };
             Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
         }
@@ -246,7 +251,16 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     source,
                     simple,
                     rhai,
-                }) => parse_value_source(value, language, source, simple, rhai, "transform")?,
+                    jsonpath,
+                }) => parse_value_source(
+                    value,
+                    language,
+                    source,
+                    simple,
+                    rhai,
+                    jsonpath,
+                    "transform",
+                )?,
             };
             Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
         }
@@ -312,12 +326,14 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     source,
                     simple,
                     rhai,
+                    jsonpath,
                 })) => {
                     let expr = parse_language_expression(
                         language,
                         source,
                         simple,
                         rhai,
+                        jsonpath,
                         "split.expression",
                     )?;
                     SplitExpressionDef::Language(expr)
@@ -449,10 +465,13 @@ fn parse_predicate_block(
     if let Some(source) = block.rhai.as_ref() {
         selected.push(("rhai".to_string(), source.clone()));
     }
+    if let Some(source) = block.jsonpath.as_ref() {
+        selected.push(("jsonpath".to_string(), source.clone()));
+    }
 
     if selected.len() != 1 {
         return Err(CamelError::RouteError(format!(
-            "{context} must define exactly one predicate source: `language+source`, `simple`, or `rhai`"
+            "{context} must define exactly one predicate source: `language+source`, `simple`, `rhai`, or `jsonpath`"
         )));
     }
 
@@ -466,6 +485,7 @@ fn parse_value_source(
     source: Option<String>,
     simple: Option<String>,
     rhai: Option<String>,
+    jsonpath: Option<String>,
     context: &str,
 ) -> Result<ValueSourceDef, CamelError> {
     let mut count = 0;
@@ -487,10 +507,13 @@ fn parse_value_source(
     if rhai.is_some() {
         count += 1;
     }
+    if jsonpath.is_some() {
+        count += 1;
+    }
 
     if count != 1 {
         return Err(CamelError::RouteError(format!(
-            "{context} must define exactly one value source: `value`, `language+source`, `simple`, or `rhai`"
+            "{context} must define exactly one value source: `value`, `language+source`, `simple`, `rhai`, or `jsonpath`"
         )));
     }
 
@@ -515,6 +538,12 @@ fn parse_value_source(
             source,
         }));
     }
+    if let Some(source) = jsonpath {
+        return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
+            language: "jsonpath".to_string(),
+            source,
+        }));
+    }
 
     Err(CamelError::RouteError(format!(
         "{context}: missing value source"
@@ -526,6 +555,7 @@ fn parse_language_expression(
     source: Option<String>,
     simple: Option<String>,
     rhai: Option<String>,
+    jsonpath: Option<String>,
     context: &str,
 ) -> Result<LanguageExpressionDef, CamelError> {
     let mut count = 0;
@@ -544,10 +574,13 @@ fn parse_language_expression(
     if rhai.is_some() {
         count += 1;
     }
+    if jsonpath.is_some() {
+        count += 1;
+    }
 
     if count != 1 {
         return Err(CamelError::RouteError(format!(
-            "{context} must define exactly one language source: `language+source`, `simple`, or `rhai`"
+            "{context} must define exactly one language source: `language+source`, `simple`, `rhai`, or `jsonpath`"
         )));
     }
 
@@ -563,6 +596,12 @@ fn parse_language_expression(
     if let Some(source) = rhai {
         return Ok(LanguageExpressionDef {
             language: "rhai".to_string(),
+            source,
+        });
+    }
+    if let Some(source) = jsonpath {
+        return Ok(LanguageExpressionDef {
+            language: "jsonpath".to_string(),
             source,
         });
     }
@@ -994,5 +1033,118 @@ routes:
         assert!(
             matches!(&steps[0], DeclarativeStep::Unmarshal(DataFormatDef { format }) if format == "xml")
         );
+    }
+
+    #[test]
+    fn test_parse_filter_jsonpath() {
+        let yaml = r#"
+routes:
+  - id: "jsonpath-filter"
+    from: "direct:start"
+    steps:
+      - filter:
+          jsonpath: "$.active"
+          steps:
+            - to: "log:info"
+"#;
+        let defs = parse_yaml(yaml).unwrap();
+        assert_eq!(defs.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_set_header_jsonpath() {
+        let yaml = r#"
+routes:
+  - id: "jsonpath-header"
+    from: "direct:start"
+    steps:
+      - set_header:
+          key: "orderId"
+          jsonpath: "$.order.id"
+"#;
+        let defs = parse_yaml(yaml).unwrap();
+        assert_eq!(defs.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_set_body_jsonpath() {
+        let yaml = r#"
+routes:
+  - id: "jsonpath-body"
+    from: "direct:start"
+    steps:
+      - set_body:
+          jsonpath: "$.items[0]"
+"#;
+        let defs = parse_yaml(yaml).unwrap();
+        assert_eq!(defs.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_log_jsonpath() {
+        let yaml = r#"
+routes:
+  - id: "jsonpath-log"
+    from: "direct:start"
+    steps:
+      - log:
+          message:
+            jsonpath: "$.message"
+"#;
+        let defs = parse_yaml(yaml).unwrap();
+        assert_eq!(defs.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_split_jsonpath() {
+        let yaml = r#"
+routes:
+  - id: "jsonpath-split"
+    from: "direct:start"
+    steps:
+      - split:
+          expression:
+            jsonpath: "$.items[*]"
+          steps:
+            - to: "log:info"
+"#;
+        let defs = parse_yaml(yaml).unwrap();
+        assert_eq!(defs.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_choice_jsonpath() {
+        let yaml = r#"
+routes:
+  - id: "jsonpath-choice"
+    from: "direct:start"
+    steps:
+      - choice:
+          when:
+            - jsonpath: "$.priority == 'high'"
+              steps:
+                - to: "log:high"
+          otherwise:
+            - to: "log:low"
+"#;
+        let defs = parse_yaml(yaml).unwrap();
+        assert_eq!(defs.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_filter_jsonpath_and_simple_fails() {
+        let yaml = r#"
+routes:
+  - id: "jsonpath-conflict"
+    from: "direct:start"
+    steps:
+      - filter:
+          jsonpath: "$.active"
+          simple: "${body} == 'test'"
+          steps:
+            - to: "log:info"
+"#;
+        let result = parse_yaml(yaml);
+        assert!(result.is_err());
     }
 }

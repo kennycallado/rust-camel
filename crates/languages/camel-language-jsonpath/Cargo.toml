@@ -1,0 +1,18 @@
+[package]
+name = "camel-language-jsonpath"
+description = "JSONPath Language for rust-camel (RFC 9535)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-language-jsonpath"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-language-api.workspace = true
+jsonpath-rust = "1.0"
+serde_json.workspace = true
