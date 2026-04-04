@@ -1,16 +1,24 @@
 use crate::parser::{Expr, InterpolatedPart, Op, PathSegment};
-use camel_api::Value;
 use camel_api::body::Body;
 use camel_api::exchange::Exchange;
+use camel_api::Value;
 use camel_language_api::LanguageError;
 
 pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError> {
     match expr {
         Expr::Header(key) => Ok(exchange.input.header(key).cloned().unwrap_or(Value::Null)),
 
-        Expr::Body => Ok(Value::String(
-            exchange.input.body.as_text().unwrap_or("").to_string(),
-        )),
+        Expr::Body => {
+            let s = match &exchange.input.body {
+                Body::Text(s) => s.clone(),
+                Body::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+                Body::Json(v) => v.to_string(),
+                Body::Xml(s) => s.clone(),
+                Body::Empty => String::new(),
+                Body::Stream(_) => String::new(),
+            };
+            Ok(Value::String(s))
+        }
 
         Expr::BodyField(segments) => {
             if let Body::Json(root) = &exchange.input.body {

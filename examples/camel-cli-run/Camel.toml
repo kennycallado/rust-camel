@@ -3,6 +3,12 @@ routes = ["routes/*.yaml"]
 log_level = "INFO"
 watch = false
 
+[default.components.jms]
+broker_url = "tcp://localhost:61616"
+broker_type = "artemis"
+username = "artemis"
+password = "artemis"
+
 [default.supervision]
 max_attempts = 5
 initial_delay_ms = 1000

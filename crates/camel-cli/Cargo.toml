@@ -26,7 +26,7 @@ serde_json.workspace = true
 camel-core.workspace = true
 camel-api.workspace = true
 camel-dsl.workspace = true
-camel-config.workspace = true
+camel-config = { workspace = true, features = ["http", "file", "ws"] }
 config.workspace = true
 camel-component-timer.workspace = true
 camel-component-log.workspace = true
@@ -51,11 +51,11 @@ serde_json.workspace = true
 
 [features]
 default = ["container", "redis", "sql", "jms", "lang-js", "lang-rhai", "lang-jsonpath"]
-container = ["dep:camel-component-container"]
-redis = ["dep:camel-component-redis"]
-kafka = ["dep:camel-component-kafka", "dynamic-linking"]
-sql = ["dep:camel-component-sql"]
-jms = ["dep:camel-component-jms"]
+container = ["dep:camel-component-container", "camel-config/container"]
+redis = ["dep:camel-component-redis", "camel-config/redis"]
+kafka = ["dep:camel-component-kafka", "dynamic-linking", "camel-config/kafka"]
+sql = ["dep:camel-component-sql", "camel-config/sql"]
+jms = ["dep:camel-component-jms", "camel-config/jms"]
 lang-js = ["camel-core/lang-js", "dep:camel-language-js"]
 lang-rhai = ["camel-core/lang-rhai", "dep:camel-language-rhai"]
 lang-jsonpath = ["camel-core/lang-jsonpath", "dep:camel-language-jsonpath"]

@@ -37,7 +37,7 @@ public class JmsProducer {
             }
 
             if (contentType != null && !contentType.isEmpty()) {
-                msg.setStringProperty("Content-Type", contentType);
+                msg.setStringProperty("ContentType", contentType);
             }
             for (var entry : headers.entrySet()) {
                 String key = entry.getKey();

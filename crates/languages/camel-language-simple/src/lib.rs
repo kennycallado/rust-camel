@@ -45,7 +45,7 @@ impl Language for SimpleLanguage {
 #[cfg(test)]
 mod tests {
     use super::SimpleLanguage;
-    use camel_api::{Value, exchange::Exchange, message::Message};
+    use camel_api::{exchange::Exchange, message::Message, Value};
     use camel_language_api::Language;
 
     fn exchange_with_header(key: &str, val: &str) -> Exchange {
@@ -360,7 +360,7 @@ mod tests {
 
 #[cfg(test)]
 mod body_field_parser_tests {
-    use crate::parser::{Expr, PathSegment, parse};
+    use crate::parser::{parse, Expr, PathSegment};
 
     #[test]
     fn parse_body_field_simple_key() {
@@ -449,9 +449,9 @@ mod body_field_parser_tests {
 #[cfg(test)]
 mod body_field_eval_tests {
     use crate::SimpleLanguage;
-    use camel_api::Value;
     use camel_api::body::Body;
     use camel_api::exchange::Exchange;
+    use camel_api::Value;
     use camel_language_api::Language;
     use serde_json::json;
 
@@ -606,5 +606,54 @@ mod body_field_eval_tests {
             .evaluate(&ex)
             .unwrap();
         assert_eq!(result, Value::Bool(true));
+    }
+
+    #[test]
+    fn body_bytes_utf8_returns_string() {
+        // Body::Bytes with valid UTF-8 content should be readable via ${body}
+        let lang = SimpleLanguage;
+        let mut ex = Exchange::default();
+        ex.input.body = Body::from(b"hello from bytes".to_vec());
+        let val = lang
+            .create_expression("${body}")
+            .unwrap()
+            .evaluate(&ex)
+            .unwrap();
+        assert_eq!(val, Value::String("hello from bytes".to_string()));
+    }
+
+    #[test]
+    fn body_json_returns_serialized_string() {
+        // Body::Json should be serialized to a JSON string when accessed via ${body}
+        let lang = SimpleLanguage;
+        let mut ex = Exchange::default();
+        ex.input.body = Body::Json(json!({"msg": "world"}));
+        let val = lang
+            .create_expression("${body}")
+            .unwrap()
+            .evaluate(&ex)
+            .unwrap();
+        // The result should be the JSON serialization, not empty
+        let s = match val {
+            Value::String(s) => s,
+            other => panic!("expected String, got {other:?}"),
+        };
+        assert!(!s.is_empty(), "${{body}} on Body::Json should not be empty");
+        let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed["msg"], "world");
+    }
+
+    #[test]
+    fn body_bytes_in_interpolation() {
+        // Body::Bytes should work in interpolated expressions like "Received: ${body}"
+        let lang = SimpleLanguage;
+        let mut ex = Exchange::default();
+        ex.input.body = Body::from(b"ping".to_vec());
+        let val = lang
+            .create_expression("Received: ${body}")
+            .unwrap()
+            .evaluate(&ex)
+            .unwrap();
+        assert_eq!(val, Value::String("Received: ping".to_string()));
     }
 }
