@@ -62,7 +62,10 @@ pub async fn shared_artemis_auth() -> &'static (ContainerAsync<GenericImage>, St
                 // ANONYMOUS_LOGIN intentionally not set → mandatory auth
                 .with_startup_timeout(Duration::from_secs(120));
 
-            let container = image.start().await.expect("Artemis auth container failed to start");
+            let container = image
+                .start()
+                .await
+                .expect("Artemis auth container failed to start");
             let port = container
                 .get_host_port_ipv4(ARTEMIS_PORT)
                 .await

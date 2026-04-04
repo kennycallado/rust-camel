@@ -97,9 +97,7 @@ impl ServerRegistry {
         };
 
         let handle = cell
-            .get_or_try_init(|| async {
-                spawn_server(&host_owned, port, tls_config).await
-            })
+            .get_or_try_init(|| async { spawn_server(&host_owned, port, tls_config).await })
             .await?;
 
         if wants_tls != handle.is_tls {
@@ -124,7 +122,9 @@ async fn spawn_server(
         dispatch: Arc::clone(&dispatch),
         path_configs: Arc::clone(&path_configs),
     };
-    let app = Router::new().fallback(dispatch_handler).with_state(state.clone());
+    let app = Router::new()
+        .fallback(dispatch_handler)
+        .with_state(state.clone());
 
     let (task, is_tls) = if let Some(ref tls) = tls_config {
         let rustls = load_tls_config(&tls.cert_path, &tls.key_path)?;

@@ -99,6 +99,7 @@
             llvm
             sccache
             patchelf
+            nix-ld
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";

@@ -531,7 +531,7 @@ fn default_jms_bridge_version() -> String {
     }
     #[cfg(not(feature = "jms"))]
     {
-        "0.1.0".to_string()
+        "0.1.1".to_string()
     }
 }
 
@@ -982,7 +982,7 @@ broker_url = "tcp://broker:61616"
         #[cfg(feature = "jms")]
         assert_eq!(j.bridge_version, camel_component_jms::BRIDGE_VERSION);
         #[cfg(not(feature = "jms"))]
-        assert_eq!(j.bridge_version, "0.1.0");
+        assert_eq!(j.bridge_version, "0.1.1");
         #[cfg(feature = "jms")]
         assert_eq!(
             j.bridge_cache_dir,
@@ -1031,7 +1031,7 @@ broker_url = "tcp://broker:61616"
         #[cfg(feature = "jms")]
         assert_eq!(d.bridge_version, camel_component_jms::BRIDGE_VERSION);
         #[cfg(not(feature = "jms"))]
-        assert_eq!(d.bridge_version, "0.1.0");
+        assert_eq!(d.bridge_version, "0.1.1");
         #[cfg(feature = "jms")]
         assert_eq!(
             d.bridge_cache_dir,

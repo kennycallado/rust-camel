@@ -13,7 +13,7 @@
 //!   `username`/`password` so the bridge can authenticate.
 //! - **Custom JMS headers**: producer sets `x-order-id` and `x-priority` on
 //!   every message so downstream consumers and filters can act on them.
- //! - **Competing consumers**: two independent consumer routes (`consumer-a` and
+//! - **Competing consumers**: two independent consumer routes (`consumer-a` and
 //!   `consumer-b`) both subscribe to the same `orders` queue. Artemis
 //!   distributes messages between them automatically (round-robin).
 //! - **Dead Letter Channel**: `consumer-b` always rejects its messages by
@@ -264,9 +264,7 @@ async fn main() -> Result<(), CamelError> {
                 .header("x-order-id")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "?".to_string());
-            println!(
-                "[consumer-b] received order-id={order_id} — simulating processing failure"
-            );
+            println!("[consumer-b] received order-id={order_id} — simulating processing failure");
             Err(CamelError::ProcessorError(format!(
                 "consumer-b always fails (order-id={order_id})"
             )))

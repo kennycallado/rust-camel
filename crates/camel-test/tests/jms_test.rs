@@ -86,12 +86,13 @@ async fn jms_consumer_receives_from_activemq() {
         .build()
         .unwrap();
 
-    let inject_route = RouteBuilder::from("timer:inject-activemq?period=300&delay=500&repeatCount=1")
-        .set_body(Value::String("consume-from-activemq".to_string()))
-        .to("jms:queue:test-consume-activemq")
-        .route_id("jms-consumer-activemq-inject")
-        .build()
-        .unwrap();
+    let inject_route =
+        RouteBuilder::from("timer:inject-activemq?period=300&delay=500&repeatCount=1")
+            .set_body(Value::String("consume-from-activemq".to_string()))
+            .to("jms:queue:test-consume-activemq")
+            .route_id("jms-consumer-activemq-inject")
+            .build()
+            .unwrap();
 
     h.add_route(consumer_route).await.unwrap();
     h.add_route(inject_route).await.unwrap();
@@ -286,12 +287,13 @@ async fn jms_producer_sends_multiple_messages() {
         .build()
         .unwrap();
 
-    let producer_route = RouteBuilder::from("timer:multi-inject?period=300&delay=500&repeatCount=2")
-        .set_body(Value::String("multi-msg".to_string()))
-        .to("jms:queue:test-multi")
-        .route_id("jms-multi-producer")
-        .build()
-        .unwrap();
+    let producer_route =
+        RouteBuilder::from("timer:multi-inject?period=300&delay=500&repeatCount=2")
+            .set_body(Value::String("multi-msg".to_string()))
+            .to("jms:queue:test-multi")
+            .route_id("jms-multi-producer")
+            .build()
+            .unwrap();
 
     h.add_route(consumer_route).await.unwrap();
     h.add_route(producer_route).await.unwrap();

@@ -28,7 +28,9 @@ where
             Ok(Ok(true)) => return Ok(()),
             Ok(Ok(false)) => debug!("bridge health check: not ready yet"),
             Ok(Err(e)) => debug!("bridge health check error: {e}"),
-            Err(_) => debug!("bridge health check probe timed out after {PROBE_TIMEOUT:?}, retrying"),
+            Err(_) => {
+                debug!("bridge health check probe timed out after {PROBE_TIMEOUT:?}, retrying")
+            }
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(BridgeError::Timeout(format!(
