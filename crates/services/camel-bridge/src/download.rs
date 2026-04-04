@@ -87,7 +87,15 @@ pub async fn ensure_binary(version: &str, cache_dir: &Path) -> Result<PathBuf, B
         }
     }
 
-    let bin_path = cache_dir.join(version).join("bin").join("jms-bridge");
+    let tarball_name = tarball_filename(version)?;
+    // The tarball extracts to a directory named after the tarball (without .tar.gz)
+    // e.g. jms-bridge-0.1.0-linux-x86_64/bin/jms-bridge
+    let tarball_dir = tarball_name.trim_end_matches(".tar.gz");
+    let bin_path = cache_dir
+        .join(version)
+        .join(tarball_dir)
+        .join("bin")
+        .join("jms-bridge");
     let hash_path = cache_dir.join(version).join(".binary.sha256");
     if bin_path.exists()
         && hash_path.exists()
@@ -108,7 +116,6 @@ pub async fn ensure_binary(version: &str, cache_dir: &Path) -> Result<PathBuf, B
     }
 
     let base_url = release_base_url(version)?;
-    let tarball_name = tarball_filename(version)?;
 
     let checksums = fetch_sha256sums(&base_url, version).await?;
 
