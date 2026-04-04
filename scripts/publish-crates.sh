@@ -87,6 +87,7 @@ publish_crate "camel-language-api" "crates/languages/camel-language-api"
 publish_crate "camel-language-simple" "crates/languages/camel-language-simple"
 publish_crate "camel-language-rhai" "crates/languages/camel-language-rhai"
 publish_crate "camel-language-js" "crates/languages/camel-language-js"
+publish_crate "camel-language-jsonpath" "crates/languages/camel-language-jsonpath"
 
 publish_crate "camel-component" "crates/camel-component"
 publish_crate "camel-processor" "crates/camel-processor"

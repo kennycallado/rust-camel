@@ -42,19 +42,21 @@ camel-component-kafka = { workspace = true, optional = true }
 camel-component-sql = { workspace = true, optional = true }
 camel-language-js = { workspace = true, optional = true }
 camel-language-rhai = { workspace = true, optional = true }
+camel-language-jsonpath = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 serde_json.workspace = true
 
 [features]
-default = ["container", "redis", "sql", "lang-js", "lang-rhai"]
+default = ["container", "redis", "sql", "lang-js", "lang-rhai", "lang-jsonpath"]
 container = ["dep:camel-component-container"]
 redis = ["dep:camel-component-redis"]
 kafka = ["dep:camel-component-kafka", "dynamic-linking"]
 sql = ["dep:camel-component-sql"]
 lang-js = ["camel-core/lang-js", "dep:camel-language-js"]
 lang-rhai = ["camel-core/lang-rhai", "dep:camel-language-rhai"]
+lang-jsonpath = ["camel-core/lang-jsonpath", "dep:camel-language-jsonpath"]
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]
 all-components = ["container", "redis", "kafka", "sql"]

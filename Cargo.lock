@@ -776,6 +776,7 @@ dependencies = [
  "camel-core",
  "camel-dsl",
  "camel-language-js",
+ "camel-language-jsonpath",
  "camel-language-rhai",
  "chrono",
  "clap",
