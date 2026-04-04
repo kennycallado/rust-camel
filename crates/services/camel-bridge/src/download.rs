@@ -179,7 +179,7 @@ fn resolve_release_base_url(
     let url = match override_url {
         Some(u) => u.to_string(),
         None => format!(
-            "https://github.com/rust-camel/rust-camel/releases/download/jms-bridge-v{version}"
+            "https://github.com/kennycallado/rust-camel/releases/download/jms-bridge-v{version}"
         ),
     };
     match url::Url::parse(&url) {
@@ -376,7 +376,7 @@ mod tests {
         // naming matches what CI produces.
         let version = "0.2.0";
         let base = format!(
-            "https://github.com/rust-camel/rust-camel/releases/download/jms-bridge-v{version}"
+            "https://github.com/kennycallado/rust-camel/releases/download/jms-bridge-v{version}"
         );
         let expected = format!("{base}/jms-bridge-{version}-SHA256SUMS");
 
