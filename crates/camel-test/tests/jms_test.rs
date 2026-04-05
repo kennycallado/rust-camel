@@ -13,7 +13,7 @@ mod support;
 
 use std::time::Duration;
 
-use camel_api::{Body, Value};
+use camel_api::Value;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_jms::{BrokerType, JmsComponent, JmsConfig};
 use camel_test::CamelTestContext;
@@ -59,7 +59,7 @@ async fn jms_producer_sends_to_activemq() {
         Duration::from_millis(200),
         || {
             let endpoint = endpoint.clone();
-            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
         },
     )
     .await
@@ -202,7 +202,7 @@ async fn jms_producer_sends_to_artemis() {
         Duration::from_millis(200),
         || {
             let endpoint = endpoint.clone();
-            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
         },
     )
     .await
@@ -278,7 +278,7 @@ async fn jms_headers_propagated() {
 async fn jms_producer_fails_gracefully_when_broker_unavailable() {
     init_tracing();
 
-    let mut cfg = JmsConfig {
+    let cfg = JmsConfig {
         broker_url: "tcp://127.0.0.1:1".to_string(),
         broker_type: BrokerType::ActiveMq,
         username: Some("admin".to_string()),

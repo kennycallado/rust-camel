@@ -191,10 +191,10 @@ pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
         if let Some(headers) = msg.headers() {
             for i in 0..headers.count() {
                 let header = headers.get(i);
-                if let Some(value_bytes) = header.value {
-                    if let Ok(v) = std::str::from_utf8(value_bytes) {
-                        headers_map.insert(header.key.to_string(), v.to_string());
-                    }
+                if let Some(value_bytes) = header.value
+                    && let Ok(v) = std::str::from_utf8(value_bytes)
+                {
+                    headers_map.insert(header.key.to_string(), v.to_string());
                 }
             }
         }
@@ -718,10 +718,10 @@ mod tests {
             let mut extracted_map = HashMap::new();
             for i in 0..kafka_headers.count() {
                 let header = kafka_headers.get(i);
-                if let Some(value_bytes) = header.value {
-                    if let Ok(v) = std::str::from_utf8(value_bytes) {
-                        extracted_map.insert(header.key.to_string(), v.to_string());
-                    }
+                if let Some(value_bytes) = header.value
+                    && let Ok(v) = std::str::from_utf8(value_bytes)
+                {
+                    extracted_map.insert(header.key.to_string(), v.to_string());
                 }
             }
 

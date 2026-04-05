@@ -71,7 +71,7 @@ async fn redis_string_commands() {
         std::time::Duration::from_millis(100),
         || {
             let endpoint = endpoint.clone();
-            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
         },
     )
     .await
@@ -128,7 +128,7 @@ async fn redis_list_commands() {
         std::time::Duration::from_millis(100),
         || {
             let endpoint = endpoint.clone();
-            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
         },
     )
     .await
@@ -186,7 +186,7 @@ async fn redis_hash_commands() {
         std::time::Duration::from_millis(100),
         || {
             let endpoint = endpoint.clone();
-            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
         },
     )
     .await
@@ -243,7 +243,7 @@ async fn redis_set_commands() {
         std::time::Duration::from_millis(100),
         || {
             let endpoint = endpoint.clone();
-            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
         },
     )
     .await
@@ -300,7 +300,7 @@ async fn redis_pubsub_producer() {
         std::time::Duration::from_millis(100),
         || {
             let endpoint = endpoint.clone();
-            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
         },
     )
     .await

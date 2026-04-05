@@ -1,4 +1,4 @@
-#![cfg(feature = "integration-tests")]
+#![allow(dead_code)]
 
 use std::time::Duration;
 

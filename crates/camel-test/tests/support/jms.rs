@@ -1,4 +1,4 @@
-#![cfg(feature = "integration-tests")]
+#![allow(dead_code)]
 
 use camel_component_jms::{BrokerType, JmsComponent, JmsConfig};
 use tokio::sync::OnceCell;

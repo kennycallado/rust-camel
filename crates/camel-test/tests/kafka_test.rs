@@ -112,7 +112,7 @@ async fn kafka_producer_sends_without_error() {
         std::time::Duration::from_millis(100),
         || {
             let endpoint = endpoint.clone();
-            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
         },
     )
     .await

@@ -3,6 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
+    nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
@@ -14,6 +15,7 @@
   outputs =
     {
       nixpkgs,
+      nixpkgs-unstable,
       crane,
       flake-utils,
       rust-overlay,
@@ -23,6 +25,11 @@
       system:
       let
         pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ (import rust-overlay) ];
+        };
+
+        pkgsUnstable = import nixpkgs-unstable {
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
@@ -100,6 +107,8 @@
             sccache
             patchelf
             nix-ld
+            pkg-config
+            pkgsUnstable.rdkafka
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";
