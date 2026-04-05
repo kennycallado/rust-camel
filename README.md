@@ -548,7 +548,7 @@ Supported component configurations:
 - **`[components.kafka]`**: `brokers`, `group_id`, `session_timeout_ms`, `request_timeout_ms`, `auto_offset_reset`, `security_protocol`
 - **`[components.redis]`**: `host`, `port`
 - **`[components.sql]`**: `max_connections`, `min_connections`, `idle_timeout_secs`, `max_lifetime_secs`
-- **`[components.jms]`**: `broker_url`, `broker_type`, `username`, `password`, `bridge_version`, `bridge_cache_dir`, `bridge_start_timeout_ms`, `broker_reconnect_interval_ms`
+- **`[components.jms]`**: `broker_url`, `broker_type` (`activemq`|`artemis`), `username`, `password`, `bridge_version`, `bridge_cache_dir`, `bridge_start_timeout_ms`, `broker_reconnect_interval_ms`. URI schemes `activemq:` and `artemis:` lock the broker type automatically and support shorthand destinations (e.g. `activemq:orders` → queue). URI query params `brokerUrl`, `username`, `password` override the config file.
 - **`[components.file]`**: `delay_ms`, `initial_delay_ms`, `read_timeout_ms`, `write_timeout_ms`
 - **`[components.container]`**: `docker_host`
 

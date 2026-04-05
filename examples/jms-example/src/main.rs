@@ -1,8 +1,11 @@
 //! JMS example for rust-camel.
 //!
 //! Demonstrates:
-//!   - Route 1 (Producer): timer → set_body → to(jms:queue:orders)
-//!   - Route 2 (Consumer): from(jms:queue:orders) → log
+//!   - `activemq:` scheme — locks broker type to ActiveMQ Classic automatically.
+//!   - Shorthand destination: `activemq:orders` is equivalent to `activemq:queue:orders`.
+//!   - `brokerUrl` URI query param overrides the programmatic config at the endpoint level.
+//!   - Route 1 (Producer): timer → set_body → to(activemq:queue:orders)
+//!   - Route 2 (Consumer): from(activemq:orders) → log  (shorthand)
 //!
 //! An ActiveMQ Classic broker is started automatically via testcontainers
 //! (requires Docker). No external infrastructure needed — just run:
@@ -10,6 +13,20 @@
 //!   cargo run -p jms-example
 //!
 //! The example runs for ~15 seconds then shuts down cleanly.
+//!
+//! ## URI scheme variants
+//!
+//! ```text
+//! activemq:orders                   shorthand → queue (ActiveMQ Classic)
+//! activemq:queue:orders             explicit type
+//! activemq:topic:events             topic destination
+//! artemis:orders                    shorthand → queue (ActiveMQ Artemis)
+//! jms:queue:orders                  generic scheme — broker_type from config
+//!
+//! # Inline overrides via query params:
+//! activemq:queue:orders?brokerUrl=tcp://192.168.1.1:61616
+//! jms:queue:orders?username=admin&password=secret
+//! ```
 
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
@@ -46,6 +63,9 @@ async fn main() -> Result<(), CamelError> {
     let broker_url = format!("tcp://127.0.0.1:{port}");
     println!("ActiveMQ broker available at {broker_url}");
 
+    // Register using JmsComponent::new() with explicit config.
+    // The `activemq:` scheme used in routes below locks broker_type automatically,
+    // so it is equivalent to passing BrokerType::ActiveMq here.
     let jms_config = JmsConfig {
         broker_url: broker_url.clone(),
         broker_type: BrokerType::ActiveMq,
@@ -58,16 +78,18 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(JmsComponent::new(jms_config));
 
     // Route 1: Timer → JMS producer (every 3 seconds)
+    // Uses explicit destination type: activemq:queue:orders
     let producer_route = RouteBuilder::from("timer:tick?period=3000")
         .route_id("jms-producer")
         .set_body(Value::String(
             r#"{"event":"order","source":"rust-camel"}"#.to_string(),
         ))
-        .to("jms:queue:orders")
+        .to("activemq:queue:orders")
         .build()?;
 
     // Route 2: JMS consumer → Log
-    let consumer_route = RouteBuilder::from("jms:queue:orders")
+    // Uses shorthand: activemq:orders is equivalent to activemq:queue:orders
+    let consumer_route = RouteBuilder::from("activemq:orders")
         .route_id("jms-consumer")
         .to("log:info?showHeaders=true")
         .build()?;

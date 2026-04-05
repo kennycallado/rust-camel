@@ -4,43 +4,88 @@ JMS component for [rust-camel](https://github.com/kennycallado/rust-camel). Supp
 
 ## URI Format
 
+Three URI schemes are supported:
+
 ```
+# Generic — requires explicit destination type
 jms:queue:name[?param=value&...]
 jms:topic:name[?param=value&...]
+
+# Broker-specific — destination type can be omitted (defaults to queue)
+activemq:queue:name[?param=value&...]
+activemq:name              # shorthand → queue
+activemq:topic:name
+
+artemis:queue:name[?param=value&...]
+artemis:name               # shorthand → queue
+artemis:topic:name
 ```
 
-## Parameters
+Using `activemq:` or `artemis:` as scheme locks the `broker_type` automatically — no `brokerType` query param needed.
+
+## URI Query Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `brokerUrl` | `tcp://localhost:61616` | Broker connection URL |
-| `brokerType` | `activemq` | `activemq` or `artemis` |
-| `username` | — | Broker username |
-| `password` | — | Broker password |
+| `brokerUrl` | `tcp://localhost:61616` | Broker connection URL (overrides `Camel.toml`) |
+| `username` | — | Broker username (overrides `Camel.toml`) |
+| `password` | — | Broker password (overrides `Camel.toml`) |
+
+> `brokerType` is **not** a URI parameter — it is inferred from the scheme (`activemq:` → ActiveMQ Classic, `artemis:` → Artemis) or set in `Camel.toml`.
+
+## Camel.toml Configuration
+
+```toml
+[default.components.jms]
+broker_url  = "tcp://localhost:61616"
+broker_type = "activemq"   # "activemq" | "artemis" — ignored when using activemq:/artemis: schemes
+username    = "admin"
+password    = "admin"
+```
 
 ## Quick Start
 
 ```rust
 use camel_component_jms::JmsComponent;
 
+// Option A: broker config from Camel.toml
 ctx.register_component(JmsComponent::default());
 
-// Consumer
-let route = RouteBuilder::from("jms:queue:orders?brokerUrl=tcp://localhost:61616")
+// Option B: programmatic config
+use camel_component_jms::{BrokerType, JmsConfig};
+let config = JmsConfig {
+    broker_url: "tcp://localhost:61616".to_string(),
+    broker_type: BrokerType::ActiveMq,
+    ..Default::default()
+};
+ctx.register_component(JmsComponent::new(config));
+
+// Option C: broker-specific scheme (locks broker type automatically)
+ctx.register_component(JmsComponent::with_scheme("activemq"));
+```
+
+```rust
+// Consumer — generic scheme
+let route = RouteBuilder::from("jms:queue:orders")
     .to("log:info")
     .build()?;
 
-// Producer
+// Consumer — activemq: shorthand (queue is the default)
+let route = RouteBuilder::from("activemq:orders")
+    .to("log:info")
+    .build()?;
+
+// Producer — override broker URL inline
 let route = RouteBuilder::from("timer:tick?period=1000")
     .set_body("hello".to_string())
-    .to("jms:queue:events?brokerUrl=tcp://localhost:61616")
+    .to("activemq:queue:events?brokerUrl=tcp://192.168.1.1:61616")
     .build()?;
-```
 
-## Artemis
-
-```rust
-.to("jms:queue:orders?brokerUrl=tcp://artemis:61616&brokerType=artemis")
+// Producer — Artemis topic
+let route = RouteBuilder::from("timer:tick?period=1000")
+    .set_body("hello".to_string())
+    .to("artemis:topic:notifications")
+    .build()?;
 ```
 
 ## How It Works
