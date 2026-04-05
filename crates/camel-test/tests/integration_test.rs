@@ -1502,6 +1502,85 @@ async fn aggregator_scatter_gather() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 29 (Aggregator): complete on inactivity timeout
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn aggregator_agg_timeout_emits_after_inactivity() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
+
+    let route = RouteBuilder::from("timer:agg-timeout?period=50&repeatCount=1")
+        .route_id("agg-timeout-route")
+        .process(|mut ex: camel_api::Exchange| async move {
+            ex.input.set_header("key", Value::String("A".into()));
+            Ok(ex)
+        })
+        .aggregate(
+            AggregatorConfig::correlate_by("key")
+                .complete_on_timeout(std::time::Duration::from_millis(200))
+                .build(),
+        )
+        .to("mock:agg-timeout-result")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+
+    // Wait for timeout to fire (200ms + margin)
+    tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+
+    h.stop().await;
+
+    let endpoint = h.mock().get_endpoint("agg-timeout-result").unwrap();
+    endpoint.assert_exchange_count(1).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 30 (Aggregator): force completion on stop flushes pending group
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn aggregator_agg_force_completion_on_stop() {
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .build()
+        .await;
+
+    let route = RouteBuilder::from("timer:agg-force?period=50&repeatCount=1")
+        .route_id("agg-force-route")
+        .process(|mut ex: camel_api::Exchange| async move {
+            ex.input.set_header("key", Value::String("A".into()));
+            Ok(ex)
+        })
+        .aggregate(
+            AggregatorConfig::correlate_by("key")
+                .complete_when_size(100)
+                .force_completion_on_stop(true)
+                .build(),
+        )
+        .to("mock:agg-force-result")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+
+    // Ensure one timer exchange is produced and remains pending.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+    h.stop().await;
+
+    let endpoint = h.mock().get_endpoint("agg-force-result").unwrap();
+    endpoint.assert_exchange_count(1).await;
+}
+
+// ---------------------------------------------------------------------------
 // set_body / set_body_fn / set_header_fn integration tests
 // ---------------------------------------------------------------------------
 

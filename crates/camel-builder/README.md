@@ -126,6 +126,50 @@ let route = RouteBuilder::from("direct:input")
     .unwrap();
 ```
 
+### Aggregate Pattern
+
+```rust
+use camel_api::aggregator::AggregatorConfig;
+use std::time::Duration;
+
+// Size-based completion (basic)
+let route = RouteBuilder::from("timer:orders?period=200")
+    .aggregate(
+        AggregatorConfig::correlate_by("orderId")
+            .complete_when_size(3)
+            .build(),
+    )
+    .to("log:info")
+    .build()
+    .unwrap();
+
+// Size OR timeout completion (v2)
+let route = RouteBuilder::from("timer:orders?period=200")
+    .aggregate(
+        AggregatorConfig::correlate_by("orderId")
+            .complete_on_size_or_timeout(3, Duration::from_secs(5))
+            .force_completion_on_stop(true)
+            .build(),
+    )
+    .to("log:info")
+    .build()
+    .unwrap();
+```
+
+#### AggregatorConfig Builder Methods
+
+| Method | Description |
+|--------|-------------|
+| `correlate_by(header)` | Correlate exchanges by header value |
+| `complete_when_size(n)` | Complete when bucket reaches `n` exchanges |
+| `complete_on_timeout(duration)` | Complete on inactivity timeout (resets on each exchange) |
+| `complete_on_size_or_timeout(n, duration)` | Complete on either condition (first wins) |
+| `force_completion_on_stop(bool)` | Force-complete all buckets when route stops |
+| `discard_on_timeout(bool)` | Discard incomplete exchanges on timeout instead of emitting |
+| `strategy(strategy)` | Custom aggregation strategy (`Fn(Exchange, Exchange) -> Exchange`) |
+| `max_buckets(n)` | Maximum concurrent correlation buckets |
+| `bucket_ttl(duration)` | TTL for idle buckets |
+
 ### Script Step
 
 Execute a script that can modify the Exchange in-place (headers, properties, body):

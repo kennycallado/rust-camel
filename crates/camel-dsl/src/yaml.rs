@@ -6,7 +6,7 @@ use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
 use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical};
-use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
+use crate::contract::{assert_contract_coverage, DeclarativeStepKind};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
@@ -390,12 +390,15 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
 
             Ok(DeclarativeStep::Aggregate(AggregateStepDef {
                 header: aggregate.header,
+                correlation_key: aggregate.correlation_key,
                 completion_size: aggregate.completion_size,
                 completion_timeout_ms: aggregate.completion_timeout_ms,
                 completion_predicate,
                 strategy,
                 max_buckets: aggregate.max_buckets,
                 bucket_ttl_ms: aggregate.bucket_ttl_ms,
+                force_completion_on_stop: aggregate.force_completion_on_stop,
+                discard_on_timeout: aggregate.discard_on_timeout,
             }))
         }
         YamlStep::Multicast(MulticastStep { multicast }) => {
@@ -489,6 +492,7 @@ fn parse_predicate_block(
     Ok(LanguageExpressionDef { language, source })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_value_source(
     literal: Option<serde_json::Value>,
     language: Option<String>,

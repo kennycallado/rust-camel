@@ -5,19 +5,28 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 use camel_api::{
     CamelError,
-    aggregator::{AggregationStrategy, AggregatorConfig, CompletionCondition},
+    aggregator::{
+        AggregationStrategy, AggregatorConfig, CompletionCondition, CompletionMode,
+        CompletionReason, CorrelationStrategy,
+    },
     body::Body,
     exchange::Exchange,
     message::Message,
 };
+use camel_language_api::Language;
+
+pub type SharedLanguageRegistry = Arc<std::sync::Mutex<HashMap<String, Arc<dyn Language>>>>;
 
 pub const CAMEL_AGGREGATOR_PENDING: &str = "CamelAggregatorPending";
 pub const CAMEL_AGGREGATED_SIZE: &str = "CamelAggregatedSize";
 pub const CAMEL_AGGREGATED_KEY: &str = "CamelAggregatedKey";
+pub const CAMEL_AGGREGATED_COMPLETION_REASON: &str = "CamelAggregatedCompletionReason";
 
 /// Internal bucket structure with timestamp tracking for TTL eviction.
 struct Bucket {
@@ -42,6 +51,7 @@ impl Bucket {
         self.last_updated = Instant::now();
     }
 
+    #[allow(dead_code)]
     fn len(&self) -> usize {
         self.exchanges.len()
     }
@@ -55,14 +65,77 @@ impl Bucket {
 pub struct AggregatorService {
     config: AggregatorConfig,
     buckets: Arc<Mutex<HashMap<String, Bucket>>>,
+    timeout_tasks: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    late_tx: mpsc::Sender<Exchange>,
+    language_registry: SharedLanguageRegistry,
+    route_cancel: CancellationToken,
 }
 
 impl AggregatorService {
-    pub fn new(config: AggregatorConfig) -> Self {
+    pub fn new(
+        config: AggregatorConfig,
+        late_tx: mpsc::Sender<Exchange>,
+        language_registry: SharedLanguageRegistry,
+        route_cancel: CancellationToken,
+    ) -> Self {
         Self {
             config,
             buckets: Arc::new(Mutex::new(HashMap::new())),
+            timeout_tasks: Arc::new(Mutex::new(HashMap::new())),
+            late_tx,
+            language_registry,
+            route_cancel,
         }
+    }
+
+    pub fn has_timeout(&self) -> bool {
+        has_timeout_condition(&self.config.completion)
+    }
+
+    pub fn force_complete_all(&self) {
+        let mut buckets_guard = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let keys: Vec<String> = buckets_guard.keys().cloned().collect();
+
+        for key in keys {
+            if let Some(bucket) = buckets_guard.remove(&key) {
+                if self.config.force_completion_on_stop {
+                    cancel_timeout_task(&key, &self.timeout_tasks);
+                    match aggregate(bucket.exchanges, &self.config.strategy) {
+                        Ok(mut result) => {
+                            result.set_property(
+                                CAMEL_AGGREGATED_COMPLETION_REASON,
+                                serde_json::json!(CompletionReason::Stop.as_str()),
+                            );
+                            if self.late_tx.try_send(result).is_err() {
+                                tracing::warn!(
+                                    key = %key,
+                                    "aggregator force-complete emit dropped: late channel full"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                key = %key,
+                                error = %e,
+                                "aggregation failed in force_complete_all"
+                            );
+                        }
+                    }
+                } else {
+                    cancel_timeout_task(&key, &self.timeout_tasks);
+                }
+            }
+        }
+    }
+}
+
+pub fn has_timeout_condition(mode: &CompletionMode) -> bool {
+    match mode {
+        CompletionMode::Single(CompletionCondition::Timeout(_)) => true,
+        CompletionMode::Any(conditions) => conditions
+            .iter()
+            .any(|c| matches!(c, CompletionCondition::Timeout(_))),
+        _ => false,
     }
 }
 
@@ -78,35 +151,25 @@ impl Service<Exchange> for AggregatorService {
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let config = self.config.clone();
         let buckets = Arc::clone(&self.buckets);
+        let timeout_tasks = Arc::clone(&self.timeout_tasks);
+        let late_tx = self.late_tx.clone();
+        let language_registry = Arc::clone(&self.language_registry);
+        let route_cancel = self.route_cancel.clone();
 
         Box::pin(async move {
-            // 1. Extract correlation key value from header
-            let key_value = exchange
-                .input
-                .headers
-                .get(&config.header_name)
-                .cloned()
-                .ok_or_else(|| {
-                    CamelError::ProcessorError(format!(
-                        "Aggregator: missing correlation key header '{}'",
-                        config.header_name
-                    ))
-                })?;
+            let key_value =
+                extract_correlation_key(&exchange, &config.correlation, &language_registry)?;
 
-            // Serialize to String for use as HashMap key
             let key_str = serde_json::to_string(&key_value)
                 .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
 
-            // 2. Insert into bucket and check completion (lock scope)
             let completed_bucket = {
                 let mut guard = buckets.lock().unwrap_or_else(|e| e.into_inner());
 
-                // Evict expired buckets if TTL is configured
                 if let Some(ttl) = config.bucket_ttl {
                     guard.retain(|_, bucket| !bucket.is_expired(ttl));
                 }
 
-                // Enforce max buckets limit - reject new correlation keys if at limit
                 if let Some(max) = config.max_buckets
                     && !guard.contains_key(&key_str)
                     && guard.len() >= max
@@ -125,38 +188,215 @@ impl Service<Exchange> for AggregatorService {
                 let bucket = guard.entry(key_str.clone()).or_insert_with(Bucket::new);
                 bucket.push(exchange);
 
-                let is_complete = match &config.completion {
-                    CompletionCondition::Size(n) => bucket.len() >= *n,
-                    CompletionCondition::Predicate(pred) => pred(&bucket.exchanges),
-                };
+                let (is_complete, reason) =
+                    check_sync_completion(&config.completion, &bucket.exchanges);
 
                 if is_complete {
-                    guard.remove(&key_str).map(|b| b.exchanges)
+                    let exchanges = guard.remove(&key_str).map(|b| b.exchanges);
+                    (exchanges, reason)
                 } else {
-                    None
+                    (None, CompletionReason::Size) // placeholder; reason unused when None
                 }
-            }; // Mutex released here
+            };
 
-            // 3. Emit aggregated exchange or return pending placeholder
-            match completed_bucket {
-                Some(exchanges) => {
-                    let size = exchanges.len();
-                    let mut result = aggregate(exchanges, &config.strategy)?;
-                    result.set_property(CAMEL_AGGREGATED_SIZE, serde_json::json!(size as u64));
-                    result.set_property(CAMEL_AGGREGATED_KEY, key_value);
-                    Ok(result)
+            if completed_bucket.0.is_none() && has_timeout_condition(&config.completion) {
+                let cancel = {
+                    let mut tt_guard = timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(existing) = tt_guard.get(&key_str) {
+                        existing.cancel();
+                    }
+                    let token = CancellationToken::new();
+                    tt_guard.insert(key_str.clone(), token.clone());
+                    token
+                };
+
+                let timeout_dur = extract_timeout_duration(&config.completion);
+                if let Some(timeout) = timeout_dur {
+                    spawn_timeout_task(
+                        key_str.clone(),
+                        timeout,
+                        cancel,
+                        buckets.clone(),
+                        timeout_tasks.clone(),
+                        late_tx,
+                        config.strategy.clone(),
+                        config.discard_on_timeout,
+                        route_cancel,
+                    );
                 }
-                None => {
-                    let mut pending = Exchange::new(Message {
-                        headers: Default::default(),
-                        body: Body::Empty,
-                    });
-                    pending.set_property(CAMEL_AGGREGATOR_PENDING, serde_json::json!(true));
-                    Ok(pending)
-                }
+            }
+
+            if let Some(exchanges) = completed_bucket.0 {
+                cancel_timeout_task(&key_str, &timeout_tasks);
+                let reason = completed_bucket.1;
+                let size = exchanges.len();
+                let mut result = aggregate(exchanges, &config.strategy)?;
+                result.set_property(CAMEL_AGGREGATED_SIZE, serde_json::json!(size as u64));
+                result.set_property(CAMEL_AGGREGATED_KEY, key_value);
+                result.set_property(
+                    CAMEL_AGGREGATED_COMPLETION_REASON,
+                    serde_json::json!(reason.as_str()),
+                );
+                Ok(result)
+            } else {
+                let mut pending = Exchange::new(Message {
+                    headers: Default::default(),
+                    body: Body::Empty,
+                });
+                pending.set_property(CAMEL_AGGREGATOR_PENDING, serde_json::json!(true));
+                Ok(pending)
             }
         })
     }
+}
+
+fn extract_correlation_key(
+    exchange: &Exchange,
+    strategy: &CorrelationStrategy,
+    registry: &SharedLanguageRegistry,
+) -> Result<serde_json::Value, CamelError> {
+    match strategy {
+        CorrelationStrategy::HeaderName(h) => exchange.input.headers.get(h).cloned().ok_or_else(|| {
+            CamelError::ProcessorError(format!("Aggregator: missing correlation key header '{}'", h))
+        }),
+        CorrelationStrategy::Expression { expr, language } => {
+            let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+            let lang = reg.get(language).ok_or_else(|| {
+                CamelError::ProcessorError(format!(
+                    "Aggregator: language '{}' not found in registry",
+                    language
+                ))
+            })?;
+            let expression = lang
+                .create_expression(expr)
+                .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+            let value = expression
+                .evaluate(exchange)
+                .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+            if value.is_null() {
+                return Err(CamelError::ProcessorError(format!(
+                    "Aggregator: correlation expression '{}' evaluated to null",
+                    expr
+                )));
+            }
+            Ok(value)
+        }
+        CorrelationStrategy::Fn(f) => {
+            f(exchange).map(serde_json::Value::String).ok_or_else(|| {
+                CamelError::ProcessorError("Aggregator: correlation function returned None".to_string())
+            })
+        }
+    }
+}
+
+fn check_sync_completion(mode: &CompletionMode, exchanges: &[Exchange]) -> (bool, CompletionReason) {
+    match mode {
+        CompletionMode::Single(cond) => check_single(cond, exchanges),
+        CompletionMode::Any(conditions) => {
+            for cond in conditions {
+                if let CompletionCondition::Timeout(_) = cond {
+                    continue;
+                }
+                let (done, reason) = check_single(cond, exchanges);
+                if done {
+                    return (true, reason);
+                }
+            }
+            (false, CompletionReason::Size)
+        }
+    }
+}
+
+fn check_single(cond: &CompletionCondition, exchanges: &[Exchange]) -> (bool, CompletionReason) {
+    match cond {
+        CompletionCondition::Size(n) => (exchanges.len() >= *n, CompletionReason::Size),
+        CompletionCondition::Predicate(pred) => (pred(exchanges), CompletionReason::Predicate),
+        CompletionCondition::Timeout(_) => (false, CompletionReason::Timeout),
+    }
+}
+
+fn extract_timeout_duration(mode: &CompletionMode) -> Option<Duration> {
+    match mode {
+        CompletionMode::Single(CompletionCondition::Timeout(d)) => Some(*d),
+        CompletionMode::Any(conditions) => conditions.iter().find_map(|c| {
+            if let CompletionCondition::Timeout(d) = c {
+                Some(*d)
+            } else {
+                None
+            }
+        }),
+        _ => None,
+    }
+}
+
+fn cancel_timeout_task(key: &str, timeout_tasks: &Arc<Mutex<HashMap<String, CancellationToken>>>) {
+    let mut guard = timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(token) = guard.remove(key) {
+        token.cancel();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_timeout_task(
+    key: String,
+    timeout: Duration,
+    cancel: CancellationToken,
+    buckets: Arc<Mutex<HashMap<String, Bucket>>>,
+    timeout_tasks: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    late_tx: mpsc::Sender<Exchange>,
+    strategy: AggregationStrategy,
+    discard: bool,
+    _route_cancel: CancellationToken,
+) {
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep(timeout) => {
+                let should_proceed = {
+                    let mut tt_guard = timeout_tasks.lock().unwrap_or_else(|e| e.into_inner());
+                    if cancel_clone.is_cancelled() {
+                        false
+                    } else {
+                        tt_guard.remove(&key);
+                        true
+                    }
+                };
+                if !should_proceed {
+                    return;
+                }
+                let bucket_exchanges = {
+                    let mut guard = buckets.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.remove(&key).map(|b| b.exchanges)
+                };
+                if let Some(exchanges) = bucket_exchanges
+                    && !discard
+                {
+                    match aggregate(exchanges, &strategy) {
+                        Ok(mut result) => {
+                            result.set_property(
+                                CAMEL_AGGREGATED_COMPLETION_REASON,
+                                serde_json::json!(CompletionReason::Timeout.as_str()),
+                            );
+                            if late_tx.try_send(result).is_err() {
+                                tracing::warn!(
+                                    key = %key,
+                                    "aggregator timeout emit dropped: late channel full"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                key = %key,
+                                error = %e,
+                                "aggregation failed in timeout task"
+                            );
+                        }
+                    }
+                }
+            }
+            _ = cancel_clone.cancelled() => {}
+        }
+    });
 }
 
 fn aggregate(
@@ -202,12 +442,16 @@ fn aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
     use camel_api::{
         aggregator::{AggregationStrategy, AggregatorConfig},
         body::Body,
         exchange::Exchange,
         message::Message,
     };
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
     fn make_exchange(header: &str, value: &str, body: &str) -> Exchange {
@@ -226,9 +470,16 @@ mod tests {
             .build()
     }
 
+    fn new_test_svc(config: AggregatorConfig) -> AggregatorService {
+        let (tx, _rx) = mpsc::channel(256);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        AggregatorService::new(config, tx, registry, cancel)
+    }
+
     #[tokio::test]
     async fn test_pending_exchange_not_yet_complete() {
-        let mut svc = AggregatorService::new(config_size(3));
+        let mut svc = new_test_svc(config_size(3));
         let ex = make_exchange("orderId", "A", "first");
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
         assert!(matches!(result.input.body, Body::Empty));
@@ -240,7 +491,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_completes_on_size() {
-        let mut svc = AggregatorService::new(config_size(3));
+        let mut svc = new_test_svc(config_size(3));
         for _ in 0..2 {
             let ex = make_exchange("orderId", "A", "item");
             let r = svc.ready().await.unwrap().call(ex).await.unwrap();
@@ -257,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect_all_produces_json_array() {
-        let mut svc = AggregatorService::new(config_size(2));
+        let mut svc = new_test_svc(config_size(2));
         svc.ready()
             .await
             .unwrap()
@@ -283,7 +534,7 @@ mod tests {
     #[tokio::test]
     async fn test_two_keys_independent_buckets() {
         // completionSize=3 so we can test that A and B accumulate independently.
-        let mut svc = AggregatorService::new(config_size(3));
+        let mut svc = new_test_svc(config_size(3));
         svc.ready()
             .await
             .unwrap()
@@ -325,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bucket_resets_after_completion() {
-        let mut svc = AggregatorService::new(config_size(2));
+        let mut svc = new_test_svc(config_size(2));
         svc.ready()
             .await
             .unwrap()
@@ -351,7 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_completion_size_1_emits_immediately() {
-        let mut svc = AggregatorService::new(config_size(1));
+        let mut svc = new_test_svc(config_size(1));
         let ex = make_exchange("orderId", "A", "solo");
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
         assert!(result.property(CAMEL_AGGREGATOR_PENDING).is_none());
@@ -375,7 +626,7 @@ mod tests {
             .complete_when_size(2)
             .strategy(AggregationStrategy::Custom(f))
             .build();
-        let mut svc = AggregatorService::new(config);
+        let mut svc = new_test_svc(config);
         svc.ready()
             .await
             .unwrap()
@@ -401,7 +652,7 @@ mod tests {
                     .any(|e| e.input.body.as_text() == Some("DONE"))
             })
             .build();
-        let mut svc = AggregatorService::new(config);
+        let mut svc = new_test_svc(config);
         svc.ready()
             .await
             .unwrap()
@@ -426,7 +677,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_header_returns_error() {
-        let mut svc = AggregatorService::new(config_size(2));
+        let mut svc = new_test_svc(config_size(2));
         let msg = Message {
             headers: Default::default(),
             body: Body::Text("no key".into()),
@@ -442,7 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cloned_service_shares_state() {
-        let svc1 = AggregatorService::new(config_size(2));
+        let svc1 = new_test_svc(config_size(2));
         let mut svc2 = svc1.clone();
         // send first exchange via svc1
         svc1.clone()
@@ -465,7 +716,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_camel_aggregated_key_property_set() {
-        let mut svc = AggregatorService::new(config_size(1));
+        let mut svc = new_test_svc(config_size(1));
         let ex = make_exchange("orderId", "ORDER-42", "body");
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
         assert_eq!(
@@ -481,7 +732,7 @@ mod tests {
             .max_buckets(3)
             .build();
 
-        let mut svc = AggregatorService::new(config);
+        let mut svc = new_test_svc(config);
 
         // Create 3 different correlation keys (fills limit)
         for i in 0..3 {
@@ -509,7 +760,7 @@ mod tests {
             .max_buckets(2)
             .build();
 
-        let mut svc = AggregatorService::new(config);
+        let mut svc = new_test_svc(config);
 
         // Create 2 different correlation keys (fills limit)
         let ex1 = make_exchange("orderId", "key-A", "body1");
@@ -533,7 +784,7 @@ mod tests {
             .bucket_ttl(Duration::from_millis(50))
             .build();
 
-        let mut svc = AggregatorService::new(config);
+        let mut svc = new_test_svc(config);
 
         // Create a bucket
         let ex1 = make_exchange("orderId", "key-A", "body1");
@@ -551,6 +802,228 @@ mod tests {
         let ex3 = make_exchange("orderId", "key-A", "body3");
         let result = svc.ready().await.unwrap().call(ex3).await;
         assert!(result.is_ok(), "Should be able to recreate evicted bucket");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeout_completes_bucket() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_on_timeout(Duration::from_millis(100))
+            .build();
+        let mut svc = new_test_svc(config);
+        let ex = make_exchange("key", "A", "data");
+        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        assert!(result.property(CAMEL_AGGREGATOR_PENDING).is_some());
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            svc.buckets.lock().unwrap().len(),
+            0,
+            "bucket should be removed after timeout"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_timeout_resets_on_new_exchange() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_on_timeout(Duration::from_millis(150))
+            .build();
+        let mut svc = new_test_svc(config);
+
+        let ex1 = make_exchange("key", "A", "first");
+        let _ = svc.ready().await.unwrap().call(ex1).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let ex2 = make_exchange("key", "A", "second");
+        let _ = svc.ready().await.unwrap().call(ex2).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(
+            svc.buckets.lock().unwrap().len(),
+            1,
+            "bucket should still exist — timeout was reset"
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(
+            svc.buckets.lock().unwrap().len(),
+            0,
+            "bucket should be gone after timeout fires"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_composable_size_and_timeout() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_on_size_or_timeout(2, Duration::from_millis(200))
+            .build();
+        let mut svc = new_test_svc(config);
+
+        let ex1 = make_exchange("key", "A", "first");
+        let _ = svc.ready().await.unwrap().call(ex1).await.unwrap();
+        assert!(svc.buckets.lock().unwrap().contains_key("\"A\""));
+
+        let ex2 = make_exchange("key", "A", "second");
+        let result = svc.ready().await.unwrap().call(ex2).await.unwrap();
+        assert!(result.property(CAMEL_AGGREGATOR_PENDING).is_none());
+        assert_eq!(
+            result.property(CAMEL_AGGREGATED_COMPLETION_REASON),
+            Some(&serde_json::json!("size"))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_discard_on_timeout() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_on_timeout(Duration::from_millis(50))
+            .discard_on_timeout(true)
+            .build();
+        let (tx, mut rx) = mpsc::channel(256);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let mut svc = AggregatorService::new(config, tx, registry, cancel);
+
+        let ex = make_exchange("key", "A", "data");
+        let _ = svc.ready().await.unwrap().call(ex).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(rx.try_recv().is_err(), "no emit expected with discard_on_timeout");
+        assert_eq!(svc.buckets.lock().unwrap().len(), 0);
+        assert!(
+            svc.timeout_tasks.lock().unwrap().is_empty(),
+            "timeout task should be cleaned up"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_force_completion_on_stop() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(10)
+            .force_completion_on_stop(true)
+            .build();
+        let (tx, mut rx) = mpsc::channel(256);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let svc = AggregatorService::new(config, tx, registry, cancel);
+
+        let mut call_svc = svc.clone();
+        let ex = make_exchange("key", "A", "data");
+        let _ = call_svc.ready().await.unwrap().call(ex).await.unwrap();
+
+        svc.force_complete_all();
+
+        let result = rx.try_recv().expect("should emit on force-complete");
+        assert!(result.input.body.as_text().is_some() || matches!(result.input.body, Body::Json(_)));
+        assert_eq!(
+            result.property(CAMEL_AGGREGATED_COMPLETION_REASON),
+            Some(&serde_json::json!("stop"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_completion_reason_property_size() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(1)
+            .build();
+        let mut svc = new_test_svc(config);
+        let ex = make_exchange("key", "X", "body");
+        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        assert_eq!(
+            result.property(CAMEL_AGGREGATED_COMPLETION_REASON),
+            Some(&serde_json::json!("size"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_completion_reason_property_predicate() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_when(|_| true)
+            .build();
+        let mut svc = new_test_svc(config);
+        let ex = make_exchange("key", "X", "body");
+        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        assert_eq!(
+            result.property(CAMEL_AGGREGATED_COMPLETION_REASON),
+            Some(&serde_json::json!("predicate"))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_size_completes_before_timeout() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_on_size_or_timeout(2, Duration::from_millis(200))
+            .build();
+        let mut svc = new_test_svc(config);
+
+        let ex1 = make_exchange("key", "A", "first");
+        let _ = svc.ready().await.unwrap().call(ex1).await.unwrap();
+
+        let ex2 = make_exchange("key", "A", "second");
+        let result = svc.ready().await.unwrap().call(ex2).await.unwrap();
+
+        assert!(result.property(CAMEL_AGGREGATOR_PENDING).is_none());
+        assert_eq!(
+            result.property(CAMEL_AGGREGATED_COMPLETION_REASON),
+            Some(&serde_json::json!("size"))
+        );
+        assert_eq!(svc.buckets.lock().unwrap().len(), 0);
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(svc.buckets.lock().unwrap().len(), 0, "no re-fire after timeout");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_concurrent_timeout_fire_and_new_exchange() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_on_size_or_timeout(2, Duration::from_millis(100))
+            .build();
+        let (tx, mut rx) = mpsc::channel(256);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let mut svc = AggregatorService::new(config, tx, registry, cancel);
+
+        let ex = make_exchange("key", "A", "data");
+        let _ = svc.ready().await.unwrap().call(ex).await.unwrap();
+
+        // Advance time past timeout — timeout task fires and removes bucket
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // New exchange arrives after timeout — starts a fresh bucket
+        let ex2 = make_exchange("key", "A", "data2");
+        let result = svc.ready().await.unwrap().call(ex2).await.unwrap();
+        assert!(
+            result.property(CAMEL_AGGREGATOR_PENDING).is_some(),
+            "should be pending in new bucket"
+        );
+
+        // Drain late emits from timeout
+        let mut late_count = 0;
+        while rx.try_recv().is_ok() {
+            late_count += 1;
+        }
+        assert_eq!(late_count, 1, "exactly 1 late emit from the timed-out bucket");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_late_channel_full_drops_with_warning() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_on_timeout(Duration::from_millis(50))
+            .build();
+        let (tx, mut rx) = mpsc::channel(1);
+        rx.close();
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cancel = CancellationToken::new();
+        let mut svc = AggregatorService::new(config, tx, registry, cancel);
+
+        let ex = make_exchange("key", "A", "data");
+        let _ = svc.ready().await.unwrap().call(ex).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(svc.buckets.lock().unwrap().len(), 0, "bucket removed despite channel closed");
     }
 
     #[tokio::test]

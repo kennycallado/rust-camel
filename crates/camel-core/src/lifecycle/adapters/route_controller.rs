@@ -14,6 +14,7 @@ use tower::{Layer, Service, ServiceExt};
 use tracing::{error, info, warn};
 
 use camel_api::UnitOfWorkConfig;
+use camel_api::aggregator::AggregatorConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
@@ -26,6 +27,8 @@ use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::error_handler::ErrorHandlerLayer;
 use camel_processor::script_mutator::ScriptMutator;
+use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
+pub use camel_processor::aggregator::SharedLanguageRegistry;
 use camel_processor::{ChoiceService, WhenClause};
 
 use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
@@ -70,7 +73,6 @@ pub(crate) struct SyncBoxProcessor(pub(crate) BoxProcessor);
 unsafe impl Sync for SyncBoxProcessor {}
 
 type SharedPipeline = Arc<ArcSwap<SyncBoxProcessor>>;
-pub type SharedLanguageRegistry = Arc<std::sync::Mutex<HashMap<String, Arc<dyn Language>>>>;
 
 /// Internal trait extending [`RouteController`] with methods needed by [`CamelContext`]
 /// that are not part of the public lifecycle API.
@@ -133,6 +135,12 @@ pub trait RouteControllerInternal: RouteController + Send {
 }
 
 /// Internal state for a managed route.
+struct AggregateSplitInfo {
+    pre_pipeline: SharedPipeline,
+    agg_config: AggregatorConfig,
+    post_pipeline: SharedPipeline,
+}
+
 struct ManagedRoute {
     /// The route definition metadata (for introspection).
     definition: RouteDefinitionInfo,
@@ -157,6 +165,8 @@ struct ManagedRoute {
     channel_sender: Option<mpsc::Sender<ExchangeEnvelope>>,
     /// In-flight exchange counter. `None` when UoW is not configured for this route.
     in_flight: Option<Arc<std::sync::atomic::AtomicU64>>,
+    aggregate_split: Option<AggregateSplitInfo>,
+    agg_service: Option<Arc<std::sync::Mutex<AggregatorService>>>,
 }
 
 fn handle_is_running(handle: &Option<JoinHandle<()>>) -> bool {
@@ -173,6 +183,24 @@ fn inferred_lifecycle_label(managed: &ManagedRoute) -> &'static str {
         (true, false) => "Stopping",
         (false, false) => "Stopped",
     }
+}
+
+fn find_top_level_aggregate_with_timeout(steps: &[BuilderStep]) -> Option<(usize, AggregatorConfig)> {
+    for (i, step) in steps.iter().enumerate() {
+        if let BuilderStep::Aggregate { config } = step {
+            if has_timeout_condition(&config.completion) {
+                return Some((i, config.clone()));
+            }
+            break;
+        }
+    }
+    None
+}
+
+fn is_pending(ex: &Exchange) -> bool {
+    ex.property("CamelAggregatorPending")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 /// Wait for a pipeline service to be ready with circuit breaker backoff.
@@ -702,7 +730,11 @@ impl DefaultRouteController {
                     processors.push((BoxProcessor::new(splitter), None));
                 }
                 BuilderStep::Aggregate { config } => {
-                    let svc = camel_processor::AggregatorService::new(config);
+                    let (late_tx, _late_rx) = mpsc::channel(256);
+                    let registry: SharedLanguageRegistry =
+                        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+                    let cancel = CancellationToken::new();
+                    let svc = camel_processor::AggregatorService::new(config, late_tx, registry, cancel);
                     processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::Filter { predicate, steps } => {
@@ -951,34 +983,71 @@ impl DefaultRouteController {
 
         // Extract definition info for storage before steps are consumed
         let definition_info = definition.to_info();
-        let from_uri = definition.from_uri.to_string();
-        let concurrency = definition.concurrency;
+        let RouteDefinition {
+            from_uri,
+            steps,
+            error_handler,
+            circuit_breaker,
+            unit_of_work,
+            concurrency,
+            ..
+        } = definition;
 
         // Create ProducerContext from self_ref for step resolution
         let producer_ctx = self.build_producer_context()?;
 
-        // Resolve steps into processors (takes ownership of steps)
-        let processors_with_contracts =
-            self.resolve_steps(definition.steps, &producer_ctx, &self.registry)?;
+        // Take ownership of steps before resolve_steps consumes them
+        let mut aggregate_split: Option<AggregateSplitInfo> = None;
+        let processors_with_contracts = match find_top_level_aggregate_with_timeout(&steps) {
+            Some((idx, agg_config)) => {
+                let mut pre_steps = steps;
+                let mut rest = pre_steps.split_off(idx);
+                let _agg_step = rest.remove(0);
+                let post_steps = rest;
+
+                let pre_pairs = self.resolve_steps(pre_steps, &producer_ctx, &self.registry)?;
+                let pre_procs: Vec<BoxProcessor> = pre_pairs.into_iter().map(|(p, _)| p).collect();
+                let pre_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(compose_pipeline(
+                    pre_procs,
+                ))));
+
+                let post_pairs = self.resolve_steps(post_steps, &producer_ctx, &self.registry)?;
+                let post_procs: Vec<BoxProcessor> = post_pairs.into_iter().map(|(p, _)| p).collect();
+                let post_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
+                    compose_pipeline(post_procs),
+                )));
+
+                aggregate_split = Some(AggregateSplitInfo {
+                    pre_pipeline,
+                    agg_config,
+                    post_pipeline,
+                });
+
+                vec![]
+            }
+            None => self.resolve_steps(steps, &producer_ctx, &self.registry)?,
+        };
         let route_id_for_tracing = route_id.clone();
-        let mut pipeline = compose_traced_pipeline_with_contracts(
-            processors_with_contracts,
-            &route_id_for_tracing,
-            self.tracing_enabled,
-            self.tracer_detail_level.clone(),
-            self.tracer_metrics.clone(),
-        );
+        let mut pipeline = if processors_with_contracts.is_empty() {
+            BoxProcessor::new(IdentityProcessor)
+        } else {
+            compose_traced_pipeline_with_contracts(
+                processors_with_contracts,
+                &route_id_for_tracing,
+                self.tracing_enabled,
+                self.tracer_detail_level.clone(),
+                self.tracer_metrics.clone(),
+            )
+        };
 
         // Apply circuit breaker if configured
-        if let Some(cb_config) = definition.circuit_breaker {
+        if let Some(cb_config) = circuit_breaker {
             let cb_layer = CircuitBreakerLayer::new(cb_config);
             pipeline = BoxProcessor::new(cb_layer.layer(pipeline));
         }
 
         // Determine which error handler config to use (per-route takes precedence)
-        let eh_config = definition
-            .error_handler
-            .or_else(|| self.global_error_handler.clone());
+        let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
 
         if let Some(config) = eh_config {
             // Lock registry for error handler resolution
@@ -991,7 +1060,7 @@ impl DefaultRouteController {
         }
 
         // Apply UoW layer outermost (after error handler)
-        let uow_counter = if let Some(uow_config) = &definition.unit_of_work {
+        let uow_counter = if let Some(uow_config) = &unit_of_work {
             let registry = self
                 .registry
                 .lock()
@@ -1017,6 +1086,8 @@ impl DefaultRouteController {
                 pipeline_cancel_token: CancellationToken::new(),
                 channel_sender: None,
                 in_flight: uow_counter,
+                aggregate_split,
+                agg_service: None,
             },
         );
 
@@ -1168,6 +1239,13 @@ impl DefaultRouteController {
             .get(route_id)
             .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
 
+        if managed.aggregate_split.is_some() {
+            tracing::warn!(
+                route_id = %route_id,
+                "swap_pipeline: aggregate routes with timeout do not support hot-reload of pre/post segments"
+            );
+        }
+
         managed
             .pipeline
             .store(Arc::new(SyncBoxProcessor(new_pipeline)));
@@ -1211,6 +1289,21 @@ impl DefaultRouteController {
             .get_mut(route_id)
             .expect("invariant: route must exist after prior existence check");
         managed.consumer_cancel_token.cancel();
+
+        // Aggregator v2: force-complete pending buckets before cancelling pipeline
+        let managed = self
+            .routes
+            .get_mut(route_id)
+            .expect("invariant: route must exist after prior existence check");
+        if let Some(agg_svc) = &managed.agg_service {
+            let guard = agg_svc.lock().unwrap();
+            guard.force_complete_all();
+        }
+
+        let managed = self
+            .routes
+            .get_mut(route_id)
+            .expect("invariant: route must exist after prior existence check");
         managed.pipeline_cancel_token.cancel();
 
         // Take handles directly (no Arc<Mutex> wrapper needed)
@@ -1345,6 +1438,136 @@ impl RouteController for DefaultRouteController {
         // Clone sender for storage (to reuse on resume)
         let tx_for_storage = tx.clone();
         let consumer_ctx = ConsumerContext::new(tx, consumer_cancel.clone());
+
+        // --- Aggregator v2: check for aggregate route with timeout ---
+        let managed = self
+            .routes
+            .get_mut(route_id)
+            .expect("invariant: route must exist after prior existence check");
+
+        if let Some(split) = managed.aggregate_split.as_ref() {
+            let (late_tx, late_rx) = mpsc::channel::<Exchange>(256);
+
+            let route_cancel_clone = pipeline_cancel.clone();
+            let svc = AggregatorService::new(
+                split.agg_config.clone(),
+                late_tx,
+                Arc::clone(&self.languages),
+                route_cancel_clone,
+            );
+            let agg = Arc::new(std::sync::Mutex::new(svc));
+
+            managed.agg_service = Some(Arc::clone(&agg));
+
+            let late_rx = Arc::new(tokio::sync::Mutex::new(late_rx));
+            let pre_pipeline = Arc::clone(&split.pre_pipeline);
+            let post_pipeline = Arc::clone(&split.post_pipeline);
+
+            // Spawn consumer task (same as normal route)
+            let route_id_for_consumer = route_id.to_string();
+            let consumer_handle = tokio::spawn(async move {
+                if let Err(e) = consumer.start(consumer_ctx).await {
+                    error!(route_id = %route_id_for_consumer, "Consumer error: {e}");
+                    let error_msg = e.to_string();
+                    if let Some(tx) = crash_notifier {
+                        let _ = tx
+                            .send(CrashNotification {
+                                route_id: route_id_for_consumer.clone(),
+                                error: error_msg.clone(),
+                            })
+                            .await;
+                    }
+                    publish_runtime_failure(runtime_for_consumer, &route_id_for_consumer, &error_msg)
+                        .await;
+                }
+            });
+
+            // Spawn biased select forward loop
+            let pipeline_handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+
+                        late_ex = async {
+                            let mut rx = late_rx.lock().await;
+                            rx.recv().await
+                        } => {
+                            match late_ex {
+                                Some(ex) => {
+                                    let pipe = post_pipeline.load();
+                                    if let Err(e) = pipe.0.clone().oneshot(ex).await {
+                                        tracing::warn!(error = %e, "late exchange post-pipeline failed");
+                                    }
+                                }
+                                None => return,
+                            }
+                        }
+
+                        envelope_opt = rx.recv() => {
+                            match envelope_opt {
+                                Some(envelope) => {
+                                    let ExchangeEnvelope { exchange, reply_tx } = envelope;
+                                    let pre_pipe = pre_pipeline.load();
+                                    let ex = match pre_pipe.0.clone().oneshot(exchange).await {
+                                        Ok(ex) => ex,
+                                        Err(e) => {
+                                            if let Some(tx) = reply_tx { let _ = tx.send(Err(e)); }
+                                            continue;
+                                        }
+                                    };
+
+                                    let ex = {
+                                        let cloned_svc = agg.lock().unwrap().clone();
+                                        cloned_svc.oneshot(ex).await
+                                    };
+
+                                    match ex {
+                                        Ok(ex) => {
+                                            if !is_pending(&ex) {
+                                                let post_pipe = post_pipeline.load();
+                                                let out = post_pipe.0.clone().oneshot(ex).await;
+                                                if let Some(tx) = reply_tx { let _ = tx.send(out); }
+                                            } else if let Some(tx) = reply_tx {
+                                                let _ = tx.send(Ok(ex));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if let Some(tx) = reply_tx { let _ = tx.send(Err(e)); }
+                                        }
+                                    }
+                                }
+                                None => return,
+                            }
+                        }
+
+                        _ = pipeline_cancel.cancelled() => {
+                            {
+                                let guard = agg.lock().unwrap();
+                                guard.force_complete_all();
+                            }
+                            let mut rx_guard = late_rx.lock().await;
+                            while let Ok(late_ex) = rx_guard.try_recv() {
+                                let pipe = post_pipeline.load();
+                                let _ = pipe.0.clone().oneshot(late_ex).await;
+                            }
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let managed = self
+                .routes
+                .get_mut(route_id)
+                .expect("invariant: route must exist");
+            managed.consumer_handle = Some(consumer_handle);
+            managed.pipeline_handle = Some(pipeline_handle);
+            managed.channel_sender = Some(tx_for_storage);
+
+            info!(route_id = %route_id, "Route started (aggregate with timeout)");
+            return Ok(());
+        }
+        // --- End aggregator v2 branch ---
 
         // Start consumer in background task.
         let route_id_for_consumer = route_id.to_string();
@@ -1814,6 +2037,8 @@ mod tests {
             pipeline_cancel_token: CancellationToken::new(),
             channel_sender: None,
             in_flight: None,
+            aggregate_split: None,
+            agg_service: None,
         };
 
         assert_eq!(inferred_lifecycle_label(&managed), "Stopped");

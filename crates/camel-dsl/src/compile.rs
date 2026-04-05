@@ -5,22 +5,22 @@ use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::{
-    AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
-    split_body_lines,
+    split_body_json_array, split_body_lines, AggregationStrategy as SplitAggregation,
+    SplitterConfig,
 };
 use camel_api::{
-    CamelError, CanonicalRouteSpec, CircuitBreakerConfig, IdentityProcessor,
     canonical_contract_rejection_reason,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
         CanonicalWhenSpec,
     },
+    CamelError, CanonicalRouteSpec, CircuitBreakerConfig, IdentityProcessor,
 };
 use camel_component::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{
-    ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService, builtin_data_format,
+    builtin_data_format, ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService,
 };
 
 use crate::model::{
@@ -392,12 +392,6 @@ fn compile_split_step_to_canonical(def: SplitStepDef) -> Result<CanonicalStepSpe
 fn compile_aggregate_step_to_canonical(
     def: AggregateStepDef,
 ) -> Result<CanonicalStepSpec, CamelError> {
-    if def.completion_timeout_ms.is_some() {
-        return Err(CamelError::RouteError(
-            "aggregate.completion_timeout_ms is not yet implemented".to_string(),
-        ));
-    }
-
     if def.completion_predicate.is_some() {
         return Err(CamelError::RouteError(
             "aggregate.completion_predicate is not yet implemented".to_string(),
@@ -412,6 +406,10 @@ fn compile_aggregate_step_to_canonical(
         config: CanonicalAggregateSpec {
             header: def.header,
             completion_size: def.completion_size,
+            completion_timeout_ms: def.completion_timeout_ms,
+            correlation_key: def.correlation_key,
+            force_completion_on_stop: def.force_completion_on_stop,
+            discard_on_timeout: def.discard_on_timeout,
             strategy,
             max_buckets: def.max_buckets,
             bucket_ttl_ms: def.bucket_ttl_ms,
@@ -509,20 +507,29 @@ fn compile_split_step(def: SplitStepDef) -> Result<BuilderStep, CamelError> {
 fn compile_aggregate_step(def: AggregateStepDef) -> Result<BuilderStep, CamelError> {
     let completion_size = def.completion_size.unwrap_or(1);
 
-    if def.completion_timeout_ms.is_some() {
-        return Err(CamelError::RouteError(
-            "aggregate.completion_timeout_ms is not yet implemented".to_string(),
-        ));
-    }
-
     if def.completion_predicate.is_some() {
         return Err(CamelError::RouteError(
             "aggregate.completion_predicate is not yet implemented".to_string(),
         ));
     }
 
-    let mut builder =
-        AggregatorConfig::correlate_by(def.header).complete_when_size(completion_size);
+    // NOTE: def.correlation_key is intentionally not wired here — the builder path
+    // lacks correlate_by_expr(). Expression correlation is resolved at runtime by
+    // the processor via CanonicalAggregateSpec.correlation_key (canonical path).
+    let mut builder = AggregatorConfig::correlate_by(&def.header);
+
+    match (def.completion_timeout_ms, completion_size) {
+        (Some(timeout_ms), size) if timeout_ms > 0 && size > 1 => {
+            builder = builder.complete_on_size_or_timeout(size, Duration::from_millis(timeout_ms));
+        }
+        (Some(timeout_ms), _) if timeout_ms > 0 => {
+            builder = builder.complete_on_timeout(Duration::from_millis(timeout_ms));
+        }
+        (_, size) => {
+            builder = builder.complete_when_size(size);
+        }
+    }
+
     builder = match def.strategy {
         AggregateStrategyDef::CollectAll => builder.strategy(AggregatorStrategy::CollectAll),
     };
@@ -531,6 +538,12 @@ fn compile_aggregate_step(def: AggregateStepDef) -> Result<BuilderStep, CamelErr
     }
     if let Some(ttl_ms) = def.bucket_ttl_ms {
         builder = builder.bucket_ttl(Duration::from_millis(ttl_ms));
+    }
+    if let Some(force) = def.force_completion_on_stop {
+        builder = builder.force_completion_on_stop(force);
+    }
+    if let Some(discard) = def.discard_on_timeout {
+        builder = builder.discard_on_timeout(discard);
     }
 
     Ok(BuilderStep::Aggregate {

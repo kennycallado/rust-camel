@@ -97,7 +97,7 @@ routes:
 | `filter` | Filter messages | `- filter: { simple: "${header.type} == 'allowed'", steps: [...] }` |
 | `choice` | Content-based router | `- choice: { when: [...], otherwise: [...] }` |
 | `split` | Split message | `- split: { expression: "body_lines", steps: [...] }` |
-| `aggregate` | Aggregate messages | `- aggregate: { header: "id", completion_size: 5 }` |
+| `aggregate` | Aggregate messages with size/timeout completion | `- aggregate: { header: "id", completion_size: 5, completion_timeout_ms: 5000 }` |
 | `wire_tap` | Fire-and-forget tap | `- wire_tap: "direct:audit"` |
 | `multicast` | Fan-out to multiple | `- multicast: { steps: [...] }` |
 | `stop` | Stop pipeline | `- stop: true` |
@@ -150,6 +150,33 @@ let controller = DefaultRouteController::with_beans(bean_registry);
 ```
 
 See `examples/bean-demo` for a complete example.
+
+### Aggregate Step
+
+The `aggregate` step supports size-based, timeout-based, or combined completion:
+
+```yaml
+routes:
+  - id: "aggregate-demo"
+    from: "timer:orders?period=200"
+    steps:
+      - aggregate:
+          header: "orderId"
+          completion_size: 3
+          completion_timeout_ms: 5000
+          force_completion_on_stop: true
+          discard_on_timeout: false
+      - log: "Batch completed"
+      - to: "log:info"
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `header` | string | Correlation header name |
+| `completion_size` | integer | Complete when N exchanges aggregated |
+| `completion_timeout_ms` | integer | Inactivity timeout in ms (resets per exchange) |
+| `force_completion_on_stop` | boolean | Force-complete all buckets on route stop |
+| `discard_on_timeout` | boolean | Discard (instead of emit) incomplete exchanges on timeout |
 
 ## Environment Variable Interpolation
 

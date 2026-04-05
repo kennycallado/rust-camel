@@ -170,7 +170,7 @@ Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (cu
 
 | Pattern              | Builder Method           | Description                                                          |
 | -------------------- | ------------------------ | -------------------------------------------------------------------- |
-| Aggregator           | `.aggregate(config)`     | Correlate and aggregate multiple exchanges                           |
+| Aggregator           | `.aggregate(config)`     | Correlate and aggregate exchanges with size/timeout completion, expression correlation, force-complete-on-stop |
 | Content-Based Router | `.choice()` / `.when()`  | Route based on exchange content                                      |
 | Dynamic Router       | `.dynamic_router(expr)`  | Expression-based routing with slip pattern                           |
 | Routing Slip         | `.routing_slip(expr)`    | Route through a sequence of endpoints determined at runtime          |

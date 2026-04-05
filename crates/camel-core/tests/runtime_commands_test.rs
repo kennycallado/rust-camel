@@ -821,6 +821,10 @@ async fn register_route_accepts_advanced_canonical_steps() {
                 config: CanonicalAggregateSpec {
                     header: "orderId".to_string(),
                     completion_size: Some(2),
+                    completion_timeout_ms: None,
+                    correlation_key: None,
+                    force_completion_on_stop: None,
+                    discard_on_timeout: None,
                     strategy: CanonicalAggregateStrategySpec::CollectAll,
                     max_buckets: Some(100),
                     bucket_ttl_ms: Some(60_000),

@@ -1,4 +1,7 @@
-use camel_api::aggregator::{AggregationStrategy, AggregatorConfig, CompletionCondition};
+use camel_api::aggregator::{
+    AggregationStrategy, AggregatorConfig, CompletionCondition, CompletionMode,
+    CorrelationStrategy,
+};
 use camel_api::body::Body;
 use camel_api::body_converter::BodyType;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
@@ -755,15 +758,53 @@ fn canonicalize_split_aggregation(
     }
 }
 
-fn canonicalize_aggregate(config: AggregatorConfig) -> Result<CanonicalAggregateSpec, CamelError> {
-    let completion_size = match config.completion {
-        CompletionCondition::Size(size) => Some(size),
-        CompletionCondition::Predicate(_) => {
-            return Err(CamelError::RouteError(
+fn extract_completion_fields(mode: &CompletionMode) -> Result<(Option<usize>, Option<u64>), CamelError> {
+    match mode {
+        CompletionMode::Single(cond) => match cond {
+            CompletionCondition::Size(n) => Ok((Some(*n), None)),
+            CompletionCondition::Timeout(d) => Ok((None, Some(d.as_millis() as u64))),
+            CompletionCondition::Predicate(_) => Err(CamelError::RouteError(
                 "canonical v1 does not support aggregate predicate completion".to_string(),
+            )),
+        },
+        CompletionMode::Any(conds) => {
+            let mut size = None;
+            let mut timeout_ms = None;
+            for cond in conds {
+                match cond {
+                    CompletionCondition::Size(n) => size = Some(*n),
+                    CompletionCondition::Timeout(d) => timeout_ms = Some(d.as_millis() as u64),
+                    CompletionCondition::Predicate(_) => {
+                        return Err(CamelError::RouteError(
+                            "canonical v1 does not support aggregate predicate completion".to_string(),
+                        ));
+                    }
+                }
+            }
+            Ok((size, timeout_ms))
+        }
+    }
+}
+
+fn canonicalize_aggregate(config: AggregatorConfig) -> Result<CanonicalAggregateSpec, CamelError> {
+    let (completion_size, completion_timeout_ms) = extract_completion_fields(&config.completion)?;
+
+    let header = match &config.correlation {
+        CorrelationStrategy::HeaderName(h) => h.clone(),
+        CorrelationStrategy::Expression { expr, .. } => expr.clone(),
+        CorrelationStrategy::Fn(_) => {
+            return Err(CamelError::RouteError(
+                "canonical v1 does not support Fn correlation strategy".to_string(),
             ));
         }
     };
+
+    let correlation_key = match &config.correlation {
+        CorrelationStrategy::HeaderName(_) => None,
+        CorrelationStrategy::Expression { expr, .. } => Some(expr.clone()),
+        CorrelationStrategy::Fn(_) => unreachable!(),
+    };
+
     let strategy = match config.strategy {
         AggregationStrategy::CollectAll => CanonicalAggregateStrategySpec::CollectAll,
         AggregationStrategy::Custom(_) => {
@@ -777,8 +818,20 @@ fn canonicalize_aggregate(config: AggregatorConfig) -> Result<CanonicalAggregate
         .map(|ttl| u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX));
 
     Ok(CanonicalAggregateSpec {
-        header: config.header_name,
+        header,
         completion_size,
+        completion_timeout_ms,
+        correlation_key,
+        force_completion_on_stop: if config.force_completion_on_stop {
+            Some(true)
+        } else {
+            None
+        },
+        discard_on_timeout: if config.discard_on_timeout {
+            Some(true)
+        } else {
+            None
+        },
         strategy,
         max_buckets: config.max_buckets,
         bucket_ttl_ms,

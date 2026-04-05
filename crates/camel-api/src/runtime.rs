@@ -142,6 +142,10 @@ pub enum CanonicalAggregateStrategySpec {
 pub struct CanonicalAggregateSpec {
     pub header: String,
     pub completion_size: Option<usize>,
+    pub completion_timeout_ms: Option<u64>,
+    pub correlation_key: Option<String>,
+    pub force_completion_on_stop: Option<bool>,
+    pub discard_on_timeout: Option<bool>,
     pub strategy: CanonicalAggregateStrategySpec,
     pub max_buckets: Option<usize>,
     pub bucket_ttl_ms: Option<u64>,

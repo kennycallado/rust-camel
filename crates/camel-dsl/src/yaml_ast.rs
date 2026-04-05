@@ -343,6 +343,8 @@ pub struct AggregateStep {
 pub struct AggregateData {
     pub header: String,
     #[serde(default)]
+    pub correlation_key: Option<String>,
+    #[serde(default)]
     pub completion_size: Option<usize>,
     #[serde(default)]
     pub completion_timeout_ms: Option<u64>,
@@ -354,6 +356,10 @@ pub struct AggregateData {
     pub max_buckets: Option<usize>,
     #[serde(default)]
     pub bucket_ttl_ms: Option<u64>,
+    #[serde(default)]
+    pub force_completion_on_stop: Option<bool>,
+    #[serde(default)]
+    pub discard_on_timeout: Option<bool>,
 }
 
 fn default_aggregate_strategy() -> String {
