@@ -32,7 +32,7 @@ let route = RouteBuilder::from("jms:queue:orders?brokerUrl=tcp://localhost:61616
 
 // Producer
 let route = RouteBuilder::from("timer:tick?period=1000")
-    .set_body(Value::String("hello".to_string()))
+    .set_body("hello".to_string())
     .to("jms:queue:events?brokerUrl=tcp://localhost:61616")
     .build()?;
 ```
