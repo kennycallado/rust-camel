@@ -36,6 +36,7 @@ members = [
     "crates/languages/camel-language-rhai",
     "crates/languages/camel-language-simple",
     "crates/languages/camel-language-jsonpath",
+    "crates/languages/camel-language-xpath",
     "crates/camel-bench",
     "examples/hello-world",
     "examples/kafka-example",
@@ -70,6 +71,7 @@ members = [
     "examples/language-rhai",
     "examples/language-js",
     "examples/language-jsonpath",
+    "examples/language-xpath",
     "examples/hot-reload",
     "examples/hot-reload-yaml",
     "examples/xml-body",
@@ -154,6 +156,7 @@ camel-language-js = { path = "crates/languages/camel-language-js", version = "=0
 camel-language-rhai = { path = "crates/languages/camel-language-rhai", version = "=0.5.6" }
 camel-language-simple = { path = "crates/languages/camel-language-simple", version = "=0.5.6" }
 camel-language-jsonpath = { path = "crates/languages/camel-language-jsonpath", version = "=0.5.6" }
+camel-language-xpath = { path = "crates/languages/camel-language-xpath", version = "=0.5.6" }
 camel-config = { path = "crates/camel-config", version = "=0.5.6" }
 
 tokio = { version = "1", features = ["full"] }

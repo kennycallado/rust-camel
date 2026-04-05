@@ -144,6 +144,7 @@ cargo run -p hello-world
 | `camel-language-js`     | JavaScript scripting language for expressions and side effects                                                                            |
 | `camel-language-rhai`   | Rhai scripting language for full expression power                                                                                         |
 | `camel-language-jsonpath` | RFC 9535 JSONPath expressions: `$.items[*].price`. Requires `lang-jsonpath` feature.                                                    |
+| `camel-language-xpath`    | XPath 1.0 language for XML body queries: `/books/book[1]/title`. Requires `lang-xpath` feature.                    |
 | `camel-prometheus`      | Prometheus metrics exporter with /metrics endpoint                                                                                       |
 | `camel-otel`            | OpenTelemetry tracing and metrics exporter                                                                                               |
 

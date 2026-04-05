@@ -176,6 +176,13 @@ impl CamelContext {
                 Arc::new(camel_language_jsonpath::JsonPathLanguage),
             );
         }
+        #[cfg(feature = "lang-xpath")]
+        {
+            languages.insert(
+                "xpath".to_string(),
+                Arc::new(camel_language_xpath::XPathLanguage),
+            );
+        }
         Arc::new(std::sync::Mutex::new(languages))
     }
 

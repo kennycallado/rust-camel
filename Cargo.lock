@@ -779,6 +779,7 @@ dependencies = [
  "camel-language-js",
  "camel-language-jsonpath",
  "camel-language-rhai",
+ "camel-language-xpath",
  "chrono",
  "clap",
  "config",
@@ -1093,6 +1094,7 @@ dependencies = [
  "camel-language-jsonpath",
  "camel-language-rhai",
  "camel-language-simple",
+ "camel-language-xpath",
  "camel-processor",
  "camel-support",
  "camel-util",
@@ -1216,6 +1218,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-language-xpath"
+version = "0.5.5"
+dependencies = [
+ "camel-api",
+ "camel-language-api",
+ "serde_json",
+ "sxd-document",
+ "sxd-xpath",
+]
+
+[[package]]
 name = "camel-otel"
 version = "0.5.6"
 dependencies = [
@@ -1308,6 +1321,7 @@ dependencies = [
  "camel-language-api",
  "camel-language-jsonpath",
  "camel-language-rhai",
+ "camel-language-xpath",
  "camel-processor",
  "redis",
  "reqwest",
@@ -3359,6 +3373,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "language-xpath"
+version = "0.5.5"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-language-api",
+ "camel-language-xpath",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lazy-route"
 version = "0.1.0"
 dependencies = [
@@ -4043,6 +4072,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "peresil"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f658886ed52e196e850cfbbfddab9eaa7f6d90dd0929e264c31e5cec07e09e57"
+
+[[package]]
 name = "pest"
 version = "2.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4497,6 +4532,12 @@ name = "protoc-bin-vendored-win32"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
+
+[[package]]
+name = "quick-error"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
 name = "quick-xml"
@@ -5779,6 +5820,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "sxd-document"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94d82f37be9faf1b10a82c4bd492b74f698e40082f0f40de38ab275f31d42078"
+dependencies = [
+ "peresil",
+ "typed-arena",
+]
+
+[[package]]
+name = "sxd-xpath"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36e39da5d30887b5690e29de4c5ebb8ddff64ebd9933f98a01daaa4fd11b36ea"
+dependencies = [
+ "peresil",
+ "quick-error",
+ "sxd-document",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6513,6 +6575,12 @@ dependencies = [
  "thiserror 2.0.18",
  "utf-8",
 ]
+
+[[package]]
+name = "typed-arena"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9b2228007eba4120145f785df0f6c92ea538f5a3635a612ecf4e334c8c1446d"
 
 [[package]]
 name = "typenum"

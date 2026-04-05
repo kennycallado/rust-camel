@@ -1,0 +1,19 @@
+[package]
+name = "camel-language-xpath"
+description = "XPath Language for rust-camel (XPath 1.0 via sxd-xpath)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-language-xpath"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-language-api.workspace = true
+sxd-document = "0.3"
+sxd-xpath = "0.4"
+serde_json.workspace = true

@@ -23,6 +23,7 @@ camel-language-simple.workspace = true
 camel-language-js = { workspace = true, optional = true }
 camel-language-rhai = { workspace = true, optional = true }
 camel-language-jsonpath = { workspace = true, optional = true }
+camel-language-xpath = { workspace = true, optional = true }
 camel-bean.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
@@ -44,6 +45,7 @@ default = []
 lang-js = ["camel-language-js"]
 lang-rhai = ["camel-language-rhai"]
 lang-jsonpath = ["camel-language-jsonpath"]
+lang-xpath = ["camel-language-xpath"]
 
 [dev-dependencies]
 futures = "0.3"

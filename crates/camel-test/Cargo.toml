@@ -41,6 +41,7 @@ camel-endpoint.workspace = true
 camel-language-api.workspace = true
 camel-language-rhai.workspace = true
 camel-language-jsonpath.workspace = true
+camel-language-xpath.workspace = true
 camel-dsl.workspace = true
 serde_json.workspace = true
 tempfile = "3"

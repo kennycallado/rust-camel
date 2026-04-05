@@ -206,6 +206,7 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     expr.simple,
                     expr.rhai,
                     expr.jsonpath,
+                    expr.xpath,
                     "log.message",
                 )?,
             };
@@ -219,6 +220,7 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 set_header.simple,
                 set_header.rhai,
                 set_header.jsonpath,
+                set_header.xpath,
                 "set_header",
             )?;
             Ok(DeclarativeStep::SetHeader(SetHeaderStepDef {
@@ -236,9 +238,10 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     simple,
                     rhai,
                     jsonpath,
-                }) => {
-                    parse_value_source(value, language, source, simple, rhai, jsonpath, "set_body")?
-                }
+                    xpath,
+                }) => parse_value_source(
+                    value, language, source, simple, rhai, jsonpath, xpath, "set_body",
+                )?,
             };
             Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
         }
@@ -252,6 +255,7 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     simple,
                     rhai,
                     jsonpath,
+                    xpath,
                 }) => parse_value_source(
                     value,
                     language,
@@ -259,6 +263,7 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     simple,
                     rhai,
                     jsonpath,
+                    xpath,
                     "transform",
                 )?,
             };
@@ -327,6 +332,7 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     simple,
                     rhai,
                     jsonpath,
+                    xpath,
                 })) => {
                     let expr = parse_language_expression(
                         language,
@@ -334,6 +340,7 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                         simple,
                         rhai,
                         jsonpath,
+                        xpath,
                         "split.expression",
                     )?;
                     SplitExpressionDef::Language(expr)
@@ -468,10 +475,13 @@ fn parse_predicate_block(
     if let Some(source) = block.jsonpath.as_ref() {
         selected.push(("jsonpath".to_string(), source.clone()));
     }
+    if let Some(source) = block.xpath.as_ref() {
+        selected.push(("xpath".to_string(), source.clone()));
+    }
 
     if selected.len() != 1 {
         return Err(CamelError::RouteError(format!(
-            "{context} must define exactly one predicate source: `language+source`, `simple`, `rhai`, or `jsonpath`"
+            "{context} must define exactly one predicate source: `language+source`, `simple`, `rhai`, `jsonpath`, or `xpath`"
         )));
     }
 
@@ -486,6 +496,7 @@ fn parse_value_source(
     simple: Option<String>,
     rhai: Option<String>,
     jsonpath: Option<String>,
+    xpath: Option<String>,
     context: &str,
 ) -> Result<ValueSourceDef, CamelError> {
     let mut count = 0;
@@ -510,10 +521,13 @@ fn parse_value_source(
     if jsonpath.is_some() {
         count += 1;
     }
+    if xpath.is_some() {
+        count += 1;
+    }
 
     if count != 1 {
         return Err(CamelError::RouteError(format!(
-            "{context} must define exactly one value source: `value`, `language+source`, `simple`, `rhai`, or `jsonpath`"
+            "{context} must define exactly one value source: `value`, `language+source`, `simple`, `rhai`, `jsonpath`, or `xpath`"
         )));
     }
 
@@ -544,6 +558,12 @@ fn parse_value_source(
             source,
         }));
     }
+    if let Some(source) = xpath {
+        return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
+            language: "xpath".to_string(),
+            source,
+        }));
+    }
 
     Err(CamelError::RouteError(format!(
         "{context}: missing value source"
@@ -556,6 +576,7 @@ fn parse_language_expression(
     simple: Option<String>,
     rhai: Option<String>,
     jsonpath: Option<String>,
+    xpath: Option<String>,
     context: &str,
 ) -> Result<LanguageExpressionDef, CamelError> {
     let mut count = 0;
@@ -577,10 +598,13 @@ fn parse_language_expression(
     if jsonpath.is_some() {
         count += 1;
     }
+    if xpath.is_some() {
+        count += 1;
+    }
 
     if count != 1 {
         return Err(CamelError::RouteError(format!(
-            "{context} must define exactly one language source: `language+source`, `simple`, `rhai`, or `jsonpath`"
+            "{context} must define exactly one language source: `language+source`, `simple`, `rhai`, `jsonpath`, or `xpath`"
         )));
     }
 
@@ -602,6 +626,12 @@ fn parse_language_expression(
     if let Some(source) = jsonpath {
         return Ok(LanguageExpressionDef {
             language: "jsonpath".to_string(),
+            source,
+        });
+    }
+    if let Some(source) = xpath {
+        return Ok(LanguageExpressionDef {
+            language: "xpath".to_string(),
             source,
         });
     }
@@ -1143,6 +1173,134 @@ routes:
           simple: "${body} == 'test'"
           steps:
             - to: "log:info"
+"#;
+        let result = parse_yaml(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_filter_xpath() {
+        let yaml = r#"
+routes:
+  - id: "xpath-filter"
+    from: "direct:start"
+    steps:
+      - filter:
+          xpath: "/orders/order[@status='pending']"
+          steps:
+            - to: "log:filtered"
+"#;
+        let routes = parse_yaml(yaml).expect("parse failed");
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_set_header_xpath() {
+        let yaml = r#"
+routes:
+  - id: "xpath-header"
+    from: "direct:start"
+    steps:
+      - set_header:
+          key: "title"
+          xpath: "/books/book[1]/title"
+      - to: "log:out"
+"#;
+        let routes = parse_yaml(yaml).expect("parse failed");
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_set_body_xpath() {
+        let yaml = r#"
+routes:
+  - id: "xpath-body"
+    from: "direct:start"
+    steps:
+      - set_body:
+          xpath: "//item[name='widget']/price"
+      - to: "log:out"
+"#;
+        let routes = parse_yaml(yaml).expect("parse failed");
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_log_xpath() {
+        let yaml = r#"
+routes:
+  - id: "xpath-log"
+    from: "direct:start"
+    steps:
+      - log:
+          message:
+            xpath: "/root/message"
+"#;
+        let routes = parse_yaml(yaml).expect("parse failed");
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_split_xpath() {
+        let yaml = r#"
+routes:
+  - id: "xpath-split"
+    from: "direct:start"
+    steps:
+      - split:
+          expression:
+            xpath: "/catalog/book"
+"#;
+        let routes = parse_yaml(yaml).expect("parse failed");
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_choice_xpath() {
+        let yaml = r#"
+routes:
+  - id: "xpath-choice"
+    from: "direct:start"
+    steps:
+      - choice:
+          when:
+            - xpath: "count(/errors/error) > 0"
+              steps:
+                - to: "log:error"
+"#;
+        let routes = parse_yaml(yaml).expect("parse failed");
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_filter_xpath_and_simple_fails() {
+        let yaml = r#"
+routes:
+  - id: "xpath-and-simple"
+    from: "direct:start"
+    steps:
+      - filter:
+          xpath: "/root/item"
+          simple: "${header.type}"
+          steps:
+            - to: "log:out"
+"#;
+        let result = parse_yaml(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_filter_xpath_and_jsonpath_fails() {
+        let yaml = r#"
+routes:
+  - id: "xpath-and-jsonpath"
+    from: "direct:start"
+    steps:
+      - filter:
+          xpath: "/root/item"
+          jsonpath: "$.item"
+          steps:
+            - to: "log:out"
 "#;
         let result = parse_yaml(yaml);
         assert!(result.is_err());

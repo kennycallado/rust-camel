@@ -87,11 +87,14 @@ publish_crate "camel-language-api" "crates/languages/camel-language-api"
 publish_crate "camel-language-simple" "crates/languages/camel-language-simple"
 publish_crate "camel-language-rhai" "crates/languages/camel-language-rhai"
 
+
+
 publish_crate "camel-component" "crates/camel-component"
 publish_crate "camel-processor" "crates/camel-processor"
 
 publish_crate "camel-language-js" "crates/languages/camel-language-js"
 publish_crate "camel-language-jsonpath" "crates/languages/camel-language-jsonpath"
+publish_crate "camel-language-xpath" "crates/languages/camel-language-xpath"
 
 # Container component (depends on camel-api, camel-component, camel-endpoint)
 publish_crate "camel-component-container" "crates/components/camel-container"
