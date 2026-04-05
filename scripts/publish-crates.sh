@@ -109,11 +109,8 @@ publish_crate "camel-component-timer" "crates/components/camel-timer"
 publish_crate "camel-component-log" "crates/components/camel-log"
 publish_crate "camel-component-mock" "crates/components/camel-mock"
 
-# Core engine — published with --no-verify because its dev-dependencies (camel-dsl)
-# form a circular order: camel-dsl depends on camel-core, so camel-dsl can't be
-# published before camel-core. The crate itself is valid; verification is skipped
-# only to break this dev-dep ordering cycle.
-publish_crate "camel-core" "crates/camel-core" "--no-verify"
+# Core engine
+publish_crate "camel-core" "crates/camel-core"
 
 # Additional component crates (needed for tests / camel-builder)
 publish_crate "camel-component-direct" "crates/components/camel-direct"

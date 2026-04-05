@@ -1087,7 +1087,6 @@ dependencies = [
  "camel-component-log",
  "camel-component-mock",
  "camel-component-timer",
- "camel-dsl",
  "camel-endpoint",
  "camel-language-api",
  "camel-language-js",
@@ -1219,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-xpath"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "camel-api",
  "camel-language-api",
@@ -1301,6 +1300,7 @@ name = "camel-test"
 version = "0.5.6"
 dependencies = [
  "camel-api",
+ "camel-bean",
  "camel-builder",
  "camel-component",
  "camel-component-controlbus",
@@ -1325,12 +1325,14 @@ dependencies = [
  "camel-processor",
  "redis",
  "reqwest",
+ "serde",
  "serde_json",
  "sqlx",
  "tempfile",
  "testcontainers",
  "testcontainers-modules",
  "tokio",
+ "tokio-util",
  "tower 0.5.3",
  "tracing-subscriber",
  "wiremock",
@@ -3374,7 +3376,7 @@ dependencies = [
 
 [[package]]
 name = "language-xpath"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "camel-api",
  "camel-builder",

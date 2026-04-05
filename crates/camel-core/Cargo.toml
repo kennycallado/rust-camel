@@ -53,8 +53,6 @@ tempfile = "3"
 camel-component-timer.workspace = true
 camel-component-log.workspace = true
 camel-component-mock.workspace = true
-camel-dsl.workspace = true
-camel-bean.workspace = true
 criterion.workspace = true
 
 [[bench]]
