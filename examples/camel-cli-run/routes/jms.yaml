@@ -1,4 +1,14 @@
 routes:
+  # JMS broker aliases — equivalent URI forms:
+  #   jms:queue:orders          (generic, broker_type from Camel.toml)
+  #   activemq:queue:orders     (hard-sets broker_type=activemq)
+  #   artemis:queue:orders      (hard-sets broker_type=artemis)
+  #   activemq:orders           (shorthand — defaults destination type to queue)
+  #
+  # With per-endpoint broker URL override (overrides Camel.toml broker_url):
+  #   activemq:queue:orders?brokerUrl=tcp://192.168.1.1:61616
+  #   jms:queue:orders?username=admin&password=secret
+  #
   # Step 1: Check if artemis-demo already exists, then launch or reuse it.
   # Fires once after a 1s delay so the rest of the routes are registered first.
   - id: "artemis-launcher"
