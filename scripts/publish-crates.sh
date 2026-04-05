@@ -21,6 +21,7 @@ WORKSPACE_VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
 publish_crate() {
 	local crate=$1
 	local path=$2
+	local extra_flags="${3:-}"
 	echo ""
 	echo "📦 Publishing $crate..."
 	cd "$path"
@@ -56,7 +57,7 @@ publish_crate() {
 
 	# Capture output; treat "already exists" as success (idempotent)
 	local publish_output
-	publish_output=$(cargo publish $DRY_RUN --allow-dirty 2>&1) || {
+	publish_output=$(cargo publish $DRY_RUN --allow-dirty $extra_flags 2>&1) || {
 		if echo "$publish_output" | grep -q "already exists"; then
 			echo "⚠️  $crate@$current_version already exists (race), skipping..."
 			cd "$WORKSPACE_ROOT" >/dev/null
@@ -108,8 +109,11 @@ publish_crate "camel-component-timer" "crates/components/camel-timer"
 publish_crate "camel-component-log" "crates/components/camel-log"
 publish_crate "camel-component-mock" "crates/components/camel-mock"
 
-# Core engine
-publish_crate "camel-core" "crates/camel-core"
+# Core engine — published with --no-verify because its dev-dependencies (camel-dsl)
+# form a circular order: camel-dsl depends on camel-core, so camel-dsl can't be
+# published before camel-core. The crate itself is valid; verification is skipped
+# only to break this dev-dep ordering cycle.
+publish_crate "camel-core" "crates/camel-core" "--no-verify"
 
 # Additional component crates (needed for tests / camel-builder)
 publish_crate "camel-component-direct" "crates/components/camel-direct"
