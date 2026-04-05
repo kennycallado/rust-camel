@@ -183,6 +183,26 @@ impl Default for JmsConfig {
     }
 }
 
+impl JmsConfig {
+    /// Merge URI overrides into this config. Override values win over self.
+    /// `broker_type` is NOT merged — it is always set by the scheme, not by URI overrides.
+    pub fn merge_overrides(&self, overrides: &JmsUriOverrides) -> Self {
+        Self {
+            broker_url: overrides
+                .broker_url
+                .clone()
+                .unwrap_or_else(|| self.broker_url.clone()),
+            broker_type: self.broker_type.clone(),
+            username: overrides.username.clone().or_else(|| self.username.clone()),
+            password: overrides.password.clone().or_else(|| self.password.clone()),
+            bridge_version: self.bridge_version.clone(),
+            bridge_cache_dir: self.bridge_cache_dir.clone(),
+            bridge_start_timeout_ms: self.bridge_start_timeout_ms,
+            broker_reconnect_interval_ms: self.broker_reconnect_interval_ms,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +383,38 @@ mod tests {
         let dbg = format!("{cfg:?}");
         assert!(dbg.contains("[REDACTED]"));
         assert!(!dbg.contains("secret"));
+    }
+
+    #[test]
+    fn merge_overrides_uri_wins_for_broker_url() {
+        let base = JmsConfig::default(); // broker_url = "tcp://localhost:61616"
+        let overrides = JmsUriOverrides {
+            broker_url: Some("tcp://override:9999".to_string()),
+            username: None,
+            password: None,
+        };
+        let merged = base.merge_overrides(&overrides);
+        assert_eq!(merged.broker_url, "tcp://override:9999");
+        assert_eq!(merged.broker_type, BrokerType::ActiveMq); // unchanged
+        assert!(merged.username.is_none()); // from base
+    }
+
+    #[test]
+    fn merge_overrides_base_used_when_no_override() {
+        let mut base = JmsConfig::default();
+        base.username = Some("base_user".to_string());
+        let overrides = JmsUriOverrides::default(); // all None
+        let merged = base.merge_overrides(&overrides);
+        assert_eq!(merged.broker_url, "tcp://localhost:61616");
+        assert_eq!(merged.username.as_deref(), Some("base_user"));
+    }
+
+    #[test]
+    fn merge_overrides_broker_type_never_overridden() {
+        let mut base = JmsConfig::default();
+        base.broker_type = BrokerType::Artemis;
+        let overrides = JmsUriOverrides::default();
+        let merged = base.merge_overrides(&overrides);
+        assert_eq!(merged.broker_type, BrokerType::Artemis);
     }
 }

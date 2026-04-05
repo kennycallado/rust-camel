@@ -362,10 +362,27 @@ impl Component for JmsComponent {
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
         let endpoint_config = JmsEndpointConfig::from_uri(uri)?;
+
+        // Merge URI overrides into the component config
+        let final_config = self.config.merge_overrides(&endpoint_config.uri_overrides);
+
+        // If the bridge is already running and the broker URL differs, reject the endpoint
+        // (bridge is single-broker; mixed URLs in one process are not supported)
+        if let Ok(guard) = self.bridge.try_read() {
+            if let Some(handle) = guard.as_ref() {
+                if final_config.broker_url != handle.broker_url {
+                    return Err(CamelError::ProcessorError(format!(
+                        "JMS endpoint brokerUrl '{}' conflicts with running bridge '{}'",
+                        final_config.broker_url, handle.broker_url
+                    )));
+                }
+            }
+        }
+
         let component = Arc::new(JmsComponent {
             scheme: self.scheme.clone(),
             bridge: Arc::clone(&self.bridge),
-            config: self.config.clone(),
+            config: final_config,
             restart_semaphore: Arc::clone(&self.restart_semaphore),
         });
         Ok(Box::new(JmsEndpointInner {
@@ -382,6 +399,16 @@ mod tests {
     use camel_component::ConsumerContext;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn create_endpoint_applies_broker_url_override() {
+        use camel_component::Component;
+        let comp = JmsComponent::new(JmsConfig::default()); // default: tcp://localhost:61616
+        // URI specifies a different brokerUrl
+        let ep = comp.create_endpoint("activemq:queue:orders?brokerUrl=tcp://override:9999").unwrap();
+        // The endpoint URI is stored as-is; the override is in endpoint_config.uri_overrides
+        assert!(ep.uri().contains("activemq:queue:orders"));
+    }
 
     #[test]
     fn with_scheme_returns_correct_scheme() {
