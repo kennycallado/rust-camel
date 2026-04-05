@@ -27,6 +27,8 @@ use crate::proto::{HealthRequest, bridge_service_client::BridgeServiceClient};
 pub struct BridgeHandle {
     pub process: BridgeProcess,
     pub channel: Channel,
+    /// The broker URL used to start this bridge process (for conflict detection).
+    pub broker_url: String,
 }
 
 /// Cloning a `JmsComponent` shares the same underlying bridge process and
@@ -35,6 +37,7 @@ pub struct BridgeHandle {
 /// resource exhaustion from spawning one native process per test.
 #[derive(Clone)]
 pub struct JmsComponent {
+    scheme: String,
     bridge: Arc<RwLock<Option<BridgeHandle>>>,
     config: JmsConfig,
     restart_semaphore: Arc<Semaphore>,
@@ -54,10 +57,25 @@ fn is_bridge_transport_error(err: &CamelError) -> bool {
 
 impl JmsComponent {
     pub fn new(config: JmsConfig) -> Self {
-        Self {
-            bridge: Arc::new(RwLock::new(None)),
+        Self::with_scheme(
+            "jms",
             config,
-            restart_semaphore: Arc::new(Semaphore::new(1)),
+            Arc::new(RwLock::new(None)),
+            Arc::new(Semaphore::new(1)),
+        )
+    }
+
+    pub fn with_scheme(
+        scheme: impl Into<String>,
+        config: JmsConfig,
+        bridge: Arc<RwLock<Option<BridgeHandle>>>,
+        restart_semaphore: Arc<Semaphore>,
+    ) -> Self {
+        Self {
+            scheme: scheme.into(),
+            config,
+            bridge,
+            restart_semaphore,
         }
     }
 
@@ -167,7 +185,11 @@ impl JmsComponent {
         .map_err(|e| CamelError::ProcessorError(format!("JMS bridge health check failed: {e}")))?;
 
         info!(port, "JMS bridge ready");
-        Ok(BridgeHandle { process, channel })
+        Ok(BridgeHandle {
+            process,
+            channel,
+            broker_url: self.config.broker_url.clone(),
+        })
     }
 
     async fn cached_channel_healthy(&self, channel: Channel) -> bool {
@@ -335,12 +357,13 @@ impl Consumer for LazyJmsConsumer {
 
 impl Component for JmsComponent {
     fn scheme(&self) -> &str {
-        "jms"
+        &self.scheme
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
         let endpoint_config = JmsEndpointConfig::from_uri(uri)?;
         let component = Arc::new(JmsComponent {
+            scheme: self.scheme.clone(),
             bridge: Arc::clone(&self.bridge),
             config: self.config.clone(),
             restart_semaphore: Arc::clone(&self.restart_semaphore),
@@ -361,6 +384,27 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[test]
+    fn with_scheme_returns_correct_scheme() {
+        use std::sync::Arc;
+        use tokio::sync::{RwLock, Semaphore};
+        let bridge = Arc::new(RwLock::new(None));
+        let semaphore = Arc::new(Semaphore::new(1));
+        let comp = JmsComponent::with_scheme(
+            "activemq",
+            JmsConfig::default(),
+            bridge,
+            semaphore,
+        );
+        assert_eq!(comp.scheme(), "activemq");
+    }
+
+    #[test]
+    fn new_constructor_scheme_is_jms() {
+        let comp = JmsComponent::new(JmsConfig::default());
+        assert_eq!(comp.scheme(), "jms");
+    }
+
+    #[test]
     fn component_scheme_is_jms() {
         let component = JmsComponent::new(JmsConfig::default());
         assert_eq!(component.scheme(), "jms");
@@ -373,7 +417,7 @@ mod tests {
             Ok(_) => panic!("endpoint creation should fail for wrong scheme"),
             Err(err) => err,
         };
-        assert!(err.to_string().contains("expected scheme 'jms'"));
+        assert!(err.to_string().contains("expected scheme 'jms', 'activemq', or 'artemis'"));
     }
 
     #[tokio::test]
