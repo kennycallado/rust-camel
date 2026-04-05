@@ -229,11 +229,45 @@ async fn run(
 
     #[cfg(feature = "jms")]
     {
+        use std::sync::Arc;
+        use tokio::sync::{RwLock, Semaphore};
+        use camel_component_jms::BrokerType;
+
         let jms_cfg = ctx
             .get_component_config::<camel_component_jms::JmsConfig>()
             .cloned()
             .unwrap_or_default();
-        ctx.register_component(camel_component_jms::JmsComponent::new(jms_cfg));
+
+        // Shared bridge — all three schemes use the same bridge process
+        let bridge = Arc::new(RwLock::new(None));
+        let semaphore = Arc::new(Semaphore::new(1));
+
+        // activemq: hard-sets broker_type to ActiveMq
+        let mut activemq_cfg = jms_cfg.clone();
+        activemq_cfg.broker_type = BrokerType::ActiveMq;
+
+        // artemis: hard-sets broker_type to Artemis
+        let mut artemis_cfg = jms_cfg.clone();
+        artemis_cfg.broker_type = BrokerType::Artemis;
+
+        ctx.register_component(camel_component_jms::JmsComponent::with_scheme(
+            "jms",
+            jms_cfg,
+            Arc::clone(&bridge),
+            Arc::clone(&semaphore),
+        ));
+        ctx.register_component(camel_component_jms::JmsComponent::with_scheme(
+            "activemq",
+            activemq_cfg,
+            Arc::clone(&bridge),
+            Arc::clone(&semaphore),
+        ));
+        ctx.register_component(camel_component_jms::JmsComponent::with_scheme(
+            "artemis",
+            artemis_cfg,
+            Arc::clone(&bridge),
+            Arc::clone(&semaphore),
+        ));
     }
 
     // 5. Discover and load initial routes
