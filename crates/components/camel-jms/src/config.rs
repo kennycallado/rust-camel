@@ -45,27 +45,63 @@ pub struct JmsEndpointConfig {
 
 impl JmsEndpointConfig {
     pub fn from_uri(uri: &str) -> Result<Self, camel_api::CamelError> {
-        let rest = uri.strip_prefix("jms:").ok_or_else(|| {
-            camel_api::CamelError::ProcessorError(format!("expected scheme 'jms', got: {uri}"))
-        })?;
-        let (dtype, name) = rest.split_once(':').ok_or_else(|| {
-            camel_api::CamelError::ProcessorError(
-                "JMS URI must be jms:queue:name or jms:topic:name".to_string(),
-            )
-        })?;
-        let destination_type = match dtype.to_lowercase().as_str() {
-            "queue" => DestinationType::Queue,
-            "topic" => DestinationType::Topic,
-            other => {
-                return Err(camel_api::CamelError::ProcessorError(format!(
-                    "JMS destination type must be 'queue' or 'topic', got: {other}"
-                )));
-            }
+        // 1. Strip known scheme prefix
+        let (scheme, rest) = if let Some(r) = uri.strip_prefix("jms:") {
+            ("jms", r)
+        } else if let Some(r) = uri.strip_prefix("activemq:") {
+            ("activemq", r)
+        } else if let Some(r) = uri.strip_prefix("artemis:") {
+            ("artemis", r)
+        } else {
+            return Err(camel_api::CamelError::ProcessorError(format!(
+                "expected scheme 'jms', 'activemq', or 'artemis', got: {uri}"
+            )));
         };
-        Ok(JmsEndpointConfig {
+
+        // 2. Split query string
+        let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+
+        // 3. Parse destination type and name
+        let (destination_type, destination_name) =
+            if let Some((dtype_str, name)) = path.split_once(':') {
+                // explicit type prefix: queue:name or topic:name
+                if name.is_empty() {
+                    return Err(camel_api::CamelError::ProcessorError(
+                        "destination name cannot be empty".to_string(),
+                    ));
+                }
+                let dtype = match dtype_str.to_lowercase().as_str() {
+                    "queue" => DestinationType::Queue,
+                    "topic" => DestinationType::Topic,
+                    other => {
+                        return Err(camel_api::CamelError::ProcessorError(format!(
+                            "JMS destination type must be 'queue' or 'topic', got: {other}"
+                        )))
+                    }
+                };
+                (dtype, name.to_string())
+            } else {
+                // no colon in path — shorthand form (only allowed for activemq: and artemis:)
+                if scheme == "jms" {
+                    return Err(camel_api::CamelError::ProcessorError(
+                        "JMS URI must be jms:queue:name or jms:topic:name".to_string(),
+                    ));
+                }
+                if path.is_empty() {
+                    return Err(camel_api::CamelError::ProcessorError(
+                        "destination name cannot be empty".to_string(),
+                    ));
+                }
+                (DestinationType::Queue, path.to_string())
+            };
+
+        // 4. Parse query params
+        let uri_overrides = parse_uri_overrides(query);
+
+        Ok(Self {
             destination_type,
-            destination_name: name.to_string(),
-            uri_overrides: JmsUriOverrides::default(),
+            destination_name,
+            uri_overrides,
         })
     }
 
@@ -76,6 +112,27 @@ impl JmsEndpointConfig {
         };
         format!("{prefix}:{}", self.destination_name)
     }
+}
+
+fn parse_uri_overrides(query: &str) -> JmsUriOverrides {
+    let mut overrides = JmsUriOverrides::default();
+    if query.is_empty() {
+        return overrides;
+    }
+    for pair in query.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            if value.is_empty() {
+                continue; // empty value = no override
+            }
+            match key {
+                "brokerUrl" => overrides.broker_url = Some(value.to_string()),
+                "username" => overrides.username = Some(value.to_string()),
+                "password" => overrides.password = Some(value.to_string()),
+                _ => {} // unknown params silently ignored
+            }
+        }
+    }
+    overrides
 }
 
 #[derive(Clone)]
@@ -162,6 +219,106 @@ mod tests {
     fn invalid_destination_type_returns_error() {
         let err = JmsEndpointConfig::from_uri("jms:inbox:orders").unwrap_err();
         assert!(err.to_string().contains("'queue' or 'topic'"));
+    }
+
+    #[test]
+    fn parse_activemq_queue_explicit() {
+        let cfg = JmsEndpointConfig::from_uri("activemq:queue:orders").unwrap();
+        assert_eq!(cfg.destination_type, DestinationType::Queue);
+        assert_eq!(cfg.destination_name, "orders");
+        assert!(cfg.uri_overrides.broker_url.is_none());
+    }
+
+    #[test]
+    fn parse_activemq_topic_explicit() {
+        let cfg = JmsEndpointConfig::from_uri("activemq:topic:events").unwrap();
+        assert_eq!(cfg.destination_type, DestinationType::Topic);
+        assert_eq!(cfg.destination_name, "events");
+    }
+
+    #[test]
+    fn parse_artemis_queue_explicit() {
+        let cfg = JmsEndpointConfig::from_uri("artemis:queue:orders").unwrap();
+        assert_eq!(cfg.destination_type, DestinationType::Queue);
+        assert_eq!(cfg.destination_name, "orders");
+    }
+
+    #[test]
+    fn parse_activemq_shorthand_defaults_to_queue() {
+        let cfg = JmsEndpointConfig::from_uri("activemq:orders").unwrap();
+        assert_eq!(cfg.destination_type, DestinationType::Queue);
+        assert_eq!(cfg.destination_name, "orders");
+    }
+
+    #[test]
+    fn parse_artemis_shorthand_defaults_to_queue() {
+        let cfg = JmsEndpointConfig::from_uri("artemis:my-queue").unwrap();
+        assert_eq!(cfg.destination_type, DestinationType::Queue);
+        assert_eq!(cfg.destination_name, "my-queue");
+    }
+
+    #[test]
+    fn parse_query_broker_url_override() {
+        let cfg = JmsEndpointConfig::from_uri("activemq:queue:orders?brokerUrl=tcp://host:61617")
+            .unwrap();
+        assert_eq!(cfg.destination_name, "orders");
+        assert_eq!(
+            cfg.uri_overrides.broker_url.as_deref(),
+            Some("tcp://host:61617")
+        );
+        assert!(cfg.uri_overrides.username.is_none());
+    }
+
+    #[test]
+    fn parse_query_all_overrides() {
+        let cfg = JmsEndpointConfig::from_uri(
+            "jms:queue:orders?brokerUrl=tcp://h:1&username=admin&password=secret",
+        )
+        .unwrap();
+        assert_eq!(cfg.uri_overrides.broker_url.as_deref(), Some("tcp://h:1"));
+        assert_eq!(cfg.uri_overrides.username.as_deref(), Some("admin"));
+        assert_eq!(cfg.uri_overrides.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn parse_query_unknown_params_ignored() {
+        let cfg = JmsEndpointConfig::from_uri(
+            "activemq:queue:orders?unknownParam=foo&brokerUrl=tcp://h:1",
+        )
+        .unwrap();
+        assert_eq!(cfg.uri_overrides.broker_url.as_deref(), Some("tcp://h:1"));
+    }
+
+    #[test]
+    fn parse_query_empty_value_treated_as_no_override() {
+        let cfg = JmsEndpointConfig::from_uri("activemq:queue:orders?brokerUrl=").unwrap();
+        assert!(cfg.uri_overrides.broker_url.is_none());
+    }
+
+    #[test]
+    fn parse_activemq_empty_destination_errors() {
+        assert!(JmsEndpointConfig::from_uri("activemq:queue:").is_err());
+        assert!(JmsEndpointConfig::from_uri("activemq:").is_err());
+    }
+
+    #[test]
+    fn parse_jms_shorthand_still_errors() {
+        // jms: without explicit queue:/topic: is unchanged — still an error
+        let err = JmsEndpointConfig::from_uri("jms:orders").unwrap_err();
+        assert!(
+            err.to_string().contains("jms:queue:name")
+                || err.to_string().contains("jms:topic:name")
+        );
+    }
+
+    #[test]
+    fn parse_wrong_scheme_new_message() {
+        let err = JmsEndpointConfig::from_uri("kafka:orders").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("activemq") && msg.contains("artemis") && msg.contains("jms"),
+            "error should mention all valid schemes, got: {msg}"
+        );
     }
 
     #[test]
