@@ -29,6 +29,8 @@ pub struct BridgeHandle {
     pub channel: Channel,
     /// The broker URL used to start this bridge process (for conflict detection).
     pub broker_url: String,
+    /// The broker type used to start this bridge process (for conflict detection).
+    pub broker_type: crate::BrokerType,
 }
 
 /// Cloning a `JmsComponent` shares the same underlying bridge process and
@@ -47,6 +49,22 @@ impl Default for JmsComponent {
     fn default() -> Self {
         Self::new(JmsConfig::default())
     }
+}
+
+/// Redact the `password` query parameter from a URI before storing or logging.
+/// e.g. `jms:queue:orders?username=admin&password=secret` → `jms:queue:orders?username=admin&password=***`
+fn redact_uri_password(uri: &str) -> String {
+    let Some((base, query)) = uri.split_once('?') else {
+        return uri.to_string();
+    };
+    let redacted: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some(("password", _)) => "password=***".to_string(),
+            _ => pair.to_string(),
+        })
+        .collect();
+    format!("{}?{}", base, redacted.join("&"))
 }
 
 /// Check if an error indicates a bridge transport failure that warrants a restart.
@@ -189,6 +207,7 @@ impl JmsComponent {
             process,
             channel,
             broker_url: self.config.broker_url.clone(),
+            broker_type: self.config.broker_type.clone(),
         })
     }
 
@@ -366,16 +385,23 @@ impl Component for JmsComponent {
         // Merge URI overrides into the component config
         let final_config = self.config.merge_overrides(&endpoint_config.uri_overrides);
 
-        // If the bridge is already running and the broker URL differs, reject the endpoint
-        // (bridge is single-broker; mixed URLs in one process are not supported)
+        // If the bridge is already running and the broker URL or type differs, reject the endpoint
+        // (bridge is single-broker/single-protocol; mixing is not supported)
         if let Ok(guard) = self.bridge.try_read()
             && let Some(handle) = guard.as_ref()
-            && final_config.broker_url != handle.broker_url
         {
-            return Err(CamelError::ProcessorError(format!(
-                "JMS endpoint brokerUrl '{}' conflicts with running bridge '{}'",
-                final_config.broker_url, handle.broker_url
-            )));
+            if final_config.broker_url != handle.broker_url {
+                return Err(CamelError::ProcessorError(format!(
+                    "JMS endpoint brokerUrl '{}' conflicts with running bridge '{}'",
+                    final_config.broker_url, handle.broker_url
+                )));
+            }
+            if final_config.broker_type != handle.broker_type {
+                return Err(CamelError::ProcessorError(format!(
+                    "JMS endpoint broker_type '{:?}' conflicts with running bridge '{:?}'",
+                    final_config.broker_type, handle.broker_type
+                )));
+            }
         }
 
         let component = Arc::new(JmsComponent {
@@ -386,7 +412,7 @@ impl Component for JmsComponent {
         });
         Ok(Box::new(JmsEndpointInner {
             component,
-            uri: uri.to_string(),
+            uri: redact_uri_password(uri),
             endpoint_config,
         }))
     }
@@ -409,6 +435,39 @@ mod tests {
             .unwrap();
         // The endpoint URI is stored as-is; the override is in endpoint_config.uri_overrides
         assert!(ep.uri().contains("activemq:queue:orders"));
+    }
+
+    #[test]
+    fn endpoint_uri_redacts_password() {
+        use camel_component::Component;
+        let comp = JmsComponent::new(JmsConfig::default());
+        let ep = comp
+            .create_endpoint("jms:queue:orders?username=admin&password=secret")
+            .unwrap();
+        let stored_uri = ep.uri();
+        assert!(stored_uri.contains("password=***"), "password must be redacted, got: {stored_uri}");
+        assert!(!stored_uri.contains("secret"), "raw password must not appear, got: {stored_uri}");
+        assert!(stored_uri.contains("username=admin"), "username must be preserved, got: {stored_uri}");
+    }
+
+    #[test]
+    fn redact_uri_password_no_query() {
+        assert_eq!(redact_uri_password("jms:queue:orders"), "jms:queue:orders");
+    }
+
+    #[test]
+    fn redact_uri_password_only_password() {
+        let result = redact_uri_password("jms:queue:orders?password=secret");
+        assert_eq!(result, "jms:queue:orders?password=***");
+    }
+
+    #[test]
+    fn redact_uri_password_mixed_params() {
+        let result = redact_uri_password("jms:queue:orders?brokerUrl=tcp://h:1&password=s&username=u");
+        assert!(result.contains("password=***"));
+        assert!(result.contains("brokerUrl=tcp://h:1"));
+        assert!(result.contains("username=u"));
+        assert!(!result.contains("password=s"));
     }
 
     #[test]
