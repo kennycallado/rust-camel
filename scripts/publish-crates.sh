@@ -103,13 +103,16 @@ publish_crate "camel-component-container" "crates/components/camel-container"
 publish_crate "camel-bean-macros" "crates/camel-bean-macros"
 publish_crate "camel-bean" "crates/camel-bean"
 
+# Component crates required by camel-core (must come before it)
+publish_crate "camel-component-timer" "crates/components/camel-timer"
+publish_crate "camel-component-log" "crates/components/camel-log"
+publish_crate "camel-component-mock" "crates/components/camel-mock"
+
 # Core engine
 publish_crate "camel-core" "crates/camel-core"
 
-# Component crates needed for tests (publish before camel-builder)
-publish_crate "camel-component-timer" "crates/components/camel-timer"
+# Additional component crates (needed for tests / camel-builder)
 publish_crate "camel-component-direct" "crates/components/camel-direct"
-publish_crate "camel-component-mock" "crates/components/camel-mock"
 
 # Remaining core crates
 publish_crate "camel-health" "crates/camel-health"
@@ -123,7 +126,6 @@ publish_crate "camel-otel" "crates/services/camel-otel"
 publish_crate "camel-prometheus" "crates/services/camel-prometheus"
 
 # Component crates (needed by camel-config which has optional deps on most of them)
-publish_crate "camel-component-log" "crates/components/camel-log"
 publish_crate "camel-component-file" "crates/components/camel-file"
 publish_crate "camel-component-http" "crates/components/camel-http"
 publish_crate "camel-component-redis" "crates/components/camel-redis"
