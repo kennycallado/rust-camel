@@ -256,9 +256,14 @@ fn extract_correlation_key(
     registry: &SharedLanguageRegistry,
 ) -> Result<serde_json::Value, CamelError> {
     match strategy {
-        CorrelationStrategy::HeaderName(h) => exchange.input.headers.get(h).cloned().ok_or_else(|| {
-            CamelError::ProcessorError(format!("Aggregator: missing correlation key header '{}'", h))
-        }),
+        CorrelationStrategy::HeaderName(h) => {
+            exchange.input.headers.get(h).cloned().ok_or_else(|| {
+                CamelError::ProcessorError(format!(
+                    "Aggregator: missing correlation key header '{}'",
+                    h
+                ))
+            })
+        }
         CorrelationStrategy::Expression { expr, language } => {
             let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
             let lang = reg.get(language).ok_or_else(|| {
@@ -281,15 +286,16 @@ fn extract_correlation_key(
             }
             Ok(value)
         }
-        CorrelationStrategy::Fn(f) => {
-            f(exchange).map(serde_json::Value::String).ok_or_else(|| {
-                CamelError::ProcessorError("Aggregator: correlation function returned None".to_string())
-            })
-        }
+        CorrelationStrategy::Fn(f) => f(exchange).map(serde_json::Value::String).ok_or_else(|| {
+            CamelError::ProcessorError("Aggregator: correlation function returned None".to_string())
+        }),
     }
 }
 
-fn check_sync_completion(mode: &CompletionMode, exchanges: &[Exchange]) -> (bool, CompletionReason) {
+fn check_sync_completion(
+    mode: &CompletionMode,
+    exchanges: &[Exchange],
+) -> (bool, CompletionReason) {
     match mode {
         CompletionMode::Single(cond) => check_single(cond, exchanges),
         CompletionMode::Any(conditions) => {
@@ -891,7 +897,10 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        assert!(rx.try_recv().is_err(), "no emit expected with discard_on_timeout");
+        assert!(
+            rx.try_recv().is_err(),
+            "no emit expected with discard_on_timeout"
+        );
         assert_eq!(svc.buckets.lock().unwrap().len(), 0);
         assert!(
             svc.timeout_tasks.lock().unwrap().is_empty(),
@@ -917,7 +926,9 @@ mod tests {
         svc.force_complete_all();
 
         let result = rx.try_recv().expect("should emit on force-complete");
-        assert!(result.input.body.as_text().is_some() || matches!(result.input.body, Body::Json(_)));
+        assert!(
+            result.input.body.as_text().is_some() || matches!(result.input.body, Body::Json(_))
+        );
         assert_eq!(
             result.property(CAMEL_AGGREGATED_COMPLETION_REASON),
             Some(&serde_json::json!("stop"))
@@ -973,7 +984,11 @@ mod tests {
         assert_eq!(svc.buckets.lock().unwrap().len(), 0);
 
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(svc.buckets.lock().unwrap().len(), 0, "no re-fire after timeout");
+        assert_eq!(
+            svc.buckets.lock().unwrap().len(),
+            0,
+            "no re-fire after timeout"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1005,7 +1020,10 @@ mod tests {
         while rx.try_recv().is_ok() {
             late_count += 1;
         }
-        assert_eq!(late_count, 1, "exactly 1 late emit from the timed-out bucket");
+        assert_eq!(
+            late_count, 1,
+            "exactly 1 late emit from the timed-out bucket"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1023,7 +1041,11 @@ mod tests {
         let _ = svc.ready().await.unwrap().call(ex).await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(svc.buckets.lock().unwrap().len(), 0, "bucket removed despite channel closed");
+        assert_eq!(
+            svc.buckets.lock().unwrap().len(),
+            0,
+            "bucket removed despite channel closed"
+        );
     }
 
     #[tokio::test]

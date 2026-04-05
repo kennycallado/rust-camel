@@ -45,7 +45,7 @@ impl Language for SimpleLanguage {
 #[cfg(test)]
 mod tests {
     use super::SimpleLanguage;
-    use camel_api::{exchange::Exchange, message::Message, Value};
+    use camel_api::{Value, exchange::Exchange, message::Message};
     use camel_language_api::Language;
 
     fn exchange_with_header(key: &str, val: &str) -> Exchange {
@@ -360,7 +360,7 @@ mod tests {
 
 #[cfg(test)]
 mod body_field_parser_tests {
-    use crate::parser::{parse, Expr, PathSegment};
+    use crate::parser::{Expr, PathSegment, parse};
 
     #[test]
     fn parse_body_field_simple_key() {
@@ -449,9 +449,9 @@ mod body_field_parser_tests {
 #[cfg(test)]
 mod body_field_eval_tests {
     use crate::SimpleLanguage;
+    use camel_api::Value;
     use camel_api::body::Body;
     use camel_api::exchange::Exchange;
-    use camel_api::Value;
     use camel_language_api::Language;
     use serde_json::json;
 

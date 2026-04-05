@@ -24,11 +24,11 @@ use camel_api::{
 use camel_component::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_endpoint::parse_uri;
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
+pub use camel_processor::aggregator::SharedLanguageRegistry;
+use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::error_handler::ErrorHandlerLayer;
 use camel_processor::script_mutator::ScriptMutator;
-use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
-pub use camel_processor::aggregator::SharedLanguageRegistry;
 use camel_processor::{ChoiceService, WhenClause};
 
 use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
@@ -185,7 +185,9 @@ fn inferred_lifecycle_label(managed: &ManagedRoute) -> &'static str {
     }
 }
 
-fn find_top_level_aggregate_with_timeout(steps: &[BuilderStep]) -> Option<(usize, AggregatorConfig)> {
+fn find_top_level_aggregate_with_timeout(
+    steps: &[BuilderStep],
+) -> Option<(usize, AggregatorConfig)> {
     for (i, step) in steps.iter().enumerate() {
         if let BuilderStep::Aggregate { config } = step {
             if has_timeout_condition(&config.completion) {
@@ -734,7 +736,8 @@ impl DefaultRouteController {
                     let registry: SharedLanguageRegistry =
                         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
                     let cancel = CancellationToken::new();
-                    let svc = camel_processor::AggregatorService::new(config, late_tx, registry, cancel);
+                    let svc =
+                        camel_processor::AggregatorService::new(config, late_tx, registry, cancel);
                     processors.push((BoxProcessor::new(svc), None));
                 }
                 BuilderStep::Filter { predicate, steps } => {
@@ -1007,12 +1010,13 @@ impl DefaultRouteController {
 
                 let pre_pairs = self.resolve_steps(pre_steps, &producer_ctx, &self.registry)?;
                 let pre_procs: Vec<BoxProcessor> = pre_pairs.into_iter().map(|(p, _)| p).collect();
-                let pre_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(compose_pipeline(
-                    pre_procs,
-                ))));
+                let pre_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
+                    compose_pipeline(pre_procs),
+                )));
 
                 let post_pairs = self.resolve_steps(post_steps, &producer_ctx, &self.registry)?;
-                let post_procs: Vec<BoxProcessor> = post_pairs.into_iter().map(|(p, _)| p).collect();
+                let post_procs: Vec<BoxProcessor> =
+                    post_pairs.into_iter().map(|(p, _)| p).collect();
                 let post_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
                     compose_pipeline(post_procs),
                 )));
@@ -1477,8 +1481,12 @@ impl RouteController for DefaultRouteController {
                             })
                             .await;
                     }
-                    publish_runtime_failure(runtime_for_consumer, &route_id_for_consumer, &error_msg)
-                        .await;
+                    publish_runtime_failure(
+                        runtime_for_consumer,
+                        &route_id_for_consumer,
+                        &error_msg,
+                    )
+                    .await;
                 }
             });
 

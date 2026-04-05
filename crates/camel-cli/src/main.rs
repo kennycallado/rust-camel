@@ -229,9 +229,9 @@ async fn run(
 
     #[cfg(feature = "jms")]
     {
+        use camel_component_jms::BrokerType;
         use std::sync::Arc;
         use tokio::sync::{RwLock, Semaphore};
-        use camel_component_jms::BrokerType;
 
         let jms_cfg = ctx
             .get_component_config::<camel_component_jms::JmsConfig>()

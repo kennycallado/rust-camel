@@ -445,9 +445,18 @@ mod tests {
             .create_endpoint("jms:queue:orders?username=admin&password=secret")
             .unwrap();
         let stored_uri = ep.uri();
-        assert!(stored_uri.contains("password=***"), "password must be redacted, got: {stored_uri}");
-        assert!(!stored_uri.contains("secret"), "raw password must not appear, got: {stored_uri}");
-        assert!(stored_uri.contains("username=admin"), "username must be preserved, got: {stored_uri}");
+        assert!(
+            stored_uri.contains("password=***"),
+            "password must be redacted, got: {stored_uri}"
+        );
+        assert!(
+            !stored_uri.contains("secret"),
+            "raw password must not appear, got: {stored_uri}"
+        );
+        assert!(
+            stored_uri.contains("username=admin"),
+            "username must be preserved, got: {stored_uri}"
+        );
     }
 
     #[test]
@@ -463,7 +472,8 @@ mod tests {
 
     #[test]
     fn redact_uri_password_mixed_params() {
-        let result = redact_uri_password("jms:queue:orders?brokerUrl=tcp://h:1&password=s&username=u");
+        let result =
+            redact_uri_password("jms:queue:orders?brokerUrl=tcp://h:1&password=s&username=u");
         assert!(result.contains("password=***"));
         assert!(result.contains("brokerUrl=tcp://h:1"));
         assert!(result.contains("username=u"));

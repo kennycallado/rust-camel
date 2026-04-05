@@ -100,7 +100,10 @@ impl BridgeProcess {
                         f.into()
                     }
                     Err(e) => {
-                        eprintln!("[camel-bridge] failed to create log file {}: {}", log_path, e);
+                        eprintln!(
+                            "[camel-bridge] failed to create log file {}: {}",
+                            log_path, e
+                        );
                         std::process::Stdio::inherit()
                     }
                 }

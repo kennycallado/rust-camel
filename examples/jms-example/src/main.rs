@@ -35,12 +35,12 @@ use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
 use std::sync::Arc;
-use tokio::sync::{RwLock, Semaphore};
 use testcontainers::{
     GenericImage,
     core::{ContainerPort, WaitFor},
     runners::AsyncRunner,
 };
+use tokio::sync::{RwLock, Semaphore};
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {

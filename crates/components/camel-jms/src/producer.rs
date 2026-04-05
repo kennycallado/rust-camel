@@ -147,7 +147,8 @@ mod tests {
         // Explicit Content-Type header should always take precedence
         let mut ex = Exchange::default();
         ex.input.body = Body::Text("hello".to_string());
-        ex.input.set_header("Content-Type", Value::String("text/xml".to_string()));
+        ex.input
+            .set_header("Content-Type", Value::String("text/xml".to_string()));
         assert_eq!(JmsProducer::content_type(&ex), "text/xml");
     }
 

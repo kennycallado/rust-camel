@@ -5,22 +5,22 @@ use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::{
-    split_body_json_array, split_body_lines, AggregationStrategy as SplitAggregation,
-    SplitterConfig,
+    AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
+    split_body_lines,
 };
 use camel_api::{
+    CamelError, CanonicalRouteSpec, CircuitBreakerConfig, IdentityProcessor,
     canonical_contract_rejection_reason,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
         CanonicalWhenSpec,
     },
-    CamelError, CanonicalRouteSpec, CircuitBreakerConfig, IdentityProcessor,
 };
 use camel_component::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{
-    builtin_data_format, ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService,
+    ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService, builtin_data_format,
 };
 
 use crate::model::{

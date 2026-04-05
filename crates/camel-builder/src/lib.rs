@@ -1,6 +1,5 @@
 use camel_api::aggregator::{
-    AggregationStrategy, AggregatorConfig, CompletionCondition, CompletionMode,
-    CorrelationStrategy,
+    AggregationStrategy, AggregatorConfig, CompletionCondition, CompletionMode, CorrelationStrategy,
 };
 use camel_api::body::Body;
 use camel_api::body_converter::BodyType;
@@ -758,7 +757,9 @@ fn canonicalize_split_aggregation(
     }
 }
 
-fn extract_completion_fields(mode: &CompletionMode) -> Result<(Option<usize>, Option<u64>), CamelError> {
+fn extract_completion_fields(
+    mode: &CompletionMode,
+) -> Result<(Option<usize>, Option<u64>), CamelError> {
     match mode {
         CompletionMode::Single(cond) => match cond {
             CompletionCondition::Size(n) => Ok((Some(*n), None)),
@@ -776,7 +777,8 @@ fn extract_completion_fields(mode: &CompletionMode) -> Result<(Option<usize>, Op
                     CompletionCondition::Timeout(d) => timeout_ms = Some(d.as_millis() as u64),
                     CompletionCondition::Predicate(_) => {
                         return Err(CamelError::RouteError(
-                            "canonical v1 does not support aggregate predicate completion".to_string(),
+                            "canonical v1 does not support aggregate predicate completion"
+                                .to_string(),
                         ));
                     }
                 }
