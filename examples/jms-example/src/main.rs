@@ -34,6 +34,8 @@ use camel_component_jms::{BrokerType, JmsComponent, JmsConfig};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
+use std::sync::Arc;
+use tokio::sync::{RwLock, Semaphore};
 use testcontainers::{
     GenericImage,
     core::{ContainerPort, WaitFor},
@@ -63,19 +65,42 @@ async fn main() -> Result<(), CamelError> {
     let broker_url = format!("tcp://127.0.0.1:{port}");
     println!("ActiveMQ broker available at {broker_url}");
 
-    // Register using JmsComponent::new() with explicit config.
-    // The `activemq:` scheme used in routes below locks broker_type automatically,
-    // so it is equivalent to passing BrokerType::ActiveMq here.
-    let jms_config = JmsConfig {
+    // Register all three JMS schemes sharing a single bridge process.
+    // activemq:/artemis: hard-set their broker_type; jms: uses the config value.
+    let bridge = Arc::new(RwLock::new(None));
+    let semaphore = Arc::new(Semaphore::new(1));
+
+    let jms_cfg = JmsConfig {
         broker_url: broker_url.clone(),
         broker_type: BrokerType::ActiveMq,
         ..Default::default()
     };
+    let mut activemq_cfg = jms_cfg.clone();
+    activemq_cfg.broker_type = BrokerType::ActiveMq;
+    let mut artemis_cfg = jms_cfg.clone();
+    artemis_cfg.broker_type = BrokerType::Artemis;
 
     let mut ctx = CamelContext::new();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
-    ctx.register_component(JmsComponent::new(jms_config));
+    ctx.register_component(JmsComponent::with_scheme(
+        "jms",
+        jms_cfg,
+        Arc::clone(&bridge),
+        Arc::clone(&semaphore),
+    ));
+    ctx.register_component(JmsComponent::with_scheme(
+        "activemq",
+        activemq_cfg,
+        Arc::clone(&bridge),
+        Arc::clone(&semaphore),
+    ));
+    ctx.register_component(JmsComponent::with_scheme(
+        "artemis",
+        artemis_cfg,
+        Arc::clone(&bridge),
+        Arc::clone(&semaphore),
+    ));
 
     // Route 1: Timer → JMS producer (every 3 seconds)
     // Uses explicit destination type: activemq:queue:orders
