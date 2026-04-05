@@ -1,6 +1,28 @@
 use std::path::PathBuf;
 
-use crate::{BRIDGE_VERSION, BrokerType};
+use crate::{BrokerType, BRIDGE_VERSION};
+
+/// Per-endpoint connection overrides parsed from the URI query string.
+/// These are resolved at `create_endpoint()` time and never reach producer/consumer.
+#[derive(Default, Clone)]
+pub struct JmsUriOverrides {
+    pub broker_url: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for JmsUriOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JmsUriOverrides")
+            .field("broker_url", &self.broker_url)
+            .field("username", &self.username)
+            .field(
+                "password",
+                &self.password.as_ref().map(|_| "[REDACTED]".to_string()),
+            )
+            .finish()
+    }
+}
 
 pub fn default_bridge_cache_dir() -> PathBuf {
     camel_bridge::download::default_cache_dir()
@@ -16,6 +38,9 @@ pub enum DestinationType {
 pub struct JmsEndpointConfig {
     pub destination_type: DestinationType,
     pub destination_name: String,
+    /// Connection overrides from URI query string. Resolved in create_endpoint(),
+    /// not used by producer or consumer directly.
+    pub(crate) uri_overrides: JmsUriOverrides,
 }
 
 impl JmsEndpointConfig {
@@ -40,6 +65,7 @@ impl JmsEndpointConfig {
         Ok(JmsEndpointConfig {
             destination_type,
             destination_name: name.to_string(),
+            uri_overrides: JmsUriOverrides::default(),
         })
     }
 
@@ -136,6 +162,32 @@ mod tests {
     fn invalid_destination_type_returns_error() {
         let err = JmsEndpointConfig::from_uri("jms:inbox:orders").unwrap_err();
         assert!(err.to_string().contains("'queue' or 'topic'"));
+    }
+
+    #[test]
+    fn uri_overrides_debug_redacts_password() {
+        let o = JmsUriOverrides {
+            broker_url: Some("tcp://host:61616".to_string()),
+            username: Some("admin".to_string()),
+            password: Some("secret".to_string()),
+        };
+        let s = format!("{:?}", o);
+        assert!(
+            s.contains("[REDACTED]"),
+            "password must be redacted, got: {s}"
+        );
+        assert!(
+            !s.contains("secret"),
+            "raw password must not appear, got: {s}"
+        );
+    }
+
+    #[test]
+    fn uri_overrides_default_is_all_none() {
+        let o = JmsUriOverrides::default();
+        assert!(o.broker_url.is_none());
+        assert!(o.username.is_none());
+        assert!(o.password.is_none());
     }
 
     #[test]
