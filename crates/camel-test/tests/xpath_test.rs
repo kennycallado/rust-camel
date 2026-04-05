@@ -46,7 +46,7 @@ async fn xpath_filter_with_xml_body() {
         .await;
 
     let mut guard = h.ctx().lock().await;
-    ensure_xpath_registered(&mut *guard);
+    ensure_xpath_registered(&mut guard);
     drop(guard);
 
     let yaml = r#"
@@ -90,7 +90,7 @@ async fn xpath_set_header_from_body() {
         .await;
 
     let mut guard = h.ctx().lock().await;
-    ensure_xpath_registered(&mut *guard);
+    ensure_xpath_registered(&mut guard);
     drop(guard);
 
     let yaml = r#"
@@ -139,7 +139,7 @@ async fn xpath_set_body_from_query() {
         .await;
 
     let mut guard = h.ctx().lock().await;
-    ensure_xpath_registered(&mut *guard);
+    ensure_xpath_registered(&mut guard);
     drop(guard);
 
     let yaml = r#"

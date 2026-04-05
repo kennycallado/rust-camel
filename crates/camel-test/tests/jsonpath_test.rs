@@ -46,7 +46,7 @@ async fn jsonpath_filter_with_json_body() {
         .await;
 
     let mut guard = h.ctx().lock().await;
-    ensure_jsonpath_registered(&mut *guard);
+    ensure_jsonpath_registered(&mut guard);
     drop(guard);
 
     let yaml = r#"
@@ -91,7 +91,7 @@ async fn jsonpath_set_header_from_body() {
         .await;
 
     let mut guard = h.ctx().lock().await;
-    ensure_jsonpath_registered(&mut *guard);
+    ensure_jsonpath_registered(&mut guard);
     drop(guard);
 
     let yaml = r#"
@@ -140,7 +140,7 @@ async fn jsonpath_set_body_extracts_field() {
         .await;
 
     let mut guard = h.ctx().lock().await;
-    ensure_jsonpath_registered(&mut *guard);
+    ensure_jsonpath_registered(&mut guard);
     drop(guard);
 
     let yaml = r#"

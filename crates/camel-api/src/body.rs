@@ -688,8 +688,8 @@ mod tests {
     async fn test_into_async_read_already_consumed() {
         use tokio::io::AsyncReadExt;
         // Mutex holds None → stream already consumed
-        let arc: Arc<Mutex<Option<BoxStream<'static, Result<Bytes, CamelError>>>>> =
-            Arc::new(Mutex::new(None));
+        type MaybeStream = Arc<Mutex<Option<BoxStream<'static, Result<Bytes, CamelError>>>>>;
+        let arc: MaybeStream = Arc::new(Mutex::new(None));
         let body = Body::Stream(StreamBody {
             stream: arc,
             metadata: StreamMetadata {

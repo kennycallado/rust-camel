@@ -199,7 +199,11 @@ async fn main() -> Result<(), CamelError> {
             let c = Arc::clone(&order_counter_clone);
             async move {
                 let n = c.fetch_add(1, Ordering::SeqCst);
-                let priority = if n % 2 == 0 { "high" } else { "normal" };
+                let priority = if n.is_multiple_of(2) {
+                    "high"
+                } else {
+                    "normal"
+                };
                 exchange.input.body = camel_api::body::Body::Text(format!(
                     r#"{{"event":"order","id":{n},"source":"rust-camel"}}"#
                 ));

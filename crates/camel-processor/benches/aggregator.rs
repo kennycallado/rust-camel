@@ -1,6 +1,11 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use camel_api::{AggregatorConfig, Exchange, Message, Value};
-use camel_processor::aggregator::AggregatorService;
+use camel_processor::aggregator::{AggregatorService, SharedLanguageRegistry};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 fn bench_aggregator_sizes(c: &mut Criterion) {
@@ -15,7 +20,10 @@ fn bench_aggregator_sizes(c: &mut Criterion) {
                 let config = AggregatorConfig::correlate_by("corr-id")
                     .complete_when_size(size)
                     .build();
-                let svc = AggregatorService::new(config);
+                let (tx, _rx) = mpsc::channel(1024);
+                let registry: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+                let cancel = CancellationToken::new();
+                let svc = AggregatorService::new(config, tx, registry, cancel);
                 let payloads = payloads.clone();
                 async move {
                     for payload in payloads {

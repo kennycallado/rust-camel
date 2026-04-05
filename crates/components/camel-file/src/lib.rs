@@ -1748,8 +1748,8 @@ mod tests {
         let endpoint = component.create_endpoint(&uri).unwrap();
         let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
 
-        // Mutex holds None → stream already consumed
-        let arc: std::sync::Arc<
+        // Mutex holds None -> stream already consumed
+        type MaybeStream = std::sync::Arc<
             tokio::sync::Mutex<
                 Option<
                     std::pin::Pin<
@@ -1757,7 +1757,8 @@ mod tests {
                     >,
                 >,
             >,
-        > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        >;
+        let arc: MaybeStream = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let body = Body::Stream(camel_api::body::StreamBody {
             stream: arc,
             metadata: camel_api::body::StreamMetadata {

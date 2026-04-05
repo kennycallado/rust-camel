@@ -18,13 +18,13 @@ pub(crate) fn find_workspace_root_from_path(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     for _ in 0..10 {
         let cargo_toml = current.join("Cargo.toml");
-        if cargo_toml.exists() {
-            if let Ok(contents) = std::fs::read_to_string(&cargo_toml) {
-                if contents.contains("[workspace]") && current.join("bridges").join("jms").exists()
-                {
-                    return Some(current);
-                }
-            }
+        if cargo_toml.exists()
+            && std::fs::read_to_string(&cargo_toml)
+                .map(|contents| contents.contains("[workspace]"))
+                .unwrap_or(false)
+            && current.join("bridges").join("jms").exists()
+        {
+            return Some(current);
         }
         if !current.pop() {
             break;
@@ -459,11 +459,11 @@ mod tests {
 
         let pad = (512 - (data.len() % 512)) % 512;
         if pad > 0 {
-            tar_bytes.extend(std::iter::repeat(0u8).take(pad));
+            tar_bytes.resize(tar_bytes.len() + pad, 0u8);
         }
 
         // end-of-archive marker (two empty blocks)
-        tar_bytes.extend(std::iter::repeat(0u8).take(1024));
+        tar_bytes.extend_from_slice(&[0u8; 1024]);
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         use std::io::Write;

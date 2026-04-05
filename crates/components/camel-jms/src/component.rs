@@ -85,10 +85,10 @@ impl JmsComponent {
             guard.as_ref().map(|handle| handle.channel.clone())
         };
 
-        if let Some(channel) = cached_channel {
-            if self.cached_channel_healthy(channel.clone()).await {
-                return Ok(channel);
-            }
+        if let Some(channel) = cached_channel
+            && self.cached_channel_healthy(channel.clone()).await
+        {
+            return Ok(channel);
         }
 
         // Acquire semaphore before write-lock to keep canonical lock ordering.
@@ -368,15 +368,14 @@ impl Component for JmsComponent {
 
         // If the bridge is already running and the broker URL differs, reject the endpoint
         // (bridge is single-broker; mixed URLs in one process are not supported)
-        if let Ok(guard) = self.bridge.try_read() {
-            if let Some(handle) = guard.as_ref() {
-                if final_config.broker_url != handle.broker_url {
-                    return Err(CamelError::ProcessorError(format!(
-                        "JMS endpoint brokerUrl '{}' conflicts with running bridge '{}'",
-                        final_config.broker_url, handle.broker_url
-                    )));
-                }
-            }
+        if let Ok(guard) = self.bridge.try_read()
+            && let Some(handle) = guard.as_ref()
+            && final_config.broker_url != handle.broker_url
+        {
+            return Err(CamelError::ProcessorError(format!(
+                "JMS endpoint brokerUrl '{}' conflicts with running bridge '{}'",
+                final_config.broker_url, handle.broker_url
+            )));
         }
 
         let component = Arc::new(JmsComponent {
@@ -405,7 +404,9 @@ mod tests {
         use camel_component::Component;
         let comp = JmsComponent::new(JmsConfig::default()); // default: tcp://localhost:61616
         // URI specifies a different brokerUrl
-        let ep = comp.create_endpoint("activemq:queue:orders?brokerUrl=tcp://override:9999").unwrap();
+        let ep = comp
+            .create_endpoint("activemq:queue:orders?brokerUrl=tcp://override:9999")
+            .unwrap();
         // The endpoint URI is stored as-is; the override is in endpoint_config.uri_overrides
         assert!(ep.uri().contains("activemq:queue:orders"));
     }
@@ -416,12 +417,7 @@ mod tests {
         use tokio::sync::{RwLock, Semaphore};
         let bridge = Arc::new(RwLock::new(None));
         let semaphore = Arc::new(Semaphore::new(1));
-        let comp = JmsComponent::with_scheme(
-            "activemq",
-            JmsConfig::default(),
-            bridge,
-            semaphore,
-        );
+        let comp = JmsComponent::with_scheme("activemq", JmsConfig::default(), bridge, semaphore);
         assert_eq!(comp.scheme(), "activemq");
     }
 
@@ -444,7 +440,10 @@ mod tests {
             Ok(_) => panic!("endpoint creation should fail for wrong scheme"),
             Err(err) => err,
         };
-        assert!(err.to_string().contains("expected scheme 'jms', 'activemq', or 'artemis'"));
+        assert!(
+            err.to_string()
+                .contains("expected scheme 'jms', 'activemq', or 'artemis'")
+        );
     }
 
     #[tokio::test]

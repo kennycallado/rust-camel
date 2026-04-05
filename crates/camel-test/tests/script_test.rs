@@ -31,7 +31,7 @@ async fn script_error_prevents_downstream_delivery() {
         .build()
         .await;
     let mut guard = h.ctx().lock().await;
-    ensure_rhai_registered(&mut *guard);
+    ensure_rhai_registered(&mut guard);
     drop(guard);
 
     let route = RouteBuilder::from("direct:input-err")
@@ -77,7 +77,7 @@ async fn script_sets_header() {
         .build()
         .await;
     let mut guard = h.ctx().lock().await;
-    ensure_rhai_registered(&mut *guard);
+    ensure_rhai_registered(&mut guard);
     drop(guard);
 
     let route = RouteBuilder::from("direct:input")
@@ -124,7 +124,7 @@ async fn script_reads_and_transforms_body() {
         .build()
         .await;
     let mut guard = h.ctx().lock().await;
-    ensure_rhai_registered(&mut *guard);
+    ensure_rhai_registered(&mut guard);
     drop(guard);
 
     let route = RouteBuilder::from("direct:input")
@@ -170,7 +170,7 @@ async fn script_sets_multiple_headers() {
         .build()
         .await;
     let mut guard = h.ctx().lock().await;
-    ensure_rhai_registered(&mut *guard);
+    ensure_rhai_registered(&mut guard);
     drop(guard);
 
     let route = RouteBuilder::from("direct:input")
@@ -221,7 +221,7 @@ async fn script_reads_existing_header() {
         .build()
         .await;
     let mut guard = h.ctx().lock().await;
-    ensure_rhai_registered(&mut *guard);
+    ensure_rhai_registered(&mut guard);
     drop(guard);
 
     let route = RouteBuilder::from("direct:input")
@@ -269,7 +269,7 @@ async fn script_sets_property() {
         .build()
         .await;
     let mut guard = h.ctx().lock().await;
-    ensure_rhai_registered(&mut *guard);
+    ensure_rhai_registered(&mut guard);
     drop(guard);
 
     let route = RouteBuilder::from("direct:input")
@@ -347,7 +347,7 @@ async fn script_empty_body_handled() {
         .build()
         .await;
     let mut guard = h.ctx().lock().await;
-    ensure_rhai_registered(&mut *guard);
+    ensure_rhai_registered(&mut guard);
     drop(guard);
 
     let route = RouteBuilder::from("direct:input")

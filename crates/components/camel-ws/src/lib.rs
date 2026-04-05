@@ -1344,14 +1344,13 @@ mod tests {
         let producer = WsProducer::new(cfg.client_config());
 
         let exchange = Exchange::new(CamelMessage::new(CamelBody::Text("hello-client".into())));
-        let result = loop {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let result =
             match tokio::time::timeout(Duration::from_secs(3), producer.oneshot(exchange)).await {
-                Ok(Ok(r)) => break r,
+                Ok(Ok(r)) => r,
                 Ok(Err(_)) => panic!("producer call failed"),
                 Err(_) => panic!("producer call timed out"),
-            }
-        };
+            };
 
         assert_eq!(result.input.body.as_text().unwrap(), "hello-client");
 

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{BrokerType, BRIDGE_VERSION};
+use crate::{BRIDGE_VERSION, BrokerType};
 
 /// Per-endpoint connection overrides parsed from the URI query string.
 /// These are resolved at `create_endpoint()` time and never reach producer/consumer.
@@ -76,7 +76,7 @@ impl JmsEndpointConfig {
                     other => {
                         return Err(camel_api::CamelError::ProcessorError(format!(
                             "JMS destination type must be 'queue' or 'topic', got: {other}"
-                        )))
+                        )));
                     }
                 };
                 (dtype, name.to_string())
@@ -401,8 +401,10 @@ mod tests {
 
     #[test]
     fn merge_overrides_base_used_when_no_override() {
-        let mut base = JmsConfig::default();
-        base.username = Some("base_user".to_string());
+        let base = JmsConfig {
+            username: Some("base_user".to_string()),
+            ..JmsConfig::default()
+        };
         let overrides = JmsUriOverrides::default(); // all None
         let merged = base.merge_overrides(&overrides);
         assert_eq!(merged.broker_url, "tcp://localhost:61616");
@@ -411,8 +413,10 @@ mod tests {
 
     #[test]
     fn merge_overrides_broker_type_never_overridden() {
-        let mut base = JmsConfig::default();
-        base.broker_type = BrokerType::Artemis;
+        let base = JmsConfig {
+            broker_type: BrokerType::Artemis,
+            ..JmsConfig::default()
+        };
         let overrides = JmsUriOverrides::default();
         let merged = base.merge_overrides(&overrides);
         assert_eq!(merged.broker_type, BrokerType::Artemis);

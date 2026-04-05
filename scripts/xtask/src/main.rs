@@ -266,9 +266,9 @@ fn patchelf_for_nixos(binary: &Path) -> Result<(), String> {
             .status()
             .map_err(|e| format!("sudo chmod failed: {e}"))?;
         if !status.success() {
-            return Err(format!(
-                "sudo chmod a+w failed — cannot make binary writable for patchelf"
-            ));
+            return Err(
+                "sudo chmod a+w failed — cannot make binary writable for patchelf".to_string(),
+            );
         }
     }
 
@@ -308,13 +308,13 @@ pub fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     for _ in 0..10 {
         let cargo_toml = current.join("Cargo.toml");
-        if cargo_toml.exists() {
-            if let Ok(contents) = std::fs::read_to_string(&cargo_toml) {
-                if contents.contains("[workspace]") && current.join("bridges").join("jms").exists()
-                {
-                    return Some(current);
-                }
-            }
+        if cargo_toml.exists()
+            && std::fs::read_to_string(&cargo_toml)
+                .map(|contents| contents.contains("[workspace]"))
+                .unwrap_or(false)
+            && current.join("bridges").join("jms").exists()
+        {
+            return Some(current);
         }
         if !current.pop() {
             break;

@@ -226,7 +226,7 @@ mod tests {
         );
         let ex = make_exchange();
         let _ = expr.evaluate(&ex).unwrap();
-        assert!(ex.input.headers.get("x").is_none());
+        assert!(!ex.input.headers.contains_key("x"));
         assert_eq!(ex.input.body.as_text(), Some("hello"));
     }
 
@@ -327,7 +327,7 @@ mod tests {
         let mut ex = make_exchange();
         let result = expr.evaluate(&mut ex);
         assert!(result.is_err());
-        assert!(ex.input.headers.get("x").is_none());
+        assert!(!ex.input.headers.contains_key("x"));
         assert_eq!(ex.input.body.as_text(), Some("hello"));
     }
 

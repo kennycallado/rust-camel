@@ -1795,10 +1795,7 @@ mod tests {
             .inspect_container(&container_id, None)
             .await
             .expect("Container should exist");
-        assert_eq!(
-            inspect.id.as_ref().map(|s| s.as_str()),
-            Some(container_id.as_str())
-        );
+        assert_eq!(inspect.id.as_deref(), Some(container_id.as_str()));
 
         // Cleanup: remove container
         docker
