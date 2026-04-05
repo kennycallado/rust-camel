@@ -19,6 +19,7 @@ routes:
             - simple: "${header.artemis-status} == 'running'"
               steps:
                 - log: "message=Artemis container already running — starting JMS routes directly"
+                - to: "controlbus:route?routeId=artemis-ready-watcher&action=stop"
                 - to: "controlbus:route?routeId=jms-producer&action=start"
                 - to: "controlbus:route?routeId=jms-consumer&action=start"
             - simple: "${header.artemis-status} == 'exited'"
@@ -47,10 +48,11 @@ routes:
   # On first run, camel-cli will download the JMS bridge binary from GitHub.
   - id: "jms-producer"
     auto_startup: false
-    from: "timer:jms-tick?period=5000"
+    from: "timer:jms-tick?period=5000&delay=3000"
     steps:
       - set_body:
           simple: '{"event":"hello","source":"camel-cli"}'
+      - log: "message=Sending to JMS: ${body}"
       - to: "jms:queue:test"
 
   # Step 4 (lazy): Reads from the same queue and logs each message.

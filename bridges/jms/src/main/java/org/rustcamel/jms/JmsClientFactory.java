@@ -10,10 +10,6 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.openwire.OpenWireFormatFactory;
 import org.apache.activemq.pool.PooledConnectionFactory;
@@ -32,6 +28,10 @@ public class JmsClientFactory {
     private static final AtomicBoolean NATIVE_INIT_DONE = new AtomicBoolean(false);
 
     private volatile ConnectionFactory factory;
+    // Raw (non-pooled) factory kept for long-lived consumer connections.
+    // The pool silently recycles connections after idle timeout, breaking
+    // MessageListeners without any error. Consumers use this directly.
+    private volatile ConnectionFactory rawFactory;
 
     public ConnectionFactory get() {
         if (factory == null) {
@@ -65,30 +65,18 @@ public class JmsClientFactory {
                 break;
             }
             case "artemis": {
-                // Run the Artemis connection attempt in a separate thread with a hard
-                // deadline. The Netty handshake in GraalVM native image can block
-                // indefinitely under mandatory auth without this guard, preventing
-                // the gRPC health() RPC from ever returning and freezing Rust's
-                // wait_for_health startup gate.
+                // Use the ServerLocator directly with createSessionFactory(tc)
+                // to bypass waitForTopology(). The no-arg createSessionFactory()
+                // always waits for a CLUSTER_TOPOLOGY packet from the broker,
+                // which never arrives in GraalVM native image (Netty callback
+                // not processed), causing an infinite hang / timeout.
                 var cf = buildArtemisFactory(url, user, pass);
-                var executor = Executors.newSingleThreadExecutor(r -> {
-                    Thread t = new Thread(r, "artemis-health-check");
-                    t.setDaemon(true);
-                    return t;
-                });
-                Future<?> future = executor.submit((java.util.concurrent.Callable<Void>) () -> {
-                    try (Connection c = cf.createConnection()) {
-                        c.start();
-                    }
-                    return null;
-                });
-                try {
-                    future.get(8, TimeUnit.SECONDS);
-                } catch (TimeoutException e) {
-                    future.cancel(true);
-                    throw new Exception("Artemis health check timed out after 8s");
+                var locator = cf.getServerLocator();
+                var tc = locator.getStaticTransportConfigurations()[0];
+                try (var csf = locator.createSessionFactory(tc)) {
+                    // Successfully created a session factory → broker is reachable
                 } finally {
-                    executor.shutdownNow();
+                    cf.close();
                 }
                 break;
             }
@@ -115,6 +103,17 @@ public class JmsClientFactory {
         return get().createConnection();
     }
 
+    /**
+     * Creates a dedicated (non-pooled) connection for long-lived consumers.
+     * The pool silently recycles idle connections, breaking MessageListeners.
+     */
+    public Connection createDedicatedConnection() throws javax.jms.JMSException {
+        if (rawFactory == null) {
+            get(); // ensure createFactory() has run and rawFactory is set
+        }
+        return rawFactory.createConnection();
+    }
+
     public synchronized void reset() {
         if (factory instanceof PooledConnectionFactory pool) {
             try { pool.stop(); } catch (Exception ignored) {}
@@ -133,6 +132,7 @@ public class JmsClientFactory {
         switch (type) {
             case "activemq": {
                 ActiveMQConnectionFactory cf = buildActiveMqFactory(url, user, pass);
+                rawFactory = cf;
                 PooledConnectionFactory pool = new PooledConnectionFactory(cf);
                 pool.setMaxConnections(5);
                 pool.start();
@@ -140,6 +140,7 @@ public class JmsClientFactory {
             }
             case "artemis": {
                 var cf = buildArtemisFactory(url, user, pass);
+                rawFactory = cf;
                 JmsPoolConnectionFactory pool = new JmsPoolConnectionFactory();
                 pool.setConnectionFactory(cf);
                 pool.setMaxConnections(5);
@@ -193,7 +194,6 @@ public class JmsClientFactory {
         // means 5ms (not 5s) and causes connection setup to fail repeatedly.
         params.put(TransportConstants.HANDSHAKE_TIMEOUT, 5_000);          // ms (int)
         params.put(TransportConstants.NETTY_CONNECT_TIMEOUT, 5_000);       // ms (int)
-        params.put(TransportConstants.CONNECTION_TTL, 10_000L);             // ms
 
         TransportConfiguration tc = new TransportConfiguration(
             NettyConnectorFactory.class.getName(), params);
@@ -201,6 +201,23 @@ public class JmsClientFactory {
         var cf = new org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory(false, tc);
         cf.setReconnectAttempts(3);
         cf.setRetryInterval(1000);
+        // Disable consumer-side pre-fetching. By default Artemis buffers up to
+        // 1 MiB of messages on the client. With 0 the broker pushes one message
+        // at a time, which avoids the scenario where the consumer's internal
+        // buffer stalls in GraalVM native image and receive() never returns
+        // new messages even though they exist on the broker.
+        cf.setConsumerWindowSize(0);
+        // Set TTL on the factory itself (not in TransportConstants where
+        // it is silently ignored for client-side connectors).
+        cf.setConnectionTTL(300_000);    // 5 min
+        // Disable producer-side flow control. Artemis Core protocol assigns a
+        // limited credit window (producerWindowSize, default ~64 KiB) to each
+        // producer. When credits are exhausted the send() call blocks waiting
+        // for the broker to grant more. In GraalVM native image + Netty NIO
+        // the credit-grant callback can stall, causing send() to block
+        // indefinitely after a few messages. Setting -1 disables the credit
+        // mechanism entirely — the producer never waits for credits.
+        cf.setProducerWindowSize(-1);
         if (user != null) cf.setUser(user);
         if (pass != null) cf.setPassword(pass);
         return cf;

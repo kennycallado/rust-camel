@@ -13,7 +13,7 @@ mod support;
 
 use std::time::Duration;
 
-use camel_api::Value;
+use camel_api::{Body, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_jms::{BrokerType, JmsComponent, JmsConfig};
 use camel_test::CamelTestContext;
@@ -42,7 +42,7 @@ async fn jms_producer_sends_to_activemq() {
         .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
-        .set_body(Value::String("hello-jms".to_string()))
+        .set_body("hello-jms".to_string())
         .to("jms:queue:test-produce")
         .to("mock:sent")
         .route_id("jms-producer-test")
@@ -88,7 +88,7 @@ async fn jms_consumer_receives_from_activemq() {
 
     let inject_route =
         RouteBuilder::from("timer:inject-activemq?period=300&delay=500&repeatCount=1")
-            .set_body(Value::String("consume-from-activemq".to_string()))
+            .set_body("consume-from-activemq".to_string())
             .to("jms:queue:test-consume-activemq")
             .route_id("jms-consumer-activemq-inject")
             .build()
@@ -112,7 +112,13 @@ async fn jms_consumer_receives_from_activemq() {
     .unwrap();
 
     h.stop().await;
-    assert!(!endpoint.get_received_exchanges().await.is_empty());
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert!(!exchanges.is_empty());
+    assert_eq!(
+        exchanges[0].input.body.as_text(),
+        Some("consume-from-activemq"),
+        "Body should survive the ActiveMQ round-trip intact"
+    );
 }
 
 #[tokio::test]
@@ -134,7 +140,7 @@ async fn jms_consumer_receives_from_artemis() {
 
     let inject_route =
         RouteBuilder::from("timer:inject-artemis?period=300&delay=500&repeatCount=1")
-            .set_body(Value::String("consume-from-artemis".to_string()))
+            .set_body("consume-from-artemis".to_string())
             .to("jms:queue:test-consume-artemis")
             .route_id("jms-consumer-artemis-inject")
             .build()
@@ -158,7 +164,52 @@ async fn jms_consumer_receives_from_artemis() {
     .unwrap();
 
     h.stop().await;
-    assert!(!endpoint.get_received_exchanges().await.is_empty());
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert!(!exchanges.is_empty());
+    assert_eq!(
+        exchanges[0].input.body.as_text(),
+        Some("consume-from-artemis"),
+        "Body should survive the Artemis round-trip intact"
+    );
+}
+
+#[tokio::test]
+async fn jms_producer_sends_to_artemis() {
+    init_tracing();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(shared_jms_artemis().await)
+        .build()
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .set_body("hello-artemis".to_string())
+        .to("jms:queue:test-produce-artemis")
+        .to("mock:sent")
+        .route_id("jms-producer-artemis-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+
+    let endpoint = h.mock().get_endpoint("sent").unwrap();
+    wait_until(
+        "jms producer route delivery (artemis)",
+        Duration::from_secs(35),
+        Duration::from_millis(200),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 1) }
+        },
+    )
+    .await
+    .unwrap();
+
+    h.stop().await;
+    endpoint.assert_exchange_count(1).await;
 }
 
 #[tokio::test]
@@ -180,7 +231,7 @@ async fn jms_headers_propagated() {
 
     let producer_route =
         RouteBuilder::from("timer:headers-inject?period=300&delay=500&repeatCount=1")
-            .set_body(Value::String("header-check".to_string()))
+            .set_body("header-check".to_string())
             .set_header("x-custom-header", Value::String("custom-value".to_string()))
             .to("jms:queue:test-headers")
             .route_id("jms-headers-producer")
@@ -209,6 +260,11 @@ async fn jms_headers_propagated() {
     let exchanges = endpoint.get_received_exchanges().await;
     assert!(!exchanges.is_empty(), "Expected at least one exchange");
     let received = &exchanges[0];
+    assert_eq!(
+        received.input.body.as_text(),
+        Some("header-check"),
+        "Body should survive the round-trip intact"
+    );
     assert_eq!(
         received
             .input
@@ -239,7 +295,7 @@ async fn jms_producer_fails_gracefully_when_broker_unavailable() {
         .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
-        .set_body(Value::String("this-should-fail".to_string()))
+        .set_body("this-should-fail".to_string())
         .to("jms:queue:missing-broker")
         .to("mock:success")
         .route_id("jms-unavailable-broker")
@@ -289,7 +345,7 @@ async fn jms_producer_sends_multiple_messages() {
 
     let producer_route =
         RouteBuilder::from("timer:multi-inject?period=300&delay=500&repeatCount=2")
-            .set_body(Value::String("multi-msg".to_string()))
+            .set_body("multi-msg".to_string())
             .to("jms:queue:test-multi")
             .route_id("jms-multi-producer")
             .build()
@@ -313,7 +369,15 @@ async fn jms_producer_sends_multiple_messages() {
     .unwrap();
 
     h.stop().await;
-    assert!(endpoint.get_received_exchanges().await.len() >= 2);
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert!(exchanges.len() >= 2);
+    for ex in &exchanges {
+        assert_eq!(
+            ex.input.body.as_text(),
+            Some("multi-msg"),
+            "Each message body should survive the round-trip intact"
+        );
+    }
 }
 
 /// Regression test for: bridge crashes ~7s after start when Artemis uses mandatory auth.
@@ -352,7 +416,7 @@ async fn jms_artemis_bridge_stable_under_mandatory_auth() {
 
     // Send 1 message/s for 10 iterations starting at 2s (well past the 7s crash).
     let producer = RouteBuilder::from("timer:auth-inject?period=1000&delay=2000&repeatCount=10")
-        .set_body(Value::String("auth-stable-msg".to_string()))
+        .set_body("auth-stable-msg".to_string())
         .to("jms:queue:test-auth-stability")
         .route_id("jms-auth-stable-producer")
         .build()
@@ -381,8 +445,16 @@ async fn jms_artemis_bridge_stable_under_mandatory_auth() {
     .unwrap();
 
     h.stop().await;
+    let exchanges = endpoint.get_received_exchanges().await;
     assert!(
-        endpoint.get_received_exchanges().await.len() >= 10,
+        exchanges.len() >= 10,
         "Expected at least 10 messages; bridge may have restarted under mandatory auth"
     );
+    for ex in &exchanges {
+        assert_eq!(
+            ex.input.body.as_text(),
+            Some("auth-stable-msg"),
+            "Each message body should survive the Artemis auth round-trip intact"
+        );
+    }
 }

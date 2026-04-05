@@ -145,6 +145,16 @@ impl BridgeProcess {
             ))
         })??;
 
+        // Keep draining the bridge's stdout in the background so the pipe
+        // buffer never fills up.  If the pipe blocks, the bridge's JMS
+        // MessageListener thread blocks on its next log write and silently
+        // stops delivering messages after the first one.
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = reader.next_line().await {
+                tracing::debug!(target: "camel_bridge::child", "{}", line);
+            }
+        });
+
         Ok(BridgeProcess {
             child,
             grpc_port: port,

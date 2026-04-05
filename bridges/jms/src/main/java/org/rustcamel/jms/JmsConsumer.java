@@ -10,33 +10,43 @@ import javax.jms.Destination;
 import javax.jms.JMSException;
 import javax.jms.Message;
 import javax.jms.MessageConsumer;
-import javax.jms.MessageListener;
 import javax.jms.Session;
 import javax.jms.TextMessage;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import jms_bridge.JmsMessage;
+import org.jboss.logging.Logger;
 
 @Dependent
 public class JmsConsumer {
+    private static final Logger LOG = Logger.getLogger(JmsConsumer.class);
     @Inject JmsClientFactory factory;
 
     private volatile Connection connection;
     private volatile Session session;
     private volatile MessageConsumer consumer;
-    private volatile CountDownLatch stopLatch;
     private volatile boolean running = false;
     private final AtomicBoolean resourcesClosed = new AtomicBoolean(false);
 
+    /**
+     * Subscribe to a JMS destination and forward messages to the gRPC stream.
+     *
+     * Uses synchronous polling (receive with timeout) instead of async
+     * MessageListener. The previous MessageListener approach caused the JMS
+     * delivery thread to block on gRPC's responseObserver.onNext() — which
+     * can stall when Vert.x back-pressures the stream. With AUTO_ACKNOWLEDGE
+     * the broker won't dispatch the next message until onMessage returns,
+     * so the consumer silently stopped after the first message.
+     *
+     * Polling on a dedicated thread avoids this: the thread owns both the
+     * JMS receive and the gRPC write, so there is no cross-thread blocking.
+     */
     public void subscribe(String destination, String subscriptionId, StreamObserver<JmsMessage> observer) {
         running = true;
         resourcesClosed.set(false);
-        CountDownLatch latch = new CountDownLatch(1);
-        stopLatch = latch;
 
         Thread t = new Thread(() -> {
             try {
-                connection = factory.createConnection();
+                connection = factory.createDedicatedConnection();
             } catch (Exception e) {
                 if (running) observer.onError(e);
                 else observer.onCompleted();
@@ -49,27 +59,25 @@ public class JmsConsumer {
                 Destination dest = JmsProducer.parseDestination(session, destination);
                 consumer = session.createConsumer(dest);
 
-                consumer.setMessageListener(new MessageListener() {
-                    @Override
-                    public void onMessage(Message msg) {
-                        if (!running) {
+                while (running) {
+                    Message msg = consumer.receive(1000);
+                    if (msg == null) {
+                        continue;
+                    }
+                    LOG.debug("Received JMS message on " + destination);
+                    try {
+                        JmsMessage grpcMsg = convertMessage(msg, destination);
+                        observer.onNext(grpcMsg);
+                    } catch (Exception e) {
+                        LOG.error("Error forwarding message: " + e.getMessage(), e);
+                        if (running) {
+                            observer.onError(e);
                             return;
                         }
-                        try {
-                            JmsMessage grpcMsg = convertMessage(msg, destination);
-                            observer.onNext(grpcMsg);
-                        } catch (Exception e) {
-                            if (running) {
-                                observer.onError(e);
-                            }
-                        }
                     }
-                });
-
-                latch.await();
-                if (running) {
-                    observer.onCompleted();
                 }
+
+                observer.onCompleted();
             } catch (Exception e) {
                 if (running) observer.onError(e);
                 else observer.onCompleted();
@@ -83,12 +91,6 @@ public class JmsConsumer {
 
     public void stop() {
         running = false;
-
-        CountDownLatch latch = stopLatch;
-        if (latch != null) {
-            latch.countDown();
-        }
-
         closeResources();
     }
 

@@ -4,6 +4,7 @@ import io.grpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import io.quarkus.grpc.GrpcService;
+import io.smallrye.common.annotation.Blocking;
 import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
 import java.util.concurrent.ConcurrentHashMap;
@@ -17,6 +18,7 @@ import jms_bridge.SubscribeRequest;
 import org.jboss.logging.Logger;
 
 @GrpcService
+@Blocking
 public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
     private static final Logger LOG = Logger.getLogger(JmsBridgeService.class);
 

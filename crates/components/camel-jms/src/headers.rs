@@ -59,6 +59,10 @@ fn is_internal_jms_header(key: &str) -> bool {
             | "JMSExpiration"
             | "JMSDeliveryMode"
             | "JMSPriority"
+            // Content-Type travels as a dedicated field in SendRequest, not as
+            // a JMS property. Artemis rejects property names containing hyphens
+            // (AMQ139012), so we must not forward it as a header.
+            | "Content-Type"
     )
 }
 

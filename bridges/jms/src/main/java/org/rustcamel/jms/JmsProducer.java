@@ -45,12 +45,11 @@ public class JmsProducer {
                 try {
                     msg.setStringProperty(key, entry.getValue());
                 } catch (Exception e) {
-                    if (LOG.isLoggable(Level.FINE)) {
-                        LOG.fine("Failed to set JMS property '" + key + "': " + e.getMessage());
-                    }
+                    LOG.log(Level.FINE, "Failed to set JMS property ''{0}'': {1}", new Object[]{key, e.getMessage()});
                 }
             }
             producer.send(msg);
+            LOG.log(Level.FINE, "Sent message to {0}, msgId={1}", new Object[]{destination, msg.getJMSMessageID()});
             return msg.getJMSMessageID();
         }
     }
