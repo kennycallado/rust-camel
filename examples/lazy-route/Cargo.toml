@@ -1,13 +1,13 @@
 [package]
 name = "lazy-route"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-camel-api = { path = "../../crates/camel-api" }
-camel-builder = { path = "../../crates/camel-builder" }
-camel-core = { path = "../../crates/camel-core" }
-camel-component-timer = { path = "../../crates/components/camel-timer" }
-camel-component-log = { path = "../../crates/components/camel-log" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
-tracing-subscriber = "0.3"
+camel-api.workspace = true
+camel-builder.workspace = true
+camel-core.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

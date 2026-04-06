@@ -17,8 +17,8 @@ This enables clean separation between route configuration and business logic, si
 1. Add `camel-bean` to your `Cargo.toml`:
 ```toml
 [dependencies]
-camel-bean = "0.2.2"
-camel-bean-macros = "0.2.2"
+camel-bean = "0.5.7"
+camel-bean-macros = "0.5.7"
 ```
 
 2. Define a bean with handlers:

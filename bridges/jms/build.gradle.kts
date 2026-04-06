@@ -3,7 +3,7 @@ plugins {
     id("io.quarkus") version "3.20.0"
 }
 
-version = project.findProperty("version")?.toString() ?: "0.1.0"
+version = project.findProperty("version")?.toString() ?: "0.1.1"
 
 repositories {
     mavenCentral()

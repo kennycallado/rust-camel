@@ -1,14 +1,14 @@
 [package]
 name = "config-profiles"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-camel-core = { path = "../../crates/camel-core" }
-camel-config = { path = "../../crates/camel-config" }
-camel-component-timer = { path = "../../crates/components/camel-timer" }
-camel-component-log = { path = "../../crates/components/camel-log" }
-camel-api = { path = "../../crates/camel-api" }
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
+camel-core.workspace = true
+camel-config.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+camel-api.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
