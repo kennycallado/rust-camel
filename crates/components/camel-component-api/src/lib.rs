@@ -9,7 +9,11 @@ pub use endpoint::Endpoint;
 pub use producer::ProducerContext;
 
 // Re-export camel-api types for component convenience
-pub use camel_api::{Body, BodyType, BoxProcessor, CamelError, Exchange, Message, Value};
+pub use camel_api::{
+    Body, BodyType, BoxProcessor, CamelError, Exchange, Message, RouteAction, RouteStatus,
+    RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult, RuntimeHandle, RuntimeQuery,
+    RuntimeQueryBus, RuntimeQueryResult, StreamBody, StreamMetadata, Value,
+};
 
 // Re-export camel-endpoint types for component convenience
 pub use camel_endpoint::{UriComponents, UriConfig, parse_uri};

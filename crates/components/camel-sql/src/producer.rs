@@ -17,8 +17,7 @@ use crate::config::{SqlEndpointConfig, SqlOutputType};
 use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
-use camel_api::{StreamBody, StreamMetadata};
-use camel_component_api::{Body, CamelError, Exchange, Message};
+use camel_component_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
 
 #[derive(Clone)]
 pub struct SqlProducer {

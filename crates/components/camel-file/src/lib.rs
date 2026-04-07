@@ -18,8 +18,9 @@ use tokio_util::io::ReaderStream;
 use tower::Service;
 use tracing::{debug, warn};
 
-use camel_api::body::{StreamBody, StreamMetadata};
-use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, Message};
+use camel_component_api::{
+    Body, BoxProcessor, CamelError, Exchange, Message, StreamBody, StreamMetadata,
+};
 use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 use camel_component_api::{UriConfig, parse_uri};
 
@@ -164,7 +165,7 @@ impl FileGlobalConfig {
 /// | `Fail` | Returns error if file already exists |
 #[derive(Debug, Clone, UriConfig)]
 #[uri_scheme = "file"]
-#[uri_config(skip_impl)]
+#[uri_config(skip_impl, crate = "camel_component_api")]
 pub struct FileConfig {
     /// Directory path to read from or write to.
     pub directory: String,

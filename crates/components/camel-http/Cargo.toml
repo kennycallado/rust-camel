@@ -12,7 +12,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-camel-api.workspace = true
 camel-component-api.workspace = true
 async-trait.workspace = true
 tokio.workspace = true

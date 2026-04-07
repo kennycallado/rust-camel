@@ -104,7 +104,7 @@ impl Service<Exchange> for JmsProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::StreamBody;
+    use camel_component_api::StreamBody;
     use futures::stream;
     use std::sync::Arc;
     use tokio::sync::Mutex;

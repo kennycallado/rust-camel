@@ -17,6 +17,7 @@ use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, Produc
 /// Format: `timer:name?period=1000&delay=0&repeatCount=0`
 #[derive(Debug, Clone, UriConfig)]
 #[uri_scheme = "timer"]
+#[uri_config(crate = "camel_component_api")]
 pub struct TimerConfig {
     /// Timer name (the path portion of the URI).
     pub name: String,

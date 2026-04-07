@@ -825,7 +825,6 @@ name = "camel-component-controlbus"
 version = "0.5.7"
 dependencies = [
  "async-trait",
- "camel-api",
  "camel-component-api",
  "serde_json",
  "tokio",
@@ -839,7 +838,6 @@ version = "0.5.7"
 dependencies = [
  "async-trait",
  "camel-component-api",
- "camel-endpoint",
  "tokio",
  "tokio-util",
  "tower 0.5.3",
@@ -852,9 +850,7 @@ version = "0.5.7"
 dependencies = [
  "async-trait",
  "bytes",
- "camel-api",
  "camel-component-api",
- "camel-endpoint",
  "futures",
  "regex",
  "serde_json",
@@ -873,7 +869,6 @@ dependencies = [
  "async-trait",
  "axum 0.8.8",
  "bytes",
- "camel-api",
  "camel-component-api",
  "camel-otel",
  "futures",
@@ -894,7 +889,6 @@ version = "0.5.7"
 dependencies = [
  "async-trait",
  "bytes",
- "camel-api",
  "camel-bridge",
  "camel-component-api",
  "futures",
@@ -916,7 +910,6 @@ version = "0.5.7"
 dependencies = [
  "async-trait",
  "bytes",
- "camel-api",
  "camel-component-api",
  "camel-otel",
  "futures",
@@ -935,7 +928,6 @@ version = "0.5.7"
 dependencies = [
  "async-trait",
  "camel-component-api",
- "camel-endpoint",
  "serde_json",
  "tokio",
  "tower 0.5.3",
@@ -976,7 +968,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "bytes",
- "camel-api",
  "camel-component-api",
  "futures",
  "serde_json",
@@ -993,7 +984,6 @@ version = "0.5.7"
 dependencies = [
  "async-trait",
  "camel-component-api",
- "camel-endpoint",
  "serde_json",
  "tokio",
  "tokio-util",

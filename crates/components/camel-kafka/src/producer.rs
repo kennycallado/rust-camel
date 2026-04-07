@@ -189,8 +189,8 @@ impl Service<Exchange> for KafkaProducer {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use camel_api::StreamBody;
     use camel_component_api::Message;
+    use camel_component_api::StreamBody;
     use futures::stream;
     use serde_json::json;
     use std::sync::Arc;

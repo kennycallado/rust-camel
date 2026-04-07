@@ -115,6 +115,53 @@ fn parse_uri_param_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<UriParam
     Ok(None)
 }
 
+struct UriConfigAttr {
+    skip_impl: bool,
+    crate_path: syn::Path,
+}
+
+fn parse_uri_config_attr(attrs: &[syn::Attribute]) -> syn::Result<UriConfigAttr> {
+    let mut skip_impl = false;
+    let mut crate_path: Option<syn::Path> = None;
+
+    for attr in attrs {
+        if !attr.path().is_ident("uri_config") {
+            continue;
+        }
+
+        match &attr.meta {
+            Meta::List(_) => {
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("skip_impl") {
+                        skip_impl = true;
+                        return Ok(());
+                    }
+
+                    if meta.path.is_ident("crate") {
+                        let value = meta.value()?;
+                        let lit: syn::LitStr = value.parse()?;
+                        crate_path = Some(lit.parse()?);
+                        return Ok(());
+                    }
+
+                    Err(meta.error("unknown uri_config option"))
+                })?;
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "unexpected attribute format for #[uri_config]",
+                ));
+            }
+        }
+    }
+
+    Ok(UriConfigAttr {
+        skip_impl,
+        crate_path: crate_path.unwrap_or_else(|| syn::parse_quote!(camel_endpoint)),
+    })
+}
+
 /// Get the type name as a string (for simple type matching)
 fn get_type_name(ty: &Type) -> Option<String> {
     if let Type::Path(TypePath { path, .. }) = ty {
@@ -160,6 +207,7 @@ fn generate_param_parsing(
     field_name: &syn::Ident,
     ty: &Type,
     default: Option<&str>,
+    endpoint_crate: &syn::Path,
 ) -> TokenStream {
     let type_name = get_type_name(ty);
     let inner_type = is_option_type(ty);
@@ -199,7 +247,7 @@ fn generate_param_parsing(
             } else {
                 quote! {
                     let #field_name = params.get(#param_name).cloned().ok_or_else(|| {
-                        camel_endpoint::CamelError::InvalidUri(
+                        #endpoint_crate::CamelError::InvalidUri(
                             format!("missing required parameter: {}", #param_name)
                         )
                     })?
@@ -219,7 +267,7 @@ fn generate_param_parsing(
                 quote! {
                     let #field_name = params.get(#param_name)
                         .map(|v| v == "true")
-                        .ok_or_else(|| camel_endpoint::CamelError::InvalidUri(
+                        .ok_or_else(|| #endpoint_crate::CamelError::InvalidUri(
                             format!("missing required parameter: {}", #param_name)
                         ))?
                 }
@@ -230,7 +278,7 @@ fn generate_param_parsing(
                 let default_num: u64 = default_val.parse().unwrap_or(0);
                 quote! {
                     let #field_name = match params.get(#param_name) {
-                        Some(v) => v.parse::<u64>().map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        Some(v) => v.parse::<u64>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for {}: {}", #param_name, e)
                         ))?,
                         None => #default_num,
@@ -239,11 +287,11 @@ fn generate_param_parsing(
             } else {
                 quote! {
                     let #field_name = params.get(#param_name)
-                        .ok_or_else(|| camel_endpoint::CamelError::InvalidUri(
+                        .ok_or_else(|| #endpoint_crate::CamelError::InvalidUri(
                             format!("missing required parameter: {}", #param_name)
                         ))?
                         .parse::<u64>()
-                        .map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        .map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for {}: {}", #param_name, e)
                         ))?
                 }
@@ -254,7 +302,7 @@ fn generate_param_parsing(
                 let default_num: u32 = default_val.parse().unwrap_or(0);
                 quote! {
                     let #field_name = match params.get(#param_name) {
-                        Some(v) => v.parse::<u32>().map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        Some(v) => v.parse::<u32>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for {}: {}", #param_name, e)
                         ))?,
                         None => #default_num,
@@ -263,11 +311,11 @@ fn generate_param_parsing(
             } else {
                 quote! {
                     let #field_name = params.get(#param_name)
-                        .ok_or_else(|| camel_endpoint::CamelError::InvalidUri(
+                        .ok_or_else(|| #endpoint_crate::CamelError::InvalidUri(
                             format!("missing required parameter: {}", #param_name)
                         ))?
                         .parse::<u32>()
-                        .map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        .map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for {}: {}", #param_name, e)
                         ))?
                 }
@@ -278,7 +326,7 @@ fn generate_param_parsing(
                 let default_num: usize = default_val.parse().unwrap_or(0);
                 quote! {
                     let #field_name = match params.get(#param_name) {
-                        Some(v) => v.parse::<usize>().map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        Some(v) => v.parse::<usize>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for {}: {}", #param_name, e)
                         ))?,
                         None => #default_num,
@@ -287,11 +335,11 @@ fn generate_param_parsing(
             } else {
                 quote! {
                     let #field_name = params.get(#param_name)
-                        .ok_or_else(|| camel_endpoint::CamelError::InvalidUri(
+                        .ok_or_else(|| #endpoint_crate::CamelError::InvalidUri(
                             format!("missing required parameter: {}", #param_name)
                         ))?
                         .parse::<usize>()
-                        .map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        .map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for {}: {}", #param_name, e)
                         ))?
                 }
@@ -302,7 +350,7 @@ fn generate_param_parsing(
                 let default_num: i64 = default_val.parse().unwrap_or(0);
                 quote! {
                     let #field_name = match params.get(#param_name) {
-                        Some(v) => v.parse::<i64>().map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        Some(v) => v.parse::<i64>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for {}: {}", #param_name, e)
                         ))?,
                         None => #default_num,
@@ -311,11 +359,11 @@ fn generate_param_parsing(
             } else {
                 quote! {
                     let #field_name = params.get(#param_name)
-                        .ok_or_else(|| camel_endpoint::CamelError::InvalidUri(
+                        .ok_or_else(|| #endpoint_crate::CamelError::InvalidUri(
                             format!("missing required parameter: {}", #param_name)
                         ))?
                         .parse::<i64>()
-                        .map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        .map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for {}: {}", #param_name, e)
                         ))?
                 }
@@ -326,7 +374,7 @@ fn generate_param_parsing(
                 let default_num: i32 = default_val.parse().unwrap_or(0);
                 quote! {
                     let #field_name = match params.get(#param_name) {
-                        Some(v) => v.parse::<i32>().map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        Some(v) => v.parse::<i32>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for {}: {}", #param_name, e)
                         ))?,
                         None => #default_num,
@@ -335,11 +383,11 @@ fn generate_param_parsing(
             } else {
                 quote! {
                     let #field_name = params.get(#param_name)
-                        .ok_or_else(|| camel_endpoint::CamelError::InvalidUri(
+                        .ok_or_else(|| #endpoint_crate::CamelError::InvalidUri(
                             format!("missing required parameter: {}", #param_name)
                         ))?
                         .parse::<i32>()
-                        .map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        .map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for {}: {}", #param_name, e)
                         ))?
                 }
@@ -356,11 +404,11 @@ fn generate_param_parsing(
             } else {
                 quote! {
                     let #field_name = params.get(#param_name)
-                        .ok_or_else(|| camel_endpoint::CamelError::InvalidUri(
+                        .ok_or_else(|| #endpoint_crate::CamelError::InvalidUri(
                             format!("missing required parameter: {}", #param_name)
                         ))?
                         .parse::<#ty>()
-                        .map_err(|e| camel_endpoint::CamelError::InvalidUri(
+                        .map_err(|e| #endpoint_crate::CamelError::InvalidUri(
                             format!("invalid value for parameter '{}': {}", #param_name, e)
                         ))?
                 }
@@ -369,24 +417,16 @@ fn generate_param_parsing(
     }
 }
 
-/// Check if `#[uri_config(skip_impl)]` attribute is present
-fn has_skip_impl_attr(attrs: &[syn::Attribute]) -> bool {
-    for attr in attrs {
-        if let Meta::List(list) = &attr.meta
-            && list.path.is_ident("uri_config")
-            && let Ok(nested) = list.parse_args::<syn::Ident>()
-        {
-            return nested == "skip_impl";
-        }
-    }
-    false
-}
-
 pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
     let struct_name = &input.ident;
 
-    // Check for skip_impl attribute
-    let skip_impl = has_skip_impl_attr(&input.attrs);
+    let uri_config_attr = match parse_uri_config_attr(&input.attrs) {
+        Ok(a) => a,
+        Err(e) => return e.to_compile_error(),
+    };
+
+    let skip_impl = uri_config_attr.skip_impl;
+    let endpoint_crate = uri_config_attr.crate_path;
 
     // Extract scheme from struct attributes
     let scheme = match extract_scheme(&input.attrs) {
@@ -515,7 +555,7 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
                         let ty = field_type;
                         bindings.push(quote! {
                             let #field_name = parts.path.parse::<#ty>()
-                                .map_err(|_| camel_endpoint::CamelError::InvalidUri(
+                                .map_err(|_| #endpoint_crate::CamelError::InvalidUri(
                                     format!("invalid path value for field: {}", stringify!(#field_name))
                                 ))?
                         });
@@ -526,8 +566,13 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
                 param_name,
                 default,
             } => {
-                let parsing_code =
-                    generate_param_parsing(param_name, field_name, field_type, default.as_deref());
+                let parsing_code = generate_param_parsing(
+                    param_name,
+                    field_name,
+                    field_type,
+                    default.as_deref(),
+                    &endpoint_crate,
+                );
                 bindings.push(parsing_code);
             }
             FieldType::DurationFromMs { .. } => {
@@ -553,7 +598,7 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
     let parsing_logic = quote! {
         // Validate scheme
         if parts.scheme != #scheme_lit {
-            return Err(camel_endpoint::CamelError::InvalidUri(
+            return Err(#endpoint_crate::CamelError::InvalidUri(
                 format!("expected scheme '{}' but got '{}'", #scheme_lit, parts.scheme)
             ));
         }
@@ -573,7 +618,7 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
             impl #struct_name {
                 /// Parse URI components into this config.
                 /// Call this from your custom `UriConfig::from_components` implementation.
-                pub fn parse_uri_components(parts: camel_endpoint::UriComponents) -> Result<Self, camel_endpoint::CamelError> {
+                pub fn parse_uri_components(parts: #endpoint_crate::UriComponents) -> Result<Self, #endpoint_crate::CamelError> {
                     #parsing_logic
                 }
             }
@@ -581,17 +626,17 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
     } else {
         // Generate full UriConfig trait implementation
         quote! {
-            impl camel_endpoint::UriConfig for #struct_name {
+            impl #endpoint_crate::UriConfig for #struct_name {
                 fn scheme() -> &'static str {
                     #scheme_lit
                 }
 
-                fn from_uri(uri: &str) -> Result<Self, camel_endpoint::CamelError> {
-                    let parts = camel_endpoint::parse_uri(uri)?;
+                fn from_uri(uri: &str) -> Result<Self, #endpoint_crate::CamelError> {
+                    let parts = #endpoint_crate::parse_uri(uri)?;
                     Self::from_components(parts)
                 }
 
-                fn from_components(parts: camel_endpoint::UriComponents) -> Result<Self, camel_endpoint::CamelError> {
+                fn from_components(parts: #endpoint_crate::UriComponents) -> Result<Self, #endpoint_crate::CamelError> {
                     let config = Self::parse_uri_components(parts)?;
                     // Call validate to allow custom validation logic
                     config.validate()
@@ -600,7 +645,7 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
 
             impl #struct_name {
                 /// Parse URI components into this config.
-                pub fn parse_uri_components(parts: camel_endpoint::UriComponents) -> Result<Self, camel_endpoint::CamelError> {
+                pub fn parse_uri_components(parts: #endpoint_crate::UriComponents) -> Result<Self, #endpoint_crate::CamelError> {
                     #parsing_logic
                 }
             }

@@ -33,6 +33,7 @@ type DirectRegistry = Arc<Mutex<HashMap<String, DirectSender>>>;
 /// Example: `direct:foo` creates an endpoint named "foo"
 #[derive(Debug, Clone, UriConfig)]
 #[uri_scheme = "direct"]
+#[uri_config(crate = "camel_component_api")]
 pub struct DirectConfig {
     /// Endpoint name (path portion).
     pub name: String,

@@ -25,7 +25,6 @@ futures         = { workspace = true }
 tokio-util      = { workspace = true }
 
 [dev-dependencies]
-camel-api = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

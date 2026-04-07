@@ -25,7 +25,6 @@ bytes           = { workspace = true }
 futures         = { workspace = true }
 
 [dev-dependencies]
-camel-api = { workspace = true }
 opentelemetry = { workspace = true }
 
 [features]

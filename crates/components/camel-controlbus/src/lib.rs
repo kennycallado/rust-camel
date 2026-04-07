@@ -38,11 +38,13 @@ use tokio::sync::Mutex;
 use tower::Service;
 use tracing::debug;
 
-#[cfg(test)]
-use camel_api::RouteStatus;
-use camel_api::{RouteAction, RuntimeCommand, RuntimeQuery, RuntimeQueryResult};
-use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, parse_uri};
+use camel_component_api::{
+    Body, BoxProcessor, CamelError, Exchange, RouteAction, RuntimeCommand, RuntimeHandle,
+    RuntimeQuery, RuntimeQueryResult, parse_uri,
+};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+#[cfg(test)]
+use camel_component_api::{RouteStatus, RuntimeCommandBus, RuntimeCommandResult, RuntimeQueryBus};
 
 // ---------------------------------------------------------------------------
 // ControlBusComponent
@@ -185,7 +187,7 @@ struct ControlBusProducer {
     /// Action to perform on the route.
     action: RouteAction,
     /// Runtime command/query handle.
-    runtime: Arc<dyn camel_api::RuntimeHandle>,
+    runtime: Arc<dyn RuntimeHandle>,
 }
 
 impl Service<Exchange> for ControlBusProducer {
@@ -247,7 +249,7 @@ impl Service<Exchange> for ControlBusProducer {
 }
 
 async fn execute_runtime_action(
-    runtime: &dyn camel_api::RuntimeHandle,
+    runtime: &dyn RuntimeHandle,
     route_id: &str,
     action: &RouteAction,
     command_scope: &str,
@@ -356,53 +358,47 @@ mod tests {
     }
 
     #[async_trait]
-    impl camel_api::RuntimeCommandBus for MockRuntime {
-        async fn execute(
-            &self,
-            cmd: camel_api::RuntimeCommand,
-        ) -> Result<camel_api::RuntimeCommandResult, CamelError> {
+    impl RuntimeCommandBus for MockRuntime {
+        async fn execute(&self, cmd: RuntimeCommand) -> Result<RuntimeCommandResult, CamelError> {
             let marker = match cmd {
-                camel_api::RuntimeCommand::RegisterRoute { .. } => "register".to_string(),
-                camel_api::RuntimeCommand::StartRoute { route_id, .. } => {
+                RuntimeCommand::RegisterRoute { .. } => "register".to_string(),
+                RuntimeCommand::StartRoute { route_id, .. } => {
                     format!("start:{route_id}")
                 }
-                camel_api::RuntimeCommand::StopRoute { route_id, .. } => {
+                RuntimeCommand::StopRoute { route_id, .. } => {
                     format!("stop:{route_id}")
                 }
-                camel_api::RuntimeCommand::SuspendRoute { route_id, .. } => {
+                RuntimeCommand::SuspendRoute { route_id, .. } => {
                     format!("suspend:{route_id}")
                 }
-                camel_api::RuntimeCommand::ResumeRoute { route_id, .. } => {
+                RuntimeCommand::ResumeRoute { route_id, .. } => {
                     format!("resume:{route_id}")
                 }
-                camel_api::RuntimeCommand::ReloadRoute { route_id, .. } => {
+                RuntimeCommand::ReloadRoute { route_id, .. } => {
                     format!("reload:{route_id}")
                 }
-                camel_api::RuntimeCommand::FailRoute { route_id, .. } => format!("fail:{route_id}"),
-                camel_api::RuntimeCommand::RemoveRoute { route_id, .. } => {
+                RuntimeCommand::FailRoute { route_id, .. } => format!("fail:{route_id}"),
+                RuntimeCommand::RemoveRoute { route_id, .. } => {
                     format!("remove:{route_id}")
                 }
             };
             self.commands.lock().await.push(marker);
-            Ok(camel_api::RuntimeCommandResult::Accepted)
+            Ok(RuntimeCommandResult::Accepted)
         }
     }
 
     #[async_trait]
-    impl camel_api::RuntimeQueryBus for MockRuntime {
-        async fn ask(
-            &self,
-            query: camel_api::RuntimeQuery,
-        ) -> Result<camel_api::RuntimeQueryResult, CamelError> {
+    impl RuntimeQueryBus for MockRuntime {
+        async fn ask(&self, query: RuntimeQuery) -> Result<RuntimeQueryResult, CamelError> {
             match query {
-                camel_api::RuntimeQuery::GetRouteStatus { route_id } => {
+                RuntimeQuery::GetRouteStatus { route_id } => {
                     let status = self.statuses.get(&route_id).ok_or_else(|| {
                         CamelError::ProcessorError(format!(
                             "runtime: route '{}' not found",
                             route_id
                         ))
                     })?;
-                    Ok(camel_api::RuntimeQueryResult::RouteStatus {
+                    Ok(RuntimeQueryResult::RouteStatus {
                         route_id,
                         status: status.clone(),
                     })

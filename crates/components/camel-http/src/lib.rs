@@ -13,8 +13,7 @@ use tower::Service;
 use tracing::debug;
 
 use axum::body::BodyDataStream;
-use camel_api::body::{StreamBody, StreamMetadata};
-use camel_component_api::{Body, BoxProcessor, CamelError, Exchange};
+use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, StreamBody, StreamMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
 use futures::TryStreamExt;
@@ -2701,10 +2700,10 @@ mod tests {
     #[tokio::test]
     async fn test_streaming_response_chunked() {
         use bytes::Bytes;
-        use camel_api::body::{StreamBody, StreamMetadata};
         use camel_component_api::Body;
         use camel_component_api::CamelError;
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+        use camel_component_api::{StreamBody, StreamMetadata};
         use futures::stream;
         use std::sync::Arc;
         use tokio::sync::Mutex;

@@ -49,6 +49,7 @@ impl FromStr for LogLevel {
 /// Format: `log:category?level=info&showHeaders=true&showBody=true`
 #[derive(Debug, Clone, UriConfig)]
 #[uri_scheme = "log"]
+#[uri_config(crate = "camel_component_api")]
 pub struct LogConfig {
     /// Log category (the path portion of the URI).
     pub category: String,
