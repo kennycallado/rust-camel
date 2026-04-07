@@ -187,17 +187,12 @@ impl BeanStepDef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ThrottleStrategyDef {
+    #[default]
     Delay,
     Reject,
     Drop,
-}
-
-impl Default for ThrottleStrategyDef {
-    fn default() -> Self {
-        Self::Delay
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -208,17 +203,12 @@ pub struct ThrottleStepDef {
     pub steps: Vec<DeclarativeStep>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum LoadBalanceStrategyDef {
+    #[default]
     RoundRobin,
     Random,
     Failover,
-}
-
-impl Default for LoadBalanceStrategyDef {
-    fn default() -> Self {
-        Self::RoundRobin
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

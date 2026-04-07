@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use camel_api::CamelError;
-use camel_component_container::{cleanup_tracked_containers, ContainerComponent};
+use camel_component_container::{ContainerComponent, cleanup_tracked_containers};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;

@@ -1,6 +1,6 @@
+use camel_api::CamelError;
 use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_mock::MockComponent;
@@ -36,11 +36,11 @@ async fn main() -> Result<(), CamelError> {
         .log("Checking order priority", LogLevel::Error)
         .to("log:exchange-full?showBody=true&showHeaders=true&multiline=true&showCorrelationId=true")
         .process(|mut ex| async move {
-            if let Some(priority) = ex.input.header("priority").and_then(|v| v.as_str()) {
-                if priority == "high" {
-                    ex.input
-                        .set_header("CamelLogPriority", camel_api::Value::Bool(true));
-                }
+            if let Some(priority) = ex.input.header("priority").and_then(|v| v.as_str())
+                && priority == "high"
+            {
+                ex.input
+                    .set_header("CamelLogPriority", camel_api::Value::Bool(true));
             }
             Ok(ex)
         })

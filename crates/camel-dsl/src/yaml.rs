@@ -6,7 +6,7 @@ use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
 use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical};
-use crate::contract::{assert_contract_coverage, DeclarativeStepKind};
+use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,

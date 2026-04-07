@@ -1,9 +1,9 @@
 // lifecycle/application/route_definition.rs
 // Route definition and builder-step types. Route (compiled artifact) lives in adapters.
 
+use camel_api::UnitOfWorkConfig;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::UnitOfWorkConfig;
 use camel_api::{AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, SplitterConfig};
 use camel_component::ConcurrencyModel;
 
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_builder_step_debug_covers_many_variants() {
-        use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
+        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
         use camel_api::{
             DynamicRouterConfig, Exchange, IdentityProcessor, RoutingSlipConfig, Value,
         };

@@ -65,10 +65,10 @@ impl CreateUserRequest {
             return Err("email format is invalid".to_string());
         }
 
-        if let Some(age) = self.age {
-            if age > 150 {
-                return Err("age must be 150 or less".to_string());
-            }
+        if let Some(age) = self.age
+            && age > 150
+        {
+            return Err("age must be 150 or less".to_string());
         }
 
         let valid_roles = ["user", "admin", "moderator"];
@@ -104,10 +104,10 @@ impl UpdateUserRequest {
             }
         }
 
-        if let Some(age) = self.age {
-            if age > 150 {
-                return Err("age must be 150 or less".to_string());
-            }
+        if let Some(age) = self.age
+            && age > 150
+        {
+            return Err("age must be 150 or less".to_string());
         }
 
         if let Some(role) = &self.role {

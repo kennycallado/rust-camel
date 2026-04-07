@@ -45,8 +45,8 @@ use camel_component_log::LogComponent;
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
 use camel_config::CamelConfig;
-use camel_core::reload_watcher::{resolve_watch_dirs, watch_and_reload};
 use camel_core::CamelContext;
+use camel_core::reload_watcher::{resolve_watch_dirs, watch_and_reload};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]

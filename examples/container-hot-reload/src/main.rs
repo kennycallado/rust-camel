@@ -22,11 +22,11 @@
 use std::path::PathBuf;
 
 use camel_api::CamelError;
-use camel_component_container::{cleanup_tracked_containers, ContainerComponent};
+use camel_component_container::{ContainerComponent, cleanup_tracked_containers};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
-use camel_core::reload_watcher::{resolve_watch_dirs, watch_and_reload};
 use camel_core::CamelContext;
+use camel_core::reload_watcher::{resolve_watch_dirs, watch_and_reload};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]

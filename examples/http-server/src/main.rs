@@ -11,8 +11,8 @@ use camel_core::route::RouteDefinition;
 use camel_processor::LogLevel;
 use errors::ApiError;
 use models::{CreateUserRequest, UpdateUserRequest};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use storage::UserStorage;
 
 #[tokio::main]

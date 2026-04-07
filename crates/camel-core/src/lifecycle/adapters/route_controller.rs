@@ -935,14 +935,15 @@ impl DefaultRouteController {
                     use camel_api::EndpointResolver;
 
                     let expression = self.compile_language_expression(&expression)?;
-                    let expression: camel_api::RouterExpression = Arc::new(move |exchange: &Exchange| {
-                        let value = expression.evaluate(exchange).unwrap_or(Value::Null);
-                        match value {
-                            Value::Null => None,
-                            Value::String(s) => Some(s),
-                            other => Some(other.to_string()),
-                        }
-                    });
+                    let expression: camel_api::RouterExpression =
+                        Arc::new(move |exchange: &Exchange| {
+                            let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                            match value {
+                                Value::Null => None,
+                                Value::String(s) => Some(s),
+                                other => Some(other.to_string()),
+                            }
+                        });
 
                     let config = camel_api::DynamicRouterConfig::new(expression)
                         .uri_delimiter(uri_delimiter)
