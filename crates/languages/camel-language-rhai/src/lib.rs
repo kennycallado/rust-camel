@@ -1,6 +1,6 @@
-use camel_api::Value;
-use camel_api::exchange::Exchange;
-use camel_language_api::{Expression, Language, LanguageError, MutatingExpression, Predicate};
+use camel_language_api::{
+    Body, Exchange, Expression, Language, LanguageError, MutatingExpression, Predicate, Value,
+};
 use rhai::{Engine, Scope};
 use std::sync::{Arc, RwLock};
 
@@ -308,7 +308,7 @@ impl MutatingExpression for RhaiMutatingExpression {
             exchange.properties = rhai_map_to_value_map(&p);
         }
         if let Some(b) = scope.get_value::<String>("body") {
-            exchange.input.body = camel_api::Body::Text(b);
+            exchange.input.body = Body::Text(b);
         }
 
         Ok(dynamic_to_value(result))
@@ -373,8 +373,7 @@ impl Default for RhaiLanguage {
 
 #[cfg(test)]
 mod tests {
-    use camel_api::{Value, exchange::Exchange, message::Message};
-    use camel_language_api::Language;
+    use camel_language_api::{Exchange, Language, Message, Value};
 
     use super::RhaiLanguage;
 

@@ -1,5 +1,4 @@
-use camel_api::{Exchange, Message, Value};
-use camel_language_api::Language;
+use camel_language_api::{Exchange, Language, Message, Value};
 use camel_language_simple::SimpleLanguage;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 

@@ -1,8 +1,5 @@
 use crate::parser::{Expr, InterpolatedPart, Op, PathSegment};
-use camel_api::Value;
-use camel_api::body::Body;
-use camel_api::exchange::Exchange;
-use camel_language_api::LanguageError;
+use camel_language_api::{Body, Exchange, LanguageError, Value};
 
 pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError> {
     match expr {

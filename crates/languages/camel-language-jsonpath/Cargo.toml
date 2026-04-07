@@ -12,7 +12,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-camel-api.workspace = true
 camel-language-api.workspace = true
 jsonpath-rust = "1.0"
 serde_json.workspace = true

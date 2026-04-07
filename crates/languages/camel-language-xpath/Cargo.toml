@@ -12,7 +12,6 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-camel-api.workspace = true
 camel-language-api.workspace = true
 sxd-document = "0.3"
 sxd-xpath = "0.4"

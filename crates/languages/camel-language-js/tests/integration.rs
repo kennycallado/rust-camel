@@ -1,7 +1,4 @@
-use camel_api::Value;
-use camel_api::exchange::Exchange;
-use camel_api::message::Message;
-use camel_language_api::Language;
+use camel_language_api::{Exchange, Language, Message, Value};
 use camel_language_js::JsLanguage;
 use camel_processor::script_mutator::ScriptMutator;
 use tower::ServiceExt;

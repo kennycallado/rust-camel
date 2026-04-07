@@ -1,6 +1,4 @@
-use camel_api::Value;
-use camel_api::body::Body;
-use camel_api::exchange::Exchange;
+use camel_language_api::{Body, Exchange, Value};
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use jsonpath_rust::JsonPath;
 use serde_json::Value as JsonValue;
@@ -94,7 +92,7 @@ impl Language for JsonPathLanguage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::message::Message;
+    use camel_language_api::Message;
 
     fn exchange_with_json(json: &str) -> Exchange {
         let value: JsonValue = serde_json::from_str(json).unwrap();

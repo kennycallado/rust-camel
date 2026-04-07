@@ -1,8 +1,7 @@
 mod evaluator;
 mod parser;
 
-use camel_api::exchange::Exchange;
-use camel_language_api::{Expression, Language, LanguageError, Predicate};
+use camel_language_api::{Exchange, Expression, Language, LanguageError, Predicate, Value};
 
 pub struct SimpleLanguage;
 
@@ -10,7 +9,7 @@ struct SimpleExpression(parser::Expr);
 struct SimplePredicate(parser::Expr);
 
 impl Expression for SimpleExpression {
-    fn evaluate(&self, exchange: &Exchange) -> Result<camel_api::Value, LanguageError> {
+    fn evaluate(&self, exchange: &Exchange) -> Result<Value, LanguageError> {
         evaluator::evaluate(&self.0, exchange)
     }
 }
@@ -19,8 +18,8 @@ impl Predicate for SimplePredicate {
     fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
         let val = evaluator::evaluate(&self.0, exchange)?;
         Ok(match &val {
-            camel_api::Value::Bool(b) => *b,
-            camel_api::Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Null => false,
             _ => true,
         })
     }
@@ -45,8 +44,8 @@ impl Language for SimpleLanguage {
 #[cfg(test)]
 mod tests {
     use super::SimpleLanguage;
-    use camel_api::{Value, exchange::Exchange, message::Message};
     use camel_language_api::Language;
+    use camel_language_api::{Body, Exchange, Message, Value};
 
     fn exchange_with_header(key: &str, val: &str) -> Exchange {
         let mut msg = Message::default();
@@ -283,7 +282,7 @@ mod tests {
         let expr = lang
             .create_expression("Transformed: ${body} (source=${header.source})")
             .unwrap();
-        let mut msg = camel_api::message::Message::new("data");
+        let mut msg = Message::new("data");
         msg.set_header("source", Value::String("kafka".to_string()));
         let ex = Exchange::new(msg);
         let val = expr.evaluate(&ex).unwrap();
@@ -449,10 +448,8 @@ mod body_field_parser_tests {
 #[cfg(test)]
 mod body_field_eval_tests {
     use crate::SimpleLanguage;
-    use camel_api::Value;
-    use camel_api::body::Body;
-    use camel_api::exchange::Exchange;
     use camel_language_api::Language;
+    use camel_language_api::{Body, Exchange, Value};
     use serde_json::json;
 
     fn eval(expr_str: &str, body: Body) -> Value {
@@ -580,7 +577,7 @@ mod body_field_eval_tests {
             "${body.name}",
             Body::Text(r#"{"name":"Alice"}"#.to_string()),
         );
-        assert_eq!(result, camel_api::Value::Null);
+        assert_eq!(result, Value::Null);
     }
 
     #[test]
@@ -590,7 +587,7 @@ mod body_field_eval_tests {
             "${body.name}",
             Body::Json(serde_json::json!({"name": null})),
         );
-        assert_eq!(result, camel_api::Value::Null);
+        assert_eq!(result, Value::Null);
     }
 
     #[test]

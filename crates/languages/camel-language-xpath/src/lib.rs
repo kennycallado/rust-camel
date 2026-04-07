@@ -1,8 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use camel_api::Value;
-use camel_api::body::Body;
-use camel_api::exchange::Exchange;
+use camel_language_api::{Body, Exchange, Value};
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use serde_json::Value as JsonValue;
 use sxd_document::parser;
@@ -130,7 +128,7 @@ impl Language for XPathLanguage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::message::Message;
+    use camel_language_api::Message;
 
     fn exchange_with_xml(xml: &str) -> Exchange {
         Exchange::new(Message::new(Body::Xml(xml.to_string())))

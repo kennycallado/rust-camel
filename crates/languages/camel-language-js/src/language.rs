@@ -94,7 +94,7 @@ impl Language for JsLanguage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{Body, exchange::Exchange, message::Message};
+    use camel_language_api::{Body, Exchange, Message};
     use serde_json::json;
 
     fn make_exchange() -> Exchange {

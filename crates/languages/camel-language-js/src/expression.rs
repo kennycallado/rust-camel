@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use camel_api::{Body, Value, exchange::Exchange};
+use camel_language_api::{Body, Exchange, Value};
 use camel_language_api::{Expression, LanguageError, MutatingExpression, Predicate};
 
 use crate::{
@@ -175,7 +175,7 @@ fn is_truthy(v: &Value) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use camel_api::message::Message;
+    use camel_language_api::Message;
     use serde_json::json;
 
     use super::*;

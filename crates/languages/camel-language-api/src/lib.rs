@@ -1,7 +1,9 @@
 pub mod error;
 
-use camel_api::Value;
-use camel_api::exchange::Exchange;
+pub use camel_api::Value;
+pub use camel_api::body::Body;
+pub use camel_api::exchange::Exchange;
+pub use camel_api::message::Message;
 pub use error::LanguageError;
 
 /// A Language factory: produces Expression and Predicate objects.
