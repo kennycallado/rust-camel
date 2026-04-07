@@ -170,6 +170,52 @@ routes:
     from: "direct:start"
     steps:
       - load_balance:
+          strategy: "nonexistent"
+          steps:
+            - to: "mock:a"
+"#;
+
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_balance_weighted_strategy() {
+        let yaml = r#"
+routes:
+  - id: "lb-weighted"
+    from: "direct:start"
+    steps:
+      - load_balance:
+          strategy: "weighted"
+          distribution_ratio: "4,2,1"
+          steps:
+            - to: "mock:a"
+            - to: "mock:b"
+            - to: "mock:c"
+"#;
+
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let route = &routes[0];
+        match &route.steps[0] {
+            DeclarativeStep::LoadBalance(step) => match &step.strategy {
+                LoadBalanceStrategyDef::Weighted { distribution_ratio } => {
+                    assert_eq!(distribution_ratio, "4,2,1");
+                }
+                other => panic!("expected Weighted strategy, got {other:?}"),
+            },
+            other => panic!("expected LoadBalance step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_balance_weighted_missing_ratio_returns_error() {
+        let yaml = r#"
+routes:
+  - id: "lb-weighted-no-ratio"
+    from: "direct:start"
+    steps:
+      - load_balance:
           strategy: "weighted"
           steps:
             - to: "mock:a"

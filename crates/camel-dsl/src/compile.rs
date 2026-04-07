@@ -297,13 +297,37 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
             parallel,
             steps,
         }) => {
+            let compiled_steps = compile_declarative_steps(steps)?;
             let strategy = match strategy {
                 LoadBalanceStrategyDef::RoundRobin => LoadBalanceStrategy::RoundRobin,
                 LoadBalanceStrategyDef::Random => LoadBalanceStrategy::Random,
                 LoadBalanceStrategyDef::Failover => LoadBalanceStrategy::Failover,
+                LoadBalanceStrategyDef::Weighted { distribution_ratio } => {
+                    let weights: Vec<u32> = distribution_ratio
+                        .split(',')
+                        .map(|s| s.trim().parse::<u32>())
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| {
+                            CamelError::RouteError(format!(
+                                "weighted distribution_ratio contains invalid value: {e}"
+                            ))
+                        })?;
+                    if weights.len() != compiled_steps.len() {
+                        return Err(CamelError::RouteError(format!(
+                            "weighted distribution_ratio has {} weights but {} steps",
+                            weights.len(),
+                            compiled_steps.len()
+                        )));
+                    }
+                    let weighted: Vec<(String, u32)> = weights
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, w)| (format!("endpoint-{i}"), w))
+                        .collect();
+                    LoadBalanceStrategy::Weighted(weighted)
+                }
             };
             let config = LoadBalancerConfig { strategy, parallel };
-            let compiled_steps = compile_declarative_steps(steps)?;
             Ok(BuilderStep::LoadBalance {
                 config,
                 steps: compiled_steps,

@@ -468,6 +468,8 @@ pub struct LoadBalanceData {
     #[serde(default = "default_lb_strategy")]
     pub strategy: String,
     #[serde(default)]
+    pub distribution_ratio: Option<String>,
+    #[serde(default)]
     pub parallel: bool,
     #[serde(default)]
     pub steps: Vec<YamlStep>,

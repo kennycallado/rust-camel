@@ -29,6 +29,20 @@ routes:
             - to: "mock:lb-b"
 
   # ===========================================================================
+  # Route 2b: Weighted Load Balance EIP
+  # ===========================================================================
+  - id: "weighted-lb-demo"
+    from: "direct:start"
+    steps:
+      - load_balance:
+          strategy: "weighted"
+          distribution_ratio: "4,2,1"
+          steps:
+            - to: "mock:wlb-x"
+            - to: "mock:wlb-y"
+            - to: "mock:wlb-z"
+
+  # ===========================================================================
   # Route 3: Dynamic Router EIP
   # ===========================================================================
   - id: "dynamic-router-demo"

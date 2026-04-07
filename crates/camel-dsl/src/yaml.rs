@@ -498,6 +498,7 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
             load_balance:
                 LoadBalanceData {
                     strategy,
+                    distribution_ratio,
                     parallel,
                     steps,
                 },
@@ -506,6 +507,16 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 "round_robin" => LoadBalanceStrategyDef::RoundRobin,
                 "random" => LoadBalanceStrategyDef::Random,
                 "failover" => LoadBalanceStrategyDef::Failover,
+                "weighted" => {
+                    let ratio = distribution_ratio.ok_or_else(|| {
+                        CamelError::RouteError(
+                            "weighted strategy requires distribution_ratio (e.g. \"4,2,1\")".into(),
+                        )
+                    })?;
+                    LoadBalanceStrategyDef::Weighted {
+                        distribution_ratio: ratio,
+                    }
+                }
                 other => {
                     return Err(CamelError::RouteError(format!(
                         "unsupported load_balance.strategy `{other}`"

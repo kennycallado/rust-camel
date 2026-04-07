@@ -945,6 +945,9 @@ impl DefaultRouteController {
                             }
                         });
 
+                    // Note: timeout defaults to 60s (DynamicRouterConfig::new default).
+                    // Apache Camel does not expose a timeout option on dynamicRouter —
+                    // our timeout is a rust-camel extension.
                     let config = camel_api::DynamicRouterConfig::new(expression)
                         .uri_delimiter(uri_delimiter)
                         .cache_size(cache_size)

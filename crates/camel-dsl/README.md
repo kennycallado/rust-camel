@@ -54,6 +54,21 @@ steps:
         - to: "mock:b"
 ```
 
+Weighted distribution (follows Apache Camel's `distributionRatio` pattern):
+
+```yaml
+steps:
+  - load_balance:
+      strategy: "weighted"
+      distribution_ratio: "4,2,1"
+      steps:
+        - to: "seda:x"
+        - to: "seda:y"
+        - to: "seda:z"
+```
+
+The `distribution_ratio` string maps weights to steps by position. `"4,2,1"` means for every 7 messages: 4 to `seda:x`, 2 to `seda:y`, 1 to `seda:z`.
+
 ### Dynamic Router
 Route to endpoints determined at runtime:
 
@@ -62,6 +77,8 @@ steps:
   - dynamic_router:
       simple: "${header.dest}"
 ```
+
+> **Note:** The `dynamic_router` uses a 60s timeout by default. This is a rust-camel extension — Apache Camel's `dynamicRouter` does not expose a timeout option.
 
 ### Routing Slip
 Dynamic routing slip pattern:

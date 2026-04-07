@@ -209,6 +209,9 @@ pub enum LoadBalanceStrategyDef {
     RoundRobin,
     Random,
     Failover,
+    Weighted {
+        distribution_ratio: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
