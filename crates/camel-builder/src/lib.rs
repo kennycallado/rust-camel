@@ -11,6 +11,7 @@ use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
 use camel_api::splitter::SplitterConfig;
 use camel_api::throttler::{ThrottleStrategy, ThrottlerConfig};
+use camel_api::DelayConfig;
 use camel_api::{
     BoxProcessor, CamelError, CanonicalRouteSpec, Exchange, FilterPredicate, IdentityProcessor,
     ProcessorFn, Value,
@@ -127,6 +128,24 @@ pub trait StepAccumulator: Sized {
     /// inside `.filter()`, inside `.split()`, etc.
     fn stop(mut self) -> Self {
         self.steps_mut().push(BuilderStep::Stop);
+        self
+    }
+
+    fn delay(mut self, duration: std::time::Duration) -> Self {
+        self.steps_mut().push(BuilderStep::Delay {
+            config: DelayConfig::from_duration(duration),
+        });
+        self
+    }
+
+    fn delay_with_header(
+        mut self,
+        duration: std::time::Duration,
+        header: impl Into<String>,
+    ) -> Self {
+        self.steps_mut().push(BuilderStep::Delay {
+            config: DelayConfig::from_duration_with_header(duration, header),
+        });
         self
     }
 
@@ -685,6 +704,10 @@ fn canonicalize_step(step: BuilderStep) -> Result<CanonicalStepSpec, CamelError>
         BuilderStep::Log { message, .. } => Ok(CanonicalStepSpec::Log { message }),
         BuilderStep::Stop => Ok(CanonicalStepSpec::Stop),
         BuilderStep::WireTap { uri } => Ok(CanonicalStepSpec::WireTap { uri }),
+        BuilderStep::Delay { config } => Ok(CanonicalStepSpec::Delay {
+            delay_ms: config.delay_ms,
+            dynamic_header: config.dynamic_header,
+        }),
         BuilderStep::DeclarativeScript { expression } => {
             Ok(CanonicalStepSpec::Script { expression })
         }
@@ -864,6 +887,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::Filter { .. } => "filter",
         BuilderStep::Choice { .. } => "choice",
         BuilderStep::WireTap { .. } => "wire_tap",
+        BuilderStep::Delay { .. } => "delay",
         BuilderStep::Multicast { .. } => "multicast",
         BuilderStep::DeclarativeLog { .. } => "log",
         BuilderStep::Bean { .. } => "bean",

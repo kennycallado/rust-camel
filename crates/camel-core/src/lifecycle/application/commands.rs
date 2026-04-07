@@ -519,6 +519,15 @@ fn canonical_step_to_builder_step(
             })
         }
         camel_api::runtime::CanonicalStepSpec::Stop => Ok(BuilderStep::Stop),
+        camel_api::runtime::CanonicalStepSpec::Delay {
+            delay_ms,
+            dynamic_header,
+        } => Ok(BuilderStep::Delay {
+            config: camel_api::DelayConfig {
+                delay_ms,
+                dynamic_header,
+            },
+        }),
     }
 }
 

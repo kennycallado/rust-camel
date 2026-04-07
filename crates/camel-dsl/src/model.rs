@@ -274,6 +274,12 @@ pub struct DataFormatDef {
     pub format: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelayStepDef {
+    pub delay_ms: u64,
+    pub dynamic_header: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclarativeStep {
     To(ToStepDef),
@@ -296,4 +302,5 @@ pub enum DeclarativeStep {
     Marshal(DataFormatDef),
     Unmarshal(DataFormatDef),
     Bean(BeanStepDef),
+    Delay(DelayStepDef),
 }

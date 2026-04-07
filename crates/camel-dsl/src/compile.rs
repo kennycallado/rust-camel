@@ -5,28 +5,29 @@ use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::{
-    AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
-    split_body_lines,
+    split_body_json_array, split_body_lines, AggregationStrategy as SplitAggregation,
+    SplitterConfig,
 };
 use camel_api::{
-    CamelError, CanonicalRouteSpec, CircuitBreakerConfig, IdentityProcessor, LoadBalanceStrategy,
-    LoadBalancerConfig, ThrottleStrategy, ThrottlerConfig, canonical_contract_rejection_reason,
+    canonical_contract_rejection_reason,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
         CanonicalWhenSpec,
     },
+    CamelError, CanonicalRouteSpec, CircuitBreakerConfig, DelayConfig, IdentityProcessor,
+    LoadBalanceStrategy, LoadBalancerConfig, ThrottleStrategy, ThrottlerConfig,
 };
 use camel_component_api::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{
-    ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService, builtin_data_format,
+    builtin_data_format, ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService,
 };
 
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
-    DeclarativeStep, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
+    DeclarativeStep, DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
     LoadBalanceStrategyDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
     RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
     SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
@@ -395,6 +396,17 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
                 UnmarshalService::new(camel_api::IdentityProcessor, df),
             )))
         }
+        DeclarativeStep::Delay(DelayStepDef {
+            delay_ms,
+            dynamic_header,
+        }) => {
+            let config = DelayConfig::new(delay_ms);
+            let config = match dynamic_header {
+                Some(h) => config.with_dynamic_header(h),
+                None => config,
+            };
+            Ok(BuilderStep::Delay { config })
+        }
     }
 }
 
@@ -434,6 +446,13 @@ fn compile_declarative_step_to_canonical(
         }
         DeclarativeStep::Split(def) => compile_split_step_to_canonical(def),
         DeclarativeStep::Aggregate(def) => compile_aggregate_step_to_canonical(def),
+        DeclarativeStep::Delay(DelayStepDef {
+            delay_ms,
+            dynamic_header,
+        }) => Ok(CanonicalStepSpec::Delay {
+            delay_ms,
+            dynamic_header,
+        }),
         other => {
             let step_name = declarative_step_name(&other);
             let detail = canonical_contract_rejection_reason(step_name)
@@ -542,6 +561,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Bean(_) => "bean",
         DeclarativeStep::Marshal(_) => "marshal",
         DeclarativeStep::Unmarshal(_) => "unmarshal",
+        DeclarativeStep::Delay(_) => "delay",
     }
 }
 

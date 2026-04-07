@@ -1,9 +1,9 @@
 // lifecycle/application/route_definition.rs
 // Route definition and builder-step types. Route (compiled artifact) lives in adapters.
 
-use camel_api::UnitOfWorkConfig;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::UnitOfWorkConfig;
 use camel_api::{AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, SplitterConfig};
 use camel_component_api::ConcurrencyModel;
 
@@ -36,9 +36,14 @@ pub enum BuilderStep {
         message: String,
     },
     /// Declarative set_header (literal or language-based value), resolved at route-add time.
-    DeclarativeSetHeader { key: String, value: ValueSourceDef },
+    DeclarativeSetHeader {
+        key: String,
+        value: ValueSourceDef,
+    },
     /// Declarative set_body (literal or language-based value), resolved at route-add time.
-    DeclarativeSetBody { value: ValueSourceDef },
+    DeclarativeSetBody {
+        value: ValueSourceDef,
+    },
     /// Declarative filter using a language predicate, resolved at route-add time.
     DeclarativeFilter {
         predicate: LanguageExpressionDef,
@@ -50,7 +55,9 @@ pub enum BuilderStep {
         otherwise: Option<Vec<BuilderStep>>,
     },
     /// Declarative script step evaluated by language and written to body.
-    DeclarativeScript { expression: LanguageExpressionDef },
+    DeclarativeScript {
+        expression: LanguageExpressionDef,
+    },
     /// Declarative split using a language expression, resolved at route-add time.
     DeclarativeSplit {
         expression: LanguageExpressionDef,
@@ -79,7 +86,9 @@ pub enum BuilderStep {
         steps: Vec<BuilderStep>,
     },
     /// An Aggregator step: collects exchanges by correlation key, emits when complete.
-    Aggregate { config: AggregatorConfig },
+    Aggregate {
+        config: AggregatorConfig,
+    },
     /// A Filter sub-pipeline: predicate + nested steps executed only when predicate is true.
     Filter {
         predicate: FilterPredicate,
@@ -92,7 +101,9 @@ pub enum BuilderStep {
         otherwise: Option<Vec<BuilderStep>>,
     },
     /// A WireTap step: sends a clone of the exchange to a tap endpoint (fire-and-forget).
-    WireTap { uri: String },
+    WireTap {
+        uri: String,
+    },
     /// A Multicast step: sends the same exchange to multiple destinations.
     Multicast {
         steps: Vec<BuilderStep>,
@@ -104,10 +115,16 @@ pub enum BuilderStep {
         message: ValueSourceDef,
     },
     /// Bean invocation step — resolved at route-add time.
-    Bean { name: String, method: String },
+    Bean {
+        name: String,
+        method: String,
+    },
     /// Script step: executes a script that can mutate the exchange.
     /// The script has access to `headers`, `properties`, and `body`.
-    Script { language: String, script: String },
+    Script {
+        language: String,
+        script: String,
+    },
     /// Throttle step: rate limiting with configurable behavior when limit exceeded.
     Throttle {
         config: camel_api::ThrottlerConfig,
@@ -124,6 +141,9 @@ pub enum BuilderStep {
     },
     RoutingSlip {
         config: camel_api::RoutingSlipConfig,
+    },
+    Delay {
+        config: camel_api::DelayConfig,
     },
 }
 
@@ -223,6 +243,9 @@ impl std::fmt::Debug for BuilderStep {
             }
             BuilderStep::RoutingSlip { .. } => {
                 write!(f, "BuilderStep::RoutingSlip {{ .. }}")
+            }
+            BuilderStep::Delay { config } => {
+                write!(f, "BuilderStep::Delay {{ config: {:?} }}", config)
             }
         }
     }
@@ -462,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_builder_step_debug_covers_many_variants() {
-        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
+        use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
         use camel_api::{
             DynamicRouterConfig, Exchange, IdentityProcessor, RoutingSlipConfig, Value,
         };

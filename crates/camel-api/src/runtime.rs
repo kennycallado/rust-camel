@@ -16,6 +16,7 @@ pub const CANONICAL_CONTRACT_SUPPORTED_STEPS: &[&str] = &[
     "split",
     "aggregate",
     "stop",
+    "delay",
 ];
 pub const CANONICAL_CONTRACT_DECLARATIVE_ONLY_STEPS: &[&str] =
     &["script", "filter", "choice", "split"];
@@ -111,6 +112,10 @@ pub enum CanonicalStepSpec {
         config: CanonicalAggregateSpec,
     },
     Stop,
+    Delay {
+        delay_ms: u64,
+        dynamic_header: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,7 +261,8 @@ fn validate_steps(steps: &[CanonicalStepSpec]) -> Result<(), CamelError> {
             }
             CanonicalStepSpec::Log { .. }
             | CanonicalStepSpec::Script { .. }
-            | CanonicalStepSpec::Stop => {}
+            | CanonicalStepSpec::Stop
+            | CanonicalStepSpec::Delay { .. } => {}
         }
     }
     Ok(())

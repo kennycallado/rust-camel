@@ -105,6 +105,26 @@ fn default_open_duration_ms() -> u64 {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct DelayStep {
+    pub delay: DelayBody,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub enum DelayBody {
+    Short(u64),
+    Full(DelayFullConfig),
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct DelayFullConfig {
+    pub delay_ms: u64,
+    #[serde(default)]
+    pub dynamic_header: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum YamlStep {
     To(ToStep),
@@ -128,6 +148,7 @@ pub enum YamlStep {
     ConvertBodyTo(ConvertBodyToStep),
     Marshal(MarshalStep),
     Unmarshal(UnmarshalStep),
+    Delay(DelayStep),
 }
 
 #[derive(Deserialize, Debug)]

@@ -94,6 +94,7 @@ members = [
     "examples/routing-slip",
     "examples/load-balancer",
     "examples/throttler",
+    "examples/delayer",
     "crates/components/camel-container",
     "crates/services/camel-prometheus",
     "crates/services/camel-otel",

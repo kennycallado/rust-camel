@@ -2605,6 +2605,64 @@ async fn choice_short_circuits_first_match() {
 }
 
 // ---------------------------------------------------------------------------
+// Test: Delay step waits at least configured duration
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn delay_step_waits_configured_duration() {
+    use camel_api::body::Body;
+    use camel_api::{Exchange, Message};
+    use camel_component_direct::DirectComponent;
+    use std::time::{Duration, Instant};
+    use tower::util::ServiceExt;
+
+    let direct = DirectComponent::new();
+    let h = CamelTestContext::builder()
+        .with_component(direct)
+        .with_mock()
+        .build()
+        .await;
+
+    let route = RouteBuilder::from("direct:delay-in")
+        .route_id("test-delay-step")
+        .delay(Duration::from_millis(100))
+        .to("mock:delay-out")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let producer = {
+        let ctx = h.ctx().lock().await;
+        let producer_ctx = ctx.producer_context();
+        let registry = ctx.registry();
+        let component = registry.get("direct").unwrap();
+        let endpoint = component.create_endpoint("direct:delay-in").unwrap();
+        endpoint.create_producer(&producer_ctx).unwrap()
+    };
+
+    let exchange = Exchange::new(Message::new(Body::Text("hello".to_string())));
+
+    let started = Instant::now();
+    let _ = producer.oneshot(exchange).await.unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(100),
+        "expected at least 100ms delay, got {:?}",
+        elapsed
+    );
+
+    let endpoint = h.mock().get_endpoint("delay-out").unwrap();
+    endpoint.await_exchanges(1, Duration::from_secs(2)).await;
+
+    h.stop().await;
+}
+
+// ---------------------------------------------------------------------------
 // Test: XML body pipeline — direct:xml-in → convert_body_to(Text) → mock:xml-out
 // ---------------------------------------------------------------------------
 

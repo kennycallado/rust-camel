@@ -561,6 +561,10 @@ impl DefaultRouteController {
                 BuilderStep::Stop => {
                     processors.push((BoxProcessor::new(camel_processor::StopService), None));
                 }
+                BuilderStep::Delay { config } => {
+                    let svc = camel_processor::delayer::DelayerService::new(config);
+                    processors.push((BoxProcessor::new(svc), None));
+                }
                 BuilderStep::Log { level, message } => {
                     let svc = camel_processor::LogProcessor::new(level, message);
                     processors.push((BoxProcessor::new(svc), None));

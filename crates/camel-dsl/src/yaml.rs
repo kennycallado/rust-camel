@@ -6,21 +6,21 @@ use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
 use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical};
-use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
+use crate::contract::{assert_contract_coverage, DeclarativeStepKind};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
     DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep,
-    DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef,
-    LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef, RoutingSlipStepDef,
-    ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef,
-    SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef,
-    WireTapStepDef,
+    DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
+    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
+    RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
+    SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
+    ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
-    AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep,
-    DynamicRouterData, DynamicRouterStep, FilterStep, LoadBalanceData, LoadBalanceStep, LogConfig,
-    LogMessageData, LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep,
+    AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
+    DelayStep, DynamicRouterData, DynamicRouterStep, FilterStep, LoadBalanceData, LoadBalanceStep,
+    LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep,
     PredicateBlock, RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig,
     SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitExpressionConfig,
     SplitExpressionYaml, SplitStep, StopStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
@@ -589,6 +589,16 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 period_ms: period_secs.saturating_mul(1000),
                 strategy,
                 steps,
+            }))
+        }
+        YamlStep::Delay(DelayStep { delay }) => {
+            let (delay_ms, dynamic_header) = match delay {
+                DelayBody::Short(ms) => (ms, None),
+                DelayBody::Full(cfg) => (cfg.delay_ms, cfg.dynamic_header),
+            };
+            Ok(DeclarativeStep::Delay(DelayStepDef {
+                delay_ms,
+                dynamic_header,
             }))
         }
     }

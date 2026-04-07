@@ -21,12 +21,23 @@
 - **Route-level configuration**: Auto-startup, startup ordering, concurrency, error handling, circuit breaker, unit-of-work hooks
 
 - **Environment variable interpolation**: Inject env vars in route files using `${env:VAR_NAME}` syntax
-- **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, wire_tap, multicast, stop, script, bean, throttle, load_balance, dynamic_router, routing_slip
+- **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, stop, script, bean, throttle, load_balance, dynamic_router, routing_slip
 
 ## Supported YAML Steps
 
 ### Core Steps
-to, log, set_header, set_body, transform, filter, choice, split, aggregate, wire_tap, multicast, stop, script, bean
+to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, stop, script, bean
+
+### Delay
+Delay exchange processing:
+
+```yaml
+steps:
+  - delay: 500                      # shorthand: 500ms fixed
+  - delay:                          # full form:
+      delay_ms: 1000
+      dynamic_header: CamelDelayMs
+```
 
 ### Throttle
 Rate-limit message processing:
@@ -174,6 +185,7 @@ routes:
 | `choice` | Content-based router | `- choice: { when: [...], otherwise: [...] }` |
 | `split` | Split message | `- split: { expression: "body_lines", steps: [...] }` |
 | `aggregate` | Aggregate messages with size/timeout completion | `- aggregate: { header: "id", completion_size: 5, completion_timeout_ms: 5000 }` |
+| `delay` | Delay exchange processing | `- delay: 500` or `- delay: { delay_ms: 1000, dynamic_header: "CamelDelayMs" }` |
 | `wire_tap` | Fire-and-forget tap | `- wire_tap: "direct:audit"` |
 | `multicast` | Fan-out to multiple | `- multicast: { steps: [...] }` |
 | `stop` | Stop pipeline | `- stop: true` |

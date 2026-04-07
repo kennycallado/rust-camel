@@ -21,6 +21,7 @@
 - **Error Handler**: Centralized error handling
 - **Stop**: Stop processing immediately
 - **Script**: Execute mutating expressions via `ScriptMutator`; changes to headers, properties, and body propagate back with atomic rollback on error
+- **Delayer**: Delay message processing with fixed or dynamic (header-based) duration
 - **Stream Handling**: Processors that consume streams replace the body with a JSON placeholder `{"placeholder": true}`
 - **Marshal / Unmarshal**: Serialize/deserialize message bodies using pluggable data formats (JSON, XML)
 
@@ -40,9 +41,9 @@ camel-processor = "0.2"
 ```rust
 use camel_processor::{
     FilterService, LogProcessor, LogLevel, SetHeader, SetBody,
-    MapBody, SplitterService, MulticastService
+    MapBody, SplitterService, MulticastService, DelayerService
 };
-use camel_api::{Exchange, Message, Body, Value, BoxProcessor};
+use camel_api::{Exchange, Message, Body, Value, BoxProcessor, DelayConfig};
 
 // Filter exchanges
 let filter = FilterService::new(
@@ -60,6 +61,14 @@ let set_header = SetHeader::new(identity, "source", Value::String("api".into()))
 let upper = MapBody::new(identity, |body: Body| {
     body.as_text().map(|t| Body::Text(t.to_uppercase())).unwrap_or(body)
 });
+
+// Delay with fixed duration
+let delayer = DelayerService::new(DelayConfig::new(500));
+
+// Delay with dynamic header
+let dynamic_delayer = DelayerService::new(
+    DelayConfig::new(1000).with_dynamic_header("CamelDelayMs")
+);
 ```
 
 ### With RouteBuilder (Recommended)
@@ -99,6 +108,7 @@ let route = RouteBuilder::from("timer:tick")
 | `ScriptMutator` | Execute mutating scripts that modify Exchange headers, properties, or body |
 | `MarshalService` | Marshal body using a DataFormat (e.g., Json → Text) |
 | `UnmarshalService` | Unmarshal body using a DataFormat (e.g., Text → Json) |
+| `DelayerService` | Delay message processing by a fixed or dynamic duration |
 
 ## Data Formats
 

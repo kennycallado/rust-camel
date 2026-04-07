@@ -156,6 +156,21 @@ let route = RouteBuilder::from("timer:orders?period=200")
     .unwrap();
 ```
 
+### Delay Pattern
+
+```rust
+use std::time::Duration;
+
+let route = RouteBuilder::from("direct:input")
+    // Delay processing by 500ms
+    .delay(Duration::from_millis(500))
+    // Delay with dynamic header override
+    .delay_with_header(Duration::from_secs(1), "CamelDelayMs")
+    .to("mock:result")
+    .build()
+    .unwrap();
+```
+
 #### AggregatorConfig Builder Methods
 
 | Method | Description |
