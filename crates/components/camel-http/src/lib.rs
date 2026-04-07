@@ -1026,6 +1026,25 @@ fn validate_url_for_ssrf(url: &str, config: &HttpEndpointConfig) -> Result<(), C
                         domain
                     )));
                 }
+
+                // Resolve DNS to verify no private IPs are returned
+                if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(domain, 0)) {
+                    for addr in addrs {
+                        let ip = addr.ip();
+                        let is_blocked = match ip {
+                            std::net::IpAddr::V4(ipv4) => {
+                                ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local()
+                            }
+                            std::net::IpAddr::V6(ipv6) => ipv6.is_loopback(),
+                        };
+                        if is_blocked {
+                            return Err(CamelError::ProcessorError(format!(
+                                "Domain '{}' resolves to a private IP '{}' which is not allowed",
+                                domain, ip
+                            )));
+                        }
+                    }
+                }
             }
         }
     }
