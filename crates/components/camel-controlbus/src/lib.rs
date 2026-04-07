@@ -40,12 +40,9 @@ use tracing::debug;
 
 #[cfg(test)]
 use camel_api::RouteStatus;
-use camel_api::{
-    Body, BoxProcessor, CamelError, Exchange, RouteAction, RuntimeCommand, RuntimeQuery,
-    RuntimeQueryResult,
-};
-use camel_component::{Component, Consumer, Endpoint, ProducerContext};
-use camel_endpoint::parse_uri;
+use camel_api::{RouteAction, RuntimeCommand, RuntimeQuery, RuntimeQueryResult};
+use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, parse_uri};
+use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 
 // ---------------------------------------------------------------------------
 // ControlBusComponent
@@ -331,7 +328,7 @@ fn command_id(route_id: &str, operation: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::Message;
+    use camel_component_api::Message;
     use tower::ServiceExt;
 
     struct MockRuntime {

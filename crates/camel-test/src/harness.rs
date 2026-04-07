@@ -111,7 +111,7 @@ macro_rules! impl_builder_methods {
             /// Register any component that implements the `Component` trait.
             pub fn with_component<C>(mut self, component: C) -> Self
             where
-                C: camel_component::Component + 'static,
+                C: camel_component_api::Component + 'static,
             {
                 self.registrations
                     .push(Box::new(move |ctx: &mut CamelContext| {

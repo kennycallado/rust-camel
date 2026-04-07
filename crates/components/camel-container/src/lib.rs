@@ -12,9 +12,9 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use bollard::Docker;
 use bollard::service::{HostConfig, PortBinding};
-use camel_api::{Body, BoxProcessor, CamelError, Exchange, Message};
-use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
-use camel_endpoint::parse_uri;
+use camel_component_api::parse_uri;
+use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, Message};
+use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 use tower::Service;
 
 /// Global tracker for containers created by this component.
@@ -821,8 +821,8 @@ impl Consumer for ContainerConsumer {
         Ok(())
     }
 
-    fn concurrency_model(&self) -> camel_component::ConcurrencyModel {
-        camel_component::ConcurrencyModel::Concurrent { max: None }
+    fn concurrency_model(&self) -> camel_component_api::ConcurrencyModel {
+        camel_component_api::ConcurrencyModel::Concurrent { max: None }
     }
 }
 
@@ -1404,7 +1404,7 @@ mod tests {
         assert!(config.parse_env().is_none());
     }
 
-    use camel_api::Message;
+    use camel_component_api::Message;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -1854,7 +1854,7 @@ mod tests {
 
         assert_eq!(
             consumer.concurrency_model(),
-            camel_component::ConcurrencyModel::Concurrent { max: None }
+            camel_component_api::ConcurrencyModel::Concurrent { max: None }
         );
     }
 
@@ -1975,7 +1975,7 @@ mod tests {
         // Assert that the input exchange body is a JSON array
         // (because list_containers should put the JSON result in the body)
         match &result.input.body {
-            camel_api::Body::Json(json_value) => {
+            camel_component_api::Body::Json(json_value) => {
                 assert!(
                     json_value.is_array(),
                     "Expected input body to be a JSON array, got: {:?}",

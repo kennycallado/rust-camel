@@ -1,4 +1,4 @@
-use camel_api::{Body, CamelError, Exchange};
+use camel_component_api::{Body, CamelError, Exchange};
 use rdkafka::config::ClientConfig;
 #[cfg(feature = "otel")]
 use rdkafka::message::{Header, OwnedHeaders};
@@ -189,7 +189,8 @@ impl Service<Exchange> for KafkaProducer {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use camel_api::{Message, StreamBody};
+    use camel_api::StreamBody;
+    use camel_component_api::Message;
     use futures::stream;
     use serde_json::json;
     use std::sync::Arc;

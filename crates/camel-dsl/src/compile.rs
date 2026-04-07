@@ -17,7 +17,7 @@ use camel_api::{
         CanonicalWhenSpec,
     },
 };
-use camel_component::ConcurrencyModel;
+use camel_component_api::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{
     ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService, builtin_data_format,

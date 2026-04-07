@@ -12,9 +12,7 @@ keywords = ["camel", "redis", "integration", "messaging", "cache"]
 categories = ["database", "asynchronous", "network-programming"]
 
 [dependencies]
-camel-api = { workspace = true }
-camel-component = { workspace = true }
-camel-endpoint = { workspace = true }
+camel-component-api = { workspace = true }
 redis = { version = "1", features = ["tokio-comp", "aio"] }
 tokio = { workspace = true }
 async-trait = { workspace = true }

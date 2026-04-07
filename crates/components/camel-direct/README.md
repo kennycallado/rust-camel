@@ -67,14 +67,14 @@ ctx.add_route(route2).await?;
 let route = RouteBuilder::from("direct:request")
     .process(|mut ex| async move {
         // Process and modify exchange
-        ex.input.body = camel_api::Body::Text("Response".to_string());
+        ex.input.body = camel_component_api::Body::Text("Response".to_string());
         Ok(ex)
     })
     .build()?;
 
 // In another route
 let client_route = RouteBuilder::from("timer:client")
-    .set_body(camel_api::Body::Text("Request".to_string()))
+    .set_body(camel_component_api::Body::Text("Request".to_string()))
     .to("direct:request")  // Blocks until response
     .log("Got response", camel_processor::LogLevel::Info)
     .build()?;

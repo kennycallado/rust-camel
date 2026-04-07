@@ -15,7 +15,7 @@ categories.workspace = true
 camel-api.workspace = true
 camel-core.workspace = true
 camel-builder.workspace = true
-camel-component.workspace = true
+camel-component-api.workspace = true
 camel-processor.workspace = true
 camel-component-mock.workspace = true
 camel-component-timer.workspace = true
@@ -37,7 +37,6 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "any", "postgres"], optio
 
 [dev-dependencies]
 camel-config.workspace = true
-camel-endpoint.workspace = true
 camel-language-api.workspace = true
 camel-language-rhai.workspace = true
 camel-language-jsonpath.workspace = true

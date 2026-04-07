@@ -18,11 +18,10 @@ use tokio_util::io::ReaderStream;
 use tower::Service;
 use tracing::{debug, warn};
 
-use camel_api::{
-    BoxProcessor, CamelError, Exchange, Message, body::Body, body::StreamBody, body::StreamMetadata,
-};
-use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
-use camel_endpoint::{UriConfig, parse_uri};
+use camel_api::body::{StreamBody, StreamMetadata};
+use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, Message};
+use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
+use camel_component_api::{UriConfig, parse_uri};
 
 // ---------------------------------------------------------------------------
 // TempFileGuard — RAII cleanup for temp files (panic-safe)
@@ -254,7 +253,7 @@ impl UriConfig for FileConfig {
         Self::from_components(parts)
     }
 
-    fn from_components(parts: camel_endpoint::UriComponents) -> Result<Self, CamelError> {
+    fn from_components(parts: camel_component_api::UriComponents) -> Result<Self, CamelError> {
         Self::parse_uri_components(parts)?.validate()
     }
 
@@ -1588,16 +1587,16 @@ mod tests {
             Ok(Bytes::from("world")),
         ];
         let stream = futures::stream::iter(chunks);
-        let body = Body::Stream(camel_api::body::StreamBody {
+        let body = Body::Stream(StreamBody {
             stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream)))),
-            metadata: camel_api::body::StreamMetadata {
+            metadata: StreamMetadata {
                 size_hint: None,
                 content_type: None,
                 origin: None,
             },
         });
 
-        let exchange = camel_api::Exchange::new(camel_api::Message::new(body));
+        let exchange = Exchange::new(Message::new(body));
         tower::ServiceExt::oneshot(producer, exchange)
             .await
             .unwrap();
@@ -1626,16 +1625,16 @@ mod tests {
             )),
         ];
         let stream = futures::stream::iter(chunks);
-        let body = Body::Stream(camel_api::body::StreamBody {
+        let body = Body::Stream(StreamBody {
             stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream)))),
-            metadata: camel_api::body::StreamMetadata {
+            metadata: StreamMetadata {
                 size_hint: None,
                 content_type: None,
                 origin: None,
             },
         });
 
-        let exchange = camel_api::Exchange::new(camel_api::Message::new(body));
+        let exchange = Exchange::new(Message::new(body));
         let result = tower::ServiceExt::oneshot(producer, exchange).await;
         assert!(
             result.is_err(),
@@ -1671,16 +1670,16 @@ mod tests {
 
         let chunks: Vec<Result<Bytes, CamelError>> = vec![Ok(Bytes::from("line2\n"))];
         let stream = futures::stream::iter(chunks);
-        let body = Body::Stream(camel_api::body::StreamBody {
+        let body = Body::Stream(StreamBody {
             stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream)))),
-            metadata: camel_api::body::StreamMetadata {
+            metadata: StreamMetadata {
                 size_hint: None,
                 content_type: None,
                 origin: None,
             },
         });
 
-        let exchange = camel_api::Exchange::new(camel_api::Message::new(body));
+        let exchange = Exchange::new(Message::new(body));
         tower::ServiceExt::oneshot(producer, exchange)
             .await
             .unwrap();
@@ -1712,16 +1711,16 @@ mod tests {
             Ok(Bytes::from("never-written")), // This won't be reached
         ];
         let stream = futures::stream::iter(chunks);
-        let body = Body::Stream(camel_api::body::StreamBody {
+        let body = Body::Stream(StreamBody {
             stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream)))),
-            metadata: camel_api::body::StreamMetadata {
+            metadata: StreamMetadata {
                 size_hint: None,
                 content_type: None,
                 origin: None,
             },
         });
 
-        let exchange = camel_api::Exchange::new(camel_api::Message::new(body));
+        let exchange = Exchange::new(Message::new(body));
         let result = tower::ServiceExt::oneshot(producer, exchange).await;
 
         // 1. Producer must return an error
@@ -1759,16 +1758,16 @@ mod tests {
             >,
         >;
         let arc: MaybeStream = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let body = Body::Stream(camel_api::body::StreamBody {
+        let body = Body::Stream(StreamBody {
             stream: arc,
-            metadata: camel_api::body::StreamMetadata {
+            metadata: StreamMetadata {
                 size_hint: None,
                 content_type: None,
                 origin: None,
             },
         });
 
-        let exchange = camel_api::Exchange::new(camel_api::Message::new(body));
+        let exchange = Exchange::new(Message::new(body));
         let result = tower::ServiceExt::oneshot(producer, exchange).await;
         assert!(
             result.is_err(),

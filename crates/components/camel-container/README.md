@@ -247,7 +247,7 @@ The component provides clear, actionable error messages:
 
 ```rust
 use std::time::{SystemTime, UNIX_EPOCH};
-use camel_api::{CamelError, Value};
+use camel_component_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_container::{ContainerComponent, HEADER_CONTAINER_NAME};
 use camel_component_direct::DirectComponent;

@@ -424,7 +424,7 @@ mod tests {
     use crate::lifecycle::ports::RouteRegistrationPort as InternalRuntimeCommandBus;
     use async_trait::async_trait;
     use camel_api::RuntimeQueryBus;
-    use camel_component::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
+    use camel_component_api::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;

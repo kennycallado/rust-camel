@@ -12,8 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-camel-api.workspace = true
-camel-component.workspace = true
+camel-component-api.workspace = true
 camel-endpoint.workspace = true
 tower.workspace = true
 tracing.workspace = true

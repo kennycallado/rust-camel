@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use camel_api::{Body, CamelError, Exchange, Value};
+use camel_component_api::{Body, CamelError, Exchange, Value};
 use tonic::transport::Channel;
 use tower::Service;
 use tracing::debug;
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn body_stream_returns_error() {
-        let stream = stream::empty::<Result<bytes::Bytes, camel_api::CamelError>>();
+        let stream = stream::empty::<Result<bytes::Bytes, camel_component_api::CamelError>>();
         let body = Body::Stream(StreamBody {
             stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
             metadata: Default::default(),

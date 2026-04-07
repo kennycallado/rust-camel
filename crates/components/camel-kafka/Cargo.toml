@@ -12,9 +12,7 @@ keywords = ["camel", "kafka", "integration", "messaging", "streaming"]
 categories = ["network-programming", "asynchronous", "development-tools"]
 
 [dependencies]
-camel-api       = { workspace = true }
-camel-component = { workspace = true }
-camel-endpoint  = { workspace = true }
+camel-component-api = { workspace = true }
 camel-otel      = { workspace = true, optional = true }
 rdkafka         = { version = "0.36", features = ["tokio"] }
 tokio           = { workspace = true }
@@ -27,6 +25,7 @@ bytes           = { workspace = true }
 futures         = { workspace = true }
 
 [dev-dependencies]
+camel-api = { workspace = true }
 opentelemetry = { workspace = true }
 
 [features]

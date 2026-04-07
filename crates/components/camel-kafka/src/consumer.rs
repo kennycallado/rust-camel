@@ -1,13 +1,13 @@
 use async_trait::async_trait;
-use camel_api::{Body, CamelError, Exchange, Message};
-use camel_component::{ConcurrencyModel, Consumer, ConsumerContext};
+use camel_component_api::{Body, CamelError, Exchange, Message};
+use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{
     Consumer as RdConsumer, ConsumerContext as RdConsumerContext, Rebalance, StreamConsumer,
 };
 // Import rdkafka::Message trait to bring .topic(), .key(), .payload(), etc. into scope.
-// The alias `_` prevents a name conflict with camel_api::Message.
+// The alias `_` prevents a name conflict with component Message.
 #[cfg(feature = "otel")]
 use rdkafka::message::Headers as _;
 use rdkafka::message::Message as _;
@@ -608,7 +608,7 @@ mod tests {
     #[cfg(feature = "otel")]
     mod otel_tests {
         use super::*;
-        use camel_api::message::Message;
+        use camel_component_api::Message;
         use opentelemetry::Context;
         use opentelemetry::trace::{
             SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
@@ -624,8 +624,9 @@ mod tests {
         #[test]
         fn test_inject_from_exchange_produces_traceparent() {
             // Create an exchange with a valid span context
-            let mut exchange =
-                Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+            let mut exchange = Exchange::new(Message::new(camel_component_api::Body::Text(
+                "test".to_string(),
+            )));
 
             let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap();
             let span_id = SpanId::from_hex("00f067aa0ba902b7").unwrap();
@@ -664,8 +665,9 @@ mod tests {
             headers_map.insert("traceparent".to_string(), traceparent);
 
             // Create an exchange and extract context
-            let mut exchange =
-                Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+            let mut exchange = Exchange::new(Message::new(camel_component_api::Body::Text(
+                "test".to_string(),
+            )));
 
             // Verify initial context is invalid
             assert!(
@@ -688,8 +690,9 @@ mod tests {
             // Simulate the full flow: inject into HashMap -> convert to Kafka headers -> extract back
 
             // Step 1: Create exchange with span context
-            let mut exchange =
-                Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+            let mut exchange = Exchange::new(Message::new(camel_component_api::Body::Text(
+                "test".to_string(),
+            )));
             let trace_id = TraceId::from_hex("12345678901234567890123456789012").unwrap();
             let span_id = SpanId::from_hex("1234567890123456").unwrap();
             let span_context = SpanContext::new(
@@ -726,8 +729,9 @@ mod tests {
             }
 
             // Step 5: Extract into new exchange (consumer logic)
-            let mut new_exchange =
-                Exchange::new(Message::new(camel_api::Body::Text("test".to_string())));
+            let mut new_exchange = Exchange::new(Message::new(camel_component_api::Body::Text(
+                "test".to_string(),
+            )));
             camel_otel::extract_into_exchange(&mut new_exchange, &extracted_map);
 
             // Step 6: Verify the span context was preserved

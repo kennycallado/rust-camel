@@ -7,7 +7,7 @@
 use bytes::Bytes;
 use camel_api::CamelError;
 use camel_api::body::{Body, StreamBody, StreamMetadata};
-use camel_component::{Component, ConsumerContext, ExchangeEnvelope};
+use camel_component_api::{Component, ConsumerContext, ExchangeEnvelope};
 use camel_component_http::HttpComponent;
 use futures::stream;
 use std::sync::Arc;

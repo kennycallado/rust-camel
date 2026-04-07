@@ -1,6 +1,6 @@
 use super::{get_str_header, get_str_vec_header, get_u64_header, require_key};
 use crate::config::RedisCommand;
-use camel_api::{CamelError, Exchange, body::Body};
+use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 
@@ -209,7 +209,7 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{Exchange, Message};
+    use camel_component_api::{Exchange, Message};
 
     #[test]
     fn test_expire_requires_key() {

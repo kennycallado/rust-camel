@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use camel_api::CamelError;
-use camel_component::Component;
+use camel_component_api::Component;
 
 /// Registry that stores components by their URI scheme.
 pub struct Registry {

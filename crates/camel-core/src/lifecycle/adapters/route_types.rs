@@ -3,7 +3,7 @@
 // It lives in adapters/ because it contains BoxProcessor (Tower) — a compiled pipeline.
 
 use camel_api::BoxProcessor;
-use camel_component::ConcurrencyModel;
+use camel_component_api::ConcurrencyModel;
 
 /// A Route defines a message flow: from a source endpoint, through a composed
 /// Tower Service pipeline.

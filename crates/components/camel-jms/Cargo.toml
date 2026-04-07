@@ -10,8 +10,7 @@ keywords = ["camel", "jms", "activemq", "artemis", "messaging"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-camel-api       = { workspace = true }
-camel-component = { workspace = true }
+camel-component-api = { workspace = true }
 camel-bridge    = { workspace = true }
 tonic           = { workspace = true }
 prost           = { workspace = true }
@@ -24,6 +23,9 @@ serde_json      = { workspace = true }
 uuid            = { workspace = true }
 futures         = { workspace = true }
 tokio-util      = { workspace = true }
+
+[dev-dependencies]
+camel-api = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

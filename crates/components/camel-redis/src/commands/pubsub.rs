@@ -1,6 +1,6 @@
 use super::require_str_header;
 use crate::config::RedisCommand;
-use camel_api::{CamelError, Exchange, body::Body};
+use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 
@@ -71,7 +71,7 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::Message;
+    use camel_component_api::Message;
 
     #[test]
     fn test_pubsub_command_classification() {

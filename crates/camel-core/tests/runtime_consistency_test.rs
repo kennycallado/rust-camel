@@ -7,7 +7,7 @@ use camel_api::{
     CamelError, CanonicalRouteSpec, RuntimeCommand, RuntimeCommandBus, RuntimeQuery,
     RuntimeQueryResult, SupervisionConfig,
 };
-use camel_component::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
+use camel_component_api::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
 use camel_component_timer::TimerComponent;
 use camel_core::{CamelContext, RouteDefinition};
 use camel_core::{

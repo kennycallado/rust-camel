@@ -5,7 +5,7 @@
 //! under the key `"kafka.manual_commit"`.  User processors retrieve it via
 //! `exchange.get_extension::<KafkaManualCommit>("kafka.manual_commit")`.
 
-use camel_api::CamelError;
+use camel_component_api::CamelError;
 use tokio::sync::{mpsc, oneshot};
 
 /// Internal message sent from user code to the consumer's commit handler task.

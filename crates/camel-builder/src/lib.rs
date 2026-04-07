@@ -20,7 +20,7 @@ use camel_api::{
         CanonicalWhenSpec,
     },
 };
-use camel_component::ConcurrencyModel;
+use camel_component_api::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition, WhenStep};
 use camel_processor::{
     ConvertBodyTo, DynamicSetHeader, LogLevel, MapBody, MarshalService, SetBody, SetHeader,
@@ -1990,7 +1990,7 @@ mod tests {
 
     #[test]
     fn test_builder_concurrent_sets_concurrency() {
-        use camel_component::ConcurrencyModel;
+        use camel_component_api::ConcurrencyModel;
 
         let definition = RouteBuilder::from("http://0.0.0.0:8080/test")
             .route_id("test-route")
@@ -2007,7 +2007,7 @@ mod tests {
 
     #[test]
     fn test_builder_concurrent_zero_means_unbounded() {
-        use camel_component::ConcurrencyModel;
+        use camel_component_api::ConcurrencyModel;
 
         let definition = RouteBuilder::from("http://0.0.0.0:8080/test")
             .route_id("test-route")
@@ -2024,7 +2024,7 @@ mod tests {
 
     #[test]
     fn test_builder_sequential_sets_concurrency() {
-        use camel_component::ConcurrencyModel;
+        use camel_component_api::ConcurrencyModel;
 
         let definition = RouteBuilder::from("http://0.0.0.0:8080/test")
             .route_id("test-route")

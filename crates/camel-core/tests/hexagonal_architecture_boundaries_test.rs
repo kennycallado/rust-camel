@@ -321,7 +321,7 @@ fn domain_has_no_tower_or_framework_types() {
         "BoxProcessor",
         "compose_pipeline",
         "TracingProcessor",
-        "use camel_component::",
+        "use camel_component_api::",
     ];
 
     for file in &files {

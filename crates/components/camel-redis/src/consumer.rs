@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use camel_api::{Body, CamelError, Exchange, Message};
-use camel_component::{ConcurrencyModel, Consumer, ConsumerContext};
+use camel_component_api::{Body, CamelError, Exchange, Message};
+use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 use futures_util::StreamExt;
 use redis::Msg;
 use std::time::Duration;

@@ -5,7 +5,7 @@ use camel_api::UnitOfWorkConfig;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, SplitterConfig};
-use camel_component::ConcurrencyModel;
+use camel_component_api::ConcurrencyModel;
 
 /// An unresolved when-clause: predicate + nested steps for the sub-pipeline.
 pub struct WhenStep {
@@ -441,7 +441,7 @@ mod tests {
     fn test_route_definition_error_handler_circuit_breaker_and_concurrency_accessors() {
         use camel_api::circuit_breaker::CircuitBreakerConfig;
         use camel_api::error_handler::ErrorHandlerConfig;
-        use camel_component::ConcurrencyModel;
+        use camel_component_api::ConcurrencyModel;
 
         let def = RouteDefinition::new("direct:test", vec![])
             .with_route_id("eh-route")

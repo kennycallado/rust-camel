@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-use camel_api::{BodyType, BoxProcessor, CamelError};
-use camel_component::{Consumer, Endpoint, ProducerContext};
+use camel_component_api::{BodyType, BoxProcessor, CamelError};
+use camel_component_api::{Consumer, Endpoint, ProducerContext};
 use sqlx::AnyPool;
 
 use crate::config::SqlEndpointConfig;
@@ -57,8 +57,8 @@ impl Endpoint for SqlEndpoint {
 mod tests {
     use super::*;
     use crate::config::SqlEndpointConfig;
-    use camel_component::Endpoint;
-    use camel_endpoint::UriConfig;
+    use camel_component_api::Endpoint;
+    use camel_component_api::UriConfig;
 
     fn make_endpoint(use_body: bool) -> SqlEndpoint {
         let mut config =

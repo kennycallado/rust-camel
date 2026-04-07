@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use camel_api::{Body, CamelError, Exchange, Message};
-use camel_component::{ConcurrencyModel, Consumer, ConsumerContext};
+use camel_component_api::{Body, CamelError, Exchange, Message};
+use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;

@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use tokio::time;
 use tracing::debug;
 
-use camel_api::{BoxProcessor, CamelError, Exchange, Message};
-use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
-use camel_endpoint::UriConfig;
+use camel_component_api::UriConfig;
+use camel_component_api::{BoxProcessor, CamelError, Exchange, Message};
+use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 
 // ---------------------------------------------------------------------------
 // TimerConfig

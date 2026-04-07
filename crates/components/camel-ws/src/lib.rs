@@ -12,8 +12,10 @@ use axum::extract::{FromRequest, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::{Router, serve};
-use camel_api::{Body as CamelBody, BoxProcessor, CamelError, Exchange, Message as CamelMessage};
-use camel_component::{
+use camel_component_api::{
+    Body as CamelBody, BoxProcessor, CamelError, Exchange, Message as CamelMessage,
+};
+use camel_component_api::{
     Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint, ExchangeEnvelope,
     ProducerContext,
 };

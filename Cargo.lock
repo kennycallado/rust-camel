@@ -214,7 +214,7 @@ dependencies = [
  "async-trait",
  "camel-api",
  "camel-builder",
- "camel-component",
+ "camel-component-api",
  "camel-component-log",
  "camel-component-timer",
  "camel-core",
@@ -744,7 +744,7 @@ name = "camel-builder"
 version = "0.5.7"
 dependencies = [
  "camel-api",
- "camel-component",
+ "camel-component-api",
  "camel-component-direct",
  "camel-component-mock",
  "camel-component-timer",
@@ -792,7 +792,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "camel-component"
+name = "camel-component-api"
 version = "0.5.7"
 dependencies = [
  "async-trait",
@@ -810,9 +810,7 @@ version = "0.5.7"
 dependencies = [
  "async-trait",
  "bollard",
- "camel-api",
- "camel-component",
- "camel-endpoint",
+ "camel-component-api",
  "futures",
  "once_cell",
  "serde_json",
@@ -828,8 +826,7 @@ version = "0.5.7"
 dependencies = [
  "async-trait",
  "camel-api",
- "camel-component",
- "camel-endpoint",
+ "camel-component-api",
  "serde_json",
  "tokio",
  "tower 0.5.3",
@@ -841,8 +838,7 @@ name = "camel-component-direct"
 version = "0.5.7"
 dependencies = [
  "async-trait",
- "camel-api",
- "camel-component",
+ "camel-component-api",
  "camel-endpoint",
  "tokio",
  "tokio-util",
@@ -857,7 +853,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "camel-api",
- "camel-component",
+ "camel-component-api",
  "camel-endpoint",
  "futures",
  "regex",
@@ -878,8 +874,7 @@ dependencies = [
  "axum 0.8.8",
  "bytes",
  "camel-api",
- "camel-component",
- "camel-endpoint",
+ "camel-component-api",
  "camel-otel",
  "futures",
  "http",
@@ -901,7 +896,7 @@ dependencies = [
  "bytes",
  "camel-api",
  "camel-bridge",
- "camel-component",
+ "camel-component-api",
  "futures",
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -922,8 +917,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "camel-api",
- "camel-component",
- "camel-endpoint",
+ "camel-component-api",
  "camel-otel",
  "futures",
  "opentelemetry",
@@ -940,8 +934,7 @@ name = "camel-component-log"
 version = "0.5.7"
 dependencies = [
  "async-trait",
- "camel-api",
- "camel-component",
+ "camel-component-api",
  "camel-endpoint",
  "serde_json",
  "tokio",
@@ -955,9 +948,7 @@ version = "0.5.7"
 dependencies = [
  "async-trait",
  "bytes",
- "camel-api",
- "camel-component",
- "camel-endpoint",
+ "camel-component-api",
  "serde_json",
  "tokio",
  "tower 0.5.3",
@@ -968,9 +959,7 @@ name = "camel-component-redis"
 version = "0.5.7"
 dependencies = [
  "async-trait",
- "camel-api",
- "camel-component",
- "camel-endpoint",
+ "camel-component-api",
  "futures-util",
  "redis",
  "serde_json",
@@ -988,8 +977,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "camel-api",
- "camel-component",
- "camel-endpoint",
+ "camel-component-api",
  "futures",
  "serde_json",
  "sqlx",
@@ -1004,8 +992,7 @@ name = "camel-component-timer"
 version = "0.5.7"
 dependencies = [
  "async-trait",
- "camel-api",
- "camel-component",
+ "camel-component-api",
  "camel-endpoint",
  "serde_json",
  "tokio",
@@ -1021,9 +1008,7 @@ dependencies = [
  "axum 0.8.8",
  "axum-server",
  "bytes",
- "camel-api",
- "camel-component",
- "camel-endpoint",
+ "camel-component-api",
  "camel-otel",
  "dashmap 6.1.0",
  "futures",
@@ -1083,7 +1068,7 @@ dependencies = [
  "async-trait",
  "camel-api",
  "camel-bean",
- "camel-component",
+ "camel-component-api",
  "camel-component-log",
  "camel-component-mock",
  "camel-component-timer",
@@ -1119,7 +1104,7 @@ name = "camel-dsl"
 version = "0.5.7"
 dependencies = [
  "camel-api",
- "camel-component",
+ "camel-component-api",
  "camel-core",
  "camel-endpoint",
  "camel-processor",
@@ -1299,7 +1284,7 @@ dependencies = [
  "camel-api",
  "camel-bean",
  "camel-builder",
- "camel-component",
+ "camel-component-api",
  "camel-component-controlbus",
  "camel-component-direct",
  "camel-component-file",
@@ -2173,7 +2158,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "camel-api",
- "camel-component",
+ "camel-component-api",
  "camel-component-file",
  "camel-core",
  "futures",
@@ -2699,7 +2684,7 @@ version = "0.5.7"
 dependencies = [
  "bytes",
  "camel-api",
- "camel-component",
+ "camel-component-api",
  "camel-component-http",
  "futures",
  "reqwest",
@@ -5398,7 +5383,7 @@ dependencies = [
  "async-trait",
  "camel-api",
  "camel-builder",
- "camel-component",
+ "camel-component-api",
  "camel-component-controlbus",
  "camel-component-direct",
  "camel-component-file",

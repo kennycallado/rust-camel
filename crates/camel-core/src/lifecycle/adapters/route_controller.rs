@@ -21,7 +21,7 @@ use camel_api::{
     BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProducerContext,
     RouteController, RuntimeCommand, RuntimeHandle, Value, body::Body,
 };
-use camel_component::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
+use camel_component_api::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_endpoint::parse_uri;
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
 pub use camel_processor::aggregator::SharedLanguageRegistry;

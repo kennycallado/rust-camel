@@ -7,7 +7,7 @@ pub mod set;
 pub mod string;
 pub mod zset;
 
-use camel_api::{CamelError, Exchange};
+use camel_component_api::{CamelError, Exchange};
 
 // ── Header extraction helpers ────────────────────────────────────────────────
 
@@ -63,7 +63,7 @@ pub fn require_value(exchange: &Exchange) -> Result<serde_json::Value, CamelErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{Exchange, Message};
+    use camel_component_api::{Exchange, Message};
 
     fn make_exchange_with_header(key: &str, val: serde_json::Value) -> Exchange {
         let mut msg = Message::default();

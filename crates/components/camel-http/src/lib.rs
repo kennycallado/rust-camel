@@ -13,12 +13,10 @@ use tower::Service;
 use tracing::debug;
 
 use axum::body::BodyDataStream;
-use camel_api::{
-    BoxProcessor, CamelError, Exchange,
-    body::{Body, StreamBody, StreamMetadata},
-};
-use camel_component::{Component, Consumer, Endpoint, ProducerContext};
-use camel_endpoint::{UriComponents, UriConfig, parse_uri};
+use camel_api::body::{StreamBody, StreamMetadata};
+use camel_component_api::{Body, BoxProcessor, CamelError, Exchange};
+use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+use camel_component_api::{UriComponents, UriConfig, parse_uri};
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
 
@@ -579,8 +577,8 @@ impl HttpConsumer {
 
 #[async_trait::async_trait]
 impl Consumer for HttpConsumer {
-    async fn start(&mut self, ctx: camel_component::ConsumerContext) -> Result<(), CamelError> {
-        use camel_api::{Exchange, Message, body::Body};
+    async fn start(&mut self, ctx: camel_component_api::ConsumerContext) -> Result<(), CamelError> {
+        use camel_component_api::{Body, Exchange, Message};
 
         let dispatch = ServerRegistry::global()
             .get_or_spawn(
@@ -693,14 +691,14 @@ impl Consumer for HttpConsumer {
 
                         // Send through pipeline and await result
                         let (tx, rx) = tokio::sync::oneshot::channel();
-                        let envelope = camel_component::consumer::ExchangeEnvelope {
+                        let envelope = camel_component_api::consumer::ExchangeEnvelope {
                             exchange,
                             reply_tx: Some(tx),
                         };
 
                         let result = match sender.send(envelope).await {
-                            Ok(()) => rx.await.map_err(|_| camel_api::CamelError::ChannelClosed),
-                            Err(_) => Err(camel_api::CamelError::ChannelClosed),
+                            Ok(()) => rx.await.map_err(|_| camel_component_api::CamelError::ChannelClosed),
+                            Err(_) => Err(camel_component_api::CamelError::ChannelClosed),
                         }
                         .and_then(|r| r);
 
@@ -830,8 +828,8 @@ impl Consumer for HttpConsumer {
         Ok(())
     }
 
-    fn concurrency_model(&self) -> camel_component::ConcurrencyModel {
-        camel_component::ConcurrencyModel::Concurrent { max: None }
+    fn concurrency_model(&self) -> camel_component_api::ConcurrencyModel {
+        camel_component_api::ConcurrencyModel::Concurrent { max: None }
     }
 }
 
@@ -1275,7 +1273,7 @@ impl Service<Exchange> for HttpProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::Message;
+    use camel_component_api::Message;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1302,7 +1300,7 @@ mod tests {
     #[test]
     fn test_http_config_from_components() {
         // Test from_components directly (trait method)
-        let components = camel_endpoint::UriComponents {
+        let components = camel_component_api::UriComponents {
             scheme: "https".to_string(),
             path: "//api.example.com/v1".to_string(),
             params: std::collections::HashMap::from([(
@@ -1994,7 +1992,7 @@ mod tests {
     #[test]
     fn test_http_server_config_from_components() {
         // Test from_components directly (trait method)
-        let components = camel_endpoint::UriComponents {
+        let components = camel_component_api::UriComponents {
             scheme: "https".to_string(),
             path: "//0.0.0.0:8443/api".to_string(),
             params: std::collections::HashMap::from([(
@@ -2116,7 +2114,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_http_consumer_start_registers_path() {
-        use camel_component::ConsumerContext;
+        use camel_component_api::ConsumerContext;
 
         // Get an OS-assigned free port
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2132,7 +2130,7 @@ mod tests {
         };
         let mut consumer = HttpConsumer::new(consumer_cfg);
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component::ExchangeEnvelope>(16);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
         let ctx = ConsumerContext::new(tx, token.clone());
 
@@ -2173,7 +2171,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_integration_single_consumer_round_trip() {
-        use camel_component::{ConsumerContext, ExchangeEnvelope};
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
         // Get an OS-assigned free port (ephemeral)
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2210,7 +2208,7 @@ mod tests {
                     envelope.exchange.input.header("CamelHttpPath"),
                     Some(&serde_json::Value::String("/echo".into()))
                 );
-                envelope.exchange.input.body = camel_api::body::Body::Text("pong".to_string());
+                envelope.exchange.input.body = camel_component_api::Body::Text("pong".to_string());
                 if let Some(reply_tx) = envelope.reply_tx {
                     let _ = reply_tx.send(Ok(envelope.exchange));
                 }
@@ -2227,7 +2225,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_integration_two_consumers_shared_port() {
-        use camel_component::{ConsumerContext, ExchangeEnvelope};
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
         // Get an OS-assigned free port (ephemeral)
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2267,7 +2265,7 @@ mod tests {
         let (resp_hello, _) = tokio::join!(fut_hello, async {
             if let Some(mut envelope) = rx_a.recv().await {
                 envelope.exchange.input.body =
-                    camel_api::body::Body::Text("hello-response".to_string());
+                    camel_component_api::Body::Text("hello-response".to_string());
                 if let Some(reply_tx) = envelope.reply_tx {
                     let _ = reply_tx.send(Ok(envelope.exchange));
                 }
@@ -2279,7 +2277,7 @@ mod tests {
         let (resp_world, _) = tokio::join!(fut_world, async {
             if let Some(mut envelope) = rx_b.recv().await {
                 envelope.exchange.input.body =
-                    camel_api::body::Body::Text("world-response".to_string());
+                    camel_component_api::Body::Text("world-response".to_string());
                 if let Some(reply_tx) = envelope.reply_tx {
                     let _ = reply_tx.send(Ok(envelope.exchange));
                 }
@@ -2298,7 +2296,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_integration_unregistered_path_returns_404() {
-        use camel_component::{ConsumerContext, ExchangeEnvelope};
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
         // Get an OS-assigned free port (ephemeral)
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2331,7 +2329,7 @@ mod tests {
 
     #[test]
     fn test_http_consumer_declares_concurrent() {
-        use camel_component::ConcurrencyModel;
+        use camel_component_api::ConcurrencyModel;
 
         let config = HttpServerConfig {
             host: "127.0.0.1".to_string(),
@@ -2354,7 +2352,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_reply_body_stream_variant_exists() {
         use bytes::Bytes;
-        use camel_api::CamelError;
+        use camel_component_api::CamelError;
         use futures::stream;
 
         let chunks: Vec<Result<Bytes, CamelError>> =
@@ -2375,7 +2373,7 @@ mod tests {
     #[cfg(feature = "otel")]
     mod otel_tests {
         use super::*;
-        use camel_api::Message;
+        use camel_component_api::Message;
         use tower::ServiceExt;
 
         #[tokio::test]
@@ -2430,7 +2428,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_consumer_extracts_traceparent_header() {
-            use camel_component::{ConsumerContext, ExchangeEnvelope};
+            use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
             // Get an OS-assigned free port
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2495,7 +2493,7 @@ mod tests {
 
         #[tokio::test]
         async fn test_consumer_extracts_mixed_case_traceparent_header() {
-            use camel_component::{ConsumerContext, ExchangeEnvelope};
+            use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
             // Get an OS-assigned free port
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2639,8 +2637,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_body_arrives_as_stream() {
-        use camel_api::body::Body;
-        use camel_component::{ConsumerContext, ExchangeEnvelope};
+        use camel_component_api::Body;
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -2683,7 +2681,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(&bytes[..], b"hello streaming world");
 
-                envelope.exchange.input.body = camel_api::body::Body::Empty;
+                envelope.exchange.input.body = camel_component_api::Body::Empty;
                 if let Some(reply_tx) = envelope.reply_tx {
                     let _ = reply_tx.send(Ok(envelope.exchange));
                 }
@@ -2703,9 +2701,10 @@ mod tests {
     #[tokio::test]
     async fn test_streaming_response_chunked() {
         use bytes::Bytes;
-        use camel_api::CamelError;
-        use camel_api::body::{Body, StreamBody, StreamMetadata};
-        use camel_component::{ConsumerContext, ExchangeEnvelope};
+        use camel_api::body::{StreamBody, StreamMetadata};
+        use camel_component_api::Body;
+        use camel_component_api::CamelError;
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
         use futures::stream;
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -2760,7 +2759,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_413_when_content_length_exceeds_limit() {
-        use camel_component::ConsumerContext;
+        use camel_component_api::ConsumerContext;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -2775,7 +2774,7 @@ mod tests {
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
-        let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component::ExchangeEnvelope>(16);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
         let ctx = ConsumerContext::new(tx, token.clone());
 
@@ -2802,8 +2801,8 @@ mod tests {
     #[tokio::test]
     async fn test_chunked_upload_without_content_length_bypasses_limit() {
         use bytes::Bytes;
-        use camel_api::body::Body;
-        use camel_component::ConsumerContext;
+        use camel_component_api::Body;
+        use camel_component_api::ConsumerContext;
         use futures::stream;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2817,7 +2816,7 @@ mod tests {
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component::ExchangeEnvelope>(16);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
         let token = tokio_util::sync::CancellationToken::new();
         let ctx = ConsumerContext::new(tx, token.clone());
 
@@ -2847,7 +2846,7 @@ mod tests {
                         matches!(envelope.exchange.input.body, Body::Stream(_)),
                         "expected Body::Stream"
                     );
-                    envelope.exchange.input.body = camel_api::body::Body::Empty;
+                    envelope.exchange.input.body = camel_component_api::Body::Empty;
                     if let Some(reply_tx) = envelope.reply_tx {
                         let _ = reply_tx.send(Ok(envelope.exchange));
                     }

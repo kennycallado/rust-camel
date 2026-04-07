@@ -989,7 +989,7 @@ async fn file_to_file_pipeline() {
 
 #[tokio::test]
 async fn http_component_registration_and_endpoint_creation() {
-    use camel_component::Component;
+    use camel_component_api::Component;
 
     let component = HttpComponent::new();
 

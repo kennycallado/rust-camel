@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use camel_api::CamelError;
+use camel_component_api::CamelError;
 
 #[derive(Debug, Clone, Default)]
 pub struct WsConfig {
@@ -63,7 +63,7 @@ pub struct WsClientConfig {
 
 impl WsEndpointConfig {
     pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
-        let parsed = camel_endpoint::parse_uri(uri)
+        let parsed = camel_component_api::parse_uri(uri)
             .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
 
         let scheme = parsed.scheme;

@@ -1,6 +1,6 @@
 use crate::commands;
 use crate::config::{RedisCommand, RedisEndpointConfig};
-use camel_api::{CamelError, Exchange};
+use camel_component_api::{CamelError, Exchange};
 use redis::aio::MultiplexedConnection;
 use std::future::Future;
 use std::pin::Pin;
@@ -260,7 +260,7 @@ impl Service<Exchange> for RedisProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::Message;
+    use camel_component_api::Message;
 
     #[test]
     fn test_producer_new() {

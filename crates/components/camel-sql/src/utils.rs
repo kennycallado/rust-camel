@@ -1,4 +1,4 @@
-use camel_api::CamelError;
+use camel_component_api::CamelError;
 use sqlx::any::AnyArguments;
 use sqlx::any::AnyRow;
 use sqlx::query::Query;

@@ -7,9 +7,9 @@ use std::task::{Context, Poll};
 use tokio::sync::{Mutex, Notify};
 use tower::Service;
 
-use camel_api::{BoxProcessor, CamelError, Exchange};
-use camel_component::{Component, Consumer, Endpoint, ProducerContext};
-use camel_endpoint::parse_uri;
+use camel_component_api::parse_uri;
+use camel_component_api::{BoxProcessor, CamelError, Exchange};
+use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 
 // ---------------------------------------------------------------------------
 // MockComponent
@@ -295,8 +295,8 @@ impl ExchangeAssert {
     /// Assert that the body is `Body::Json` equal to `expected`.
     pub fn assert_body_json(self, expected: serde_json::Value) -> Self {
         match &self.exchange.input.body {
-            camel_api::Body::Json(actual) if *actual == expected => {}
-            camel_api::Body::Json(actual) => panic!(
+            camel_component_api::Body::Json(actual) if *actual == expected => {}
+            camel_component_api::Body::Json(actual) => panic!(
                 "{}: expected body JSON {}, got {}",
                 self.location(),
                 expected,
@@ -315,8 +315,8 @@ impl ExchangeAssert {
     /// Assert that the body is `Body::Bytes` equal to `expected`.
     pub fn assert_body_bytes(self, expected: &[u8]) -> Self {
         match &self.exchange.input.body {
-            camel_api::Body::Bytes(actual) if actual.as_ref() == expected => {}
-            camel_api::Body::Bytes(actual) => panic!(
+            camel_component_api::Body::Bytes(actual) if actual.as_ref() == expected => {}
+            camel_component_api::Body::Bytes(actual) => panic!(
                 "{}: expected body bytes {:?}, got {:?}",
                 self.location(),
                 expected,
@@ -412,7 +412,7 @@ impl ExchangeAssert {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::Message;
+    use camel_component_api::Message;
     use tower::ServiceExt;
 
     fn test_producer_ctx() -> ProducerContext {
@@ -691,7 +691,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn assert_body_json_pass() {
-        use camel_api::Body;
+        use camel_component_api::Body;
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
         let endpoint = component.create_endpoint("mock:body-json-pass").unwrap();
@@ -711,7 +711,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[should_panic(expected = "expected body JSON")]
     async fn assert_body_json_fail() {
-        use camel_api::Body;
+        use camel_component_api::Body;
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
         let endpoint = component.create_endpoint("mock:body-json-fail").unwrap();
@@ -731,7 +731,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn assert_body_bytes_pass() {
         use bytes::Bytes;
-        use camel_api::Body;
+        use camel_component_api::Body;
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
         let endpoint = component.create_endpoint("mock:body-bytes-pass").unwrap();
@@ -750,7 +750,7 @@ mod tests {
     #[should_panic(expected = "expected body bytes")]
     async fn assert_body_bytes_fail() {
         use bytes::Bytes;
-        use camel_api::Body;
+        use camel_component_api::Body;
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
         let endpoint = component.create_endpoint("mock:body-bytes-fail").unwrap();
@@ -847,7 +847,9 @@ mod tests {
         let inner = component.get_endpoint("err-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut ex = Exchange::new(Message::new("body"));
-        ex.error = Some(camel_api::CamelError::ProcessorError("oops".to_string()));
+        ex.error = Some(camel_component_api::CamelError::ProcessorError(
+            "oops".to_string(),
+        ));
         producer.call(ex).await.unwrap();
         inner
             .await_exchanges(1, std::time::Duration::from_millis(500))
@@ -899,7 +901,9 @@ mod tests {
         let inner = component.get_endpoint("no-err-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut ex = Exchange::new(Message::new("body"));
-        ex.error = Some(camel_api::CamelError::ProcessorError("oops".to_string()));
+        ex.error = Some(camel_component_api::CamelError::ProcessorError(
+            "oops".to_string(),
+        ));
         producer.call(ex).await.unwrap();
         inner
             .await_exchanges(1, std::time::Duration::from_millis(500))

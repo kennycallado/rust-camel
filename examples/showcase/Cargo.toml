@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 camel-api.workspace = true
-camel-component.workspace = true
+camel-component-api.workspace = true
 async-trait.workspace = true
 camel-core.workspace = true
 camel-builder.workspace = true

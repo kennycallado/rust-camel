@@ -13,8 +13,7 @@ categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true
-camel-component.workspace = true
-camel-endpoint.workspace = true
+camel-component-api.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tower.workspace = true

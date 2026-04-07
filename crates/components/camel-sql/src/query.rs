@@ -3,7 +3,7 @@
 //! This module provides parsing of Camel-style SQL templates with parameter
 //! placeholders and resolution of those parameters from an Exchange.
 
-use camel_api::{Body, CamelError, Exchange};
+use camel_component_api::{Body, CamelError, Exchange};
 
 /// A parsed parameter slot in a query template.
 #[derive(Debug, Clone, PartialEq)]
@@ -342,7 +342,7 @@ pub fn resolve_params(
 fn resolve_named_param(
     name: &str,
     body_json: Option<&serde_json::Value>,
-    message: &camel_api::Message,
+    message: &camel_component_api::Message,
     exchange: &Exchange,
 ) -> Result<serde_json::Value, CamelError> {
     // 1. Try body if it's a JSON object
@@ -374,7 +374,7 @@ fn resolve_named_param(
 fn resolve_expression_param(
     expr: &str,
     body_json: Option<&serde_json::Value>,
-    message: &camel_api::Message,
+    message: &camel_component_api::Message,
     exchange: &Exchange,
 ) -> Result<serde_json::Value, CamelError> {
     let parts: Vec<&str> = expr.splitn(2, '.').collect();
@@ -427,7 +427,7 @@ pub fn is_select_query(sql: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{Body, Exchange, Message};
+    use camel_component_api::{Body, Exchange, Message};
 
     #[test]
     fn parse_no_params() {

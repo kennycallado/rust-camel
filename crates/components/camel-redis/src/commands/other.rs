@@ -1,5 +1,5 @@
 use crate::config::RedisCommand;
-use camel_api::{CamelError, Exchange, body::Body};
+use camel_component_api::{Body, CamelError, Exchange};
 use redis::aio::MultiplexedConnection;
 
 pub(crate) fn is_other_command(cmd: &RedisCommand) -> bool {
@@ -53,7 +53,7 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::Message;
+    use camel_component_api::Message;
 
     #[test]
     fn test_is_other_command() {

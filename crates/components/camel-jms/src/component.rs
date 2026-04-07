@@ -4,14 +4,14 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use camel_api::{BoxProcessor, CamelError, Exchange};
 use camel_bridge::{
     channel::connect_channel,
     download::ensure_binary,
     health::wait_for_health,
     process::{BridgeProcess, BridgeProcessConfig},
 };
-use camel_component::{
+use camel_component_api::{BoxProcessor, CamelError, Exchange};
+use camel_component_api::{
     Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint, ProducerContext,
 };
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
@@ -421,13 +421,13 @@ impl Component for JmsComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_component::ConsumerContext;
+    use camel_component_api::ConsumerContext;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     #[test]
     fn create_endpoint_applies_broker_url_override() {
-        use camel_component::Component;
+        use camel_component_api::Component;
         let comp = JmsComponent::new(JmsConfig::default()); // default: tcp://localhost:61616
         // URI specifies a different brokerUrl
         let ep = comp
@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn endpoint_uri_redacts_password() {
-        use camel_component::Component;
+        use camel_component_api::Component;
         let comp = JmsComponent::new(JmsConfig::default());
         let ep = comp
             .create_endpoint("jms:queue:orders?username=admin&password=secret")

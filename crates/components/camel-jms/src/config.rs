@@ -44,7 +44,7 @@ pub struct JmsEndpointConfig {
 }
 
 impl JmsEndpointConfig {
-    pub fn from_uri(uri: &str) -> Result<Self, camel_api::CamelError> {
+    pub fn from_uri(uri: &str) -> Result<Self, camel_component_api::CamelError> {
         // 1. Strip known scheme prefix
         let (scheme, rest) = if let Some(r) = uri.strip_prefix("jms:") {
             ("jms", r)
@@ -53,7 +53,7 @@ impl JmsEndpointConfig {
         } else if let Some(r) = uri.strip_prefix("artemis:") {
             ("artemis", r)
         } else {
-            return Err(camel_api::CamelError::ProcessorError(format!(
+            return Err(camel_component_api::CamelError::ProcessorError(format!(
                 "expected scheme 'jms', 'activemq', or 'artemis', got: {uri}"
             )));
         };
@@ -66,7 +66,7 @@ impl JmsEndpointConfig {
             if let Some((dtype_str, name)) = path.split_once(':') {
                 // explicit type prefix: queue:name or topic:name
                 if name.is_empty() {
-                    return Err(camel_api::CamelError::ProcessorError(
+                    return Err(camel_component_api::CamelError::ProcessorError(
                         "destination name cannot be empty".to_string(),
                     ));
                 }
@@ -74,7 +74,7 @@ impl JmsEndpointConfig {
                     "queue" => DestinationType::Queue,
                     "topic" => DestinationType::Topic,
                     other => {
-                        return Err(camel_api::CamelError::ProcessorError(format!(
+                        return Err(camel_component_api::CamelError::ProcessorError(format!(
                             "JMS destination type must be 'queue' or 'topic', got: {other}"
                         )));
                     }
@@ -83,12 +83,12 @@ impl JmsEndpointConfig {
             } else {
                 // no colon in path — shorthand form (only allowed for activemq: and artemis:)
                 if scheme == "jms" {
-                    return Err(camel_api::CamelError::ProcessorError(
+                    return Err(camel_component_api::CamelError::ProcessorError(
                         "JMS URI must be jms:queue:name or jms:topic:name".to_string(),
                     ));
                 }
                 if path.is_empty() {
-                    return Err(camel_api::CamelError::ProcessorError(
+                    return Err(camel_component_api::CamelError::ProcessorError(
                         "destination name cannot be empty".to_string(),
                     ));
                 }

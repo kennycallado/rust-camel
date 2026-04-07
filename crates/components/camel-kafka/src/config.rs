@@ -1,5 +1,5 @@
-use camel_api::CamelError;
-use camel_endpoint::UriConfig;
+use camel_component_api::CamelError;
+use camel_component_api::UriConfig;
 use rdkafka::config::ClientConfig;
 use tracing::warn;
 
@@ -214,12 +214,12 @@ impl KafkaEndpointConfig {
     /// let config = KafkaEndpointConfig::from_uri("kafka:my-topic?brokers=localhost:9092&groupId=my-group")?;
     /// ```
     pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
-        let parts = camel_endpoint::parse_uri(uri)?;
+        let parts = camel_component_api::parse_uri(uri)?;
         Self::from_components(parts)
     }
 
     /// Parse already-extracted URI components into configuration.
-    pub fn from_components(parts: camel_endpoint::UriComponents) -> Result<Self, CamelError> {
+    pub fn from_components(parts: camel_component_api::UriComponents) -> Result<Self, CamelError> {
         // Validate scheme
         if parts.scheme != "kafka" {
             return Err(CamelError::InvalidUri(format!(
@@ -486,7 +486,7 @@ impl UriConfig for KafkaEndpointConfig {
         KafkaEndpointConfig::from_uri(uri)
     }
 
-    fn from_components(parts: camel_endpoint::UriComponents) -> Result<Self, CamelError> {
+    fn from_components(parts: camel_component_api::UriComponents) -> Result<Self, CamelError> {
         // Call inherent method explicitly using the concrete type
         KafkaEndpointConfig::from_components(parts)
     }

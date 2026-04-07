@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tower::Service;
 
-use camel_api::{BoxProcessor, CamelError, Exchange};
-use camel_component::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
-use camel_endpoint::UriConfig;
+use camel_component_api::UriConfig;
+use camel_component_api::{BoxProcessor, CamelError, Exchange};
+use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 
 // ---------------------------------------------------------------------------
 // Shared state: maps endpoint names to senders that deliver exchanges to the
@@ -227,8 +227,8 @@ impl Service<Exchange> for DirectProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::Message;
-    use camel_component::ExchangeEnvelope;
+    use camel_component_api::ExchangeEnvelope;
+    use camel_component_api::Message;
     use tower::ServiceExt;
 
     fn test_producer_ctx() -> ProducerContext {

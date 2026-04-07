@@ -73,7 +73,7 @@ ctx.register_component("http", Box::new(HttpComponent::new()));
 let route = RouteBuilder::from("http://0.0.0.0:8080/hello")
     .process(|ex| async move {
         let mut ex = ex;
-        ex.input.body = camel_api::Body::Text("Hello, World!".to_string());
+        ex.input.body = camel_component_api::Body::Text("Hello, World!".to_string());
         Ok(ex)
     })
     .build()?;
@@ -156,7 +156,7 @@ let route = RouteBuilder::from("timer:secure")
 use camel_builder::RouteBuilder;
 use camel_component_http::{HttpComponent, HttpsComponent};
 use camel_core::CamelContext;
-use camel_api::Body;
+use camel_component_api::Body;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

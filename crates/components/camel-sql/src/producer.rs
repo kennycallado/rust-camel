@@ -17,7 +17,8 @@ use crate::config::{SqlEndpointConfig, SqlOutputType};
 use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
-use camel_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
+use camel_api::{StreamBody, StreamMetadata};
+use camel_component_api::{Body, CamelError, Exchange, Message};
 
 #[derive(Clone)]
 pub struct SqlProducer {
@@ -410,8 +411,8 @@ async fn execute_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::Message;
-    use camel_endpoint::UriConfig;
+    use camel_component_api::Message;
+    use camel_component_api::UriConfig;
     use sqlx::any::AnyPoolOptions;
     use std::sync::Arc;
     use tokio::sync::OnceCell;

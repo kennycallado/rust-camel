@@ -19,7 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 serde_yaml.workspace = true
-camel-component.workspace = true
+camel-component-api.workspace = true
 camel-endpoint.workspace = true
 glob = { workspace = true }
 regex = "1"

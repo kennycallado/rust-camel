@@ -9,8 +9,8 @@ use sqlx::any::AnyRow;
 use tokio::sync::OnceCell;
 use tracing::{error, info, warn};
 
-use camel_api::{Body, CamelError, Exchange, Message};
-use camel_component::{ConcurrencyModel, Consumer, ConsumerContext};
+use camel_component_api::{Body, CamelError, Exchange, Message};
+use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 
 use crate::config::SqlEndpointConfig;
 use crate::headers;
@@ -311,8 +311,8 @@ impl Consumer for SqlConsumer {
 mod tests {
     use super::*;
     use crate::config::SqlEndpointConfig;
-    use camel_component::ExchangeEnvelope;
-    use camel_endpoint::UriConfig;
+    use camel_component_api::ExchangeEnvelope;
+    use camel_component_api::UriConfig;
     use sqlx::any::AnyPoolOptions;
     use std::sync::Arc;
     use tokio::sync::mpsc;

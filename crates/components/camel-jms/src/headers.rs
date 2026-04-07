@@ -1,4 +1,4 @@
-use camel_api::{Exchange, Value};
+use camel_component_api::{Exchange, Value};
 
 use crate::proto::JmsMessage;
 
@@ -69,7 +69,7 @@ fn is_internal_jms_header(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{Body, Message};
+    use camel_component_api::{Body, Message};
 
     fn make_msg(
         message_id: &str,

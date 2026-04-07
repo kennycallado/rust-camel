@@ -13,7 +13,7 @@ use camel_api::{
     RouteController, RuntimeCommandBus, RuntimeQueryBus, ServiceHealth, ServiceStatus,
     SupervisionConfig,
 };
-use camel_component::Component;
+use camel_component_api::Component;
 use camel_language_api::Language;
 use camel_language_api::LanguageError;
 
@@ -748,7 +748,7 @@ mod tests {
     use camel_api::{
         CanonicalRouteSpec, RuntimeCommand, RuntimeCommandResult, RuntimeQuery, RuntimeQueryResult,
     };
-    use camel_component::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
+    use camel_component_api::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
 
     /// Mock component for testing
     struct MockComponent;
@@ -1288,7 +1288,9 @@ mod tests {
                 "runtime-aware:test"
             }
 
-            fn create_consumer(&self) -> Result<Box<dyn camel_component::Consumer>, CamelError> {
+            fn create_consumer(
+                &self,
+            ) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
                 Err(CamelError::RouteError("no consumer".to_string()))
             }
 

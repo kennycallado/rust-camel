@@ -12,9 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-camel-api.workspace = true
-camel-component.workspace = true
-camel-endpoint.workspace = true
+camel-component-api.workspace = true
 serde_json.workspace = true
 tower.workspace = true
 tokio.workspace = true

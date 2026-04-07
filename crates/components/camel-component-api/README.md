@@ -1,10 +1,12 @@
-# camel-component
+# camel-component-api
 
-> Component trait and registry for rust-camel
+> Component API trait and registry for rust-camel
 
 ## Overview
 
-`camel-component` defines the core `Component`, `Endpoint`, `Consumer`, and `Producer` traits that all rust-camel components must implement. This crate provides the foundation for creating new components that can integrate with the rust-camel routing engine.
+`camel-component-api` defines the core `Component`, `Endpoint`, `Consumer`, and `Producer` traits that all rust-camel components must implement. This crate provides the foundation for creating new components that can integrate with the rust-camel routing engine.
+
+It also re-exports commonly used types from `camel-api` and `camel-endpoint` so that component crates only need a single dependency.
 
 If you're building a custom component (e.g., for a proprietary protocol or service), you'll implement the traits defined in this crate.
 
@@ -15,6 +17,7 @@ If you're building a custom component (e.g., for a proprietary protocol or servi
 - **Consumer trait**: Consumes messages from external sources
 - **Producer trait**: Sends messages to external destinations
 - **Concurrency support**: Built-in support for concurrent message processing
+- **Re-exports**: `CamelError`, `Exchange`, `Message`, `Body`, `BoxProcessor`, `Value`, `UriConfig`, `parse_uri`, etc.
 
 ## Installation
 
@@ -22,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-component = "0.2"
+camel-component-api = "0.5"
 ```
 
 ## Usage
@@ -30,8 +33,7 @@ camel-component = "0.2"
 ### Implementing a Custom Component
 
 ```rust
-use camel_component::{Component, Endpoint, Consumer, ProducerContext, ConsumerContext};
-use camel_api::{BoxProcessor, CamelError};
+use camel_component_api::{Component, Endpoint, Consumer, ProducerContext, ConsumerContext, CamelError, BoxProcessor};
 
 pub struct MyComponent;
 
@@ -41,7 +43,6 @@ impl Component for MyComponent {
     }
 
     fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        // Parse URI and create endpoint
         Ok(Box::new(MyEndpoint { uri: uri.to_string() }))
     }
 }
@@ -60,8 +61,6 @@ impl Endpoint for MyEndpoint {
     }
 
     fn create_producer(&self, ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
-        // Create and return a producer that processes exchanges
-        // See camel-service crate for processor implementation details
         Err(CamelError::NotImplemented("producer not implemented".into()))
     }
 }
@@ -86,7 +85,7 @@ impl Endpoint for MyEndpoint {
 
 ## Documentation
 
-- [API Documentation](https://docs.rs/camel-component)
+- [API Documentation](https://docs.rs/camel-component-api)
 - [Repository](https://github.com/kennycallado/rust-camel)
 
 ## License

@@ -15,7 +15,7 @@ members = [
     "crates/camel-config",
     "crates/camel-dsl",
     "crates/camel-builder",
-    "crates/camel-component",
+    "crates/components/camel-component-api",
     "crates/camel-endpoint",
     "crates/camel-endpoint-macros",
     "crates/camel-test",
@@ -130,7 +130,7 @@ camel-health = { path = "crates/camel-health", version = "=0.5.7" }
 camel-bridge = { path = "crates/services/camel-bridge", version = "=0.5.7" }
 camel-dsl = { path = "crates/camel-dsl", version = "=0.5.7" }
 camel-builder = { path = "crates/camel-builder", version = "=0.5.7" }
-camel-component = { path = "crates/camel-component", version = "=0.5.7" }
+camel-component-api = { path = "crates/components/camel-component-api", version = "=0.5.7" }
 camel-endpoint = { path = "crates/camel-endpoint", version = "=0.5.7" }
 camel-endpoint-macros = { path = "crates/camel-endpoint-macros", version = "=0.5.7" }
 camel-test = { path = "crates/camel-test", version = "=0.5.7" }

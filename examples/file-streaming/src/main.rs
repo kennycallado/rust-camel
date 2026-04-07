@@ -17,7 +17,7 @@ use camel_api::{
     body::{Body, StreamBody, StreamMetadata},
     producer::ProducerContext,
 };
-use camel_component::Component;
+use camel_component_api::Component;
 use camel_component_file::FileComponent;
 use tokio::sync::Mutex;
 use tower::ServiceExt;

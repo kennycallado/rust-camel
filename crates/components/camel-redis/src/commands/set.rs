@@ -1,6 +1,6 @@
 use super::{get_i64_header, get_str_header, get_str_vec_header, require_key, require_value};
 use crate::config::RedisCommand;
-use camel_api::{CamelError, Exchange, body::Body};
+use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 
@@ -212,7 +212,7 @@ pub async fn dispatch(
 mod tests {
     use super::*;
     use crate::config::RedisCommand;
-    use camel_api::{Exchange, Message};
+    use camel_component_api::{Exchange, Message};
 
     fn ex_with(headers: &[(&str, serde_json::Value)]) -> Exchange {
         let mut msg = Message::default();

@@ -1,5 +1,5 @@
-use camel_api::CamelError;
-use camel_endpoint::parse_uri;
+use camel_component_api::CamelError;
+use camel_component_api::parse_uri;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq)]

@@ -15,7 +15,7 @@ categories.workspace = true
 camel-api.workspace = true
 camel-core.workspace = true
 camel-processor.workspace = true
-camel-component.workspace = true
+camel-component-api.workspace = true
 camel-endpoint.workspace = true
 tower.workspace = true
 

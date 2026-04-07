@@ -8,8 +8,8 @@ pub use consumer::KafkaConsumer;
 pub use manual_commit::KafkaManualCommit;
 pub use producer::KafkaProducer;
 
-use camel_api::{BoxProcessor, CamelError};
-use camel_component::{Component, Consumer, Endpoint, ProducerContext};
+use camel_component_api::{BoxProcessor, CamelError};
+use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 
 pub struct KafkaComponent {
     config: Option<KafkaConfig>,

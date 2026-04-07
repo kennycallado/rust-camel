@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 camel-api = { workspace = true }
 camel-component-http = { workspace = true }
-camel-component = { workspace = true }
+camel-component-api = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 bytes = { workspace = true }

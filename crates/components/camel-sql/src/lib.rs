@@ -6,9 +6,9 @@ pub mod producer;
 pub mod query;
 pub(crate) mod utils;
 
-use camel_api::CamelError;
-use camel_component::{Component, Endpoint};
-use camel_endpoint::UriConfig;
+use camel_component_api::CamelError;
+use camel_component_api::UriConfig;
+use camel_component_api::{Component, Endpoint};
 
 pub use config::{SqlEndpointConfig, SqlGlobalConfig, SqlOutputType};
 
@@ -59,7 +59,7 @@ impl Component for SqlComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_component::Component;
+    use camel_component_api::Component;
 
     #[test]
     fn test_component_scheme() {

@@ -6,9 +6,9 @@ use std::task::{Context, Poll};
 use tower::Service;
 use tracing::{debug, error, info, trace, warn};
 
-use camel_api::{BoxProcessor, CamelError, Exchange};
-use camel_component::{Component, Consumer, Endpoint, ProducerContext};
-use camel_endpoint::UriConfig;
+use camel_component_api::UriConfig;
+use camel_component_api::{BoxProcessor, CamelError, Exchange};
+use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 
 // ---------------------------------------------------------------------------
 // LogLevel
@@ -138,12 +138,14 @@ impl LogProducer {
 
         if self.config.show_body {
             let body_str = match &exchange.input.body {
-                camel_api::Body::Empty => "[empty]".to_string(),
-                camel_api::Body::Text(s) => s.clone(),
-                camel_api::Body::Json(v) => v.to_string(),
-                camel_api::Body::Xml(s) => s.clone(),
-                camel_api::Body::Bytes(b) => format!("[{} bytes]", b.len()),
-                camel_api::Body::Stream(s) => format!("[Stream: origin={:?}]", s.metadata.origin),
+                camel_component_api::Body::Empty => "[empty]".to_string(),
+                camel_component_api::Body::Text(s) => s.clone(),
+                camel_component_api::Body::Json(v) => v.to_string(),
+                camel_component_api::Body::Xml(s) => s.clone(),
+                camel_component_api::Body::Bytes(b) => format!("[{} bytes]", b.len()),
+                camel_component_api::Body::Stream(s) => {
+                    format!("[Stream: origin={:?}]", s.metadata.origin)
+                }
             };
             parts.push(format!("Body: {body_str}"));
         }
@@ -200,7 +202,7 @@ impl Service<Exchange> for LogProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::Message;
+    use camel_component_api::Message;
     use tower::ServiceExt;
 
     fn test_producer_ctx() -> ProducerContext {
