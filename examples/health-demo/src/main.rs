@@ -1,5 +1,5 @@
 use camel_api::CamelError;
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_config::{CamelConfig, HealthCamelConfig, ObservabilityConfig};
