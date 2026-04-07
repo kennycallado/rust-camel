@@ -35,6 +35,7 @@ Options:
   --config <FILE>   Path to Camel.toml (default: Camel.toml)
   --watch           Enable file-watcher hot-reload
   --no-watch        Disable file-watcher hot-reload (overrides Camel.toml)
+  --health-port <PORT>  Override health server port (enables standalone health server)
 ```
 
 ### Quick start — no config file
@@ -101,6 +102,12 @@ camel run --watch                      # watch ON via flag
 camel run --no-watch                   # watch OFF, overrides Camel.toml
 ```
 
+### Health
+
+```bash
+camel run routes/*.yaml --health-port 8080
+```
+
 While the watcher is active, edit any watched YAML file and save — the route
 diff is computed and applied within ~300 ms:
 
@@ -137,6 +144,8 @@ See [camel-dsl](../crates/camel-dsl) for the full step reference.
 | `components.http.max_connections` | `usize` | `100` | HTTP connection pool size |
 | `observability.metrics_enabled` | `bool` | `false` | Enable metrics endpoint |
 | `observability.metrics_port` | `u16` | `9090` | Metrics server port |
+| `observability.health.enabled` | `bool` | `false` | Enable standalone health server |
+| `observability.health.port` | `u16` | `8080` | Health server port |
 | `supervision.max_attempts` | `u32?` | `5` | Max route restart attempts (`null` = unlimited) |
 | `supervision.initial_delay_ms` | `u64` | `1000` | Initial restart delay (ms) |
 | `supervision.backoff_multiplier` | `f64` | `2.0` | Backoff multiplier per retry |

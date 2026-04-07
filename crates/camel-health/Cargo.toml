@@ -1,6 +1,6 @@
 [package]
 name = "camel-health"
-description = "Health check support for rust-camel"
+description = "Health check HTTP endpoints and standalone server for rust-camel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,5 +13,13 @@ categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true
-camel-core.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

@@ -8,12 +8,17 @@ use camel_core::route::RouteDefinition;
 use camel_otel::{
     OtelConfig, OtelProtocol as OtelProtocolOtel, OtelSampler as OtelSamplerOtel, OtelService,
 };
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicU8;
 use tracing::Level;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+type HealthState = Arc<Mutex<Vec<(String, Arc<AtomicU8>)>>>;
 
 #[cfg(feature = "http")]
 impl From<&crate::config::HttpCamelConfig> for camel_component_http::HttpConfig {
@@ -213,7 +218,39 @@ impl CamelConfig {
             ctx = ctx.with_lifecycle(otel_service);
         }
 
-        // Prometheus — replaces loose metrics_enabled / metrics_port
+        let health_state: HealthState = Arc::new(Mutex::new(Vec::new()));
+
+        let create_checker = || {
+            let state = Arc::clone(&health_state);
+            Arc::new(move || {
+                let guard = state.lock().unwrap();
+                let services: Vec<camel_api::ServiceHealth> = guard
+                    .iter()
+                    .map(|(name, status_arc)| camel_api::ServiceHealth {
+                        name: name.clone(),
+                        status: match status_arc.load(std::sync::atomic::Ordering::SeqCst) {
+                            0 => camel_api::ServiceStatus::Stopped,
+                            1 => camel_api::ServiceStatus::Started,
+                            _ => camel_api::ServiceStatus::Failed,
+                        },
+                    })
+                    .collect();
+                let status = if services
+                    .iter()
+                    .all(|s| s.status == camel_api::ServiceStatus::Started)
+                {
+                    camel_api::HealthStatus::Healthy
+                } else {
+                    camel_api::HealthStatus::Unhealthy
+                };
+                camel_api::HealthReport {
+                    status,
+                    services,
+                    ..Default::default()
+                }
+            }) as camel_api::HealthChecker
+        };
+
         if let Some(ref prom) = config.observability.prometheus
             && prom.enabled
         {
@@ -225,8 +262,33 @@ impl CamelConfig {
                         prom.host, prom.port
                     ))
                 })?;
-            let prom_service = camel_prometheus::PrometheusService::new(addr);
+            let mut prom_service = camel_prometheus::PrometheusService::new(addr);
+            prom_service.set_health_checker(create_checker());
+            health_state
+                .lock()
+                .unwrap()
+                .push(("prometheus".to_string(), prom_service.status_arc()));
             ctx = ctx.with_lifecycle(prom_service);
+        }
+
+        if let Some(ref health_cfg) = config.observability.health
+            && health_cfg.enabled
+        {
+            let addr: std::net::SocketAddr = format!("{}:{}", health_cfg.host, health_cfg.port)
+                .parse()
+                .map_err(|_| {
+                    CamelError::Config(format!(
+                        "Invalid health bind address: {}:{}",
+                        health_cfg.host, health_cfg.port
+                    ))
+                })?;
+            let health_server =
+                camel_health::HealthServer::new_with_checker(addr, Some(create_checker()));
+            health_state
+                .lock()
+                .unwrap()
+                .push(("health".to_string(), health_server.status_arc()));
+            ctx = ctx.with_lifecycle(health_server);
         }
 
         #[cfg(feature = "http")]

@@ -4,10 +4,8 @@ use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 
 use crate::PrometheusMetrics;
 use async_trait::async_trait;
-use camel_api::{CamelError, HealthReport, Lifecycle, MetricsCollector, ServiceStatus};
+use camel_api::{CamelError, HealthChecker, Lifecycle, MetricsCollector, ServiceStatus};
 use tokio::task::JoinHandle;
-
-type HealthChecker = Arc<dyn Fn() -> HealthReport + Send + Sync>;
 
 pub struct PrometheusService {
     addr: SocketAddr,
@@ -45,6 +43,10 @@ impl PrometheusService {
     /// moved into a CamelContext or other container.
     pub fn port_accessor(&self) -> Arc<AtomicU16> {
         Arc::clone(&self.bound_port)
+    }
+
+    pub fn status_arc(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.status)
     }
 
     /// Set the health checker closure that will be called to get system health.
@@ -98,17 +100,12 @@ impl Lifecycle for PrometheusService {
         let health_checker = self.health_checker.clone();
 
         let handle = tokio::spawn(async move {
-            match health_checker {
-                Some(checker) => {
-                    crate::MetricsServer::run_with_listener_and_health_checker(
-                        listener, metrics, checker,
-                    )
-                    .await;
-                }
-                None => {
-                    crate::MetricsServer::run_with_listener(listener, metrics).await;
-                }
-            }
+            crate::MetricsServer::run_with_listener_and_health_checker(
+                listener,
+                metrics,
+                health_checker,
+            )
+            .await;
         });
 
         self.server_handle = Some(handle);
@@ -128,6 +125,7 @@ impl Lifecycle for PrometheusService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::HealthReport;
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]

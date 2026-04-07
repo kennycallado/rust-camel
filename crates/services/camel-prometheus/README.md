@@ -86,7 +86,7 @@ PrometheusService (Lifecycle trait)
 
 ## Health Endpoints
 
-The PrometheusService exposes three health endpoints:
+Health endpoints are provided by the `camel-health` crate via `health_router()`. The `PrometheusService` accepts an optional `HealthChecker` and merges the health router into its HTTP server.
 
 | Endpoint | Purpose | HTTP Status |
 |----------|---------|-------------|

@@ -38,6 +38,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
                 None
             },
             prometheus: None,
+            health: None,
         },
         supervision: None,
     }

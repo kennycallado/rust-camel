@@ -17,6 +17,7 @@ camel-core.workspace = true
 camel-dsl.workspace = true
 camel-otel = { workspace = true }
 camel-prometheus = { workspace = true }
+camel-health = { workspace = true }
 camel-processor.workspace = true
 camel-component-http = { workspace = true, optional = true }
 camel-component-kafka = { workspace = true, optional = true }

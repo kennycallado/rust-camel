@@ -79,6 +79,10 @@ docker_host = "unix:///var/run/docker.sock"
 enabled = true
 port = 9090
 
+[default.observability.health]
+enabled = false    # standalone health server (disabled by default)
+port = 8080        # health server port
+
 [production]
 log_level = "warn"
 watch = false
@@ -104,7 +108,7 @@ allow_private_ips = true  # Allow internal services in dev
 - **`[default]`** - Base configuration (required)
 - **`[default.supervision]`** - Default supervision settings
 - **`[default.components.<name>]`** - Component-specific global defaults
-- **`[default.observability.<name>]`** - Observability settings (prometheus, otel, tracer)
+- **`[default.observability.<name>]`** - Observability settings (prometheus, health, otel, tracer)
 - **`[<profile>]`** - Profile-specific overrides (merged with default)
 - **`[<profile>.supervision]`** - Profile-specific supervision overrides
 - **`[<profile>.components.<name>]`** - Profile-specific component overrides
@@ -121,6 +125,8 @@ allow_private_ips = true  # Allow internal services in dev
 | `drain_timeout_ms` | `u64` |  | Max time to wait for in-flight exchanges to complete on Restart/Remove (default: 10000) |
 | `watch_debounce_ms` | `u64` | `300` | Debounce window in ms for the hot-reload file watcher. Set to `0` to disable debouncing. |
 | `supervision.*` | - |  | Retry and backoff settings |
+| `observability.health.enabled` | `bool` | `false` | Enable standalone health server |
+| `observability.health.port` | `u16` | `8080` | Health server port |
 
 ## Component Defaults
 

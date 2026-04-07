@@ -45,7 +45,7 @@ impl Language for SimpleLanguage {
 mod tests {
     use super::SimpleLanguage;
     use camel_language_api::Language;
-    use camel_language_api::{Body, Exchange, Message, Value};
+    use camel_language_api::{Exchange, Message, Value};
 
     fn exchange_with_header(key: &str, val: &str) -> Exchange {
         let mut msg = Message::default();

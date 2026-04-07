@@ -1033,6 +1033,7 @@ dependencies = [
  "camel-component-ws",
  "camel-core",
  "camel-dsl",
+ "camel-health",
  "camel-otel",
  "camel-processor",
  "camel-prometheus",
@@ -1135,8 +1136,14 @@ name = "camel-health"
 version = "0.5.7"
 dependencies = [
  "async-trait",
+ "axum 0.8.8",
  "camel-api",
- "camel-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
 ]
 
 [[package]]
@@ -1250,6 +1257,7 @@ dependencies = [
  "camel-builder",
  "camel-component-timer",
  "camel-core",
+ "camel-health",
  "prometheus",
  "reqwest",
  "serde_json",
@@ -2517,8 +2525,8 @@ dependencies = [
  "camel-builder",
  "camel-component-log",
  "camel-component-timer",
- "camel-core",
- "camel-prometheus",
+ "camel-config",
+ "camel-health",
  "tokio",
  "tracing",
  "tracing-subscriber",

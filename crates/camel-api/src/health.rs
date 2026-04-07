@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::lifecycle::{HealthStatus, ServiceStatus};
 
@@ -32,6 +33,8 @@ pub struct ServiceHealth {
     pub name: String,
     pub status: ServiceStatus,
 }
+
+pub type HealthChecker = Arc<dyn Fn() -> HealthReport + Send + Sync>;
 
 #[cfg(test)]
 mod tests {

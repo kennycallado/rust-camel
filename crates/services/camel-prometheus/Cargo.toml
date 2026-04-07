@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true
+camel-health.workspace = true
 prometheus = "0.14"
 axum.workspace = true
 tokio.workspace = true

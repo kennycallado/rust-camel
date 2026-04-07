@@ -92,6 +92,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
             },
             otel: None,
             prometheus: None,
+            health: None,
         },
         supervision: None,
     };

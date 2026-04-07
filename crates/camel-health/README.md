@@ -1,49 +1,55 @@
 # camel-health
 
-> Health check support for rust-camel
+Health HTTP endpoints for Kubernetes-style probes, plus a standalone `Lifecycle` server for rust-camel.
 
-## Overview
+## Endpoints
 
-`camel-health` provides health check capabilities for the rust-camel framework. It integrates with health monitoring systems and exposes the health status of routes, components, and the overall integration context.
+`health_router()` exposes:
 
-## Features
+| Endpoint | Purpose | Response |
+|----------|---------|----------|
+| `/healthz` | Liveness probe | `200 OK` (always) |
+| `/readyz` | Readiness probe | `200 OK` when healthy, `503 Service Unavailable` when unhealthy |
+| `/health` | Full health report | `200 OK` + JSON `HealthReport` |
 
-- Health check integration with `CamelContext`
-- Route health monitoring
-- Component health status
-- Integration with external health check systems
+`/readyz` and `/health` return `HealthReport::default()` when no checker is provided.
 
-## Installation
-
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-camel-health = "0.2"
-```
-
-## Usage
+## Usage: embed in an existing Axum router
 
 ```rust
-use camel_health::HealthCheck;
-use camel_core::CamelContext;
+use axum::Router;
+use camel_health::health_router;
+use camel_api::HealthChecker;
 
-// Create context with health checks
-let ctx = CamelContext::new();
+let checker: Option<HealthChecker> = None;
 
-// Check health status
-// (API depends on implementation details)
+let app = Router::new()
+    .nest("/", health_router(checker));
 ```
 
-## Documentation
+## `HealthServer` (standalone server)
 
-- [API Documentation](https://docs.rs/camel-health)
-- [Repository](https://github.com/kennycallado/rust-camel)
+`HealthServer` implements `Lifecycle` and manages its own Axum server:
 
-## License
+- `start()` binds the configured address and serves health endpoints
+- `stop()` aborts the server task
+- `status()` reports `Stopped` / `Started` / `Failed`
 
-Apache-2.0
+This is used when health observability is enabled in `Camel.toml`.
 
-## Contributing
+## Camel.toml configuration
 
-Contributions are welcome! Please see the [main repository](https://github.com/kennycallado/rust-camel) for details.
+```toml
+[observability.health]
+enabled = true
+port = 8081
+```
+
+Fields:
+
+- `enabled` (bool): starts the standalone health server when `true`
+- `port` (u16): TCP port for the server (default `8081`)
+
+## CLI override
+
+Use `--health-port PORT` to enable health server and override `observability.health.port` from config.

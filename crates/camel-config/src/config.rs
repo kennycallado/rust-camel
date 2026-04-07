@@ -305,6 +305,34 @@ fn default_prometheus_port() -> u16 {
     9090
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HealthCamelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_health_host")]
+    pub host: String,
+    #[serde(default = "default_health_port")]
+    pub port: u16,
+}
+
+impl Default for HealthCamelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_health_host(),
+            port: default_health_port(),
+        }
+    }
+}
+
+fn default_health_host() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_health_port() -> u16 {
+    8081
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ObservabilityConfig {
     #[serde(default)]
@@ -315,6 +343,9 @@ pub struct ObservabilityConfig {
 
     #[serde(default)]
     pub prometheus: Option<PrometheusCamelConfig>,
+
+    #[serde(default)]
+    pub health: Option<HealthCamelConfig>,
 }
 
 /// Protocol for OTLP export.
@@ -1111,6 +1142,34 @@ port = 9091
         let p = cfg.observability.prometheus.unwrap();
         assert_eq!(p.host, "127.0.0.1");
         assert_eq!(p.port, 9091);
+    }
+
+    #[test]
+    fn test_health_config_defaults() {
+        let cfg = parse(
+            r#"
+[observability.health]
+enabled = true
+"#,
+        );
+        let h = cfg.observability.health.unwrap();
+        assert!(h.enabled);
+        assert_eq!(h.host, "0.0.0.0");
+        assert_eq!(h.port, 8081);
+    }
+
+    #[test]
+    fn test_health_config_custom_port() {
+        let cfg = parse(
+            r#"
+[observability.health]
+enabled = true
+port = 9091
+"#,
+        );
+        let h = cfg.observability.health.unwrap();
+        assert_eq!(h.port, 9091);
+        assert_eq!(h.host, "0.0.0.0");
     }
 }
 

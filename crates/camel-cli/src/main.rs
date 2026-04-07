@@ -45,6 +45,10 @@ enum Commands {
         /// OTel service name (implies --otel)
         #[arg(long, value_name = "NAME")]
         service_name: Option<String>,
+
+        /// Override health server port (starts standalone health server)
+        #[arg(long, value_name = "PORT")]
+        health_port: Option<u16>,
     },
 
     /// Inspect a runtime journal file.
@@ -73,6 +77,7 @@ async fn main() {
             otel,
             otel_endpoint,
             service_name,
+            health_port,
         } => {
             // Resolve CLI watch override: --watch → Some(true), --no-watch → Some(false), neither → None
             let cli_watch = if watch {
@@ -82,7 +87,16 @@ async fn main() {
             } else {
                 None
             };
-            run(routes, config, cli_watch, otel, otel_endpoint, service_name).await
+            run(
+                routes,
+                config,
+                cli_watch,
+                otel,
+                otel_endpoint,
+                service_name,
+                health_port,
+            )
+            .await
         }
         Commands::Journal { action } => match action {
             JournalAction::Inspect(args) => {
@@ -99,6 +113,7 @@ async fn run(
     otel: bool,
     otel_endpoint: Option<String>,
     service_name: Option<String>,
+    health_port: Option<u16>,
 ) {
     // 1. Load config (fall back to empty config with serde defaults if Camel.toml not found)
     let mut camel_config: camel_config::config::CamelConfig =
@@ -134,6 +149,15 @@ async fn run(
         if let Some(name) = service_name {
             otel_cfg.service_name = name;
         }
+    }
+
+    if let Some(port) = health_port {
+        let health_cfg = camel_config
+            .observability
+            .health
+            .get_or_insert(camel_config::config::HealthCamelConfig::default());
+        health_cfg.enabled = true;
+        health_cfg.port = port;
     }
 
     // 2. Build context (also initialises tracing subscriber)
