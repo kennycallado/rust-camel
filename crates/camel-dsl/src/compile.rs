@@ -5,30 +5,33 @@ use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::{
-    AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
-    split_body_lines,
+    split_body_json_array, split_body_lines, AggregationStrategy as SplitAggregation,
+    SplitterConfig,
 };
 use camel_api::{
-    CamelError, CanonicalRouteSpec, CircuitBreakerConfig, IdentityProcessor,
     canonical_contract_rejection_reason,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
         CanonicalWhenSpec,
     },
+    CamelError, CanonicalRouteSpec, CircuitBreakerConfig, IdentityProcessor, LoadBalanceStrategy,
+    LoadBalancerConfig, ThrottleStrategy, ThrottlerConfig,
 };
 use camel_component::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{
-    ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService, builtin_data_format,
+    builtin_data_format, ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService,
 };
 
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
-    DeclarativeStep, LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef,
-    MulticastStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
-    SplitExpressionDef, SplitStepDef, ToStepDef, ValueSourceDef, WireTapStepDef,
+    DeclarativeStep, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
+    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
+    RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
+    SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
+    ValueSourceDef, WireTapStepDef,
 };
 
 pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinition, CamelError> {
@@ -271,7 +274,67 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
         }
         DeclarativeStep::Split(def) => compile_split_step(def),
         DeclarativeStep::Aggregate(def) => compile_aggregate_step(def),
+        DeclarativeStep::Throttle(ThrottleStepDef {
+            max_requests,
+            period_ms,
+            strategy,
+            steps,
+        }) => {
+            let strategy = match strategy {
+                ThrottleStrategyDef::Delay => ThrottleStrategy::Delay,
+                ThrottleStrategyDef::Reject => ThrottleStrategy::Reject,
+                ThrottleStrategyDef::Drop => ThrottleStrategy::Drop,
+            };
+            let config = ThrottlerConfig::new(max_requests, Duration::from_millis(period_ms))
+                .strategy(strategy);
+            let compiled_steps = compile_declarative_steps(steps)?;
+            Ok(BuilderStep::Throttle {
+                config,
+                steps: compiled_steps,
+            })
+        }
+        DeclarativeStep::LoadBalance(LoadBalanceStepDef {
+            strategy,
+            parallel,
+            steps,
+        }) => {
+            let strategy = match strategy {
+                LoadBalanceStrategyDef::RoundRobin => LoadBalanceStrategy::RoundRobin,
+                LoadBalanceStrategyDef::Random => LoadBalanceStrategy::Random,
+                LoadBalanceStrategyDef::Failover => LoadBalanceStrategy::Failover,
+            };
+            let config = LoadBalancerConfig { strategy, parallel };
+            let compiled_steps = compile_declarative_steps(steps)?;
+            Ok(BuilderStep::LoadBalance {
+                config,
+                steps: compiled_steps,
+            })
+        }
         DeclarativeStep::Multicast(def) => compile_multicast_step(def),
+        DeclarativeStep::DynamicRouter(DynamicRouterStepDef {
+            expression,
+            uri_delimiter,
+            cache_size,
+            ignore_invalid_endpoints,
+            max_iterations,
+        }) => Ok(BuilderStep::DeclarativeDynamicRouter {
+            expression,
+            uri_delimiter,
+            cache_size,
+            ignore_invalid_endpoints,
+            max_iterations,
+        }),
+        DeclarativeStep::RoutingSlip(RoutingSlipStepDef {
+            expression,
+            uri_delimiter,
+            cache_size,
+            ignore_invalid_endpoints,
+        }) => Ok(BuilderStep::DeclarativeRoutingSlip {
+            expression,
+            uri_delimiter,
+            cache_size,
+            ignore_invalid_endpoints,
+        }),
         DeclarativeStep::ConvertBodyTo(def) => {
             let target = match def {
                 BodyTypeDef::Text => BodyType::Text,
@@ -445,8 +508,12 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Split(_) => "split",
         DeclarativeStep::Aggregate(_) => "aggregate",
         DeclarativeStep::WireTap(_) => "wire_tap",
+        DeclarativeStep::DynamicRouter(_) => "dynamic_router",
+        DeclarativeStep::LoadBalance(_) => "load_balance",
         DeclarativeStep::Multicast(_) => "multicast",
+        DeclarativeStep::RoutingSlip(_) => "routing_slip",
         DeclarativeStep::Stop => "stop",
+        DeclarativeStep::Throttle(_) => "throttle",
         DeclarativeStep::Script(_) => "script",
         DeclarativeStep::ConvertBodyTo(_) => "convert_body_to",
         DeclarativeStep::Bean(_) => "bean",

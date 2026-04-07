@@ -1,0 +1,57 @@
+# =============================================================================
+# YAML Route Definitions for rust-camel - Advanced EIP Showcase
+# =============================================================================
+
+routes:
+  # ===========================================================================
+  # Route 1: Throttle EIP
+  # ===========================================================================
+  - id: "throttle-demo"
+    from: "direct:start"
+    steps:
+      - throttle:
+          max_requests: 5
+          period_secs: 1
+          strategy: "delay"
+          steps:
+            - to: "mock:throttled"
+
+  # ===========================================================================
+  # Route 2: Load Balance EIP
+  # ===========================================================================
+  - id: "load-balance-demo"
+    from: "direct:start"
+    steps:
+      - load_balance:
+          strategy: "round_robin"
+          steps:
+            - to: "mock:lb-a"
+            - to: "mock:lb-b"
+
+  # ===========================================================================
+  # Route 3: Dynamic Router EIP
+  # ===========================================================================
+  - id: "dynamic-router-demo"
+    from: "direct:start"
+    steps:
+      - dynamic_router:
+          simple: "${header.dest}"
+
+  # ===========================================================================
+  # Route 4: Routing Slip EIP
+  # ===========================================================================
+  - id: "routing-slip-demo"
+    from: "direct:start"
+    steps:
+      - routing_slip:
+          simple: "${header.slip}"
+
+  # ===========================================================================
+  # Route 5: Bean EIP
+  # ===========================================================================
+  - id: "bean-demo"
+    from: "direct:start"
+    steps:
+      - bean:
+          name: "myProcessor"
+          method: "handle"

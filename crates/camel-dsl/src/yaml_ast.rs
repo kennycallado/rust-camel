@@ -109,16 +109,21 @@ fn default_open_duration_ms() -> u64 {
 pub enum YamlStep {
     To(ToStep),
     SetHeader(SetHeaderStep),
-    Transform(TransformStep),
     SetBody(SetBodyStep),
-    Log(LogStep),
-    Filter(FilterStep),
+    Bean(BeanStep),
     Choice(ChoiceStep),
+    DynamicRouter(DynamicRouterStep),
+    Filter(FilterStep),
+    LoadBalance(LoadBalanceStep),
+    Log(LogStep),
     Split(SplitStep),
     Aggregate(AggregateStep),
     WireTap(WireTapStep),
     Multicast(MulticastStep),
+    RoutingSlip(RoutingSlipStep),
     Stop(StopStep),
+    Throttle(ThrottleStep),
+    Transform(TransformStep),
     Script(ScriptStep),
     ConvertBodyTo(ConvertBodyToStep),
     Marshal(MarshalStep),
@@ -427,4 +432,124 @@ pub struct UnmarshalStep {
 pub struct ScriptData {
     pub language: String,
     pub source: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ThrottleStep {
+    pub throttle: ThrottleData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ThrottleData {
+    pub max_requests: usize,
+    #[serde(default = "default_throttle_period_secs")]
+    pub period_secs: u64,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<YamlStep>,
+}
+
+fn default_throttle_period_secs() -> u64 {
+    1
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LoadBalanceStep {
+    pub load_balance: LoadBalanceData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LoadBalanceData {
+    #[serde(default = "default_lb_strategy")]
+    pub strategy: String,
+    #[serde(default)]
+    pub parallel: bool,
+    #[serde(default)]
+    pub steps: Vec<YamlStep>,
+}
+
+fn default_lb_strategy() -> String {
+    "round_robin".to_string()
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicRouterStep {
+    pub dynamic_router: DynamicRouterData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicRouterData {
+    #[serde(default)]
+    pub simple: Option<String>,
+    #[serde(default)]
+    pub rhai: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default = "default_uri_delimiter")]
+    pub uri_delimiter: String,
+    #[serde(default = "default_cache_size")]
+    pub cache_size: i32,
+    #[serde(default)]
+    pub ignore_invalid_endpoints: bool,
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+}
+
+fn default_uri_delimiter() -> String {
+    ",".to_string()
+}
+
+fn default_cache_size() -> i32 {
+    1000
+}
+
+fn default_max_iterations() -> usize {
+    1000
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingSlipStep {
+    pub routing_slip: RoutingSlipData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingSlipData {
+    #[serde(default)]
+    pub simple: Option<String>,
+    #[serde(default)]
+    pub rhai: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default = "default_uri_delimiter")]
+    pub uri_delimiter: String,
+    #[serde(default = "default_cache_size")]
+    pub cache_size: i32,
+    #[serde(default)]
+    pub ignore_invalid_endpoints: bool,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct BeanStep {
+    pub bean: BeanStepData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct BeanStepData {
+    pub name: String,
+    pub method: String,
 }

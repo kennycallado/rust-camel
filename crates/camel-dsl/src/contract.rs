@@ -15,6 +15,11 @@ pub enum DeclarativeStepKind {
     ConvertBodyTo,
     Marshal,
     Unmarshal,
+    Bean,
+    DynamicRouter,
+    LoadBalance,
+    RoutingSlip,
+    Throttle,
     Process,
     ProcessFn,
     MapBody,
@@ -22,7 +27,7 @@ pub enum DeclarativeStepKind {
     SetHeaderFn,
 }
 
-pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 15] = [
+pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 20] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -38,6 +43,11 @@ pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 15] = [
     DeclarativeStepKind::ConvertBodyTo,
     DeclarativeStepKind::Marshal,
     DeclarativeStepKind::Unmarshal,
+    DeclarativeStepKind::Bean,
+    DeclarativeStepKind::DynamicRouter,
+    DeclarativeStepKind::LoadBalance,
+    DeclarativeStepKind::RoutingSlip,
+    DeclarativeStepKind::Throttle,
 ];
 
 pub fn is_rust_only_kind(kind: DeclarativeStepKind) -> bool {

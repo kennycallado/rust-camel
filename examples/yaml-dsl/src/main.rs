@@ -50,17 +50,28 @@ async fn main() -> Result<(), CamelError> {
     println!("    ✓ Languages registered: simple (built-in)");
 
     println!();
-    println!("[2] Loading routes from YAML file...");
+    println!("[2] Loading routes from YAML files...");
 
     let config_path = Path::new("config/routes.yaml");
+    let advanced_config_path = Path::new("config/routes_eip_advanced.yaml");
 
-    let routes = load_from_file(config_path).map_err(|e| {
+    let mut routes = load_from_file(config_path).map_err(|e| {
         println!("    ✗ Failed to load routes: {}", e);
         println!();
         println!("    Make sure you're running from the example directory:");
         println!("    cd examples/yaml-dsl && cargo run");
         e
     })?;
+
+    let advanced_routes = load_from_file(advanced_config_path).map_err(|e| {
+        println!("    ✗ Failed to load advanced routes: {}", e);
+        println!();
+        println!("    Make sure you're running from the example directory:");
+        println!("    cd examples/yaml-dsl && cargo run");
+        e
+    })?;
+
+    routes.extend(advanced_routes);
 
     println!("    ✓ Loaded {} route definitions", routes.len());
 

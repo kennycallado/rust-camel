@@ -872,6 +872,8 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::LoadBalance { .. } => "load_balancer",
         BuilderStep::DynamicRouter { .. } => "dynamic_router",
         BuilderStep::RoutingSlip { .. } => "routing_slip",
+        BuilderStep::DeclarativeDynamicRouter { .. } => "declarative_dynamic_router",
+        BuilderStep::DeclarativeRoutingSlip { .. } => "declarative_routing_slip",
     }
 }
 

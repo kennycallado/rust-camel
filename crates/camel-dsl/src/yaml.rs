@@ -6,24 +6,28 @@ use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
 use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical};
-use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
+use crate::contract::{assert_contract_coverage, DeclarativeStepKind};
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
+    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
     DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep,
-    LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
+    DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef,
+    LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef, RoutingSlipStepDef,
     ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef,
-    SplitStepDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef,
+    WireTapStepDef,
 };
 pub use crate::yaml_ast::{
-    AggregateData, AggregateStep, ChoiceData, ChoiceStep, FilterStep, LogConfig, LogMessageData,
-    LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep, PredicateBlock, ScriptData,
-    ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData,
-    SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, ToStep, TransformStep,
+    AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep,
+    DynamicRouterData, DynamicRouterStep, FilterStep, LoadBalanceData, LoadBalanceStep, LogConfig,
+    LogMessageData, LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep,
+    PredicateBlock, RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig,
+    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitExpressionConfig,
+    SplitExpressionYaml, SplitStep, StopStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
     UnmarshalStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
 };
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 15] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 20] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -39,6 +43,11 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 15] = [
     DeclarativeStepKind::ConvertBodyTo,
     DeclarativeStepKind::Marshal,
     DeclarativeStepKind::Unmarshal,
+    DeclarativeStepKind::Bean,
+    DeclarativeStepKind::DynamicRouter,
+    DeclarativeStepKind::LoadBalance,
+    DeclarativeStepKind::RoutingSlip,
+    DeclarativeStepKind::Throttle,
 ];
 
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
@@ -450,6 +459,125 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
         YamlStep::Unmarshal(UnmarshalStep { unmarshal }) => {
             Ok(DeclarativeStep::Unmarshal(DataFormatDef {
                 format: unmarshal,
+            }))
+        }
+        YamlStep::Bean(BeanStep {
+            bean: BeanStepData { name, method },
+        }) => Ok(DeclarativeStep::Bean(BeanStepDef::new(name, method))),
+        YamlStep::DynamicRouter(DynamicRouterStep {
+            dynamic_router:
+                DynamicRouterData {
+                    language,
+                    source,
+                    simple,
+                    rhai,
+                    uri_delimiter,
+                    cache_size,
+                    ignore_invalid_endpoints,
+                    max_iterations,
+                },
+        }) => {
+            let expression = parse_language_expression(
+                language,
+                source,
+                simple,
+                rhai,
+                None,
+                None,
+                "dynamic_router",
+            )?;
+            Ok(DeclarativeStep::DynamicRouter(DynamicRouterStepDef {
+                expression,
+                uri_delimiter,
+                cache_size,
+                ignore_invalid_endpoints,
+                max_iterations,
+            }))
+        }
+        YamlStep::LoadBalance(LoadBalanceStep {
+            load_balance:
+                LoadBalanceData {
+                    strategy,
+                    parallel,
+                    steps,
+                },
+        }) => {
+            let strategy = match strategy.as_str() {
+                "round_robin" => LoadBalanceStrategyDef::RoundRobin,
+                "random" => LoadBalanceStrategyDef::Random,
+                "failover" => LoadBalanceStrategyDef::Failover,
+                other => {
+                    return Err(CamelError::RouteError(format!(
+                        "unsupported load_balance.strategy `{other}`"
+                    )));
+                }
+            };
+            let steps = steps
+                .into_iter()
+                .map(yaml_step_to_declarative_step)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(DeclarativeStep::LoadBalance(LoadBalanceStepDef {
+                strategy,
+                parallel,
+                steps,
+            }))
+        }
+        YamlStep::RoutingSlip(RoutingSlipStep {
+            routing_slip:
+                RoutingSlipData {
+                    language,
+                    source,
+                    simple,
+                    rhai,
+                    uri_delimiter,
+                    cache_size,
+                    ignore_invalid_endpoints,
+                },
+        }) => {
+            let expression = parse_language_expression(
+                language,
+                source,
+                simple,
+                rhai,
+                None,
+                None,
+                "routing_slip",
+            )?;
+            Ok(DeclarativeStep::RoutingSlip(RoutingSlipStepDef {
+                expression,
+                uri_delimiter,
+                cache_size,
+                ignore_invalid_endpoints,
+            }))
+        }
+        YamlStep::Throttle(ThrottleStep {
+            throttle:
+                ThrottleData {
+                    max_requests,
+                    period_secs,
+                    strategy,
+                    steps,
+                },
+        }) => {
+            let strategy = match strategy.as_deref() {
+                None | Some("delay") => ThrottleStrategyDef::Delay,
+                Some("reject") => ThrottleStrategyDef::Reject,
+                Some("drop") => ThrottleStrategyDef::Drop,
+                Some(other) => {
+                    return Err(CamelError::RouteError(format!(
+                        "unsupported throttle.strategy `{other}`"
+                    )));
+                }
+            };
+            let steps = steps
+                .into_iter()
+                .map(yaml_step_to_declarative_step)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(DeclarativeStep::Throttle(ThrottleStepDef {
+                max_requests,
+                period_ms: period_secs.saturating_mul(1000),
+                strategy,
+                steps,
             }))
         }
     }

@@ -21,7 +21,66 @@
 - **Route-level configuration**: Auto-startup, startup ordering, concurrency, error handling, circuit breaker, unit-of-work hooks
 
 - **Environment variable interpolation**: Inject env vars in route files using `${env:VAR_NAME}` syntax
-- **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, wire_tap, multicast, stop, script, bean
+- **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, wire_tap, multicast, stop, script, bean, throttle, load_balance, dynamic_router, routing_slip
+
+## Supported YAML Steps
+
+### Core Steps
+to, log, set_header, set_body, transform, filter, choice, split, aggregate, wire_tap, multicast, stop, script, bean
+
+### Throttle
+Rate-limit message processing:
+
+```yaml
+steps:
+  - throttle:
+      max_requests: 10
+      period_secs: 1
+      strategy: "delay"
+      steps:
+        - to: "mock:result"
+```
+
+### Load Balance
+Distribute across endpoints:
+
+```yaml
+steps:
+  - load_balance:
+      strategy: "round_robin"
+      parallel: false
+      steps:
+        - to: "mock:a"
+        - to: "mock:b"
+```
+
+### Dynamic Router
+Route to endpoints determined at runtime:
+
+```yaml
+steps:
+  - dynamic_router:
+      simple: "${header.dest}"
+```
+
+### Routing Slip
+Dynamic routing slip pattern:
+
+```yaml
+steps:
+  - routing_slip:
+      simple: "${header.slip}"
+```
+
+### Bean
+Invoke a registered bean:
+
+```yaml
+steps:
+  - bean:
+      name: "myProcessor"
+      method: "handle"
+```
 
 ## Installation
 Add to your `Cargo.toml`:

@@ -1,9 +1,9 @@
 // lifecycle/application/route_definition.rs
 // Route definition and builder-step types. Route (compiled artifact) lives in adapters.
 
-use camel_api::UnitOfWorkConfig;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::UnitOfWorkConfig;
 use camel_api::{AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, SplitterConfig};
 use camel_component::ConcurrencyModel;
 
@@ -59,6 +59,19 @@ pub enum BuilderStep {
         parallel_limit: Option<usize>,
         stop_on_exception: bool,
         steps: Vec<BuilderStep>,
+    },
+    DeclarativeDynamicRouter {
+        expression: LanguageExpressionDef,
+        uri_delimiter: String,
+        cache_size: i32,
+        ignore_invalid_endpoints: bool,
+        max_iterations: usize,
+    },
+    DeclarativeRoutingSlip {
+        expression: LanguageExpressionDef,
+        uri_delimiter: String,
+        cache_size: i32,
+        ignore_invalid_endpoints: bool,
     },
     /// A Splitter sub-pipeline: config + nested steps to execute per fragment.
     Split {
@@ -158,6 +171,16 @@ impl std::fmt::Debug for BuilderStep {
                     "BuilderStep::DeclarativeSplit {{ steps: {steps:?}, .. }}"
                 )
             }
+            BuilderStep::DeclarativeDynamicRouter { expression, .. } => write!(
+                f,
+                "BuilderStep::DeclarativeDynamicRouter {{ language: {:?}, .. }}",
+                expression.language
+            ),
+            BuilderStep::DeclarativeRoutingSlip { expression, .. } => write!(
+                f,
+                "BuilderStep::DeclarativeRoutingSlip {{ language: {:?}, .. }}",
+                expression.language
+            ),
             BuilderStep::Split { steps, .. } => {
                 write!(f, "BuilderStep::Split {{ steps: {steps:?}, .. }}")
             }
@@ -439,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_builder_step_debug_covers_many_variants() {
-        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
+        use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
         use camel_api::{
             DynamicRouterConfig, Exchange, IdentityProcessor, RoutingSlipConfig, Value,
         };

@@ -925,11 +925,120 @@ impl DefaultRouteController {
                     );
                     processors.push((BoxProcessor::new(svc), None));
                 }
+                BuilderStep::DeclarativeDynamicRouter {
+                    expression,
+                    uri_delimiter,
+                    cache_size,
+                    ignore_invalid_endpoints,
+                    max_iterations,
+                } => {
+                    use camel_api::EndpointResolver;
+
+                    let expression = self.compile_language_expression(&expression)?;
+                    let expression: camel_api::RouterExpression = Arc::new(move |exchange: &Exchange| {
+                        let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                        match value {
+                            Value::Null => None,
+                            Value::String(s) => Some(s),
+                            other => Some(other.to_string()),
+                        }
+                    });
+
+                    let config = camel_api::DynamicRouterConfig::new(expression)
+                        .uri_delimiter(uri_delimiter)
+                        .cache_size(cache_size)
+                        .ignore_invalid_endpoints(ignore_invalid_endpoints)
+                        .max_iterations(max_iterations);
+
+                    let producer_ctx_clone = producer_ctx.clone();
+                    let registry_clone = Arc::clone(registry);
+                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
+                        let parsed = match parse_uri(uri) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        let registry_guard = match registry_clone.lock() {
+                            Ok(g) => g,
+                            Err(_) => return None,
+                        };
+                        let component = match registry_guard.get_or_err(&parsed.scheme) {
+                            Ok(c) => c,
+                            Err(_) => return None,
+                        };
+                        let endpoint = match component.create_endpoint(uri) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
+                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        Some(BoxProcessor::new(producer))
+                    });
+                    let svc = camel_processor::dynamic_router::DynamicRouterService::new(
+                        config, resolver,
+                    );
+                    processors.push((BoxProcessor::new(svc), None));
+                }
                 BuilderStep::RoutingSlip { config } => {
                     use camel_api::EndpointResolver;
 
                     let producer_ctx_clone = producer_ctx.clone();
-                    let registry_clone = registry.clone();
+                    let registry_clone = Arc::clone(registry);
+                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
+                        let parsed = match parse_uri(uri) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        let registry_guard = match registry_clone.lock() {
+                            Ok(g) => g,
+                            Err(_) => return None,
+                        };
+                        let component = match registry_guard.get_or_err(&parsed.scheme) {
+                            Ok(c) => c,
+                            Err(_) => return None,
+                        };
+                        let endpoint = match component.create_endpoint(uri) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
+                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        Some(BoxProcessor::new(producer))
+                    });
+
+                    let svc =
+                        camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
+                    processors.push((BoxProcessor::new(svc), None));
+                }
+                BuilderStep::DeclarativeRoutingSlip {
+                    expression,
+                    uri_delimiter,
+                    cache_size,
+                    ignore_invalid_endpoints,
+                } => {
+                    use camel_api::EndpointResolver;
+
+                    let expression = self.compile_language_expression(&expression)?;
+                    let expression: camel_api::RoutingSlipExpression =
+                        Arc::new(move |exchange: &Exchange| {
+                            let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                            match value {
+                                Value::Null => None,
+                                Value::String(s) => Some(s),
+                                other => Some(other.to_string()),
+                            }
+                        });
+
+                    let config = camel_api::RoutingSlipConfig::new(expression)
+                        .uri_delimiter(uri_delimiter)
+                        .cache_size(cache_size)
+                        .ignore_invalid_endpoints(ignore_invalid_endpoints);
+
+                    let producer_ctx_clone = producer_ctx.clone();
+                    let registry_clone = Arc::clone(registry);
                     let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                         let parsed = match parse_uri(uri) {
                             Ok(p) => p,

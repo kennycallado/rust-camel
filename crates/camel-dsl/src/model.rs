@@ -188,6 +188,64 @@ impl BeanStepDef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThrottleStrategyDef {
+    Delay,
+    Reject,
+    Drop,
+}
+
+impl Default for ThrottleStrategyDef {
+    fn default() -> Self {
+        Self::Delay
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThrottleStepDef {
+    pub max_requests: usize,
+    pub period_ms: u64,
+    pub strategy: ThrottleStrategyDef,
+    pub steps: Vec<DeclarativeStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadBalanceStrategyDef {
+    RoundRobin,
+    Random,
+    Failover,
+}
+
+impl Default for LoadBalanceStrategyDef {
+    fn default() -> Self {
+        Self::RoundRobin
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadBalanceStepDef {
+    pub strategy: LoadBalanceStrategyDef,
+    pub parallel: bool,
+    pub steps: Vec<DeclarativeStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicRouterStepDef {
+    pub expression: LanguageExpressionDef,
+    pub uri_delimiter: String,
+    pub cache_size: i32,
+    pub ignore_invalid_endpoints: bool,
+    pub max_iterations: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingSlipStepDef {
+    pub expression: LanguageExpressionDef,
+    pub uri_delimiter: String,
+    pub cache_size: i32,
+    pub ignore_invalid_endpoints: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MulticastAggregationDef {
     LastWins,
     CollectAll,
@@ -226,18 +284,22 @@ pub struct DataFormatDef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclarativeStep {
     To(ToStepDef),
-    Log(LogStepDef),
     SetHeader(SetHeaderStepDef),
     SetBody(SetBodyStepDef),
+    ConvertBodyTo(BodyTypeDef),
+    DynamicRouter(DynamicRouterStepDef),
     Filter(FilterStepDef),
+    LoadBalance(LoadBalanceStepDef),
+    Log(LogStepDef),
     Choice(ChoiceStepDef),
     Split(SplitStepDef),
     Aggregate(AggregateStepDef),
     WireTap(WireTapStepDef),
     Multicast(MulticastStepDef),
+    RoutingSlip(RoutingSlipStepDef),
     Stop,
+    Throttle(ThrottleStepDef),
     Script(ScriptStepDef),
-    ConvertBodyTo(BodyTypeDef),
     Marshal(DataFormatDef),
     Unmarshal(DataFormatDef),
     Bean(BeanStepDef),
