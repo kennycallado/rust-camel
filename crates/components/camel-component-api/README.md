@@ -17,7 +17,8 @@ If you're building a custom component (e.g., for a proprietary protocol or servi
 - **Consumer trait**: Consumes messages from external sources
 - **Producer trait**: Sends messages to external destinations
 - **Concurrency support**: Built-in support for concurrent message processing
-- **Re-exports**: `CamelError`, `Exchange`, `Message`, `Body`, `BoxProcessor`, `Value`, `UriConfig`, `parse_uri`, etc.
+- **Re-exports from `camel-api`**: `CamelError`, `Exchange`, `Message`, `Body`, `BodyType`, `BoxProcessor`, `Value`, `StreamBody`, `StreamMetadata`, `RouteStatus`, `RouteAction`, `RuntimeHandle`, `RuntimeCommandBus`, `RuntimeQueryBus`, `RuntimeCommand`, `RuntimeCommandResult`, `RuntimeQuery`, `RuntimeQueryResult`
+- **Re-exports from `camel-endpoint`**: `UriConfig`, `UriComponents`, `parse_uri`
 
 ## Installation
 
