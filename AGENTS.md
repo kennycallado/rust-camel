@@ -20,6 +20,12 @@
   Usar opción 1 del skill finishing-a-development-branch (merge branch into main) pero con squash de un solo commit con title + body siguiendo patrón de otros commits, luego actualizar documento de implementación y agregar sección postmortem si procede. Limpiar branch y worktree y revisar que README/s esté/n actualizado/s (keep it simple). Por último actualiza si procede docs/roadmap.md y docs/status.md sin dar seguimiento a docs/ en git. También es necesario revisar ./scripts/publish-crates.sh por si es necesario actualiazar y camel-cli ya que debe incluir todas las características por defecto.
   ```
 
+- When user asks to bump version or release a new version:
+
+  ```txt
+  Verificar la nueva versión con el usuario si no la ha indicado (semver desde la versión actual en Cargo.toml raíz). Actualizar la versión en Cargo.toml raíz y regenerar Cargo.lock con cargo check. Buscar y actualizar cualquier fichero con versión hardcodeada: README.md raíz, bridges/jms/build.gradle.kts (fallback), y ejemplos aislados que no usen version.workspace. Verificar que compila con cargo build. Commit siguiendo el patrón de otros commits de release con body listando cambios desde la versión anterior. Crear git tag vX.Y.Z. NO hacer push ni publicar a crates.io.
+  ```
+
 # context-mode — MANDATORY routing rules
 
 You have context-mode MCP tools available. These rules are NOT optional — they protect your context window from flooding. A single unrouted command can dump 56 KB into context and waste the entire session.
