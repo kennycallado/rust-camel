@@ -9,7 +9,7 @@ use tonic::transport::Channel;
 use tower::Service;
 use tracing::debug;
 
-use crate::config::JmsEndpointConfig;
+use crate::config::{DestinationType, JmsEndpointConfig};
 use crate::headers::extract_send_headers;
 use crate::proto::{SendRequest, bridge_service_client::BridgeServiceClient};
 
@@ -58,6 +58,17 @@ impl JmsProducer {
             _ => String::new(),
         }
     }
+
+    fn destination(endpoint_config: &JmsEndpointConfig) -> String {
+        format!(
+            "{}:{}",
+            match endpoint_config.destination_type {
+                DestinationType::Queue => "queue",
+                DestinationType::Topic => "topic",
+            },
+            endpoint_config.destination_name
+        )
+    }
 }
 
 impl Service<Exchange> for JmsProducer {
@@ -71,7 +82,7 @@ impl Service<Exchange> for JmsProducer {
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let channel = self.channel.clone();
-        let destination = self.endpoint_config.destination();
+        let destination = Self::destination(&self.endpoint_config);
 
         Box::pin(async move {
             let body = Self::body_to_bytes(&exchange.input.body)?;
@@ -172,5 +183,25 @@ mod tests {
         let mut ex = Exchange::default();
         ex.input.body = Body::from(b"raw".to_vec());
         assert_eq!(JmsProducer::content_type(&ex), "");
+    }
+
+    #[test]
+    fn destination_queue_format() {
+        let endpoint_config = JmsEndpointConfig {
+            destination_type: DestinationType::Queue,
+            destination_name: "orders".to_string(),
+            broker_name: None,
+        };
+        assert_eq!(JmsProducer::destination(&endpoint_config), "queue:orders");
+    }
+
+    #[test]
+    fn destination_topic_format() {
+        let endpoint_config = JmsEndpointConfig {
+            destination_type: DestinationType::Topic,
+            destination_name: "events".to_string(),
+            broker_name: None,
+        };
+        assert_eq!(JmsProducer::destination(&endpoint_config), "topic:events");
     }
 }

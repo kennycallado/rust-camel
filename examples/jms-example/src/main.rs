@@ -3,7 +3,7 @@
 //! Demonstrates:
 //!   - `activemq:` scheme — locks broker type to ActiveMQ Classic automatically.
 //!   - Shorthand destination: `activemq:orders` is equivalent to `activemq:queue:orders`.
-//!   - `brokerUrl` URI query param overrides the programmatic config at the endpoint level.
+//!   - `broker=<name>` URI query param selects a configured broker at the endpoint level.
 //!   - Route 1 (Producer): timer → set_body → to(activemq:queue:orders)
 //!   - Route 2 (Consumer): from(activemq:orders) → log  (shorthand)
 //!
@@ -24,13 +24,13 @@
 //! jms:queue:orders                  generic scheme — broker_type from config
 //!
 //! # Inline overrides via query params:
-//! activemq:queue:orders?brokerUrl=tcp://192.168.1.1:61616
+//! activemq:queue:orders?broker=secondary
 //! jms:queue:orders?username=admin&password=secret
 //! ```
 
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_jms::{BrokerType, JmsComponent, JmsConfig};
+use camel_component_jms::{BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
@@ -40,7 +40,6 @@ use testcontainers::{
     core::{ContainerPort, WaitFor},
     runners::AsyncRunner,
 };
-use tokio::sync::{RwLock, Semaphore};
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
@@ -65,42 +64,16 @@ async fn main() -> Result<(), CamelError> {
     let broker_url = format!("tcp://127.0.0.1:{port}");
     println!("ActiveMQ broker available at {broker_url}");
 
-    // Register all three JMS schemes sharing a single bridge process.
-    // activemq:/artemis: hard-set their broker_type; jms: uses the config value.
-    let bridge = Arc::new(RwLock::new(None));
-    let semaphore = Arc::new(Semaphore::new(1));
-
-    let jms_cfg = JmsConfig {
-        broker_url: broker_url.clone(),
-        broker_type: BrokerType::ActiveMq,
-        ..Default::default()
-    };
-    let mut activemq_cfg = jms_cfg.clone();
-    activemq_cfg.broker_type = BrokerType::ActiveMq;
-    let mut artemis_cfg = jms_cfg.clone();
-    artemis_cfg.broker_type = BrokerType::Artemis;
+    // Register all three JMS schemes against a shared bridge pool.
+    let pool_config = JmsPoolConfig::single_broker(&broker_url, BrokerType::ActiveMq);
+    let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
 
     let mut ctx = CamelContext::new();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
-    ctx.register_component(JmsComponent::with_scheme(
-        "jms",
-        jms_cfg,
-        Arc::clone(&bridge),
-        Arc::clone(&semaphore),
-    ));
-    ctx.register_component(JmsComponent::with_scheme(
-        "activemq",
-        activemq_cfg,
-        Arc::clone(&bridge),
-        Arc::clone(&semaphore),
-    ));
-    ctx.register_component(JmsComponent::with_scheme(
-        "artemis",
-        artemis_cfg,
-        Arc::clone(&bridge),
-        Arc::clone(&semaphore),
-    ));
+    ctx.register_component(JmsComponent::with_scheme("jms", Arc::clone(&pool)));
+    ctx.register_component(JmsComponent::with_scheme("activemq", Arc::clone(&pool)));
+    ctx.register_component(JmsComponent::with_scheme("artemis", Arc::clone(&pool)));
 
     // Route 1: Timer → JMS producer (every 3 seconds)
     // Uses explicit destination type: activemq:queue:orders

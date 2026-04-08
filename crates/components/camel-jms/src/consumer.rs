@@ -1,34 +1,38 @@
-use async_trait::async_trait;
-use camel_component_api::{Body, CamelError, Exchange, Message};
-use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 use std::sync::Arc;
 use std::time::Duration;
+
+use async_trait::async_trait;
+use camel_component_api::{Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tonic::transport::Channel;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::component::JmsComponent;
-use crate::config::JmsEndpointConfig;
+use crate::component::{BridgeState, JmsBridgePool};
+use crate::config::{DestinationType, JmsEndpointConfig};
 use crate::headers::apply_jms_headers;
 use crate::proto::{JmsMessage, SubscribeRequest, bridge_service_client::BridgeServiceClient};
 
 pub struct JmsConsumer {
-    component: Arc<JmsComponent>,
+    pool: Arc<JmsBridgePool>,
+    broker_name: String,
     endpoint_config: JmsEndpointConfig,
     reconnect_interval_ms: u64,
     cancel_token: Option<CancellationToken>,
-    task_handle: Option<JoinHandle<Result<(), CamelError>>>,
+    task_handle: Option<JoinHandle<()>>,
 }
 
 impl JmsConsumer {
     pub fn new(
-        component: Arc<JmsComponent>,
+        pool: Arc<JmsBridgePool>,
+        broker_name: String,
         endpoint_config: JmsEndpointConfig,
         reconnect_interval_ms: u64,
     ) -> Self {
         Self {
-            component,
+            pool,
+            broker_name,
             endpoint_config,
             reconnect_interval_ms,
             cancel_token: None,
@@ -37,7 +41,7 @@ impl JmsConsumer {
     }
 }
 
-fn build_exchange(msg: JmsMessage) -> Exchange {
+fn build_exchange(msg: &JmsMessage) -> Exchange {
     let body_bytes = msg.body.clone();
     let body = if msg.content_type.starts_with("text/") {
         match String::from_utf8(body_bytes.clone()) {
@@ -56,79 +60,118 @@ fn build_exchange(msg: JmsMessage) -> Exchange {
     };
 
     let mut exchange = Exchange::new(Message::new(body));
-    apply_jms_headers(&mut exchange, &msg);
+    apply_jms_headers(&mut exchange, msg);
     exchange
+}
+
+fn destination(endpoint_config: &JmsEndpointConfig) -> String {
+    format!(
+        "{}:{}",
+        match endpoint_config.destination_type {
+            DestinationType::Queue => "queue",
+            DestinationType::Topic => "topic",
+        },
+        endpoint_config.destination_name
+    )
+}
+
+async fn await_ready_channel(
+    pool: &JmsBridgePool,
+    broker_name: &str,
+) -> Result<Channel, CamelError> {
+    let slot = pool.get_or_create_slot(broker_name).await?;
+    let mut rx = slot.state_rx.clone();
+
+    loop {
+        match &*rx.borrow() {
+            BridgeState::Ready { channel } => return Ok(channel.clone()),
+            BridgeState::Stopped => {
+                return Err(CamelError::ProcessorError(format!(
+                    "JMS broker '{}' is stopped",
+                    broker_name
+                )));
+            }
+            _ => {}
+        }
+
+        if rx.changed().await.is_err() {
+            return Err(CamelError::ProcessorError(format!(
+                "JMS broker '{}' state channel closed",
+                broker_name
+            )));
+        }
+    }
 }
 
 #[async_trait]
 impl Consumer for JmsConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
-        let component = self.component.clone();
-        let destination = self.endpoint_config.destination();
+        let pool = Arc::clone(&self.pool);
+        let broker_name = self.broker_name.clone();
+        let endpoint_config = self.endpoint_config.clone();
         let reconnect_interval_ms = self.reconnect_interval_ms;
-        let subscription_id = Uuid::new_v4().to_string();
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
 
         let handle = tokio::spawn(async move {
-            let request = SubscribeRequest {
-                destination: destination.clone(),
-                subscription_id,
-            };
-
-            // Obtain an initial channel; re-fetch on each reconnection attempt
-            // so that if the bridge restarts on a different port, we pick up
-            // the new address instead of keeping a stale channel.
-            let mut channel = match component.ensure_bridge().await {
-                Ok(ch) => ch,
-                Err(e) => {
-                    warn!("JMS consumer initial bridge unavailable for {destination}: {e}");
-                    // Fall into the retry loop below
-                    loop {
-                        tokio::select! {
-                            _ = cancel.cancelled() => {
-                                info!("JMS consumer cancelled for {destination}");
-                                return Ok(());
-                            }
-                            _ = tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)) => {}
-                        }
-                        match component.ensure_bridge().await {
-                            Ok(ch) => break ch,
+            let destination = destination(&endpoint_config);
+            loop {
+                let channel = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        info!(broker = %broker_name, destination = %destination, "JMS consumer cancelled");
+                        break;
+                    }
+                    _ = ctx.cancelled() => {
+                        info!(broker = %broker_name, destination = %destination, "JMS consumer context cancelled");
+                        break;
+                    }
+                    result = await_ready_channel(&pool, &broker_name) => {
+                        match result {
+                            Ok(channel) => channel,
                             Err(e) => {
                                 warn!(
-                                    "JMS consumer still cannot reach bridge for {destination}: {e}"
+                                    broker = %broker_name,
+                                    destination = %destination,
+                                    error = %e,
+                                    "JMS consumer waiting for ready bridge failed"
                                 );
+                                tokio::select! {
+                                    _ = cancel.cancelled() => break,
+                                    _ = ctx.cancelled() => break,
+                                    _ = tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)) => {}
+                                }
+                                continue;
                             }
                         }
                     }
-                }
-            };
+                };
 
-            loop {
-                let mut client = BridgeServiceClient::new(channel.clone());
-                let mut stream = match client.subscribe(request.clone()).await {
-                    Ok(resp) => resp.into_inner(),
+                let mut client = BridgeServiceClient::new(channel);
+                let mut stream = match client
+                    .subscribe(SubscribeRequest {
+                        destination: destination.clone(),
+                        subscription_id: Uuid::new_v4().to_string(),
+                    })
+                    .await
+                    .map_err(|e| {
+                        CamelError::ProcessorError(format!("JMS gRPC subscribe error: {e}"))
+                    }) {
+                    Ok(resp) => {
+                        info!(broker = %broker_name, destination = %destination, "JMS consumer subscribed successfully");
+                        resp.into_inner()
+                    }
                     Err(e) => {
                         warn!(
-                            "JMS subscribe failed for {destination}: {e}, refreshing bridge and retrying in {reconnect_interval_ms}ms"
+                            broker = %broker_name,
+                            destination = %destination,
+                            error = %e,
+                            "JMS subscribe failed; retrying"
                         );
                         tokio::select! {
-                            _ = cancel.cancelled() => {
-                                info!("JMS consumer cancelled for {destination}");
-                                return Ok(());
-                            }
+                            _ = cancel.cancelled() => break,
+                            _ = ctx.cancelled() => break,
                             _ = tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)) => {}
                         }
-                        // Re-obtain channel from component; this will restart the
-                        // bridge if needed and return a fresh channel pointing to
-                        // the new port.
-                        channel = match component.ensure_bridge().await {
-                            Ok(ch) => ch,
-                            Err(e2) => {
-                                warn!("JMS consumer cannot refresh bridge for {destination}: {e2}");
-                                channel // keep old channel, will retry next iteration
-                            }
-                        };
                         continue;
                     }
                 };
@@ -136,24 +179,34 @@ impl Consumer for JmsConsumer {
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => {
-                            info!("JMS consumer cancelled for {destination}");
-                            return Ok(());
+                            info!(broker = %broker_name, destination = %destination, "JMS consumer cancelled");
+                            return;
+                        }
+                        _ = ctx.cancelled() => {
+                            info!(broker = %broker_name, destination = %destination, "JMS consumer context cancelled");
+                            return;
                         }
                         msg = stream.message() => {
                             match msg {
                                 Ok(Some(jms_msg)) => {
-                                    let exchange = build_exchange(jms_msg);
+                                    let exchange = build_exchange(&jms_msg);
                                     if let Err(e) = ctx.send(exchange).await {
                                         error!("JMS consumer route error: {e}");
                                     }
                                 }
                                 Ok(None) => {
-                                    info!("JMS stream ended for {destination}, reconnecting...");
+                                    info!(broker = %broker_name, destination = %destination, "JMS stream ended; reconnecting");
                                     break;
                                 }
                                 Err(e) => {
+                                    let subscribe_err = CamelError::ProcessorError(format!(
+                                        "JMS gRPC subscribe error: {e}"
+                                    ));
                                     warn!(
-                                        "JMS stream error for {destination}: {e}, reconnecting in {reconnect_interval_ms}ms"
+                                        broker = %broker_name,
+                                        destination = %destination,
+                                        error = %subscribe_err,
+                                        "JMS stream error; reconnecting"
                                     );
                                     break;
                                 }
@@ -162,24 +215,11 @@ impl Consumer for JmsConsumer {
                     }
                 }
 
-                if cancel.is_cancelled() {
-                    info!("JMS consumer cancelled for {destination}");
-                    return Ok(());
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = ctx.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)) => {}
                 }
-
-                tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)).await;
-
-                // After a stream error/close, refresh the channel in case the
-                // bridge was restarted while this consumer was running.
-                channel = match component.ensure_bridge().await {
-                    Ok(ch) => ch,
-                    Err(e) => {
-                        warn!(
-                            "JMS consumer cannot refresh bridge after stream close for {destination}: {e}"
-                        );
-                        channel
-                    }
-                };
             }
         });
 
@@ -192,14 +232,8 @@ impl Consumer for JmsConsumer {
             cancel.cancel();
         }
         if let Some(handle) = self.task_handle.take() {
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    warn!("JMS consumer task returned error on stop: {e}");
-                }
-                Err(join_err) => {
-                    warn!("JMS consumer task panicked on stop: {join_err}");
-                }
+            if let Err(join_err) = handle.await {
+                warn!("JMS consumer task panicked on stop: {join_err}");
             }
         }
         Ok(())
@@ -213,7 +247,8 @@ impl Consumer for JmsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::JmsConfig;
+    use crate::config::JmsPoolConfig;
+    use crate::BrokerType;
 
     #[test]
     fn build_exchange_text_body() {
@@ -223,7 +258,7 @@ mod tests {
             content_type: "text/plain".to_string(),
             ..Default::default()
         };
-        let ex = build_exchange(msg);
+        let ex = build_exchange(&msg);
         assert!(matches!(ex.input.body, Body::Text(_)));
     }
 
@@ -235,7 +270,7 @@ mod tests {
             content_type: "application/octet-stream".to_string(),
             ..Default::default()
         };
-        let ex = build_exchange(msg);
+        let ex = build_exchange(&msg);
         assert!(matches!(ex.input.body, Body::Bytes(_)));
     }
 
@@ -247,7 +282,7 @@ mod tests {
             content_type: "application/json".to_string(),
             ..Default::default()
         };
-        let ex = build_exchange(msg);
+        let ex = build_exchange(&msg);
         assert!(matches!(ex.input.body, Body::Json(_)));
     }
 
@@ -259,15 +294,21 @@ mod tests {
             content_type: "".to_string(),
             ..Default::default()
         };
-        let ex = build_exchange(msg);
+        let ex = build_exchange(&msg);
         assert!(matches!(ex.input.body, Body::Empty));
     }
 
     #[tokio::test]
     async fn stop_without_start_is_noop() {
-        let component = Arc::new(JmsComponent::new(JmsConfig::default()));
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::Generic,
+            ))
+            .unwrap(),
+        );
         let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
-        let mut consumer = JmsConsumer::new(component, endpoint_cfg, 50);
+        let mut consumer = JmsConsumer::new(pool, "default".to_string(), endpoint_cfg, 50);
         assert!(consumer.stop().await.is_ok());
     }
 }

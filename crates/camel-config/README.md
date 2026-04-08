@@ -68,6 +68,9 @@ read_timeout_ms = 30000
 write_timeout_ms = 30000
 
 [default.components.jms]
+default_broker = "main"
+
+[default.components.jms.brokers.main]
 broker_url = "tcp://localhost:61616"
 broker_type = "activemq"
 
@@ -167,14 +170,22 @@ camel-config = { version = "0.1", features = ["jms"] }
 
 ```toml
 [default.components.jms]
-broker_url = "tcp://localhost:61616"          # Broker URL (default: tcp://localhost:61616)
-broker_type = "activemq"                      # Broker type: "activemq" or "artemis" (default: activemq)
-username = "admin"                            # Optional broker username
-password = "admin"                            # Optional broker password
-bridge_version = "0.1.1"                      # JMS bridge binary version (default: auto)
-bridge_cache_dir = "/path/to/cache"           # Bridge binary cache directory (default: XDG cache)
-bridge_start_timeout_ms = 10000               # Bridge startup timeout in ms (default: 10000)
-broker_reconnect_interval_ms = 5000           # Reconnect interval in ms (default: 5000)
+default_broker = "main"                       # which broker to use when no ?broker= param
+max_bridges = 8                               # max concurrent bridge processes (default: 8)
+bridge_cache_dir = "/path/to/cache"           # bridge binary cache directory (default: XDG cache)
+bridge_start_timeout_ms = 10000               # bridge startup timeout in ms (default: 10000)
+broker_reconnect_interval_ms = 5000           # reconnect interval in ms (default: 5000)
+
+[default.components.jms.brokers.main]
+broker_url = "tcp://localhost:61616"          # broker connection URL
+broker_type = "activemq"                      # "activemq" or "artemis"
+username = "admin"                            # optional broker username
+password = "admin"                            # optional broker password
+
+# Add more brokers as needed:
+# [default.components.jms.brokers.secondary]
+# broker_url = "tcp://other-host:61616"
+# broker_type = "artemis"
 ```
 
 ### Redis Component

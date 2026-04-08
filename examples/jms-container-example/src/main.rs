@@ -9,7 +9,7 @@
 //! - **Pinned image**: `apache/activemq-artemis:2.36.0-alpine` (no `:latest` surprises)
 //! - **Credentials**: broker started with mandatory auth (`ARTEMIS_USER` /
 //!   `ARTEMIS_PASSWORD`); `ANONYMOUS_LOGIN` is intentionally **not set** so the
-//!   broker rejects unauthenticated connections. `JmsConfig` passes
+//!   broker rejects unauthenticated connections. `BrokerConfig` passes
 //!   `username`/`password` so the bridge can authenticate.
 //! - **Custom JMS headers**: producer sets `x-order-id` and `x-priority` on
 //!   every message so downstream consumers and filters can act on them.
@@ -40,6 +40,7 @@
 //! The example runs for ~30 seconds then shuts down cleanly.
 //! Requires a running Docker daemon.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -48,7 +49,9 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_container::{ContainerComponent, cleanup_tracked_containers};
-use camel_component_jms::{BrokerType, JmsComponent, JmsConfig};
+use camel_component_jms::{
+    BrokerConfig, BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig,
+};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
@@ -119,7 +122,7 @@ async fn main() -> Result<(), CamelError> {
     //   ARTEMIS_PASSWORD → broker password
     //
     // ANONYMOUS_LOGIN is intentionally absent — without it, Artemis rejects
-    // any connection that does not supply valid credentials. The JmsConfig
+    // any connection that does not supply valid credentials. The pool config
     // below passes the same credentials so the bridge authenticates correctly.
 
     println!("==> Starting ActiveMQ Artemis broker via camel-component-container");
@@ -166,18 +169,30 @@ async fn main() -> Result<(), CamelError> {
     // Step 3: Build the main context with JMS routes
     // -----------------------------------------------------------------------
 
-    let jms_config = JmsConfig {
-        broker_url: format!("tcp://127.0.0.1:{BROKER_PORT}"),
-        broker_type: BrokerType::Artemis,
-        username: Some(BROKER_USER.to_string()),
-        password: Some(BROKER_PASS.to_string()),
-        ..Default::default()
+    let broker_url = format!("tcp://127.0.0.1:{BROKER_PORT}");
+    let pool_config = JmsPoolConfig {
+        max_bridges: 1,
+        default_broker: "default".to_string(),
+        brokers: HashMap::from([(
+            "default".to_string(),
+            BrokerConfig {
+                broker_url,
+                broker_type: BrokerType::Artemis,
+                username: Some(BROKER_USER.to_string()),
+                password: Some(BROKER_PASS.to_string()),
+            },
+        )]),
+        bridge_start_timeout_ms: 90_000,
+        ..JmsPoolConfig::default()
     };
+    let pool = Arc::new(JmsBridgePool::from_config(pool_config)?);
 
     let mut ctx = CamelContext::new();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
-    ctx.register_component(JmsComponent::new(jms_config));
+    ctx.register_component(JmsComponent::with_scheme("jms", Arc::clone(&pool)));
+    ctx.register_component(JmsComponent::with_scheme("activemq", Arc::clone(&pool)));
+    ctx.register_component(JmsComponent::with_scheme("artemis", Arc::clone(&pool)));
 
     // -----------------------------------------------------------------------
     // Route 1 — Queue producer

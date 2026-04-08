@@ -27,41 +27,41 @@ Using `activemq:` or `artemis:` as scheme locks the `broker_type` automatically 
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `brokerUrl` | `tcp://localhost:61616` | Broker connection URL (overrides `Camel.toml`) |
-| `username` | — | Broker username (overrides `Camel.toml`) |
-| `password` | — | Broker password (overrides `Camel.toml`) |
+| `broker` | `default_broker` from config | Named broker to use (must exist in the broker map) |
 
-> `brokerType` is **not** a URI parameter — it is inferred from the scheme (`activemq:` → ActiveMQ Classic, `artemis:` → Artemis) or set in `Camel.toml`.
+> `brokerUrl`, `username`, and `password` are **not** URI parameters — credentials live in `Camel.toml` or programmatic config. `broker_type` is inferred from the scheme (`activemq:` → ActiveMQ Classic, `artemis:` → Artemis) or from the broker config entry.
 
 ## Camel.toml Configuration
 
 ```toml
 [default.components.jms]
+default_broker = "main"      # which broker to use when no ?broker= param is given
+
+[default.components.jms.brokers.main]
 broker_url  = "tcp://localhost:61616"
-broker_type = "activemq"   # "activemq" | "artemis" — ignored when using activemq:/artemis: schemes
-username    = "admin"
-password    = "admin"
+broker_type = "activemq"     # "activemq" | "artemis"
+username    = "admin"        # optional
+password    = "admin"        # optional
 ```
+
+Multiple brokers are supported — add as many `[default.components.jms.brokers.<name>]` entries as needed.
 
 ## Quick Start
 
 ```rust
-use camel_component_jms::JmsComponent;
+use camel_component_jms::{BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig};
+use std::sync::Arc;
 
-// Option A: broker config from Camel.toml
-ctx.register_component(JmsComponent::default());
+// Option A: single broker (programmatic)
+let pool_config = JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq);
+let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
 
-// Option B: programmatic config
-use camel_component_jms::{BrokerType, JmsConfig};
-let config = JmsConfig {
-    broker_url: "tcp://localhost:61616".to_string(),
-    broker_type: BrokerType::ActiveMq,
-    ..Default::default()
-};
-ctx.register_component(JmsComponent::new(config));
+ctx.register_component(JmsComponent::with_scheme("jms", Arc::clone(&pool)));
+ctx.register_component(JmsComponent::with_scheme("activemq", Arc::clone(&pool)));
+ctx.register_component(JmsComponent::with_scheme("artemis", Arc::clone(&pool)));
 
-// Option C: broker-specific scheme (locks broker type automatically)
-ctx.register_component(JmsComponent::with_scheme("activemq"));
+// Option B: config from Camel.toml (via camel-config crate)
+// JmsPoolConfig is built automatically by configure_context()
 ```
 
 ```rust
@@ -75,10 +75,10 @@ let route = RouteBuilder::from("activemq:orders")
     .to("log:info")
     .build()?;
 
-// Producer — override broker URL inline
+// Producer — explicit broker selection (multi-broker setup)
 let route = RouteBuilder::from("timer:tick?period=1000")
     .set_body("hello".to_string())
-    .to("activemq:queue:events?brokerUrl=tcp://192.168.1.1:61616")
+    .to("activemq:queue:events?broker=secondary")
     .build()?;
 
 // Producer — Artemis topic

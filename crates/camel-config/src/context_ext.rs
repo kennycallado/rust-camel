@@ -52,28 +52,58 @@ impl From<&crate::config::KafkaCamelConfig> for camel_component_kafka::KafkaConf
 }
 
 #[cfg(feature = "jms")]
-impl From<&crate::config::JmsCamelConfig> for camel_component_jms::JmsConfig {
+impl From<&crate::config::JmsCamelConfig> for camel_component_jms::JmsPoolConfig {
     fn from(c: &crate::config::JmsCamelConfig) -> Self {
-        let broker_type: camel_component_jms::BrokerType = c.broker_type.parse().unwrap();
-        if matches!(broker_type, camel_component_jms::BrokerType::Generic)
-            && !matches!(c.broker_type.to_lowercase().as_str(), "" | "generic")
-        {
-            tracing::warn!(
-                "JMS: unrecognized broker_type '{}', falling back to Generic. Valid values: activemq, artemis, generic",
-                c.broker_type
-            );
+        use camel_component_jms::{BrokerConfig, JmsPoolConfig};
+
+        let brokers: std::collections::HashMap<String, BrokerConfig> = c
+            .brokers
+            .iter()
+            .map(|(name, bc)| {
+                let broker_type = bc
+                    .broker_type
+                    .as_deref()
+                    .map(|t| match t.to_ascii_lowercase().as_str() {
+                        "activemq" => camel_component_jms::BrokerType::ActiveMq,
+                        "artemis" => camel_component_jms::BrokerType::Artemis,
+                        _ => camel_component_jms::BrokerType::Generic,
+                    })
+                    .unwrap_or(camel_component_jms::BrokerType::Generic);
+                (
+                    name.clone(),
+                    BrokerConfig {
+                        broker_url: bc.broker_url.clone(),
+                        broker_type,
+                        username: bc.username.clone(),
+                        password: bc.password.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let mut pool = JmsPoolConfig {
+            brokers,
+            default_broker: c.default_broker.clone(),
+            ..JmsPoolConfig::default()
+        };
+
+        if let Some(v) = c.max_bridges {
+            pool.max_bridges = v;
+        }
+        if let Some(v) = c.bridge_start_timeout_ms {
+            pool.bridge_start_timeout_ms = v;
+        }
+        if let Some(v) = c.broker_reconnect_interval_ms {
+            pool.broker_reconnect_interval_ms = v;
+        }
+        if let Some(v) = c.health_check_interval_ms {
+            pool.health_check_interval_ms = v;
+        }
+        if let Some(ref dir) = c.bridge_cache_dir {
+            pool.bridge_cache_dir = dir.clone();
         }
 
-        camel_component_jms::JmsConfig {
-            broker_url: c.broker_url.clone(),
-            broker_type,
-            username: c.username.clone(),
-            password: c.password.clone(),
-            bridge_version: c.bridge_version.clone(),
-            bridge_cache_dir: c.bridge_cache_dir.clone(),
-            bridge_start_timeout_ms: c.bridge_start_timeout_ms,
-            broker_reconnect_interval_ms: c.broker_reconnect_interval_ms,
-        }
+        pool
     }
 }
 
@@ -315,11 +345,11 @@ impl CamelConfig {
 
         #[cfg(feature = "jms")]
         {
-            let jms_config: camel_component_jms::JmsConfig = config
+            let jms_config: camel_component_jms::JmsPoolConfig = config
                 .components
                 .jms
                 .as_ref()
-                .map(camel_component_jms::JmsConfig::from)
+                .map(camel_component_jms::JmsPoolConfig::from)
                 .unwrap_or_default();
             ctx.set_component_config(jms_config);
         }

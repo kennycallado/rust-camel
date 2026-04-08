@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use camel_component_jms::{BrokerType, JmsComponent, JmsConfig};
+use std::{collections::HashMap, sync::Arc};
+
+use camel_component_jms::{
+    BrokerConfig, BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig,
+};
 use tokio::sync::OnceCell;
 
 use super::activemq::shared_activemq;
@@ -25,14 +29,24 @@ pub async fn shared_jms_activemq() -> JmsComponent {
     JMS_ACTIVEMQ
         .get_or_init(|| async {
             let (_, broker_url) = shared_activemq().await;
-            JmsComponent::new(JmsConfig {
-                broker_url: broker_url.to_string(),
-                broker_type: BrokerType::ActiveMq,
-                username: Some("admin".to_string()),
-                password: Some("admin".to_string()),
+            let pool_config = JmsPoolConfig {
+                max_bridges: 1,
+                default_broker: "default".to_string(),
+                brokers: HashMap::from([(
+                    "default".to_string(),
+                    BrokerConfig {
+                        broker_url: broker_url.to_string(),
+                        broker_type: BrokerType::ActiveMq,
+                        username: Some("admin".to_string()),
+                        password: Some("admin".to_string()),
+                    },
+                )]),
                 bridge_start_timeout_ms: 90_000,
-                ..JmsConfig::default()
-            })
+                ..JmsPoolConfig::default()
+            };
+
+            let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
+            JmsComponent::with_scheme("jms", pool)
         })
         .await
         .clone()
@@ -43,14 +57,24 @@ pub async fn shared_jms_artemis() -> JmsComponent {
     JMS_ARTEMIS
         .get_or_init(|| async {
             let (_, broker_url) = shared_artemis().await;
-            JmsComponent::new(JmsConfig {
-                broker_url: broker_url.to_string(),
-                broker_type: BrokerType::Artemis,
-                username: Some("artemis".to_string()),
-                password: Some("artemis".to_string()),
+            let pool_config = JmsPoolConfig {
+                max_bridges: 1,
+                default_broker: "default".to_string(),
+                brokers: HashMap::from([(
+                    "default".to_string(),
+                    BrokerConfig {
+                        broker_url: broker_url.to_string(),
+                        broker_type: BrokerType::Artemis,
+                        username: None,
+                        password: None,
+                    },
+                )]),
                 bridge_start_timeout_ms: 90_000,
-                ..JmsConfig::default()
-            })
+                ..JmsPoolConfig::default()
+            };
+
+            let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
+            JmsComponent::with_scheme("jms", pool)
         })
         .await
         .clone()
@@ -61,14 +85,24 @@ pub async fn shared_jms_artemis_auth() -> JmsComponent {
     JMS_ARTEMIS_AUTH
         .get_or_init(|| async {
             let (_, broker_url) = shared_artemis_auth().await;
-            JmsComponent::new(JmsConfig {
-                broker_url: broker_url.to_string(),
-                broker_type: BrokerType::Artemis,
-                username: Some("artemis".to_string()),
-                password: Some("artemis".to_string()),
+            let pool_config = JmsPoolConfig {
+                max_bridges: 1,
+                default_broker: "default".to_string(),
+                brokers: HashMap::from([(
+                    "default".to_string(),
+                    BrokerConfig {
+                        broker_url: broker_url.to_string(),
+                        broker_type: BrokerType::Artemis,
+                        username: Some("artemis".to_string()),
+                        password: Some("artemis".to_string()),
+                    },
+                )]),
                 bridge_start_timeout_ms: 90_000,
-                ..JmsConfig::default()
-            })
+                ..JmsPoolConfig::default()
+            };
+
+            let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
+            JmsComponent::with_scheme("jms", pool)
         })
         .await
         .clone()

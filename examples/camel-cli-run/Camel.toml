@@ -4,10 +4,12 @@ log_level = "INFO"
 watch = false
 
 [default.components.jms]
+max_bridges = 8
+default_broker = "main"
+
+[default.components.jms.brokers.main]
 broker_url = "tcp://localhost:61616"
-broker_type = "artemis"
-username = "artemis"
-password = "artemis"
+broker_type = "activemq"
 
 [default.supervision]
 max_attempts = 5

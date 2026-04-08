@@ -23,6 +23,7 @@ serde_json      = { workspace = true }
 uuid            = { workspace = true }
 futures         = { workspace = true }
 tokio-util      = { workspace = true }
+dashmap         = { workspace = true }
 
 [dev-dependencies]
 

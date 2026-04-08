@@ -3,6 +3,11 @@ mod commands;
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "jms")]
+use camel_component_jms::{JmsBridgePool, JmsComponent, JmsPoolConfig};
+#[cfg(feature = "jms")]
+use std::sync::Arc;
+
 #[derive(Parser)]
 #[command(
     name = "camel",
@@ -252,47 +257,25 @@ async fn run(
     }
 
     #[cfg(feature = "jms")]
-    {
-        use camel_component_jms::BrokerType;
-        use std::sync::Arc;
-        use tokio::sync::{RwLock, Semaphore};
-
-        let jms_cfg = ctx
-            .get_component_config::<camel_component_jms::JmsConfig>()
+    let jms_pool: Option<Arc<JmsBridgePool>> = {
+        let pool_config = ctx
+            .get_component_config::<JmsPoolConfig>()
             .cloned()
             .unwrap_or_default();
 
-        // Shared bridge — all three schemes use the same bridge process
-        let bridge = Arc::new(RwLock::new(None));
-        let semaphore = Arc::new(Semaphore::new(1));
+        let pool = match JmsBridgePool::from_config(pool_config) {
+            Ok(pool) => Arc::new(pool),
+            Err(e) => {
+                tracing::error!("Failed to initialize JMS bridge pool: {e}");
+                std::process::exit(1);
+            }
+        };
 
-        // activemq: hard-sets broker_type to ActiveMq
-        let mut activemq_cfg = jms_cfg.clone();
-        activemq_cfg.broker_type = BrokerType::ActiveMq;
-
-        // artemis: hard-sets broker_type to Artemis
-        let mut artemis_cfg = jms_cfg.clone();
-        artemis_cfg.broker_type = BrokerType::Artemis;
-
-        ctx.register_component(camel_component_jms::JmsComponent::with_scheme(
-            "jms",
-            jms_cfg,
-            Arc::clone(&bridge),
-            Arc::clone(&semaphore),
-        ));
-        ctx.register_component(camel_component_jms::JmsComponent::with_scheme(
-            "activemq",
-            activemq_cfg,
-            Arc::clone(&bridge),
-            Arc::clone(&semaphore),
-        ));
-        ctx.register_component(camel_component_jms::JmsComponent::with_scheme(
-            "artemis",
-            artemis_cfg,
-            Arc::clone(&bridge),
-            Arc::clone(&semaphore),
-        ));
-    }
+        ctx.register_component(JmsComponent::with_scheme("jms", Arc::clone(&pool)));
+        ctx.register_component(JmsComponent::with_scheme("activemq", Arc::clone(&pool)));
+        ctx.register_component(JmsComponent::with_scheme("artemis", Arc::clone(&pool)));
+        Some(pool)
+    };
 
     // 5. Discover and load initial routes
     match camel_dsl::discover_routes(&patterns) {
@@ -366,6 +349,13 @@ async fn run(
     ctx.stop().await.unwrap_or_else(|e| {
         tracing::error!("Error during shutdown: {}", e);
     });
+
+    #[cfg(feature = "jms")]
+    if let Some(pool) = jms_pool {
+        if let Err(e) = pool.shutdown().await {
+            tracing::error!("JMS pool shutdown error: {e}");
+        }
+    }
 
     tracing::info!("camel-cli: stopped");
 }

@@ -891,6 +891,7 @@ dependencies = [
  "bytes",
  "camel-bridge",
  "camel-component-api",
+ "dashmap 6.1.0",
  "futures",
  "prost 0.13.5",
  "protoc-bin-vendored",

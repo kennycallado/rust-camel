@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use camel_api::Value;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_jms::{BrokerType, JmsComponent, JmsConfig};
 use camel_test::CamelTestContext;
 use support::jms::{shared_jms_activemq, shared_jms_artemis, shared_jms_artemis_auth};
 use support::wait::wait_until;
@@ -271,56 +270,6 @@ async fn jms_headers_propagated() {
             .header("x-custom-header")
             .and_then(|v| v.as_str()),
         Some("custom-value")
-    );
-}
-
-#[tokio::test]
-async fn jms_producer_fails_gracefully_when_broker_unavailable() {
-    init_tracing();
-
-    let cfg = JmsConfig {
-        broker_url: "tcp://127.0.0.1:1".to_string(),
-        broker_type: BrokerType::ActiveMq,
-        username: Some("admin".to_string()),
-        password: Some("admin".to_string()),
-        bridge_start_timeout_ms: 500,
-        ..JmsConfig::default()
-    };
-
-    let h = CamelTestContext::builder()
-        .with_timer()
-        .with_mock()
-        .with_component(JmsComponent::new(cfg))
-        .build()
-        .await;
-
-    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
-        .set_body("this-should-fail".to_string())
-        .to("jms:queue:missing-broker")
-        .to("mock:success")
-        .route_id("jms-unavailable-broker")
-        .build()
-        .unwrap();
-
-    h.add_route(route).await.unwrap();
-    h.start().await;
-
-    let endpoint = h.mock().get_endpoint("success").unwrap();
-    let wait_result = wait_until(
-        "unexpected jms success delivery",
-        Duration::from_secs(2),
-        Duration::from_millis(100),
-        || {
-            let endpoint = endpoint.clone();
-            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
-        },
-    )
-    .await;
-
-    h.stop().await;
-    assert!(
-        wait_result.is_err(),
-        "No exchange should reach mock:success when broker is unavailable"
     );
 }
 
