@@ -1,3 +1,4 @@
+use camel_api::DelayConfig;
 use camel_api::aggregator::{
     AggregationStrategy, AggregatorConfig, CompletionCondition, CompletionMode, CorrelationStrategy,
 };
@@ -8,10 +9,10 @@ use camel_api::dynamic_router::{DynamicRouterConfig, RouterExpression};
 use camel_api::error_handler::{ErrorHandlerConfig, RedeliveryPolicy};
 use camel_api::load_balancer::LoadBalancerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
+use camel_api::recipient_list::{RecipientListConfig, RecipientListExpression};
 use camel_api::routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
 use camel_api::splitter::SplitterConfig;
 use camel_api::throttler::{ThrottleStrategy, ThrottlerConfig};
-use camel_api::DelayConfig;
 use camel_api::{
     BoxProcessor, CamelError, CanonicalRouteSpec, Exchange, FilterPredicate, IdentityProcessor,
     ProcessorFn, Value,
@@ -530,6 +531,15 @@ impl RouteBuilder {
         self
     }
 
+    pub fn recipient_list(self, expression: RecipientListExpression) -> Self {
+        self.recipient_list_with_config(RecipientListConfig::new(expression))
+    }
+
+    pub fn recipient_list_with_config(mut self, config: RecipientListConfig) -> Self {
+        self.steps.push(BuilderStep::RecipientList { config });
+        self
+    }
+
     /// Consume the builder and produce a [`RouteDefinition`].
     pub fn build(self) -> Result<RouteDefinition, CamelError> {
         if self.from_uri.is_empty() {
@@ -898,6 +908,8 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::RoutingSlip { .. } => "routing_slip",
         BuilderStep::DeclarativeDynamicRouter { .. } => "declarative_dynamic_router",
         BuilderStep::DeclarativeRoutingSlip { .. } => "declarative_routing_slip",
+        BuilderStep::RecipientList { .. } => "recipient_list",
+        BuilderStep::DeclarativeRecipientList { .. } => "declarative_recipient_list",
     }
 }
 

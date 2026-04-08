@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 static ENV_RE: OnceLock<Regex> = OnceLock::new();
 
 fn env_regex() -> &'static Regex {
-    ENV_RE.get_or_init(|| Regex::new(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}").unwrap())
+    ENV_RE.get_or_init(|| Regex::new(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}").unwrap())
 }
 
 /// Interpolates `${env:VAR_NAME}` placeholders in the source string.
@@ -20,11 +20,16 @@ pub fn interpolate_env(src: &str) -> Result<String, String> {
             return String::new();
         }
         let var_name = &caps[1];
+        let default_value = caps.get(2).map(|m| m.as_str());
         match env::var(var_name) {
             Ok(val) => val,
             Err(_) => {
-                error = Some(var_name.to_string());
-                String::new()
+                if let Some(default) = default_value {
+                    default.to_string()
+                } else {
+                    error = Some(var_name.to_string());
+                    String::new()
+                }
             }
         }
     });
@@ -78,5 +83,52 @@ mod tests {
         let err = interpolate_env("${env:TEST_DSL_FIRST} ${env:TEST_DSL_SECOND}").unwrap_err();
         assert_eq!(err, "TEST_DSL_FIRST");
         unsafe { env::remove_var("TEST_DSL_SECOND") };
+    }
+
+    #[test]
+    fn default_value_used_when_var_missing() {
+        unsafe { env::remove_var("TEST_DSL_DEFAULT_VAR") };
+        let result = interpolate_env("uri: ${env:TEST_DSL_DEFAULT_VAR:-localhost}/path").unwrap();
+        assert_eq!(result, "uri: localhost/path");
+    }
+
+    #[test]
+    fn default_value_not_used_when_var_set() {
+        unsafe { env::set_var("TEST_DSL_OVERRIDE", "production") };
+        let result = interpolate_env("uri: ${env:TEST_DSL_OVERRIDE:-localhost}/path").unwrap();
+        assert_eq!(result, "uri: production/path");
+        unsafe { env::remove_var("TEST_DSL_OVERRIDE") };
+    }
+
+    #[test]
+    fn empty_default_is_valid() {
+        unsafe { env::remove_var("TEST_DSL_EMPTY_DEFAULT") };
+        let result = interpolate_env("uri: ${env:TEST_DSL_EMPTY_DEFAULT:-}/path").unwrap();
+        assert_eq!(result, "uri: /path");
+    }
+
+    #[test]
+    fn no_default_still_errors() {
+        unsafe { env::remove_var("TEST_DSL_NO_DEFAULT") };
+        let err = interpolate_env("uri: ${env:TEST_DSL_NO_DEFAULT}/path").unwrap_err();
+        assert_eq!(err, "TEST_DSL_NO_DEFAULT");
+    }
+
+    #[test]
+    fn default_with_special_chars() {
+        unsafe { env::remove_var("TEST_DSL_SPECIAL") };
+        let result =
+            interpolate_env("uri: ${env:TEST_DSL_SPECIAL:-host.example.com:9092}/path").unwrap();
+        assert_eq!(result, "uri: host.example.com:9092/path");
+    }
+
+    #[test]
+    fn mixed_defaults_and_non_defaults() {
+        unsafe { env::remove_var("TEST_DSL_MIX_A") };
+        unsafe { env::set_var("TEST_DSL_MIX_B", "actual") };
+        let result =
+            interpolate_env("${env:TEST_DSL_MIX_A:-fallback}:${env:TEST_DSL_MIX_B}").unwrap();
+        assert_eq!(result, "fallback:actual");
+        unsafe { env::remove_var("TEST_DSL_MIX_B") };
     }
 }

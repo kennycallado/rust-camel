@@ -121,6 +121,11 @@ impl RuntimeExecutionHandle {
         }
     }
 
+    pub(crate) async fn route_source_hash(&self, route_id: &str) -> Option<u64> {
+        let controller = self.controller.lock().await;
+        controller.route_source_hash(route_id)
+    }
+
     pub(crate) async fn in_flight_count(&self, route_id: &str) -> Result<u64, CamelError> {
         let controller = self.controller.lock().await;
         if !controller.route_exists(route_id) {

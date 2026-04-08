@@ -1,9 +1,9 @@
 // lifecycle/application/route_definition.rs
 // Route definition and builder-step types. Route (compiled artifact) lives in adapters.
 
+use camel_api::UnitOfWorkConfig;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::UnitOfWorkConfig;
 use camel_api::{AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, SplitterConfig};
 use camel_component_api::ConcurrencyModel;
 
@@ -142,6 +142,17 @@ pub enum BuilderStep {
     RoutingSlip {
         config: camel_api::RoutingSlipConfig,
     },
+    RecipientList {
+        config: camel_api::recipient_list::RecipientListConfig,
+    },
+    DeclarativeRecipientList {
+        expression: LanguageExpressionDef,
+        delimiter: String,
+        parallel: bool,
+        parallel_limit: Option<usize>,
+        stop_on_exception: bool,
+        aggregation: String,
+    },
     Delay {
         config: camel_api::DelayConfig,
     },
@@ -244,6 +255,18 @@ impl std::fmt::Debug for BuilderStep {
             BuilderStep::RoutingSlip { .. } => {
                 write!(f, "BuilderStep::RoutingSlip {{ .. }}")
             }
+            BuilderStep::RecipientList { .. } => {
+                write!(f, "BuilderStep::RecipientList {{ .. }}")
+            }
+            BuilderStep::DeclarativeRecipientList {
+                expression,
+                aggregation,
+                ..
+            } => write!(
+                f,
+                "BuilderStep::DeclarativeRecipientList {{ language: {:?}, aggregation: {:?}, .. }}",
+                expression.language, aggregation
+            ),
             BuilderStep::Delay { config } => {
                 write!(f, "BuilderStep::Delay {{ config: {:?} }}", config)
             }
@@ -270,6 +293,7 @@ pub struct RouteDefinition {
     pub(crate) auto_startup: bool,
     /// Order in which routes are started. Lower values start first.
     pub(crate) startup_order: i32,
+    pub(crate) source_hash: Option<u64>,
 }
 
 impl RouteDefinition {
@@ -285,6 +309,7 @@ impl RouteDefinition {
             route_id: String::new(), // Will be set by with_route_id()
             auto_startup: true,
             startup_order: 1000,
+            source_hash: None,
         }
     }
 
@@ -375,6 +400,15 @@ impl RouteDefinition {
         self
     }
 
+    pub fn with_source_hash(mut self, hash: u64) -> Self {
+        self.source_hash = Some(hash);
+        self
+    }
+
+    pub fn source_hash(&self) -> Option<u64> {
+        self.source_hash
+    }
+
     /// Extract the metadata fields needed for introspection.
     /// This is used by RouteController to store route info without the non-Sync steps.
     pub fn to_info(&self) -> RouteDefinitionInfo {
@@ -382,6 +416,7 @@ impl RouteDefinition {
             route_id: self.route_id.clone(),
             auto_startup: self.auto_startup,
             startup_order: self.startup_order,
+            source_hash: self.source_hash,
         }
     }
 }
@@ -396,6 +431,7 @@ pub struct RouteDefinitionInfo {
     route_id: String,
     auto_startup: bool,
     startup_order: i32,
+    pub(crate) source_hash: Option<u64>,
 }
 
 impl RouteDefinitionInfo {
@@ -412,6 +448,10 @@ impl RouteDefinitionInfo {
     /// Order in which routes are started. Lower values start first.
     pub fn startup_order(&self) -> i32 {
         self.startup_order
+    }
+
+    pub fn source_hash(&self) -> Option<u64> {
+        self.source_hash
     }
 }
 
@@ -485,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_builder_step_debug_covers_many_variants() {
-        use camel_api::splitter::{split_body_lines, AggregationStrategy, SplitterConfig};
+        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
         use camel_api::{
             DynamicRouterConfig, Exchange, IdentityProcessor, RoutingSlipConfig, Value,
         };

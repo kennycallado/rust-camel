@@ -171,6 +171,10 @@ impl RouteControllerInternal for SupervisingRouteController {
         self.inner.route_ids()
     }
 
+    fn route_source_hash(&self, route_id: &str) -> Option<u64> {
+        self.inner.route_source_hash(route_id)
+    }
+
     fn in_flight_count(&self, route_id: &str) -> Option<u64> {
         self.inner.in_flight_count(route_id)
     }

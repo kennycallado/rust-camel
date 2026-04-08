@@ -126,6 +126,24 @@ let route = RouteBuilder::from("direct:input")
     .unwrap();
 ```
 
+### RecipientList Pattern
+
+```rust
+use camel_api::recipient_list::{RecipientListConfig, RecipientListExpression};
+
+let expression: RecipientListExpression = Arc::new(|ex: &Exchange| {
+    ex.input.header("destinations")
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
+});
+
+let route = RouteBuilder::from("direct:input")
+    .recipient_list(RecipientListConfig::new(expression))
+    .to("mock:result")
+    .build()
+    .unwrap();
+```
+
 ### Aggregate Pattern
 
 ```rust
@@ -319,6 +337,7 @@ This converts the message body from JSON to XML using the built-in data formats.
 | `end_choice()` | Close content-based router block |
 | `split(config)` | Split messages |
 | `multicast()` | Parallel routing |
+| `recipient_list(config)` | Dynamic recipient list from expression |
 | `wire_tap(uri)` | Side-channel copy |
 | `aggregate(config)` | Combine messages |
 | `log(msg, level)` | Log message |

@@ -179,6 +179,7 @@ Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (cu
 | Load Balancer        | `.load_balance()`                   | Distribute across endpoints with RoundRobin/Random/Weighted/Failover                                           |
 | Marshal / Unmarshal  | `.marshal(fmt)` / `.unmarshal(fmt)` | Serialize/deserialize bodies using pluggable data formats (JSON, XML)                                          |
 | Multicast            | `.multicast()`                      | Send the same exchange to multiple endpoints                                                                   |
+| RecipientList        | `.recipient_list(config)`           | Dynamically resolve endpoint URIs from an expression at runtime                                                |
 | Splitter             | `.split(config)`                    | Split one exchange into multiple fragments                                                                     |
 | Throttler            | `.throttle(n, duration)`            | Rate limiting with Delay/Reject/Drop strategies                                                                |
 | WireTap              | `.wire_tap(uri)`                    | Fire-and-forget copy to a tap endpoint                                                                         |
@@ -195,6 +196,7 @@ Run an example:
  cargo run -p content-based-routing
  cargo run -p controlbus
  cargo run -p dynamic-router
+ cargo run -p recipientlist
  cargo run -p routing-slip
  cargo run -p error-handling
  cargo run -p file-pipeline

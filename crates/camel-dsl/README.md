@@ -20,13 +20,13 @@
 - **Language expressions**: Use `simple:` and `rhai:` syntax for dynamic values
 - **Route-level configuration**: Auto-startup, startup ordering, concurrency, error handling, circuit breaker, unit-of-work hooks
 
-- **Environment variable interpolation**: Inject env vars in route files using `${env:VAR_NAME}` syntax
-- **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, stop, script, bean, throttle, load_balance, dynamic_router, routing_slip
+- **Environment variable interpolation**: Inject env vars in route files using `${env:VAR_NAME}` syntax with optional defaults `${env:VAR_NAME:-default}`
+- **All step types**: to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, recipient_list, stop, script, bean, throttle, load_balance, dynamic_router, routing_slip
 
 ## Supported YAML Steps
 
 ### Core Steps
-to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, stop, script, bean
+to, log, set_header, set_body, transform, filter, choice, split, aggregate, delay, wire_tap, multicast, recipient_list, stop, script, bean
 
 ### Delay
 Delay exchange processing:
@@ -99,6 +99,17 @@ steps:
   - routing_slip:
       simple: "${header.slip}"
 ```
+
+### Recipient List
+Dynamically resolve endpoints from an expression at runtime:
+
+```yaml
+steps:
+  - recipient_list:
+      simple: "${header.destinations}"
+```
+
+The expression should evaluate to a comma-separated list of endpoint URIs. Supports parallel execution and aggregation strategies.
 
 ### Bean
 Invoke a registered bean:
@@ -188,6 +199,7 @@ routes:
 | `delay` | Delay exchange processing | `- delay: 500` or `- delay: { delay_ms: 1000, dynamic_header: "CamelDelayMs" }` |
 | `wire_tap` | Fire-and-forget tap | `- wire_tap: "direct:audit"` |
 | `multicast` | Fan-out to multiple | `- multicast: { steps: [...] }` |
+| `recipient_list` | Dynamic recipient list | `- recipient_list: { simple: "${header.destinations}" }` |
 | `stop` | Stop pipeline | `- stop: true` |
 | `script` | Execute script | `- script: { language: "simple", source: "${body}" }` |
 | `bean` | Invoke bean method | `- bean: { name: "orderService", method: "process" }` |
@@ -280,6 +292,19 @@ routes:
 ```
 
 The substitution happens before YAML parsing, so it works in any position — URIs, log messages, header values, etc. Unset variables are left as-is (the literal `${env:VAR_NAME}` string).
+
+You can specify a default value when the variable is not set:
+
+```yaml
+routes:
+  - id: "env-defaults"
+    from: "timer:tick?period=${env:POLL_MS:-1000}"
+    steps:
+      - log: "Target: ${env:OUTPUT_URI:-log:info}"
+      - to: "${env:OUTPUT_URI:-log:info}"
+```
+
+If `POLL_MS` is not set, the default `1000` is used. The `:-` syntax follows the same convention as shell parameter expansion.
 
 ## Language Expressions
 Many steps support language expressions for dynamic values:

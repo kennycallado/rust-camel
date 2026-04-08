@@ -33,7 +33,9 @@ async fn main() -> Result<(), CamelError> {
 
     println!("Delayer example running.");
     println!("Route 1 (fixed): timer -> delay(500ms) -> log:delayed");
-    println!("Route 2 (dynamic): timer -> set_header(CamelDelayMs=1000) -> delay_with_header -> log:dynamic-delayed");
+    println!(
+        "Route 2 (dynamic): timer -> set_header(CamelDelayMs=1000) -> delay_with_header -> log:dynamic-delayed"
+    );
     println!("Press Ctrl+C to stop...");
 
     tokio::signal::ctrl_c()

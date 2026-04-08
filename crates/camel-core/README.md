@@ -32,7 +32,7 @@ crates/camel-core/src/
 - **CQRS Runtime Bus**: Separate command/query paths with projection-backed reads
 - **Event Sourcing**: Optional durable journal (redb v2) for crash recovery
 - **Hexagonal Architecture**: Clean separation via ports and adapters
-- **Hot-reload**: Live route updates with zero downtime and graceful in-flight exchange draining
+- **Hot-reload**: Live route updates with zero downtime, graceful in-flight exchange draining, and Skip optimization for unchanged routes
 - **Supervision**: Auto-recovery with configurable exponential backoff
 - **Exchange UoW layer**: `ExchangeUoWLayer` for per-route in-flight tracking and completion/failure hooks
 - **Tracer EIP**: Automatic message-flow tracing with configurable detail levels

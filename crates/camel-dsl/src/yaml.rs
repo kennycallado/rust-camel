@@ -6,28 +6,29 @@ use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
 use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical};
-use crate::contract::{assert_contract_coverage, DeclarativeStepKind};
+use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
     DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep,
     DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
     LoadBalanceStrategyDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
-    RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
-    SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
-    ValueSourceDef, WhenStepDef, WireTapStepDef,
+    RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef,
+    SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef,
+    ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
     DelayStep, DynamicRouterData, DynamicRouterStep, FilterStep, LoadBalanceData, LoadBalanceStep,
     LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep,
-    PredicateBlock, RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig,
-    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitExpressionConfig,
-    SplitExpressionYaml, SplitStep, StopStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
-    UnmarshalStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
+    PredicateBlock, RecipientListData, RecipientListStep, RoutingSlipData, RoutingSlipStep,
+    ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep,
+    SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, ThrottleData,
+    ThrottleStep, ToStep, TransformStep, UnmarshalStep, WireTapStep, YamlRoute, YamlRoutes,
+    YamlStep,
 };
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 20] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 21] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -48,6 +49,7 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 20] = [
     DeclarativeStepKind::LoadBalance,
     DeclarativeStepKind::RoutingSlip,
     DeclarativeStepKind::Throttle,
+    DeclarativeStepKind::RecipientList,
 ];
 
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
@@ -559,6 +561,48 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 uri_delimiter,
                 cache_size,
                 ignore_invalid_endpoints,
+            }))
+        }
+        YamlStep::RecipientList(RecipientListStep {
+            recipient_list:
+                RecipientListData {
+                    language,
+                    source,
+                    simple,
+                    rhai,
+                    delimiter,
+                    parallel,
+                    parallel_limit,
+                    stop_on_exception,
+                    strategy,
+                },
+        }) => {
+            let expression = parse_language_expression(
+                language,
+                source,
+                simple,
+                rhai,
+                None,
+                None,
+                "recipient_list",
+            )?;
+            let aggregation = match strategy.as_deref() {
+                None | Some("last_wins") => MulticastAggregationDef::LastWins,
+                Some("collect_all") => MulticastAggregationDef::CollectAll,
+                Some("original") => MulticastAggregationDef::Original,
+                Some(other) => {
+                    return Err(CamelError::RouteError(format!(
+                        "unsupported recipient_list.strategy `{other}`"
+                    )));
+                }
+            };
+            Ok(DeclarativeStep::RecipientList(RecipientListStepDef {
+                expression,
+                delimiter,
+                parallel,
+                parallel_limit,
+                stop_on_exception,
+                aggregation,
             }))
         }
         YamlStep::Throttle(ThrottleStep {

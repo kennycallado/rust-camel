@@ -16,6 +16,7 @@
 - **Splitter**: Split messages into multiple fragments
 - **Aggregator**: Aggregate multiple messages into one
 - **Multicast**: Send to multiple destinations in parallel
+- **RecipientList**: Dynamically resolve endpoints from expression at runtime
 - **WireTap**: Fire-and-forget message copying
 - **Circuit Breaker**: Resilience pattern implementation
 - **Error Handler**: Centralized error handling
@@ -109,6 +110,7 @@ let route = RouteBuilder::from("timer:tick")
 | `MarshalService` | Marshal body using a DataFormat (e.g., Json → Text) |
 | `UnmarshalService` | Unmarshal body using a DataFormat (e.g., Text → Json) |
 | `DelayerService` | Delay message processing by a fixed or dynamic duration |
+| `RecipientListService` | Dynamic recipient list — resolve endpoints from expression at runtime |
 
 ## Data Formats
 

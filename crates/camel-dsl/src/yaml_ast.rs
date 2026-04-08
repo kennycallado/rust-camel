@@ -141,6 +141,7 @@ pub enum YamlStep {
     WireTap(WireTapStep),
     Multicast(MulticastStep),
     RoutingSlip(RoutingSlipStep),
+    RecipientList(RecipientListStep),
     Stop(StopStep),
     Throttle(ThrottleStep),
     Transform(TransformStep),
@@ -562,6 +563,35 @@ pub struct RoutingSlipData {
     pub cache_size: i32,
     #[serde(default)]
     pub ignore_invalid_endpoints: bool,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct RecipientListStep {
+    pub recipient_list: RecipientListData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct RecipientListData {
+    #[serde(default)]
+    pub simple: Option<String>,
+    #[serde(default)]
+    pub rhai: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default = "default_uri_delimiter")]
+    pub delimiter: String,
+    #[serde(default)]
+    pub parallel: bool,
+    #[serde(default)]
+    pub parallel_limit: Option<usize>,
+    #[serde(default)]
+    pub stop_on_exception: bool,
+    #[serde(default)]
+    pub strategy: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]

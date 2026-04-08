@@ -2,12 +2,15 @@
 # env-interpolation example routes
 #
 # Uses ${env:VAR_NAME} to inject runtime environment variables.
+# Supports default values with ${env:VAR_NAME:-default} syntax.
 # Substitution happens before YAML parsing — works in URIs, messages, values.
 #
 # Try setting these before running:
 #   GREET_TARGET=log:my-app
 #   POLL_PERIOD_MS=2000
 #   LOG_PREFIX="[demo]"
+#
+# If unset, defaults kick in automatically (see route 2).
 # =============================================================================
 
 routes:
@@ -22,3 +25,12 @@ routes:
           key: "app"
           value: "${env:APP_NAME}"
       - to: "${env:GREET_TARGET}"
+
+  # ---------------------------------------------------------------------------
+  # Route 2: env var with default fallback syntax
+  # ---------------------------------------------------------------------------
+  - id: "env-defaults"
+    from: "timer:env-defaults?period=${env:DEFAULT_POLL_MS:-3000}&repeatCount=2"
+    steps:
+      - log: "${env:DEFAULT_LOG_PREFIX:-[defaults]} Using fallback defaults"
+      - to: "${env:DEFAULT_TARGET:-log:info}"

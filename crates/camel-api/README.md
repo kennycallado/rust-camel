@@ -16,6 +16,7 @@ If you're building custom components or processors for rust-camel, you'll need t
 - **Circuit breaker**: Circuit breaker configuration for resilience patterns
 - **Aggregator & Splitter**: EIP patterns for message aggregation and splitting
 - **Multicast**: Parallel message processing support
+- **RecipientList**: Dynamic recipient list with expression-based endpoint resolution
 - **Metrics**: Metrics collection interfaces
 - **Route control**: Route controller traits for lifecycle management
 - **Streaming**: Lazy `Body::Stream` variant with `materialize()`, `into_bytes()`, and `into_async_read()` for zero-copy I/O

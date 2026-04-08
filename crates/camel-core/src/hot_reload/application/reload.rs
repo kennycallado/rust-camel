@@ -1,17 +1,7 @@
 //! Route reload coordinator.
 //!
 //! Compares a new set of route definitions against the currently running routes
-//! and computes the minimal set of actions: SWAP, RESTART, ADD, or REMOVE.
-//!
-//! # Why no Skip action?
-//!
-//! We cannot reliably detect when a route is truly unchanged because:
-//! 1. `BoxProcessor` (the pipeline) is type-erased and cannot be compared for equality
-//! 2. Partial comparison (only metadata) risks false negatives—silently ignoring changes
-//!
-//! Since `Swap` is an atomic pointer swap via ArcSwap (nanoseconds), the cost of
-//! "unnecessary" swaps is negligible. Simplicity and correctness outweigh the
-//! theoretical benefit of Skip.
+//! and computes the minimal set of actions: SWAP, RESTART, ADD, REMOVE, or SKIP.
 
 use camel_api::CamelError;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,8 +64,16 @@ fn compute_reload_actions(
                 if from_uri != def.from_uri() {
                     actions.push(ReloadAction::Restart { route_id });
                 } else {
-                    // from_uri same — assume steps changed (we can't cheaply diff BoxProcessor)
-                    actions.push(ReloadAction::Swap { route_id });
+                    let existing_hash = controller.route_source_hash(&route_id);
+                    let new_hash = def.source_hash();
+                    match (existing_hash, new_hash) {
+                        (Some(h_existing), Some(h_new)) if h_existing == h_new => {
+                            actions.push(ReloadAction::Skip { route_id });
+                        }
+                        _ => {
+                            actions.push(ReloadAction::Swap { route_id });
+                        }
+                    }
                 }
             }
         } else {
@@ -102,6 +100,7 @@ fn compute_reload_actions(
 pub(crate) fn compute_reload_actions_from_runtime_snapshot(
     new_definitions: &[RouteDefinition],
     runtime_route_ids: &[String],
+    runtime_source_hash: &dyn Fn(&str) -> Option<u64>,
 ) -> Vec<ReloadAction> {
     let active_ids: std::collections::HashSet<String> = runtime_route_ids.iter().cloned().collect();
     let mut new_ids = std::collections::HashSet::new();
@@ -112,7 +111,16 @@ pub(crate) fn compute_reload_actions_from_runtime_snapshot(
         new_ids.insert(route_id.clone());
 
         if active_ids.contains(&route_id) {
-            actions.push(ReloadAction::Restart { route_id });
+            let existing_hash = runtime_source_hash(&route_id);
+            let new_hash = def.source_hash();
+            match (existing_hash, new_hash) {
+                (Some(h_existing), Some(h_new)) if h_existing == h_new => {
+                    actions.push(ReloadAction::Skip { route_id });
+                }
+                _ => {
+                    actions.push(ReloadAction::Restart { route_id });
+                }
+            }
         } else {
             actions.push(ReloadAction::Add { route_id });
         }
@@ -410,6 +418,10 @@ pub(crate) async fn execute_reload_actions(
                     );
                 }
             }
+
+            ReloadAction::Skip { route_id } => {
+                tracing::debug!(route_id = %route_id, "hot-reload: skipped unchanged route");
+            }
         }
     }
 
@@ -467,10 +479,16 @@ mod tests {
     #[test]
     fn test_same_from_uri_detected_as_swap() {
         let mut controller = make_controller();
-        let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("my-route");
+        let def = RouteDefinition::new("timer:tick", vec![])
+            .with_route_id("my-route")
+            .with_source_hash(100);
         controller.add_route(def).unwrap();
 
-        let new_defs = vec![RouteDefinition::new("timer:tick", vec![]).with_route_id("my-route")];
+        let new_defs = vec![
+            RouteDefinition::new("timer:tick", vec![])
+                .with_route_id("my-route")
+                .with_source_hash(200),
+        ];
         let actions = compute_reload_actions(&new_defs, &controller);
         assert_eq!(
             actions,
@@ -508,7 +526,8 @@ mod tests {
             .unwrap();
 
         let runtime_ids = vec!["runtime-route".to_string()];
-        let actions = compute_reload_actions_from_runtime_snapshot(&[], &runtime_ids);
+        let actions =
+            compute_reload_actions_from_runtime_snapshot(&[], &runtime_ids, &|_id: &str| None);
         assert_eq!(
             actions,
             vec![ReloadAction::Remove {
@@ -520,12 +539,23 @@ mod tests {
     #[test]
     fn test_runtime_snapshot_existing_routes_map_to_restart() {
         let defs = vec![
-            RouteDefinition::new("timer:tick", vec![]).with_route_id("runtime-r1"),
-            RouteDefinition::new("timer:tock", vec![]).with_route_id("runtime-r2"),
+            RouteDefinition::new("timer:tick", vec![])
+                .with_route_id("runtime-r1")
+                .with_source_hash(10),
+            RouteDefinition::new("timer:tock", vec![])
+                .with_route_id("runtime-r2")
+                .with_source_hash(20),
         ];
         let runtime_ids = vec!["runtime-r1".to_string(), "runtime-r2".to_string()];
+        let runtime_hashes = std::collections::HashMap::from([
+            ("runtime-r1".to_string(), 11u64),
+            ("runtime-r2".to_string(), 22u64),
+        ]);
 
-        let actions = compute_reload_actions_from_runtime_snapshot(&defs, &runtime_ids);
+        let actions =
+            compute_reload_actions_from_runtime_snapshot(&defs, &runtime_ids, &|id: &str| {
+                runtime_hashes.get(id).copied()
+            });
         assert_eq!(
             actions,
             vec![
@@ -536,6 +566,70 @@ mod tests {
                     route_id: "runtime-r2".into()
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn test_same_hash_detected_as_skip() {
+        let mut controller = make_controller();
+        let def = RouteDefinition::new("timer:tick", vec![])
+            .with_route_id("my-route")
+            .with_source_hash(42);
+        controller.add_route(def).unwrap();
+
+        let new_defs = vec![
+            RouteDefinition::new("timer:tick", vec![])
+                .with_route_id("my-route")
+                .with_source_hash(42),
+        ];
+        let actions = compute_reload_actions(&new_defs, &controller);
+        assert_eq!(
+            actions,
+            vec![ReloadAction::Skip {
+                route_id: "my-route".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn test_none_hash_detected_as_swap() {
+        let mut controller = make_controller();
+        let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("my-route");
+        controller.add_route(def).unwrap();
+
+        let new_defs = vec![
+            RouteDefinition::new("timer:tick", vec![])
+                .with_route_id("my-route")
+                .with_source_hash(99),
+        ];
+        let actions = compute_reload_actions(&new_defs, &controller);
+        assert_eq!(
+            actions,
+            vec![ReloadAction::Swap {
+                route_id: "my-route".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn test_runtime_snapshot_same_hash_detected_as_skip() {
+        let defs = vec![
+            RouteDefinition::new("timer:tick", vec![])
+                .with_route_id("r1")
+                .with_source_hash(42),
+        ];
+        let runtime_ids = vec!["r1".to_string()];
+        let runtime_hashes = std::collections::HashMap::from([("r1".to_string(), 42u64)]);
+
+        let actions =
+            compute_reload_actions_from_runtime_snapshot(&defs, &runtime_ids, &|id: &str| {
+                runtime_hashes.get(id).copied()
+            });
+        assert_eq!(
+            actions,
+            vec![ReloadAction::Skip {
+                route_id: "r1".into()
+            }]
         );
     }
 

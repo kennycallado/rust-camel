@@ -111,6 +111,8 @@ pub trait RouteControllerInternal: RouteController + Send {
     /// Returns all route IDs.
     fn route_ids(&self) -> Vec<String>;
 
+    fn route_source_hash(&self, route_id: &str) -> Option<u64>;
+
     /// Returns route IDs that should auto-start, sorted by startup order (ascending).
     fn auto_startup_route_ids(&self) -> Vec<String>;
 
@@ -1075,6 +1077,101 @@ impl DefaultRouteController {
                         camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
                     processors.push((BoxProcessor::new(svc), None));
                 }
+                BuilderStep::RecipientList { config } => {
+                    use camel_api::EndpointResolver;
+                    let producer_ctx_clone = producer_ctx.clone();
+                    let registry_clone = Arc::clone(registry);
+                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
+                        let parsed = match parse_uri(uri) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        let registry_guard = match registry_clone.lock() {
+                            Ok(g) => g,
+                            Err(_) => return None,
+                        };
+                        let component = match registry_guard.get_or_err(&parsed.scheme) {
+                            Ok(c) => c,
+                            Err(_) => return None,
+                        };
+                        let endpoint = match component.create_endpoint(uri) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
+                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        Some(BoxProcessor::new(producer))
+                    });
+                    let svc = camel_processor::recipient_list::RecipientListService::new(
+                        config, resolver,
+                    );
+                    processors.push((BoxProcessor::new(svc), None));
+                }
+                BuilderStep::DeclarativeRecipientList {
+                    expression,
+                    delimiter,
+                    parallel,
+                    parallel_limit,
+                    stop_on_exception,
+                    aggregation,
+                } => {
+                    use camel_api::EndpointResolver;
+                    let expression = self.compile_language_expression(&expression)?;
+                    let expression: camel_api::recipient_list::RecipientListExpression =
+                        Arc::new(move |exchange: &Exchange| {
+                            let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                            match value {
+                                Value::String(s) => s,
+                                Value::Null => String::new(),
+                                _ => value.to_string(),
+                            }
+                        });
+                    let strategy = match aggregation.as_str() {
+                        "collect_all" => camel_api::MulticastStrategy::CollectAll,
+                        "original" => camel_api::MulticastStrategy::Original,
+                        _ => camel_api::MulticastStrategy::LastWins,
+                    };
+                    let config = camel_api::recipient_list::RecipientListConfig::new(expression)
+                        .delimiter(delimiter)
+                        .parallel(parallel)
+                        .stop_on_exception(stop_on_exception)
+                        .strategy(strategy);
+                    let config = match parallel_limit {
+                        Some(limit) => config.parallel_limit(limit),
+                        None => config,
+                    };
+                    let producer_ctx_clone = producer_ctx.clone();
+                    let registry_clone = Arc::clone(registry);
+                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
+                        let parsed = match parse_uri(uri) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        let registry_guard = match registry_clone.lock() {
+                            Ok(g) => g,
+                            Err(_) => return None,
+                        };
+                        let component = match registry_guard.get_or_err(&parsed.scheme) {
+                            Ok(c) => c,
+                            Err(_) => return None,
+                        };
+                        let endpoint = match component.create_endpoint(uri) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
+                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
+                            Ok(p) => p,
+                            Err(_) => return None,
+                        };
+                        Some(BoxProcessor::new(producer))
+                    });
+                    let svc = camel_processor::recipient_list::RecipientListService::new(
+                        config, resolver,
+                    );
+                    processors.push((BoxProcessor::new(svc), None));
+                }
             }
         }
         Ok(processors)
@@ -1321,6 +1418,12 @@ impl DefaultRouteController {
     /// Returns all route IDs.
     pub fn route_ids(&self) -> Vec<String> {
         self.routes.keys().cloned().collect()
+    }
+
+    pub fn route_source_hash(&self, route_id: &str) -> Option<u64> {
+        self.routes
+            .get(route_id)
+            .and_then(|m| m.definition.source_hash())
     }
 
     /// Returns route IDs that should auto-start, sorted by startup order (ascending).
@@ -2075,6 +2178,10 @@ impl RouteControllerInternal for DefaultRouteController {
 
     fn route_ids(&self) -> Vec<String> {
         DefaultRouteController::route_ids(self)
+    }
+
+    fn route_source_hash(&self, route_id: &str) -> Option<u64> {
+        DefaultRouteController::route_source_hash(self, route_id)
     }
 
     fn auto_startup_route_ids(&self) -> Vec<String> {

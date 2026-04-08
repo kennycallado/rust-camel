@@ -6,11 +6,22 @@ pub(crate) enum ReloadAction {
     /// This action is taken when the route exists and `from_uri` is unchanged.
     /// Even if the pipeline is identical, swapping is harmless (atomic pointer swap).
     #[cfg_attr(not(test), allow(dead_code))]
-    Swap { route_id: String },
+    Swap {
+        route_id: String,
+    },
     /// Consumer (from_uri) changed — must stop and restart.
-    Restart { route_id: String },
+    Restart {
+        route_id: String,
+    },
     /// New route — add and start.
-    Add { route_id: String },
+    Add {
+        route_id: String,
+    },
     /// Route removed from config — stop and delete.
-    Remove { route_id: String },
+    Remove {
+        route_id: String,
+    },
+    Skip {
+        route_id: String,
+    },
 }

@@ -239,6 +239,16 @@ pub struct RoutingSlipStepDef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipientListStepDef {
+    pub expression: LanguageExpressionDef,
+    pub delimiter: String,
+    pub parallel: bool,
+    pub parallel_limit: Option<usize>,
+    pub stop_on_exception: bool,
+    pub aggregation: MulticastAggregationDef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MulticastAggregationDef {
     LastWins,
     CollectAll,
@@ -296,6 +306,7 @@ pub enum DeclarativeStep {
     WireTap(WireTapStepDef),
     Multicast(MulticastStepDef),
     RoutingSlip(RoutingSlipStepDef),
+    RecipientList(RecipientListStepDef),
     Stop,
     Throttle(ThrottleStepDef),
     Script(ScriptStepDef),

@@ -200,7 +200,19 @@ where
                 continue;
             }
         };
-        let actions = compute_reload_actions_from_runtime_snapshot(&new_defs, &runtime_route_ids);
+        let mut runtime_hashes: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for id in &runtime_route_ids {
+            if let Some(hash) = controller.route_source_hash(id).await {
+                runtime_hashes.insert(id.clone(), hash);
+            }
+        }
+
+        let actions = compute_reload_actions_from_runtime_snapshot(
+            &new_defs,
+            &runtime_route_ids,
+            &|route_id: &str| runtime_hashes.get(route_id).copied(),
+        );
 
         if actions.is_empty() {
             tracing::debug!("hot-reload: no route changes detected");

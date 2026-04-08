@@ -2,7 +2,9 @@
 
 use camel_core::route::RouteDefinition;
 use glob::glob;
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 
 use crate::env_interpolation::interpolate_env;
@@ -60,6 +62,10 @@ pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, Disc
                 source: e,
             })?;
 
+            let mut hasher = DefaultHasher::new();
+            yaml_content.hash(&mut hasher);
+            let source_hash = hasher.finish();
+
             let yaml_content =
                 interpolate_env(&yaml_content).map_err(|var_name| DiscoveryError::Yaml {
                     path: path_str.clone(),
@@ -72,7 +78,9 @@ pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, Disc
                 error: e.to_string(),
             })?;
 
-            routes.extend(file_routes);
+            for route in file_routes {
+                routes.push(route.with_source_hash(source_hash));
+            }
         }
     }
 

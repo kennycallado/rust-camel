@@ -79,7 +79,8 @@ mod tests {
         let mut svc = DelayerService::new(config);
 
         let mut ex = Exchange::new(Message::new("test"));
-        ex.input.set_header("CamelDelayMs", Value::Number(50.into()));
+        ex.input
+            .set_header("CamelDelayMs", Value::Number(50.into()));
 
         let start = Instant::now();
         let result = svc.ready().await.unwrap().call(ex).await;
@@ -126,7 +127,8 @@ mod tests {
         let mut svc = DelayerService::new(config);
 
         let mut ex = Exchange::new(Message::new("test"));
-        ex.input.set_header("CamelDelayMs", Value::String("not a number".into()));
+        ex.input
+            .set_header("CamelDelayMs", Value::String("not a number".into()));
 
         let start = Instant::now();
         let result = svc.ready().await.unwrap().call(ex).await;
@@ -142,7 +144,8 @@ mod tests {
         let mut svc = DelayerService::new(config);
 
         let mut ex = Exchange::new(Message::new("test"));
-        ex.input.set_header("CamelDelayMs", Value::Number((-100).into()));
+        ex.input
+            .set_header("CamelDelayMs", Value::Number((-100).into()));
 
         let start = Instant::now();
         let result = svc.ready().await.unwrap().call(ex).await;
