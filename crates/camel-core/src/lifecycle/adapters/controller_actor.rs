@@ -645,8 +645,12 @@ mod tests {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         {
             let mut guard = registry.lock().expect("lock");
-            guard.register(camel_component_timer::TimerComponent::new());
-            guard.register(camel_component_mock::MockComponent::new());
+            guard.register(std::sync::Arc::new(
+                camel_component_timer::TimerComponent::new(),
+            ));
+            guard.register(std::sync::Arc::new(
+                camel_component_mock::MockComponent::new(),
+            ));
         }
         let controller = DefaultRouteController::new(Arc::clone(&registry));
         spawn_controller_actor(controller)
@@ -740,10 +744,12 @@ mod tests {
 
         handle.add_route(definition).await.expect("add route");
         assert!(handle.route_exists("h-1").await.expect("route exists h-1"));
-        assert!(!handle
-            .route_exists("no-such")
-            .await
-            .expect("route exists no-such"));
+        assert!(
+            !handle
+                .route_exists("no-such")
+                .await
+                .expect("route exists no-such")
+        );
 
         let from_uri = handle.route_from_uri("h-1").await.expect("route_from_uri");
         assert_eq!(from_uri.as_deref(), Some("timer:tick?period=100"));
@@ -766,11 +772,13 @@ mod tests {
             .await
             .expect("compile_route_definition");
 
-        assert!(handle
-            .get_pipeline("h-1")
-            .await
-            .expect("get_pipeline")
-            .is_some());
+        assert!(
+            handle
+                .get_pipeline("h-1")
+                .await
+                .expect("get_pipeline")
+                .is_some()
+        );
         handle
             .swap_pipeline("h-1", compiled)
             .await
@@ -796,7 +804,13 @@ mod tests {
             .expect("set_runtime_handle");
 
         handle.remove_route("h-1").await.expect("remove_route");
-        assert_eq!(handle.route_count().await.expect("route_count after remove"), 0);
+        assert_eq!(
+            handle
+                .route_count()
+                .await
+                .expect("route_count after remove"),
+            0
+        );
         handle
             .stop_all_routes()
             .await
@@ -849,7 +863,10 @@ mod tests {
             .add_route(route_def("sup-1", "timer:tick?period=100"))
             .await
             .expect("add route sup-1");
-        handle.start_route("sup-1").await.expect("start_route sup-1");
+        handle
+            .start_route("sup-1")
+            .await
+            .expect("start_route sup-1");
 
         let (crash_tx, crash_rx) = mpsc::channel(8);
         let supervision = spawn_supervision_task(
@@ -886,7 +903,10 @@ mod tests {
             .add_route(route_def("sup-2", "timer:tick?period=100"))
             .await
             .expect("add route sup-2");
-        handle.start_route("sup-2").await.expect("start_route sup-2");
+        handle
+            .start_route("sup-2")
+            .await
+            .expect("start_route sup-2");
 
         let (crash_tx, crash_rx) = mpsc::channel(8);
         let supervision = spawn_supervision_task(

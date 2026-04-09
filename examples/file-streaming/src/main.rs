@@ -53,7 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Write via FileProducer (streaming, no materialization)
     let write_uri = format!("file:{out_path}?fileName=output.txt");
     let component = FileComponent::new();
-    let endpoint = component.create_endpoint(&write_uri)?;
+    let endpoint =
+        component.create_endpoint(&write_uri, &camel_component_api::NoOpComponentContext)?;
     let ctx = ProducerContext::new();
     let producer = endpoint.create_producer(&ctx)?;
 

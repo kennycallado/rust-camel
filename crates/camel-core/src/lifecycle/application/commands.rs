@@ -521,8 +521,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use async_trait::async_trait;
     use crate::lifecycle::domain::RuntimeEvent;
+    use async_trait::async_trait;
 
     #[derive(Clone, Default)]
     struct InMemoryTestRepo {
@@ -914,12 +914,7 @@ mod tests {
 
         let result = handle_register_internal(&deps, def2).await;
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("already exists")
-        );
+        assert!(result.unwrap_err().to_string().contains("already exists"));
     }
 
     #[test]

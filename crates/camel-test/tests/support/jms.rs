@@ -2,9 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use camel_component_jms::{
-    BrokerConfig, BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig,
-};
+use camel_component_jms::{BrokerConfig, BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig};
 use tokio::sync::OnceCell;
 
 use super::activemq::shared_activemq;

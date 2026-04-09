@@ -239,10 +239,9 @@ async fn test_remove_route_rejects_running_route() {
     // Verifies the stopped-first invariant: remove_route must return an error
     // when the route is in Started state, preventing resource leaks.
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-    registry
-        .lock()
-        .unwrap()
-        .register(camel_component_timer::TimerComponent::new());
+    registry.lock().unwrap().register(std::sync::Arc::new(
+        camel_component_timer::TimerComponent::new(),
+    ));
     let mut controller = DefaultRouteController::new(Arc::clone(&registry));
 
     let def =

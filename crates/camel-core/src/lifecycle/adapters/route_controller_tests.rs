@@ -11,9 +11,13 @@ fn build_controller_with_components() -> DefaultRouteController {
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
     {
         let mut guard = registry.lock().expect("registry lock");
-        guard.register(camel_component_timer::TimerComponent::new());
-        guard.register(camel_component_mock::MockComponent::new());
-        guard.register(camel_component_log::LogComponent::new());
+        guard.register(std::sync::Arc::new(
+            camel_component_timer::TimerComponent::new(),
+        ));
+        guard.register(std::sync::Arc::new(
+            camel_component_mock::MockComponent::new(),
+        ));
+        guard.register(std::sync::Arc::new(camel_component_log::LogComponent::new()));
     }
     DefaultRouteController::new(registry)
 }
@@ -620,10 +624,7 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
 
     struct FailingMutatingExpr;
     impl MutatingExpression for FailingMutatingExpr {
-        fn evaluate(
-            &self,
-            _exchange: &mut camel_api::Exchange,
-        ) -> Result<Value, LanguageError> {
+        fn evaluate(&self, _exchange: &mut camel_api::Exchange) -> Result<Value, LanguageError> {
             Ok(Value::Null)
         }
     }
@@ -653,10 +654,11 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
 
     let mut controller = build_controller_with_components();
     register_simple_language(&mut controller);
-    controller.languages.lock().expect("languages lock").insert(
-        "failing".into(),
-        Arc::new(FailingMutatingLanguage),
-    );
+    controller
+        .languages
+        .lock()
+        .expect("languages lock")
+        .insert("failing".into(), Arc::new(FailingMutatingLanguage));
 
     let producer_ctx = ProducerContext::new();
 
@@ -698,13 +700,15 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
     let err = controller
         .resolve_steps(
             vec![BuilderStep::DeclarativeChoice {
-                whens: vec![crate::lifecycle::application::route_definition::DeclarativeWhenStep {
-                    predicate: LanguageExpressionDef {
-                        language: "unknown".into(),
-                        source: "x".into(),
+                whens: vec![
+                    crate::lifecycle::application::route_definition::DeclarativeWhenStep {
+                        predicate: LanguageExpressionDef {
+                            language: "unknown".into(),
+                            source: "x".into(),
+                        },
+                        steps: vec![BuilderStep::Stop],
                     },
-                    steps: vec![BuilderStep::Stop],
-                }],
+                ],
                 otherwise: None,
             }],
             &producer_ctx,

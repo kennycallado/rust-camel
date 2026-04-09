@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use camel_component_api::{Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message};
+use camel_component_api::{
+    Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message,
+};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
@@ -231,10 +233,10 @@ impl Consumer for JmsConsumer {
         if let Some(cancel) = self.cancel_token.take() {
             cancel.cancel();
         }
-        if let Some(handle) = self.task_handle.take() {
-            if let Err(join_err) = handle.await {
-                warn!("JMS consumer task panicked on stop: {join_err}");
-            }
+        if let Some(handle) = self.task_handle.take()
+            && let Err(join_err) = handle.await
+        {
+            warn!("JMS consumer task panicked on stop: {join_err}");
         }
         Ok(())
     }
@@ -247,8 +249,8 @@ impl Consumer for JmsConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::JmsPoolConfig;
     use crate::BrokerType;
+    use crate::config::JmsPoolConfig;
 
     #[test]
     fn build_exchange_text_body() {

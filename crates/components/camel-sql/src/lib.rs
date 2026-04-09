@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod config;
 pub mod consumer;
 pub mod endpoint;
@@ -10,6 +11,7 @@ use camel_component_api::CamelError;
 use camel_component_api::UriConfig;
 use camel_component_api::{Component, Endpoint};
 
+pub use bundle::SqlBundle;
 pub use config::{SqlEndpointConfig, SqlGlobalConfig, SqlOutputType};
 
 pub struct SqlComponent {
@@ -43,7 +45,11 @@ impl Component for SqlComponent {
         "sql"
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = SqlEndpointConfig::from_uri(uri)?;
         if let Some(ref global_config) = self.config {
             config.apply_defaults(global_config);
@@ -60,6 +66,7 @@ impl Component for SqlComponent {
 mod tests {
     use super::*;
     use camel_component_api::Component;
+    use camel_component_api::NoOpComponentContext;
 
     #[test]
     fn test_component_scheme() {
@@ -70,22 +77,25 @@ mod tests {
     #[test]
     fn test_component_creates_endpoint() {
         let c = SqlComponent::new();
-        let ep = c.create_endpoint("sql:select 1?db_url=postgres://localhost/test");
+        let ctx = NoOpComponentContext;
+        let ep = c.create_endpoint("sql:select 1?db_url=postgres://localhost/test", &ctx);
         assert!(ep.is_ok());
     }
 
     #[test]
     fn test_component_rejects_wrong_scheme() {
         let c = SqlComponent::new();
-        let ep = c.create_endpoint("redis://localhost");
+        let ctx = NoOpComponentContext;
+        let ep = c.create_endpoint("redis://localhost", &ctx);
         assert!(ep.is_err());
     }
 
     #[test]
     fn test_endpoint_uri() {
         let c = SqlComponent::new();
+        let ctx = NoOpComponentContext;
         let ep = c
-            .create_endpoint("sql:select 1?db_url=postgres://localhost/test")
+            .create_endpoint("sql:select 1?db_url=postgres://localhost/test", &ctx)
             .unwrap();
         assert_eq!(ep.uri(), "sql:select 1?db_url=postgres://localhost/test");
     }
@@ -94,9 +104,10 @@ mod tests {
     fn test_component_with_global_config() {
         let global = SqlGlobalConfig::default().with_max_connections(20);
         let c = SqlComponent::with_config(global);
+        let ctx = NoOpComponentContext;
         // Verify the component can create endpoints with global config applied
         assert_eq!(c.scheme(), "sql");
-        let ep = c.create_endpoint("sql:select 1?db_url=postgres://localhost/test");
+        let ep = c.create_endpoint("sql:select 1?db_url=postgres://localhost/test", &ctx);
         assert!(ep.is_ok());
     }
 

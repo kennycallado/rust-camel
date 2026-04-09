@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod commands;
 pub mod config;
 pub mod consumer;
@@ -6,6 +7,7 @@ pub mod producer;
 use camel_component_api::{BoxProcessor, CamelError};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 
+pub use bundle::RedisBundle;
 pub use config::{RedisCommand, RedisConfig, RedisEndpointConfig};
 pub use consumer::RedisConsumer;
 pub use producer::RedisProducer;
@@ -47,7 +49,11 @@ impl Component for RedisComponent {
         "redis"
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = RedisEndpointConfig::from_uri(uri)?;
         // Apply global config defaults if available
         if let Some(ref global_cfg) = self.config {
@@ -84,6 +90,7 @@ impl Endpoint for RedisEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::NoOpComponentContext;
 
     #[test]
     fn test_component_scheme() {
@@ -94,8 +101,9 @@ mod tests {
     #[test]
     fn test_component_creates_endpoint() {
         let component = RedisComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint("redis://localhost:6379?command=GET")
+            .create_endpoint("redis://localhost:6379?command=GET", &ctx)
             .expect("endpoint should be created");
         assert_eq!(endpoint.uri(), "redis://localhost:6379?command=GET");
     }
@@ -103,7 +111,8 @@ mod tests {
     #[test]
     fn test_component_rejects_wrong_scheme() {
         let component = RedisComponent::new();
-        let result = component.create_endpoint("kafka:topic?brokers=localhost:9092");
+        let ctx = NoOpComponentContext;
+        let result = component.create_endpoint("kafka:topic?brokers=localhost:9092", &ctx);
         assert!(result.is_err(), "wrong scheme should fail");
         let err = result.err().expect("error must exist");
         assert!(err.to_string().contains("expected scheme 'redis'"));
@@ -115,9 +124,10 @@ mod tests {
             .with_host("redis-global")
             .with_port(6380);
         let component = RedisComponent::with_config(global);
+        let ctx = NoOpComponentContext;
 
         let endpoint = component
-            .create_endpoint("redis://?command=GET")
+            .create_endpoint("redis://?command=GET", &ctx)
             .expect("endpoint should be created with defaults");
 
         let _producer = endpoint

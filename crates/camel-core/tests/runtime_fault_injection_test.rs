@@ -6,13 +6,13 @@ use async_trait::async_trait;
 use camel_api::{CanonicalRouteSpec, RuntimeCommand, RuntimeCommandBus, RuntimeHandle};
 use camel_component_timer::TimerComponent;
 use camel_core::Registry;
+use camel_core::lifecycle::domain::DomainError;
 use camel_core::spawn_controller_actor;
 use camel_core::{
     DefaultRouteController, InMemoryCommandDedup, InMemoryEventPublisher, InMemoryRouteRepository,
     ProjectionStorePort, RouteStatusProjection, RuntimeBus, RuntimeExecutionAdapter,
 };
 use tokio::sync::RwLock;
-use camel_core::lifecycle::domain::DomainError;
 
 #[derive(Default)]
 struct FlakyProjectionStore {
@@ -68,7 +68,7 @@ async fn controller_success_plus_projection_failure_triggers_reconciliation() {
     registry
         .lock()
         .expect("registry lock poisoned")
-        .register(TimerComponent::new());
+        .register(std::sync::Arc::new(TimerComponent::new()));
 
     let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
         Arc::clone(&registry),

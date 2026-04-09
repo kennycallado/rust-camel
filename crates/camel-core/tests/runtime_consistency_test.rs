@@ -148,7 +148,11 @@ impl Component for CrashingComponent {
         "crash"
     }
 
-    fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        _uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         Ok(Box::new(CrashingEndpoint))
     }
 }
@@ -209,7 +213,11 @@ impl Component for CrashOnceThenHoldComponent {
         "crash-once-hold"
     }
 
-    fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        _uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         Ok(Box::new(CrashOnceThenHoldEndpoint {
             starts: Arc::clone(&self.starts),
         }))

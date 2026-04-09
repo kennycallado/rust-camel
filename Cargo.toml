@@ -95,6 +95,7 @@ members = [
     "examples/load-balancer",
     "examples/throttler",
     "examples/delayer",
+    "examples/custom-component-bundle",
     "crates/components/camel-container",
     "crates/services/camel-prometheus",
     "crates/services/camel-otel",
@@ -205,6 +206,7 @@ criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 prometheus = "0.14"
 rand = "0.8"
 quick-xml = { version = "0.37", features = ["serialize"] }
+toml = "0.8"
 
 # OpenTelemetry dependencies
 opentelemetry = { version = "0.31", features = ["trace", "logs", "metrics"] }

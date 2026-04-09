@@ -1,26 +1,61 @@
-#[derive(Debug, Clone, PartialEq)]
+use serde::Deserialize;
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct HttpConfig {
+    #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
+    #[serde(default = "default_pool_max_idle_per_host")]
     pub pool_max_idle_per_host: usize,
+    #[serde(default = "default_pool_idle_timeout_ms")]
     pub pool_idle_timeout_ms: u64,
+    #[serde(default)]
     pub follow_redirects: bool,
+    #[serde(default = "default_response_timeout_ms")]
     pub response_timeout_ms: u64,
+    #[serde(default = "default_max_body_size")]
     pub max_body_size: usize,
+    #[serde(default = "default_max_request_body")]
     pub max_request_body: usize,
+    #[serde(default)]
     pub allow_private_ips: bool,
+    #[serde(default)]
     pub blocked_hosts: Vec<String>,
+}
+
+fn default_connect_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_pool_max_idle_per_host() -> usize {
+    100
+}
+
+fn default_pool_idle_timeout_ms() -> u64 {
+    90_000
+}
+
+fn default_response_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_max_body_size() -> usize {
+    10_485_760
+}
+
+fn default_max_request_body() -> usize {
+    2_097_152
 }
 
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            connect_timeout_ms: 5_000,
-            pool_max_idle_per_host: 100,
-            pool_idle_timeout_ms: 90_000,
+            connect_timeout_ms: default_connect_timeout_ms(),
+            pool_max_idle_per_host: default_pool_max_idle_per_host(),
+            pool_idle_timeout_ms: default_pool_idle_timeout_ms(),
             follow_redirects: false,
-            response_timeout_ms: 30_000,
-            max_body_size: 10_485_760,
-            max_request_body: 2_097_152,
+            response_timeout_ms: default_response_timeout_ms(),
+            max_body_size: default_max_body_size(),
+            max_request_body: default_max_request_body(),
             allow_private_ips: false,
             blocked_hosts: Vec::new(),
         }

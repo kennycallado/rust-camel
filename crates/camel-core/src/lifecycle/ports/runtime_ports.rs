@@ -27,8 +27,10 @@ pub trait RouteRepositoryPort: Send + Sync {
 #[async_trait]
 pub trait ProjectionStorePort: Send + Sync {
     async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), DomainError>;
-    async fn get_status(&self, route_id: &str)
-    -> Result<Option<RouteStatusProjection>, DomainError>;
+    async fn get_status(
+        &self,
+        route_id: &str,
+    ) -> Result<Option<RouteStatusProjection>, DomainError>;
     async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, DomainError>;
     async fn remove_status(&self, route_id: &str) -> Result<(), DomainError>;
 }

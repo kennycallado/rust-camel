@@ -9,7 +9,7 @@ fn bench_lock_contention(c: &mut Criterion) {
     let mut group = c.benchmark_group("lock_contention/controller");
 
     let mut registry = Registry::new();
-    registry.register(TimerComponent::new());
+    registry.register(std::sync::Arc::new(TimerComponent::new()));
     let registry = Arc::new(Mutex::new(registry));
 
     let (handle, actor_join) = rt.block_on(async {

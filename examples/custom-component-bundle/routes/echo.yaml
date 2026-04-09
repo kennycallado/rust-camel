@@ -1,0 +1,5 @@
+- route:
+    id: echo-demo
+    from: timer:tick?period=2000
+    steps:
+      - to: echo:hello

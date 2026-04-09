@@ -96,6 +96,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Component Infrastructure
+
+`CamelContext` implements both `ComponentContext` and `ComponentRegistrar` from `camel-component-api`.
+
+**`ComponentContext`** is passed to `create_endpoint`, giving components read-only access to:
+- Component registry (resolve components by scheme)
+- Language registry (resolve expression languages)
+- Metrics collector
+
+**`ComponentRegistrar`** enables trait-based dynamic registration:
+
+```rust
+use camel_component_api::ComponentRegistrar;
+use std::sync::Arc;
+
+ctx.register_component_dyn(Arc::new(MyComponent::new()));
+ctx.register_component(MyComponent::new()); // convenience wrapper
+```
+
+**`ComponentBundle`** groups related schemes and registers from TOML config:
+
+```rust
+use camel_component_api::ComponentBundle;
+
+if let Some(raw) = config.components.raw.get("http").cloned() {
+    camel_component_http::HttpBundle::from_toml(raw)?.register_all(&mut ctx);
+}
+```
+
 ### Runtime Bus (CQRS)
 
 Control routes via the runtime bus:

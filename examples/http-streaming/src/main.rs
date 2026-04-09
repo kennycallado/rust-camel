@@ -29,7 +29,10 @@ async fn main() -> Result<(), CamelError> {
 
     // --- Route 1: GET /stream (response streaming) ---
     let stream_endpoint = component
-        .create_endpoint(&format!("http://127.0.0.1:{PORT}/stream"))
+        .create_endpoint(
+            &format!("http://127.0.0.1:{PORT}/stream"),
+            &camel_component_api::NoOpComponentContext,
+        )
         .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
     let mut stream_consumer = stream_endpoint
         .create_consumer()
@@ -46,7 +49,10 @@ async fn main() -> Result<(), CamelError> {
 
     // --- Route 2: POST /upload (request streaming) ---
     let upload_endpoint = component
-        .create_endpoint(&format!("http://127.0.0.1:{PORT}/upload"))
+        .create_endpoint(
+            &format!("http://127.0.0.1:{PORT}/upload"),
+            &camel_component_api::NoOpComponentContext,
+        )
         .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
     let mut upload_consumer = upload_endpoint
         .create_consumer()

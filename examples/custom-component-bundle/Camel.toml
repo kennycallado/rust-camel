@@ -1,0 +1,5 @@
+routes = ["routes/*.yaml"]
+watch = false
+
+[components.echo]
+prefix = ">> "

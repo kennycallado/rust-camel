@@ -144,10 +144,9 @@ impl JmsBridgePool {
             return Ok(Arc::clone(&*slot));
         }
 
-        let broker_config = self
-            .config
-            .get(broker_name)
-            .ok_or_else(|| CamelError::ProcessorError(format!("Unknown JMS broker '{}'", broker_name)))?;
+        let broker_config = self.config.get(broker_name).ok_or_else(|| {
+            CamelError::ProcessorError(format!("Unknown JMS broker '{}'", broker_name))
+        })?;
 
         // Clone all required broker data before touching DashMap::entry().
         let broker_url = broker_config.broker_url.clone();
@@ -159,7 +158,7 @@ impl JmsBridgePool {
 
         let slot = match self.slots.entry(broker_name.to_string()) {
             dashmap::Entry::Occupied(existing) => {
-                return Ok(Arc::clone(&*existing.get()));
+                return Ok(Arc::clone(existing.get()));
             }
             dashmap::Entry::Vacant(entry) => {
                 let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
@@ -362,7 +361,9 @@ impl JmsBridgePool {
         info!("Starting JMS bridge process for {broker_url}...");
         let binary_path = ensure_binary(bridge_version, bridge_cache_dir)
             .await
-            .map_err(|e| CamelError::ProcessorError(format!("JMS bridge binary unavailable: {e}")))?;
+            .map_err(|e| {
+                CamelError::ProcessorError(format!("JMS bridge binary unavailable: {e}"))
+            })?;
 
         let process_config = BridgeProcessConfig {
             binary_path,
@@ -392,7 +393,9 @@ impl JmsBridgePool {
                 }
             })
             .await
-            .map_err(|e| CamelError::ProcessorError(format!("JMS bridge health check failed: {e}")))?;
+            .map_err(|e| {
+                CamelError::ProcessorError(format!("JMS bridge health check failed: {e}"))
+            })?;
 
             Ok::<(BridgeProcess, Channel), CamelError>((process, channel))
         })
@@ -442,7 +445,12 @@ impl JmsComponent {
             .await?;
         let channel = match &*slot.state_rx.borrow() {
             BridgeState::Ready { channel } => channel.clone(),
-            other => return Err(CamelError::ProcessorError(format!("Bridge not ready: {:?}", other))),
+            other => {
+                return Err(CamelError::ProcessorError(format!(
+                    "Bridge not ready: {:?}",
+                    other
+                )));
+            }
         };
         let mut client = BridgeServiceClient::new(channel);
         let r = client
@@ -463,7 +471,11 @@ impl Component for JmsComponent {
         &self.scheme
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         let endpoint_config = JmsEndpointConfig::from_uri(uri)?;
         let broker_name = self
             .pool
@@ -628,7 +640,10 @@ mod tests {
             BrokerType::ActiveMq,
         ))
         .unwrap();
-        assert_eq!(pool.resolve_broker_name(Some("default")).unwrap(), "default");
+        assert_eq!(
+            pool.resolve_broker_name(Some("default")).unwrap(),
+            "default"
+        );
     }
 
     #[test]
@@ -697,10 +712,7 @@ mod tests {
             pool.resolve_broker_type("activemq", "main"),
             BrokerType::ActiveMq
         );
-        assert_eq!(
-            pool.resolve_broker_type("jms", "main"),
-            BrokerType::Artemis
-        );
+        assert_eq!(pool.resolve_broker_type("jms", "main"), BrokerType::Artemis);
     }
 
     #[test]
@@ -713,7 +725,10 @@ mod tests {
             .unwrap(),
         );
         let component = JmsComponent::with_scheme("jms", pool);
-        let endpoint = component.create_endpoint("jms:queue:orders");
+        let endpoint = component.create_endpoint(
+            "jms:queue:orders",
+            &camel_component_api::NoOpComponentContext,
+        );
         assert!(endpoint.is_ok(), "got: {:?}", endpoint.err());
     }
 
@@ -727,7 +742,10 @@ mod tests {
             .unwrap(),
         );
         let component = JmsComponent::with_scheme("jms", pool);
-        let err = component.create_endpoint("kafka:orders").err().unwrap();
+        let err = component
+            .create_endpoint("kafka:orders", &camel_component_api::NoOpComponentContext)
+            .err()
+            .unwrap();
         assert!(
             err.to_string()
                 .contains("expected scheme 'jms', 'activemq', or 'artemis'"),
@@ -766,7 +784,10 @@ mod tests {
             .unwrap(),
         );
         let component = JmsComponent::with_scheme("jms", Arc::clone(&pool));
-        let endpoint = component.create_endpoint("jms:queue:orders?broker=secondary");
+        let endpoint = component.create_endpoint(
+            "jms:queue:orders?broker=secondary",
+            &camel_component_api::NoOpComponentContext,
+        );
         assert!(endpoint.is_ok(), "got: {:?}", endpoint.err());
     }
 
@@ -882,7 +903,12 @@ mod tests {
         );
 
         let component = JmsComponent::with_scheme("jms", pool);
-        let endpoint = component.create_endpoint("jms:queue:orders").unwrap();
+        let endpoint = component
+            .create_endpoint(
+                "jms:queue:orders",
+                &camel_component_api::NoOpComponentContext,
+            )
+            .unwrap();
         let mut producer = endpoint
             .create_producer(&camel_component_api::ProducerContext::default())
             .unwrap();
@@ -891,10 +917,6 @@ mod tests {
         exchange.input.body = camel_component_api::Body::Text("hello".to_string());
 
         let err = producer.call(exchange).await.unwrap_err();
-        assert!(
-            err.to_string().contains("is degraded"),
-            "got: {}",
-            err
-        );
+        assert!(err.to_string().contains("is degraded"), "got: {}", err);
     }
 }

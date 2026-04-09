@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use camel_api::{
-    RuntimeCommand, RuntimeCommandBus, RuntimeQuery, RuntimeQueryBus,
-    RuntimeQueryResult,
+    RuntimeCommand, RuntimeCommandBus, RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult,
 };
+use camel_core::lifecycle::domain::DomainError;
 use camel_core::{
     InMemoryRuntimeStore, JournalDurability, ProjectionStorePort, RedbJournalOptions,
     RedbRuntimeEventJournal, RouteRepositoryPort, RouteRuntimeAggregate, RouteRuntimeState,
@@ -12,7 +12,6 @@ use camel_core::{
     RuntimeUnitOfWorkPort,
 };
 use tempfile::tempdir;
-use camel_core::lifecycle::domain::DomainError;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -38,7 +37,9 @@ struct FailingJournal;
 #[async_trait]
 impl RuntimeEventJournalPort for FailingJournal {
     async fn append_batch(&self, _events: &[RuntimeEvent]) -> Result<(), DomainError> {
-        Err(DomainError::InvalidState("forced journal failure".to_string()))
+        Err(DomainError::InvalidState(
+            "forced journal failure".to_string(),
+        ))
     }
 
     async fn load_all(&self) -> Result<Vec<RuntimeEvent>, DomainError> {

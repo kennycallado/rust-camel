@@ -1,8 +1,10 @@
+pub mod bundle;
 pub mod config;
 pub mod consumer;
 pub mod manual_commit;
 pub mod producer;
 
+pub use bundle::KafkaBundle;
 pub use config::{KafkaConfig, KafkaEndpointConfig};
 pub use consumer::KafkaConsumer;
 pub use manual_commit::KafkaManualCommit;
@@ -48,7 +50,11 @@ impl Component for KafkaComponent {
         "kafka"
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = KafkaEndpointConfig::from_uri(uri)?;
         // Apply global config defaults if available
         if let Some(ref global_cfg) = self.config {
@@ -85,6 +91,7 @@ impl Endpoint for KafkaEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::NoOpComponentContext;
 
     #[test]
     fn test_component_scheme() {
@@ -95,8 +102,12 @@ mod tests {
     #[test]
     fn test_component_creates_endpoint_with_defaults() {
         let component = KafkaComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint("kafka:orders?brokers=localhost:9092&groupId=test-group")
+            .create_endpoint(
+                "kafka:orders?brokers=localhost:9092&groupId=test-group",
+                &ctx,
+            )
             .expect("endpoint should be created");
         assert_eq!(
             endpoint.uri(),
@@ -107,7 +118,9 @@ mod tests {
     #[test]
     fn test_component_rejects_wrong_scheme() {
         let component = KafkaComponent::new();
-        let result = component.create_endpoint("sql:select 1?db_url=postgres://localhost/test");
+        let ctx = NoOpComponentContext;
+        let result =
+            component.create_endpoint("sql:select 1?db_url=postgres://localhost/test", &ctx);
         assert!(result.is_err(), "wrong scheme should fail");
         let err = result.err().expect("error must exist");
         assert!(err.to_string().contains("expected scheme 'kafka'"));
@@ -119,9 +132,10 @@ mod tests {
             .with_brokers("broker-1:9092")
             .with_group_id("global-group");
         let component = KafkaComponent::with_config(global);
+        let ctx = NoOpComponentContext;
 
         let endpoint = component
-            .create_endpoint("kafka:orders")
+            .create_endpoint("kafka:orders", &ctx)
             .expect("endpoint should be created with global defaults");
 
         let producer = endpoint

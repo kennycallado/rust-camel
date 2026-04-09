@@ -3,11 +3,6 @@ use camel_cli::commands;
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "jms")]
-use camel_component_jms::{JmsBridgePool, JmsComponent, JmsPoolConfig};
-#[cfg(feature = "jms")]
-use std::sync::Arc;
-
 #[derive(Parser)]
 #[command(
     name = "camel",
@@ -95,7 +90,7 @@ async fn main() {
             } else {
                 None
             };
-            run(
+            if let Err(e) = run(
                 routes,
                 config,
                 cli_watch,
@@ -105,6 +100,10 @@ async fn main() {
                 health_port,
             )
             .await
+            {
+                eprintln!("camel-cli run failed: {e}");
+                std::process::exit(1);
+            }
         }
         Commands::Journal { action } => match action {
             JournalAction::Inspect(args) => {
@@ -125,7 +124,7 @@ async fn run(
     otel_endpoint: Option<String>,
     service_name: Option<String>,
     health_port: Option<u16>,
-) {
+) -> Result<(), camel_api::CamelError> {
     // 1. Load config (fall back to empty config with serde defaults if Camel.toml not found)
     let mut camel_config: camel_config::config::CamelConfig =
         camel_config::config::CamelConfig::from_file(&config_path).unwrap_or_else(|_| {
@@ -190,98 +189,79 @@ async fn run(
 
     tracing::info!("camel-cli: loading routes from patterns: {:?}", patterns);
 
-    // 4. Register built-in components
+    // Define register_bundle! macro — looks up config key in ComponentsConfig::raw
+    // Uses UFCS to invoke ComponentBundle methods without requiring trait in scope
+    macro_rules! register_bundle {
+        ($ctx:expr, $cfg:expr, $Bundle:ty) => {
+            if let Some(raw) = $cfg
+                .components
+                .raw
+                .get(<$Bundle as camel_component_api::ComponentBundle>::config_key())
+                .cloned()
+            {
+                match <$Bundle as camel_component_api::ComponentBundle>::from_toml(raw) {
+                    Ok(bundle) => <$Bundle as camel_component_api::ComponentBundle>::register_all(
+                        bundle, &mut $ctx,
+                    ),
+                    Err(e) => {
+                        return Err(camel_api::CamelError::Config(format!(
+                            "Failed to load {} config: {}",
+                            <$Bundle as camel_component_api::ComponentBundle>::config_key(),
+                            e
+                        )));
+                    }
+                }
+            }
+        };
+    }
+
+    // Register built-in components (no config needed)
     ctx.register_component(camel_component_timer::TimerComponent::new());
     ctx.register_component(camel_component_log::LogComponent::new());
     ctx.register_component(camel_component_direct::DirectComponent::new());
-    // File component: pass global config if available
-    let file_cfg = ctx
-        .get_component_config::<camel_component_file::FileGlobalConfig>()
-        .cloned();
-    ctx.register_component(camel_component_file::FileComponent::with_optional_config(
-        file_cfg,
-    ));
-    {
-        let http_cfg = ctx
-            .get_component_config::<camel_component_http::HttpConfig>()
-            .cloned();
-        ctx.register_component(camel_component_http::HttpComponent::with_optional_config(
-            http_cfg,
-        ));
-    }
-    {
-        let http_cfg = ctx
-            .get_component_config::<camel_component_http::HttpConfig>()
-            .cloned();
-        ctx.register_component(camel_component_http::HttpsComponent::with_optional_config(
-            http_cfg,
-        ));
-    }
-    ctx.register_component(camel_component_ws::WsComponent);
-    ctx.register_component(camel_component_ws::WssComponent);
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
 
-    #[cfg(feature = "container")]
-    {
-        let container_cfg = ctx
-            .get_component_config::<camel_component_container::ContainerGlobalConfig>()
-            .cloned();
-        ctx.register_component(
-            camel_component_container::ContainerComponent::with_optional_config(container_cfg),
-        );
-    }
+    // Register HTTP, WS, File, Container (always-on in camel-cli, no feature flag)
+    register_bundle!(ctx, camel_config, camel_component_http::HttpBundle);
+    register_bundle!(ctx, camel_config, camel_component_ws::WsBundle);
+    register_bundle!(ctx, camel_config, camel_component_file::FileBundle);
+    register_bundle!(
+        ctx,
+        camel_config,
+        camel_component_container::ContainerBundle
+    );
 
-    #[cfg(feature = "redis")]
-    {
-        let redis_cfg = ctx
-            .get_component_config::<camel_component_redis::RedisConfig>()
-            .cloned();
-        ctx.register_component(camel_component_redis::RedisComponent::with_optional_config(
-            redis_cfg,
-        ));
-    }
+    // Register optional/feature-gated bundles
+    #[cfg(feature = "jms")]
+    // JMS needs explicit pool capture for shutdown — handled below
+    let jms_pool = {
+        if let Some(raw) = camel_config.components.raw.get("jms").cloned() {
+            match <camel_component_jms::JmsBundle as camel_component_api::ComponentBundle>::from_toml(raw) {
+                Ok(bundle) => {
+                    let pool = bundle.pool();
+                    <camel_component_jms::JmsBundle as camel_component_api::ComponentBundle>::register_all(bundle, &mut ctx);
+                    Some(pool)
+                }
+                Err(e) => {
+                    return Err(camel_api::CamelError::Config(format!(
+                        "Failed to load jms config: {e}"
+                    )));
+                }
+            }
+        } else {
+            None
+        }
+    };
+    #[cfg(not(feature = "jms"))]
+    let jms_pool: Option<()> = None;
 
     #[cfg(feature = "kafka")]
-    {
-        let kafka_cfg = ctx
-            .get_component_config::<camel_component_kafka::KafkaConfig>()
-            .cloned();
-        ctx.register_component(camel_component_kafka::KafkaComponent::with_optional_config(
-            kafka_cfg,
-        ));
-    }
-
+    register_bundle!(ctx, camel_config, camel_component_kafka::KafkaBundle);
+    #[cfg(feature = "redis")]
+    register_bundle!(ctx, camel_config, camel_component_redis::RedisBundle);
     #[cfg(feature = "sql")]
-    {
-        let sql_cfg = ctx
-            .get_component_config::<camel_component_sql::SqlGlobalConfig>()
-            .cloned();
-        ctx.register_component(camel_component_sql::SqlComponent::with_optional_config(
-            sql_cfg,
-        ));
-    }
-
-    #[cfg(feature = "jms")]
-    let jms_pool: Option<Arc<JmsBridgePool>> = {
-        let pool_config = ctx
-            .get_component_config::<JmsPoolConfig>()
-            .cloned()
-            .unwrap_or_default();
-
-        let pool = match JmsBridgePool::from_config(pool_config) {
-            Ok(pool) => Arc::new(pool),
-            Err(e) => {
-                tracing::error!("Failed to initialize JMS bridge pool: {e}");
-                std::process::exit(1);
-            }
-        };
-
-        ctx.register_component(JmsComponent::with_scheme("jms", Arc::clone(&pool)));
-        ctx.register_component(JmsComponent::with_scheme("activemq", Arc::clone(&pool)));
-        ctx.register_component(JmsComponent::with_scheme("artemis", Arc::clone(&pool)));
-        Some(pool)
-    };
+    register_bundle!(ctx, camel_config, camel_component_sql::SqlBundle);
 
     // 5. Discover and load initial routes
     match camel_dsl::discover_routes(&patterns) {
@@ -357,11 +337,12 @@ async fn run(
     });
 
     #[cfg(feature = "jms")]
-    if let Some(pool) = jms_pool {
-        if let Err(e) = pool.shutdown().await {
-            tracing::error!("JMS pool shutdown error: {e}");
-        }
+    if let Some(pool) = jms_pool
+        && let Err(e) = pool.shutdown().await
+    {
+        tracing::error!("JMS pool shutdown error: {e}");
     }
 
     tracing::info!("camel-cli: stopped");
+    Ok(())
 }

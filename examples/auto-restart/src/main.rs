@@ -51,7 +51,11 @@ impl Component for CrashSimulatorComponent {
         "crash-simulator"
     }
 
-    fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        _uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         Ok(Box::new(CrashSimulatorEndpoint {
             crash_counter: Arc::clone(&self.crash_counter),
             runs_before_crash: self.runs_before_crash,

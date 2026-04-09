@@ -197,9 +197,11 @@ mod tests {
     fn start_emits_route_started_event() {
         let mut agg = RouteRuntimeAggregate::new("r1");
         let events = agg.apply_command(RouteLifecycleCommand::Start).unwrap();
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, RuntimeEvent::RouteStarted { route_id } if route_id == "r1")));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, RuntimeEvent::RouteStarted { route_id } if route_id == "r1"))
+        );
     }
 
     #[test]

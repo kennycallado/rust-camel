@@ -1,3 +1,7 @@
+pub mod bundle;
+
+pub use bundle::FileBundle;
+
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
@@ -94,9 +98,10 @@ impl FromStr for FileExistStrategy {
 // ---------------------------------------------------------------------------
 
 /// Global configuration for File component.
-/// Plain Rust, no serde, with Default impl and builder methods.
+/// Supports serde deserialization with defaults and builder methods.
 /// These are the fallback defaults when URI params are not set.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(default)]
 pub struct FileGlobalConfig {
     pub delay_ms: u64,
     pub initial_delay_ms: u64,
@@ -331,7 +336,11 @@ impl Component for FileComponent {
         "file"
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = FileConfig::from_uri(uri)?;
         if let Some(ref global_config) = self.config {
             config.apply_global_defaults(global_config);
@@ -861,6 +870,7 @@ impl Service<Exchange> for FileProducer {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use camel_component_api::NoOpComponentContext;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
@@ -943,7 +953,8 @@ mod tests {
     #[test]
     fn test_file_component_creates_endpoint() {
         let component = FileComponent::new();
-        let endpoint = component.create_endpoint("file:/tmp/test");
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint("file:/tmp/test", &ctx);
         assert!(endpoint.is_ok());
     }
 
@@ -960,10 +971,12 @@ mod tests {
         std::fs::write(dir.path().join("test2.txt"), "world").unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!(
-                "file:{dir_path}?noop=true&initialDelay=0&delay=100"
-            ))
+            .create_endpoint(
+                &format!("file:{dir_path}?noop=true&initialDelay=0&delay=100"),
+                &ctx,
+            )
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -1079,10 +1092,12 @@ mod tests {
         std::fs::write(dir.path().join("readme.txt"), "hello").unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!(
-                "file:{dir_path}?noop=true&initialDelay=0&delay=100&include=.*\\.csv"
-            ))
+            .create_endpoint(
+                &format!("file:{dir_path}?noop=true&initialDelay=0&delay=100&include=.*\\.csv"),
+                &ctx,
+            )
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -1123,10 +1138,12 @@ mod tests {
         std::fs::write(dir.path().join("deleteme.txt"), "bye").unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!(
-                "file:{dir_path}?delete=true&initialDelay=0&delay=100"
-            ))
+            .create_endpoint(
+                &format!("file:{dir_path}?delete=true&initialDelay=0&delay=100"),
+                &ctx,
+            )
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -1157,8 +1174,9 @@ mod tests {
         std::fs::write(dir.path().join("moveme.txt"), "data").unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}?initialDelay=0&delay=100"))
+            .create_endpoint(&format!("file:{dir_path}?initialDelay=0&delay=100"), &ctx)
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -1191,8 +1209,9 @@ mod tests {
         let dir_path = dir.path().to_str().unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}?initialDelay=0&delay=50"))
+            .create_endpoint(&format!("file:{dir_path}?initialDelay=0&delay=50"), &ctx)
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -1226,8 +1245,9 @@ mod tests {
         let dir_path = dir.path().to_str().unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}"))
+            .create_endpoint(&format!("file:{dir_path}"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1254,8 +1274,9 @@ mod tests {
         let dir_path = dir.path().to_str().unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}/sub/dir"))
+            .create_endpoint(&format!("file:{dir_path}/sub/dir"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1281,8 +1302,9 @@ mod tests {
         std::fs::write(dir.path().join("existing.txt"), "old").unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}?fileExist=Fail"))
+            .create_endpoint(&format!("file:{dir_path}?fileExist=Fail"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1310,8 +1332,9 @@ mod tests {
         std::fs::write(dir.path().join("append.txt"), "old").unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}?fileExist=Append"))
+            .create_endpoint(&format!("file:{dir_path}?fileExist=Append"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1336,8 +1359,9 @@ mod tests {
         let dir_path = dir.path().to_str().unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}?tempPrefix=.tmp"))
+            .create_endpoint(&format!("file:{dir_path}?tempPrefix=.tmp"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1364,8 +1388,9 @@ mod tests {
         let dir_path = dir.path().to_str().unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}?fileName=fixed.txt"))
+            .create_endpoint(&format!("file:{dir_path}?fileName=fixed.txt"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1384,8 +1409,9 @@ mod tests {
         let dir_path = dir.path().to_str().unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}"))
+            .create_endpoint(&format!("file:{dir_path}"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1412,8 +1438,9 @@ mod tests {
         std::fs::write(dir.path().join("secret.txt"), "secret").unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}/subdir"))
+            .create_endpoint(&format!("file:{dir_path}/subdir"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1442,8 +1469,9 @@ mod tests {
         let dir_path = dir.path().to_str().unwrap();
 
         let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}"))
+            .create_endpoint(&format!("file:{dir_path}"), &ctx)
             .unwrap();
         let ctx = test_producer_ctx();
         let producer = endpoint.create_producer(&ctx).unwrap();
@@ -1490,10 +1518,12 @@ mod tests {
 
         // Read file as stream (should succeed with lazy evaluation)
         let component = FileComponent::new();
+        let component_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!(
-                "file:{dir_path}?noop=true&initialDelay=0&delay=100&fileName={file_name}"
-            ))
+            .create_endpoint(
+                &format!("file:{dir_path}?noop=true&initialDelay=0&delay=100&fileName={file_name}"),
+                &component_ctx,
+            )
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -1533,9 +1563,10 @@ mod tests {
         // This demonstrates lazy evaluation - we don't need to load entire file
         let component2 = FileComponent::new();
         let endpoint2 = component2
-            .create_endpoint(&format!(
-                "file:{dir_path}?noop=true&initialDelay=0&delay=100&fileName={file_name}"
-            ))
+            .create_endpoint(
+                &format!("file:{dir_path}?noop=true&initialDelay=0&delay=100&fileName={file_name}"),
+                &component_ctx,
+            )
             .unwrap();
         let mut consumer2 = endpoint2.create_consumer().unwrap();
 
@@ -1579,7 +1610,8 @@ mod tests {
         let uri = format!("file:{dir_path}?fileName=out.txt");
 
         let component = FileComponent::new();
-        let endpoint = component.create_endpoint(&uri).unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
         let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
 
         let chunks: Vec<Result<Bytes, CamelError>> = vec![
@@ -1616,7 +1648,8 @@ mod tests {
         let uri = format!("file:{dir_path}?fileName=out.txt");
 
         let component = FileComponent::new();
-        let endpoint = component.create_endpoint(&uri).unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
         let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
 
         let chunks: Vec<Result<Bytes, CamelError>> = vec![
@@ -1666,7 +1699,8 @@ mod tests {
 
         let uri = format!("file:{dir_path}?fileName=out.txt&fileExist=Append");
         let component = FileComponent::new();
-        let endpoint = component.create_endpoint(&uri).unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
         let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
 
         let chunks: Vec<Result<Bytes, CamelError>> = vec![Ok(Bytes::from("line2\n"))];
@@ -1702,7 +1736,8 @@ mod tests {
 
         let uri = format!("file:{dir_path}?fileName=out.txt&fileExist=Append");
         let component = FileComponent::new();
-        let endpoint = component.create_endpoint(&uri).unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
         let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
 
         // Stream with an error in the middle
@@ -1745,7 +1780,8 @@ mod tests {
         let uri = format!("file:{dir_path}?fileName=out.txt");
 
         let component = FileComponent::new();
-        let endpoint = component.create_endpoint(&uri).unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
         let producer = endpoint.create_producer(&test_producer_ctx()).unwrap();
 
         // Mutex holds None -> stream already consumed
@@ -1789,8 +1825,9 @@ mod tests {
             .with_read_timeout_ms(60_000)
             .with_write_timeout_ms(45_000);
         let component = FileComponent::with_config(global);
+        let ctx = NoOpComponentContext;
         // URI uses no explicit delay/timeout params → macro defaults apply
-        let endpoint = component.create_endpoint("file:/tmp/inbox").unwrap();
+        let endpoint = component.create_endpoint("file:/tmp/inbox", &ctx).unwrap();
         // We cannot call endpoint.config directly (FileEndpoint is private),
         // but we can test apply_global_defaults on FileConfig directly:
         let mut config = FileConfig::from_uri("file:/tmp/inbox").unwrap();

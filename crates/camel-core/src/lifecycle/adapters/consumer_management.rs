@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use camel_api::{CamelError, RuntimeHandle};
-use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
+use camel_component_api::{ComponentContext, ConcurrencyModel, Consumer, ConsumerContext};
 use camel_endpoint::parse_uri;
 
 use crate::lifecycle::adapters::route_controller::{
@@ -19,6 +19,7 @@ use crate::shared::components::domain::Registry;
 pub(crate) fn create_route_consumer(
     registry: &Arc<std::sync::Mutex<Registry>>,
     from_uri: &str,
+    component_ctx: &dyn ComponentContext,
 ) -> Result<(Box<dyn Consumer>, ConcurrencyModel), CamelError> {
     let parsed = parse_uri(from_uri)?;
     let consumer = {
@@ -26,7 +27,7 @@ pub(crate) fn create_route_consumer(
             .lock()
             .expect("mutex poisoned: another thread panicked while holding this lock");
         let component = registry.get_or_err(&parsed.scheme)?;
-        let endpoint = component.create_endpoint(from_uri)?;
+        let endpoint = component.create_endpoint(from_uri, component_ctx)?;
         endpoint.create_consumer()?
     };
     let concurrency = consumer.concurrency_model();
@@ -145,11 +146,11 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::lifecycle::adapters::route_controller::SyncBoxProcessor;
+    use crate::lifecycle::application::route_definition::RouteDefinition;
     use arc_swap::ArcSwap;
     use async_trait::async_trait;
     use camel_api::{BoxProcessor, IdentityProcessor};
-    use crate::lifecycle::application::route_definition::RouteDefinition;
-    use crate::lifecycle::adapters::route_controller::SyncBoxProcessor;
 
     struct FailingConsumer {
         message: &'static str,
@@ -195,7 +196,15 @@ mod tests {
     fn create_route_consumer_returns_err_for_unknown_scheme() {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
 
-        let err = match create_route_consumer(&registry, "unknown:foo") {
+        let err = match create_route_consumer(
+            &registry,
+            "unknown:foo",
+            &crate::lifecycle::adapters::route_controller::ControllerComponentContext::new(
+                Arc::clone(&registry),
+                Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                Arc::new(camel_api::NoOpMetrics),
+            ),
+        ) {
             Ok(_) => panic!("unknown scheme should fail consumer creation"),
             Err(err) => err,
         };

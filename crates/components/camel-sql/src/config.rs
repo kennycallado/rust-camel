@@ -33,9 +33,10 @@ impl FromStr for SqlOutputType {
 
 /// Global configuration for SQL component.
 ///
-/// This is a plain Rust struct (no serde) with defaults and builder methods.
+/// This struct supports serde deserialization with defaults and builder methods.
 /// It holds pool configuration that can be applied as defaults to endpoints.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(default)]
 pub struct SqlGlobalConfig {
     pub max_connections: u32,
     pub min_connections: u32,

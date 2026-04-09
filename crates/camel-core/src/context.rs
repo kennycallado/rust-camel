@@ -10,7 +10,7 @@ use camel_api::{
     CamelError, HealthReport, HealthStatus, Lifecycle, MetricsCollector, NoOpMetrics,
     RuntimeCommandBus, RuntimeQueryBus, ServiceHealth, ServiceStatus, SupervisionConfig,
 };
-use camel_component_api::Component;
+use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;
 use camel_language_api::LanguageError;
 
@@ -278,7 +278,7 @@ impl CamelContext {
         self.registry
             .lock()
             .expect("mutex poisoned: another thread panicked while holding this lock")
-            .register(component);
+            .register(Arc::new(component));
     }
 
     /// Register a language with this context, keyed by name.
@@ -553,6 +553,29 @@ impl CamelContext {
         self.component_configs
             .get(&TypeId::of::<T>())
             .and_then(|b| b.downcast_ref::<T>())
+    }
+}
+
+impl ComponentRegistrar for CamelContext {
+    fn register_component_dyn(&mut self, component: Arc<dyn Component>) {
+        self.registry
+            .lock()
+            .expect("mutex poisoned: another thread panicked while holding this lock")
+            .register(component);
+    }
+}
+
+impl ComponentContext for CamelContext {
+    fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn Component>> {
+        self.registry.lock().ok()?.get(scheme)
+    }
+
+    fn resolve_language(&self, name: &str) -> Option<Arc<dyn Language>> {
+        self.languages.lock().ok()?.get(name).cloned()
+    }
+
+    fn metrics(&self) -> Arc<dyn MetricsCollector> {
+        Arc::clone(&self.metrics)
     }
 }
 

@@ -3,6 +3,10 @@
 //! This component provides integration with Docker containers, allowing Camel routes
 //! to manage container lifecycle (create, start, stop, remove) and consume container events.
 
+pub mod bundle;
+
+pub use bundle::ContainerBundle;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -112,9 +116,10 @@ pub const HEADER_ACTION_RESULT: &str = "CamelContainerActionResult";
 // ---------------------------------------------------------------------------
 
 /// Global configuration for Container component.
-/// Plain Rust, no serde, with Default impl and builder methods.
+/// Supports serde deserialization with defaults and builder methods.
 /// These are the fallback defaults when URI params are not set.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(default)]
 pub struct ContainerGlobalConfig {
     /// The Docker host URL (default: "unix:///var/run/docker.sock").
     pub docker_host: String,
@@ -1084,7 +1089,11 @@ impl Component for ContainerComponent {
         "container"
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = ContainerConfig::from_uri(uri)?;
         // Apply global defaults if present and URI didn't set them
         if let Some(ref global) = self.config {
@@ -1137,6 +1146,7 @@ impl Endpoint for ContainerEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::NoOpComponentContext;
 
     #[test]
     fn test_container_config() {
@@ -1294,8 +1304,9 @@ mod tests {
     fn test_container_component_creates_endpoint() {
         let component = ContainerComponent::new();
         assert_eq!(component.scheme(), "container");
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint("container:run?image=alpine")
+            .create_endpoint("container:run?image=alpine", &ctx)
             .unwrap();
         assert_eq!(endpoint.uri(), "container:run?image=alpine");
     }
@@ -1424,7 +1435,8 @@ mod tests {
         }
 
         let component = ContainerComponent::new();
-        let endpoint = component.create_endpoint("container:run").unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint("container:run", &ctx).unwrap();
 
         let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
@@ -1457,8 +1469,9 @@ mod tests {
     async fn test_container_producer_connection_error_on_invalid_host() {
         // Test that an invalid host (nonexistent socket) results in a connection error
         let component = ContainerComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint("container:list?host=unix:///nonexistent/docker.sock")
+            .create_endpoint("container:list?host=unix:///nonexistent/docker.sock", &ctx)
             .unwrap();
 
         let ctx = ProducerContext::new();
@@ -1503,7 +1516,8 @@ mod tests {
         }
 
         let component = ContainerComponent::new();
-        let endpoint = component.create_endpoint("container:start").unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint("container:start", &ctx).unwrap();
         let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1557,7 +1571,8 @@ mod tests {
         }
 
         let component = ContainerComponent::new();
-        let endpoint = component.create_endpoint("container:stop").unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint("container:stop", &ctx).unwrap();
         let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1612,7 +1627,8 @@ mod tests {
 
         // Create producer without an image in the URI
         let component = ContainerComponent::new();
-        let endpoint = component.create_endpoint("container:run").unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint("container:run", &ctx).unwrap();
         let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1661,7 +1677,8 @@ mod tests {
 
         // Create producer without an image in the URI
         let component = ContainerComponent::new();
-        let endpoint = component.create_endpoint("container:run").unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint("container:run", &ctx).unwrap();
         let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1744,7 +1761,8 @@ mod tests {
 
         // Create producer
         let component = ContainerComponent::new();
-        let endpoint = component.create_endpoint("container:run").unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint("container:run", &ctx).unwrap();
         let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1818,7 +1836,8 @@ mod tests {
         use tokio::sync::mpsc;
 
         let component = ContainerComponent::new();
-        let endpoint = component.create_endpoint("container:run").unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint("container:run", &ctx).unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
         // Create a minimal ConsumerContext
@@ -1881,7 +1900,8 @@ mod tests {
         }
 
         let component = ContainerComponent::new();
-        let endpoint = component.create_endpoint("container:events").unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint("container:events", &ctx).unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
         // Create a ConsumerContext
@@ -1951,7 +1971,8 @@ mod tests {
 
         // Create producer with list operation
         let component = ContainerComponent::new();
-        let endpoint = component.create_endpoint("container:list").unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint("container:list", &ctx).unwrap();
 
         let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();

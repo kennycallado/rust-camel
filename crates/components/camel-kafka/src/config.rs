@@ -50,13 +50,14 @@ impl std::str::FromStr for SaslAuthType {
     }
 }
 
-// --- KafkaConfig (global defaults, no serde) ---
+// --- KafkaConfig (global defaults) ---
 
 /// Global Kafka configuration defaults.
 ///
 /// This struct holds component-level defaults that can be set via YAML config
 /// and applied to endpoint configurations when specific values aren't provided.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(default)]
 pub struct KafkaConfig {
     pub brokers: String,
     pub group_id: String,

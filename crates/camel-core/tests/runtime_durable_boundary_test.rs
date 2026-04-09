@@ -2,15 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use camel_api::{
-    CanonicalRouteSpec, RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult,
-};
+use camel_api::{CanonicalRouteSpec, RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult};
+use camel_core::lifecycle::domain::DomainError;
 use camel_core::{
     InMemoryRuntimeStore, JournalDurability, RedbJournalOptions, RedbRuntimeEventJournal,
     RuntimeBus, RuntimeEvent, RuntimeEventJournalPort,
 };
 use tempfile::tempdir;
-use camel_core::lifecycle::domain::DomainError;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -50,7 +48,9 @@ impl RuntimeEventJournalPort for FailFirstAppendJournal {
     async fn append_batch(&self, events: &[RuntimeEvent]) -> Result<(), DomainError> {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
         if attempt == 0 {
-            return Err(DomainError::InvalidState("forced first append failure".to_string()));
+            return Err(DomainError::InvalidState(
+                "forced first append failure".to_string(),
+            ));
         }
         self.inner.append_batch(events).await
     }

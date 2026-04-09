@@ -1,11 +1,12 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use camel_api::CamelError;
 use camel_component_api::Component;
 
 /// Registry that stores components by their URI scheme.
 pub struct Registry {
-    components: HashMap<String, Box<dyn Component>>,
+    components: HashMap<String, Arc<dyn Component>>,
 }
 
 impl Registry {
@@ -17,18 +18,18 @@ impl Registry {
     }
 
     /// Register a component. Replaces any existing component with the same scheme.
-    pub fn register<C: Component + 'static>(&mut self, component: C) {
+    pub fn register(&mut self, component: Arc<dyn Component>) {
         self.components
-            .insert(component.scheme().to_string(), Box::new(component));
+            .insert(component.scheme().to_string(), component);
     }
 
     /// Look up a component by scheme.
-    pub fn get(&self, scheme: &str) -> Option<&dyn Component> {
-        self.components.get(scheme).map(|c| c.as_ref())
+    pub fn get(&self, scheme: &str) -> Option<Arc<dyn Component>> {
+        self.components.get(scheme).cloned()
     }
 
     /// Look up a component by scheme, returning an error if not found.
-    pub fn get_or_err(&self, scheme: &str) -> Result<&dyn Component, CamelError> {
+    pub fn get_or_err(&self, scheme: &str) -> Result<Arc<dyn Component>, CamelError> {
         self.get(scheme)
             .ok_or_else(|| CamelError::ComponentNotFound(scheme.to_string()))
     }
@@ -67,8 +68,8 @@ mod tests {
     #[test]
     fn registry_registers_and_gets_components() {
         let mut registry = Registry::new();
-        registry.register(TimerComponent::new());
-        registry.register(LogComponent::new());
+        registry.register(Arc::new(TimerComponent::new()));
+        registry.register(Arc::new(LogComponent::new()));
 
         assert_eq!(registry.len(), 2);
         assert!(registry.get("timer").is_some());
@@ -79,7 +80,7 @@ mod tests {
     #[test]
     fn registry_get_or_err_reports_missing_component() {
         let mut registry = Registry::new();
-        registry.register(TimerComponent::new());
+        registry.register(Arc::new(TimerComponent::new()));
 
         let err = match registry.get_or_err("missing") {
             Ok(_) => panic!("must fail"),
@@ -91,8 +92,8 @@ mod tests {
     #[test]
     fn registry_replaces_component_with_same_scheme() {
         let mut registry = Registry::new();
-        registry.register(TimerComponent::new());
-        registry.register(TimerComponent::new());
+        registry.register(Arc::new(TimerComponent::new()));
+        registry.register(Arc::new(TimerComponent::new()));
 
         assert_eq!(registry.len(), 1);
         assert!(registry.get("timer").is_some());

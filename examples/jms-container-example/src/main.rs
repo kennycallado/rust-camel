@@ -49,9 +49,7 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{CamelError, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_container::{ContainerComponent, cleanup_tracked_containers};
-use camel_component_jms::{
-    BrokerConfig, BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig,
-};
+use camel_component_jms::{BrokerConfig, BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;

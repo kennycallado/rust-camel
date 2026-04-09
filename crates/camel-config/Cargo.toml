@@ -19,20 +19,12 @@ camel-otel = { workspace = true }
 camel-prometheus = { workspace = true }
 camel-health = { workspace = true }
 camel-processor.workspace = true
-camel-component-http = { workspace = true, optional = true }
-camel-component-kafka = { workspace = true, optional = true }
-camel-component-jms = { workspace = true, optional = true }
-camel-component-redis = { workspace = true, optional = true }
-camel-component-sql = { workspace = true, optional = true }
-camel-component-file = { workspace = true, optional = true }
-camel-component-container = { workspace = true, optional = true }
-camel-component-ws = { workspace = true, optional = true }
 config = { workspace = true }
 glob = { workspace = true }
 serde = { workspace = true }
 serde_json.workspace = true
 serde_yaml.workspace = true
-toml = "0.8"
+toml = { workspace = true }
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true }
@@ -46,12 +38,3 @@ camel-component-log.workspace = true
 
 [features]
 otel = ["dep:tracing-opentelemetry"]
-http = ["dep:camel-component-http"]
-kafka = ["dep:camel-component-kafka"]
-jms = ["dep:camel-component-jms"]
-redis = ["dep:camel-component-redis"]
-sql = ["dep:camel-component-sql"]
-file = ["dep:camel-component-file"]
-container = ["dep:camel-component-container"]
-ws = ["dep:camel-component-ws"]
-all-components = ["http", "kafka", "jms", "redis", "sql", "file", "container", "ws"]

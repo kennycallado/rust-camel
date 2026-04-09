@@ -119,7 +119,10 @@ impl RuntimeQueryBus for RuntimeBus {
         match query {
             RuntimeQuery::InFlightCount { route_id } => {
                 if let Some(execution) = &self.execution {
-                    execution.in_flight_count(&route_id).await.map_err(Into::into)
+                    execution
+                        .in_flight_count(&route_id)
+                        .await
+                        .map_err(Into::into)
                 } else {
                     Ok(RuntimeQueryResult::RouteNotFound { route_id })
                 }

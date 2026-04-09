@@ -60,7 +60,11 @@ impl Component for MockComponent {
         "mock"
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         let parts = parse_uri(uri)?;
         if parts.scheme != "mock" {
             return Err(CamelError::InvalidUri(format!(

@@ -1,4 +1,6 @@
+pub mod bundle;
 pub mod config;
+pub use bundle::HttpBundle;
 pub use config::HttpConfig;
 
 use std::collections::HashMap;
@@ -887,7 +889,11 @@ impl Component for HttpComponent {
         "http"
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
         Ok(Box::new(HttpEndpoint {
@@ -935,7 +941,11 @@ impl Component for HttpsComponent {
         "https"
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
         Ok(Box::new(HttpEndpoint {
@@ -1272,7 +1282,7 @@ impl Service<Exchange> for HttpProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_component_api::Message;
+    use camel_component_api::{Message, NoOpComponentContext};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1384,8 +1394,9 @@ mod tests {
     #[test]
     fn test_http_endpoint_creates_consumer() {
         let component = HttpComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint("http://0.0.0.0:19100/test")
+            .create_endpoint("http://0.0.0.0:19100/test", &ctx)
             .unwrap();
         assert!(endpoint.create_consumer().is_ok());
     }
@@ -1393,8 +1404,9 @@ mod tests {
     #[test]
     fn test_https_endpoint_creates_consumer() {
         let component = HttpsComponent::new();
+        let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint("https://0.0.0.0:8443/test")
+            .create_endpoint("https://0.0.0.0:8443/test", &ctx)
             .unwrap();
         assert!(endpoint.create_consumer().is_ok());
     }
@@ -1403,7 +1415,10 @@ mod tests {
     fn test_http_endpoint_creates_producer() {
         let ctx = test_producer_ctx();
         let component = HttpComponent::new();
-        let endpoint = component.create_endpoint("http://localhost/api").unwrap();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint("http://localhost/api", &endpoint_ctx)
+            .unwrap();
         assert!(endpoint.create_producer(&ctx).is_ok());
     }
 
@@ -1486,8 +1501,12 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}/api/test?allowPrivateIps=true"))
+            .create_endpoint(
+                &format!("{url}/api/test?allowPrivateIps=true"),
+                &endpoint_ctx,
+            )
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1512,8 +1531,12 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}/api/data?allowPrivateIps=true"))
+            .create_endpoint(
+                &format!("{url}/api/data?allowPrivateIps=true"),
+                &endpoint_ctx,
+            )
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1536,8 +1559,9 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}/api?allowPrivateIps=true"))
+            .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1564,8 +1588,12 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}/api?httpMethod=PUT&allowPrivateIps=true"))
+            .create_endpoint(
+                &format!("{url}/api?httpMethod=PUT&allowPrivateIps=true"),
+                &endpoint_ctx,
+            )
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1588,8 +1616,12 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}/not-found?allowPrivateIps=true"))
+            .create_endpoint(
+                &format!("{url}/not-found?allowPrivateIps=true"),
+                &endpoint_ctx,
+            )
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1613,10 +1645,12 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!(
-                "{url}/error?throwExceptionOnFailure=false&allowPrivateIps=true"
-            ))
+            .create_endpoint(
+                &format!("{url}/error?throwExceptionOnFailure=false&allowPrivateIps=true"),
+                &endpoint_ctx,
+            )
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1639,8 +1673,12 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint("http://localhost:1/does-not-exist?allowPrivateIps=true")
+            .create_endpoint(
+                "http://localhost:1/does-not-exist?allowPrivateIps=true",
+                &endpoint_ctx,
+            )
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1667,8 +1705,9 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}/api?allowPrivateIps=true"))
+            .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1731,10 +1770,12 @@ mod tests {
 
         let component =
             HttpComponent::with_config(HttpConfig::default().with_follow_redirects(false));
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!(
-                "{url}?throwExceptionOnFailure=false&allowPrivateIps=true"
-            ))
+            .create_endpoint(
+                &format!("{url}?throwExceptionOnFailure=false&allowPrivateIps=true"),
+                &endpoint_ctx,
+            )
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1762,8 +1803,9 @@ mod tests {
 
         let component =
             HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("{url}?allowPrivateIps=true"))
+            .create_endpoint(&format!("{url}?allowPrivateIps=true"), &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1790,11 +1832,13 @@ mod tests {
         let ctx = test_producer_ctx();
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         // apiKey is NOT a Camel option, should be forwarded as query param
         let endpoint = component
-            .create_endpoint(&format!(
-                "{url}/api?apiKey=secret123&httpMethod=GET&allowPrivateIps=true"
-            ))
+            .create_endpoint(
+                &format!("{url}/api?apiKey=secret123&httpMethod=GET&allowPrivateIps=true"),
+                &endpoint_ctx,
+            )
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1849,8 +1893,12 @@ mod tests {
 
         let ctx = test_producer_ctx();
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint("http://example.com/api?allowPrivateIps=false")
+            .create_endpoint(
+                "http://example.com/api?allowPrivateIps=false",
+                &endpoint_ctx,
+            )
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -1909,7 +1957,10 @@ mod tests {
 
         let ctx = test_producer_ctx();
         let component = HttpComponent::new();
-        let endpoint = component.create_endpoint("http://example.com/api").unwrap();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint("http://example.com/api", &endpoint_ctx)
+            .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
@@ -1928,7 +1979,10 @@ mod tests {
 
         let ctx = test_producer_ctx();
         let component = HttpComponent::new();
-        let endpoint = component.create_endpoint("http://example.com/api").unwrap();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint("http://example.com/api", &endpoint_ctx)
+            .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
@@ -1947,10 +2001,11 @@ mod tests {
 
         let ctx = test_producer_ctx();
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         // With allowPrivateIps=true, the validation should pass
         // (actual connection will fail, but that's expected)
         let endpoint = component
-            .create_endpoint("http://192.168.1.1/api?allowPrivateIps=true")
+            .create_endpoint("http://192.168.1.1/api?allowPrivateIps=true", &endpoint_ctx)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -2178,8 +2233,9 @@ mod tests {
         drop(listener); // Release — ServerRegistry will rebind
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("http://127.0.0.1:{port}/echo"))
+            .create_endpoint(&format!("http://127.0.0.1:{port}/echo"), &endpoint_ctx)
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -2232,16 +2288,17 @@ mod tests {
         drop(listener);
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
 
         // Consumer A: /hello
         let endpoint_a = component
-            .create_endpoint(&format!("http://127.0.0.1:{port}/hello"))
+            .create_endpoint(&format!("http://127.0.0.1:{port}/hello"), &endpoint_ctx)
             .unwrap();
         let mut consumer_a = endpoint_a.create_consumer().unwrap();
 
         // Consumer B: /world
         let endpoint_b = component
-            .create_endpoint(&format!("http://127.0.0.1:{port}/world"))
+            .create_endpoint(&format!("http://127.0.0.1:{port}/world"), &endpoint_ctx)
             .unwrap();
         let mut consumer_b = endpoint_b.create_consumer().unwrap();
 
@@ -2303,8 +2360,12 @@ mod tests {
         drop(listener);
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("http://127.0.0.1:{port}/registered"))
+            .create_endpoint(
+                &format!("http://127.0.0.1:{port}/registered"),
+                &endpoint_ctx,
+            )
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -2381,8 +2442,9 @@ mod tests {
             let ctx = test_producer_ctx();
 
             let component = HttpComponent::new();
+            let endpoint_ctx = NoOpComponentContext;
             let endpoint = component
-                .create_endpoint(&format!("{url}/api?allowPrivateIps=true"))
+                .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
                 .unwrap();
             let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -2435,8 +2497,9 @@ mod tests {
             drop(listener);
 
             let component = HttpComponent::new();
+            let endpoint_ctx = NoOpComponentContext;
             let endpoint = component
-                .create_endpoint(&format!("http://127.0.0.1:{port}/trace"))
+                .create_endpoint(&format!("http://127.0.0.1:{port}/trace"), &endpoint_ctx)
                 .unwrap();
             let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -2500,8 +2563,9 @@ mod tests {
             drop(listener);
 
             let component = HttpComponent::new();
+            let endpoint_ctx = NoOpComponentContext;
             let endpoint = component
-                .create_endpoint(&format!("http://127.0.0.1:{port}/trace"))
+                .create_endpoint(&format!("http://127.0.0.1:{port}/trace"), &endpoint_ctx)
                 .unwrap();
             let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -2561,8 +2625,9 @@ mod tests {
             let ctx = test_producer_ctx();
 
             let component = HttpComponent::new();
+            let endpoint_ctx = NoOpComponentContext;
             let endpoint = component
-                .create_endpoint(&format!("{url}/api?allowPrivateIps=true"))
+                .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
                 .unwrap();
             let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -2644,8 +2709,9 @@ mod tests {
         drop(listener);
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("http://127.0.0.1:{port}/upload"))
+            .create_endpoint(&format!("http://127.0.0.1:{port}/upload"), &endpoint_ctx)
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -2713,8 +2779,9 @@ mod tests {
         drop(listener);
 
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("http://127.0.0.1:{port}/stream"))
+            .create_endpoint(&format!("http://127.0.0.1:{port}/stream"), &endpoint_ctx)
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -2766,10 +2833,12 @@ mod tests {
 
         // maxRequestBody=100 — any request declaring more than 100 bytes must get 413
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!(
-                "http://127.0.0.1:{port}/upload?maxRequestBody=100"
-            ))
+            .create_endpoint(
+                &format!("http://127.0.0.1:{port}/upload?maxRequestBody=100"),
+                &endpoint_ctx,
+            )
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 
@@ -2810,8 +2879,12 @@ mod tests {
 
         // maxRequestBody=10 — very small limit; chunked uploads have no Content-Length
         let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint(&format!("http://127.0.0.1:{port}/upload?maxRequestBody=10"))
+            .create_endpoint(
+                &format!("http://127.0.0.1:{port}/upload?maxRequestBody=10"),
+                &endpoint_ctx,
+            )
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 

@@ -7,6 +7,22 @@ pub fn default_bridge_cache_dir() -> PathBuf {
     camel_bridge::download::default_cache_dir()
 }
 
+fn default_max_bridges() -> usize {
+    8
+}
+
+fn default_bridge_start_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_broker_reconnect_interval_ms() -> u64 {
+    5_000
+}
+
+fn default_health_check_interval_ms() -> u64 {
+    5_000
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DestinationType {
     Queue,
@@ -94,7 +110,7 @@ impl JmsEndpointConfig {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Deserialize)]
 pub struct BrokerConfig {
     pub broker_url: String,
     pub broker_type: BrokerType,
@@ -113,14 +129,19 @@ impl std::fmt::Debug for BrokerConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct JmsPoolConfig {
     pub brokers: HashMap<String, BrokerConfig>,
     pub default_broker: String,
+    #[serde(default = "default_max_bridges")]
     pub max_bridges: usize,
+    #[serde(default = "default_bridge_start_timeout_ms")]
     pub bridge_start_timeout_ms: u64,
+    #[serde(default = "default_broker_reconnect_interval_ms")]
     pub broker_reconnect_interval_ms: u64,
+    #[serde(default = "default_health_check_interval_ms")]
     pub health_check_interval_ms: u64,
+    #[serde(default = "default_bridge_cache_dir")]
     pub bridge_cache_dir: PathBuf,
 }
 
@@ -129,10 +150,10 @@ impl Default for JmsPoolConfig {
         Self {
             brokers: HashMap::new(),
             default_broker: String::new(),
-            max_bridges: 8,
-            bridge_start_timeout_ms: 30_000,
-            broker_reconnect_interval_ms: 5_000,
-            health_check_interval_ms: 5_000,
+            max_bridges: default_max_bridges(),
+            bridge_start_timeout_ms: default_bridge_start_timeout_ms(),
+            broker_reconnect_interval_ms: default_broker_reconnect_interval_ms(),
+            health_check_interval_ms: default_health_check_interval_ms(),
             bridge_cache_dir: default_bridge_cache_dir(),
         }
     }

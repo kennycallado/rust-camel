@@ -1,5 +1,6 @@
 use camel_api::CamelError;
 
+use crate::component_context::ComponentContext;
 use crate::endpoint::Endpoint;
 
 /// A Component is a factory for Endpoints.
@@ -10,5 +11,9 @@ pub trait Component: Send + Sync {
     fn scheme(&self) -> &str;
 
     /// Create an endpoint from a URI string.
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError>;
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError>;
 }

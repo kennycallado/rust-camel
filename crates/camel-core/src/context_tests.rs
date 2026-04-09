@@ -18,7 +18,11 @@ impl Component for MockComponent {
         "mock"
     }
 
-    fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        _uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         Err(CamelError::ComponentNotFound("mock".to_string()))
     }
 }
@@ -67,7 +71,11 @@ impl Component for HoldComponent {
         "hold"
     }
 
-    fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+    fn create_endpoint(
+        &self,
+        _uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
         Ok(Box::new(HoldEndpoint))
     }
 }
@@ -572,7 +580,11 @@ async fn add_route_definition_injects_runtime_into_producer_context() {
             "runtime-aware"
         }
 
-        fn create_endpoint(&self, _uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
+        fn create_endpoint(
+            &self,
+            _uri: &str,
+            _ctx: &dyn camel_component_api::ComponentContext,
+        ) -> Result<Box<dyn Endpoint>, CamelError> {
             Ok(Box::new(RuntimeAwareEndpoint {
                 saw_runtime: Arc::clone(&self.saw_runtime),
             }))

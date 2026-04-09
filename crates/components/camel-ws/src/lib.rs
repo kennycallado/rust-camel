@@ -1,5 +1,7 @@
+pub mod bundle;
 pub mod config;
 
+pub use bundle::WsBundle;
 pub use config::{WsClientConfig, WsConfig, WsEndpointConfig, WsServerConfig};
 
 use std::collections::HashMap;
@@ -477,15 +479,57 @@ async fn ws_handler(
     let _ = writer.await;
 }
 
-pub struct WsComponent;
+pub struct WsComponent {
+    pub(crate) config: WsConfig,
+}
+
+impl WsComponent {
+    pub fn new() -> Self {
+        Self {
+            config: WsConfig::default(),
+        }
+    }
+
+    pub fn with_config(config: WsConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl Default for WsComponent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Component for WsComponent {
     fn scheme(&self) -> &str {
         "ws"
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let cfg = WsEndpointConfig::from_uri(uri)?;
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        let mut cfg = WsEndpointConfig::from_uri(uri)?;
+        if let Some(v) = self.config.max_connections {
+            cfg.max_connections = v;
+        }
+        if let Some(v) = self.config.max_message_size {
+            cfg.max_message_size = v;
+        }
+        if let Some(v) = self.config.heartbeat_interval_ms {
+            cfg.heartbeat_interval = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = self.config.idle_timeout_ms {
+            cfg.idle_timeout = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = self.config.connect_timeout_ms {
+            cfg.connect_timeout = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = self.config.response_timeout_ms {
+            cfg.response_timeout = std::time::Duration::from_millis(v);
+        }
         Ok(Box::new(WsEndpoint {
             uri: uri.to_string(),
             cfg,
@@ -493,15 +537,57 @@ impl Component for WsComponent {
     }
 }
 
-pub struct WssComponent;
+pub struct WssComponent {
+    pub(crate) config: WsConfig,
+}
+
+impl WssComponent {
+    pub fn new() -> Self {
+        Self {
+            config: WsConfig::default(),
+        }
+    }
+
+    pub fn with_config(config: WsConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl Default for WssComponent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Component for WssComponent {
     fn scheme(&self) -> &str {
         "wss"
     }
 
-    fn create_endpoint(&self, uri: &str) -> Result<Box<dyn Endpoint>, CamelError> {
-        let cfg = WsEndpointConfig::from_uri(uri)?;
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn camel_component_api::ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        let mut cfg = WsEndpointConfig::from_uri(uri)?;
+        if let Some(v) = self.config.max_connections {
+            cfg.max_connections = v;
+        }
+        if let Some(v) = self.config.max_message_size {
+            cfg.max_message_size = v;
+        }
+        if let Some(v) = self.config.heartbeat_interval_ms {
+            cfg.heartbeat_interval = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = self.config.idle_timeout_ms {
+            cfg.idle_timeout = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = self.config.connect_timeout_ms {
+            cfg.connect_timeout = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = self.config.response_timeout_ms {
+            cfg.response_timeout = std::time::Duration::from_millis(v);
+        }
         Ok(Box::new(WsEndpoint {
             uri: uri.to_string(),
             cfg,
@@ -937,6 +1023,7 @@ fn map_connect_error(err: tungstenite::Error, url: &str) -> CamelError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::NoOpComponentContext;
     use std::time::Duration;
 
     use tokio::sync::mpsc;
@@ -956,12 +1043,12 @@ mod tests {
 
     #[test]
     fn ws_component_scheme_is_ws() {
-        assert_eq!(WsComponent.scheme(), "ws");
+        assert_eq!(WsComponent::new().scheme(), "ws");
     }
 
     #[test]
     fn wss_component_scheme_is_wss() {
-        assert_eq!(WssComponent.scheme(), "wss");
+        assert_eq!(WssComponent::new().scheme(), "wss");
     }
 
     #[test]
@@ -1015,8 +1102,9 @@ mod tests {
 
     #[test]
     fn endpoint_trait_creates_consumer_and_producer() {
-        let endpoint = WsComponent
-            .create_endpoint("ws://127.0.0.1:9010/trait")
+        let ctx = NoOpComponentContext;
+        let endpoint = WsComponent::new()
+            .create_endpoint("ws://127.0.0.1:9010/trait", &ctx)
             .unwrap();
 
         endpoint.create_consumer().unwrap();
@@ -1091,7 +1179,10 @@ mod tests {
     async fn echo_flow_round_trips_message_through_consumer_and_producer() {
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/echo");
-        let endpoint = WsComponent.create_endpoint(&uri).unwrap();
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
 
         let mut consumer = endpoint.create_consumer().unwrap();
         let producer = endpoint
@@ -1164,7 +1255,10 @@ mod tests {
     async fn consumer_stop_sends_close_1001() {
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/shutdown");
-        let endpoint = WsComponent.create_endpoint(&uri).unwrap();
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
 
         let mut consumer = endpoint.create_consumer().unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
@@ -1236,8 +1330,9 @@ mod tests {
     #[tokio::test]
     async fn wss_consumer_start_fails_without_tls_cert() {
         let port = free_port();
-        let endpoint = WssComponent
-            .create_endpoint(&format!("wss://127.0.0.1:{port}/secure"))
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WssComponent::new()
+            .create_endpoint(&format!("wss://127.0.0.1:{port}/secure"), &component_ctx)
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
         let (tx, _rx) = mpsc::channel(16);
@@ -1254,10 +1349,11 @@ mod tests {
     #[tokio::test]
     async fn wss_consumer_start_fails_with_nonexistent_cert() {
         let port = free_port();
-        let endpoint = WssComponent
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WssComponent::new()
             .create_endpoint(&format!(
                 "wss://127.0.0.1:{port}/secure?tlsCert=/nonexistent/cert.pem&tlsKey=/nonexistent/key.pem"
-            ))
+            ), &component_ctx)
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
         let (tx, _rx) = mpsc::channel(16);
@@ -1363,7 +1459,10 @@ mod tests {
     async fn max_connections_rejects_with_close_1013() {
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/limited?maxConnections=1");
-        let endpoint = WsComponent.create_endpoint(&uri).unwrap();
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
@@ -1409,7 +1508,10 @@ mod tests {
     async fn max_message_size_rejects_with_close_1009() {
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/sizelimit?maxMessageSize=10");
-        let endpoint = WsComponent.create_endpoint(&uri).unwrap();
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
@@ -1456,7 +1558,10 @@ mod tests {
     async fn origin_rejection_returns_403() {
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/origintest?allowOrigin=https://allowed.com");
-        let endpoint = WsComponent.create_endpoint(&uri).unwrap();
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
@@ -1500,7 +1605,10 @@ mod tests {
     async fn broadcast_sends_to_all_connected_clients() {
         let port = free_port();
         let uri = format!("ws://127.0.0.1:{port}/bc");
-        let endpoint = WsComponent.create_endpoint(&uri).unwrap();
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
         let producer = endpoint
             .create_producer(&ProducerContext::default())

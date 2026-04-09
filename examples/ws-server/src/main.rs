@@ -8,7 +8,7 @@ async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
     let mut ctx = CamelContext::builder().build().await.unwrap();
-    ctx.register_component(WsComponent);
+    ctx.register_component(WsComponent::new());
 
     // Echo: messages are sent back to the same connection.
     // The consumer sets CamelWsConnectionKey, and the producer (in server-send

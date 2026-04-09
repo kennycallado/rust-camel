@@ -237,7 +237,10 @@ fn apply_replayed_event(state: &mut RuntimeStoreState, event: &RuntimeEvent) {
             let status = state_label(&next_state);
             let increment_version = !matches!(
                 (event, state.routes.get(route_id).map(|agg| agg.state())),
-                (RuntimeEvent::RouteStarted { .. }, Some(RouteRuntimeState::Starting))
+                (
+                    RuntimeEvent::RouteStarted { .. },
+                    Some(RouteRuntimeState::Starting)
+                )
             );
             upsert_replayed_route(state, route_id, next_state, status, increment_version);
         }

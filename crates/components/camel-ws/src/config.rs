@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use camel_component_api::CamelError;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct WsConfig {
     pub max_connections: Option<u32>,
     pub max_message_size: Option<u32>,

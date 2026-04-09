@@ -9,6 +9,7 @@ use camel_api::{
     body::Body,
 };
 use camel_bean::BeanRegistry;
+use camel_component_api::ComponentContext;
 use camel_endpoint::parse_uri;
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use camel_processor::script_mutator::ScriptMutator;
@@ -83,20 +84,21 @@ fn value_to_body(value: Value) -> Body {
     }
 }
 
+#[allow(clippy::only_used_in_recursion)]
 pub(crate) fn resolve_steps(
     steps: Vec<BuilderStep>,
     producer_ctx: &ProducerContext,
     registry: &Arc<std::sync::Mutex<Registry>>,
     languages: &SharedLanguageRegistry,
     beans: &Arc<std::sync::Mutex<BeanRegistry>>,
+    component_ctx: Arc<dyn ComponentContext>,
 ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
     let resolve_producer = |uri: &str| -> Result<BoxProcessor, CamelError> {
         let parsed = parse_uri(uri)?;
-        let registry_guard = registry
-            .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
-        let component = registry_guard.get_or_err(&parsed.scheme)?;
-        let endpoint = component.create_endpoint(uri)?;
+        let component = component_ctx
+            .resolve_component(&parsed.scheme)
+            .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
+        let endpoint = component.create_endpoint(uri, component_ctx.as_ref())?;
         endpoint.create_producer(producer_ctx)
     };
 
@@ -108,11 +110,10 @@ pub(crate) fn resolve_steps(
             }
             BuilderStep::To(uri) => {
                 let parsed = parse_uri(&uri)?;
-                let registry_guard = registry
-                    .lock()
-                    .expect("mutex poisoned: another thread panicked while holding this lock");
-                let component = registry_guard.get_or_err(&parsed.scheme)?;
-                let endpoint = component.create_endpoint(&uri)?;
+                let component = component_ctx
+                    .resolve_component(&parsed.scheme)
+                    .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
+                let endpoint = component.create_endpoint(&uri, component_ctx.as_ref())?;
                 let contract = endpoint.body_contract();
                 let producer = endpoint.create_producer(producer_ctx)?;
                 processors.push((producer, contract));
@@ -168,7 +169,14 @@ pub(crate) fn resolve_steps(
             },
             BuilderStep::DeclarativeFilter { predicate, steps } => {
                 let predicate = compile_filter_predicate(languages, &predicate)?;
-                let sub_pairs = resolve_steps(steps, producer_ctx, registry, languages, beans)?;
+                let sub_pairs = resolve_steps(
+                    steps,
+                    producer_ctx,
+                    registry,
+                    languages,
+                    beans,
+                    Arc::clone(&component_ctx),
+                )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
@@ -179,8 +187,14 @@ pub(crate) fn resolve_steps(
                 let mut when_clauses = Vec::new();
                 for when_step in whens {
                     let predicate = compile_filter_predicate(languages, &when_step.predicate)?;
-                    let sub_pairs =
-                        resolve_steps(when_step.steps, producer_ctx, registry, languages, beans)?;
+                    let sub_pairs = resolve_steps(
+                        when_step.steps,
+                        producer_ctx,
+                        registry,
+                        languages,
+                        beans,
+                        Arc::clone(&component_ctx),
+                    )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
                     let pipeline = compose_pipeline(sub_processors);
@@ -190,8 +204,14 @@ pub(crate) fn resolve_steps(
                     });
                 }
                 let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
-                    let sub_pairs =
-                        resolve_steps(otherwise_steps, producer_ctx, registry, languages, beans)?;
+                    let sub_pairs = resolve_steps(
+                        otherwise_steps,
+                        producer_ctx,
+                        registry,
+                        languages,
+                        beans,
+                        Arc::clone(&component_ctx),
+                    )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
                     Some(compose_pipeline(sub_processors))
@@ -234,7 +254,14 @@ pub(crate) fn resolve_steps(
                 }
             }
             BuilderStep::Split { config, steps } => {
-                let sub_pairs = resolve_steps(steps, producer_ctx, registry, languages, beans)?;
+                let sub_pairs = resolve_steps(
+                    steps,
+                    producer_ctx,
+                    registry,
+                    languages,
+                    beans,
+                    Arc::clone(&component_ctx),
+                )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
@@ -283,7 +310,14 @@ pub(crate) fn resolve_steps(
                     config = config.parallel_limit(limit);
                 }
 
-                let sub_pairs = resolve_steps(steps, producer_ctx, registry, languages, beans)?;
+                let sub_pairs = resolve_steps(
+                    steps,
+                    producer_ctx,
+                    registry,
+                    languages,
+                    beans,
+                    Arc::clone(&component_ctx),
+                )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
@@ -301,7 +335,14 @@ pub(crate) fn resolve_steps(
                 processors.push((BoxProcessor::new(svc), None));
             }
             BuilderStep::Filter { predicate, steps } => {
-                let sub_pairs = resolve_steps(steps, producer_ctx, registry, languages, beans)?;
+                let sub_pairs = resolve_steps(
+                    steps,
+                    producer_ctx,
+                    registry,
+                    languages,
+                    beans,
+                    Arc::clone(&component_ctx),
+                )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
@@ -312,8 +353,14 @@ pub(crate) fn resolve_steps(
                 // Resolve each when clause's sub-steps into a pipeline.
                 let mut when_clauses = Vec::new();
                 for when_step in whens {
-                    let sub_pairs =
-                        resolve_steps(when_step.steps, producer_ctx, registry, languages, beans)?;
+                    let sub_pairs = resolve_steps(
+                        when_step.steps,
+                        producer_ctx,
+                        registry,
+                        languages,
+                        beans,
+                        Arc::clone(&component_ctx),
+                    )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
                     let pipeline = compose_pipeline(sub_processors);
@@ -324,8 +371,14 @@ pub(crate) fn resolve_steps(
                 }
                 // Resolve otherwise branch (if present).
                 let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
-                    let sub_pairs =
-                        resolve_steps(otherwise_steps, producer_ctx, registry, languages, beans)?;
+                    let sub_pairs = resolve_steps(
+                        otherwise_steps,
+                        producer_ctx,
+                        registry,
+                        languages,
+                        beans,
+                        Arc::clone(&component_ctx),
+                    )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
                     Some(compose_pipeline(sub_processors))
@@ -344,8 +397,14 @@ pub(crate) fn resolve_steps(
                 // Each top-level step in the multicast scope becomes an independent endpoint.
                 let mut endpoints = Vec::new();
                 for step in steps {
-                    let sub_pairs =
-                        resolve_steps(vec![step], producer_ctx, registry, languages, beans)?;
+                    let sub_pairs = resolve_steps(
+                        vec![step],
+                        producer_ctx,
+                        registry,
+                        languages,
+                        beans,
+                        Arc::clone(&component_ctx),
+                    )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
                     let endpoint = compose_pipeline(sub_processors);
@@ -429,7 +488,14 @@ pub(crate) fn resolve_steps(
                 }
             }
             BuilderStep::Throttle { config, steps } => {
-                let sub_pairs = resolve_steps(steps, producer_ctx, registry, languages, beans)?;
+                let sub_pairs = resolve_steps(
+                    steps,
+                    producer_ctx,
+                    registry,
+                    languages,
+                    beans,
+                    Arc::clone(&component_ctx),
+                )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
@@ -440,8 +506,14 @@ pub(crate) fn resolve_steps(
                 // Each top-level step in the load_balance scope becomes an independent endpoint.
                 let mut endpoints = Vec::new();
                 for step in steps {
-                    let sub_pairs =
-                        resolve_steps(vec![step], producer_ctx, registry, languages, beans)?;
+                    let sub_pairs = resolve_steps(
+                        vec![step],
+                        producer_ctx,
+                        registry,
+                        languages,
+                        beans,
+                        Arc::clone(&component_ctx),
+                    )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
                     let endpoint = compose_pipeline(sub_processors);
@@ -455,24 +527,21 @@ pub(crate) fn resolve_steps(
                 use camel_api::EndpointResolver;
 
                 let producer_ctx_clone = producer_ctx.clone();
-                let registry_clone = Arc::clone(registry);
+                let component_ctx_clone = Arc::clone(&component_ctx);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
-                    let registry_guard = match registry_clone.lock() {
-                        Ok(g) => g,
-                        Err(_) => return None, // mutex poisoned
+                    let component = match component_ctx_clone.resolve_component(&parsed.scheme) {
+                        Some(c) => c,
+                        None => return None,
                     };
-                    let component = match registry_guard.get_or_err(&parsed.scheme) {
-                        Ok(c) => c,
-                        Err(_) => return None,
-                    };
-                    let endpoint = match component.create_endpoint(uri) {
-                        Ok(e) => e,
-                        Err(_) => return None,
-                    };
+                    let endpoint =
+                        match component.create_endpoint(uri, component_ctx_clone.as_ref()) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
                     let producer = match endpoint.create_producer(&producer_ctx_clone) {
                         Ok(p) => p,
                         Err(_) => return None,
@@ -513,24 +582,21 @@ pub(crate) fn resolve_steps(
                     .max_iterations(max_iterations);
 
                 let producer_ctx_clone = producer_ctx.clone();
-                let registry_clone = Arc::clone(registry);
+                let component_ctx_clone = Arc::clone(&component_ctx);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
-                    let registry_guard = match registry_clone.lock() {
-                        Ok(g) => g,
-                        Err(_) => return None,
+                    let component = match component_ctx_clone.resolve_component(&parsed.scheme) {
+                        Some(c) => c,
+                        None => return None,
                     };
-                    let component = match registry_guard.get_or_err(&parsed.scheme) {
-                        Ok(c) => c,
-                        Err(_) => return None,
-                    };
-                    let endpoint = match component.create_endpoint(uri) {
-                        Ok(e) => e,
-                        Err(_) => return None,
-                    };
+                    let endpoint =
+                        match component.create_endpoint(uri, component_ctx_clone.as_ref()) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
                     let producer = match endpoint.create_producer(&producer_ctx_clone) {
                         Ok(p) => p,
                         Err(_) => return None,
@@ -545,24 +611,21 @@ pub(crate) fn resolve_steps(
                 use camel_api::EndpointResolver;
 
                 let producer_ctx_clone = producer_ctx.clone();
-                let registry_clone = Arc::clone(registry);
+                let component_ctx_clone = Arc::clone(&component_ctx);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
-                    let registry_guard = match registry_clone.lock() {
-                        Ok(g) => g,
-                        Err(_) => return None,
+                    let component = match component_ctx_clone.resolve_component(&parsed.scheme) {
+                        Some(c) => c,
+                        None => return None,
                     };
-                    let component = match registry_guard.get_or_err(&parsed.scheme) {
-                        Ok(c) => c,
-                        Err(_) => return None,
-                    };
-                    let endpoint = match component.create_endpoint(uri) {
-                        Ok(e) => e,
-                        Err(_) => return None,
-                    };
+                    let endpoint =
+                        match component.create_endpoint(uri, component_ctx_clone.as_ref()) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
                     let producer = match endpoint.create_producer(&producer_ctx_clone) {
                         Ok(p) => p,
                         Err(_) => return None,
@@ -598,24 +661,21 @@ pub(crate) fn resolve_steps(
                     .ignore_invalid_endpoints(ignore_invalid_endpoints);
 
                 let producer_ctx_clone = producer_ctx.clone();
-                let registry_clone = Arc::clone(registry);
+                let component_ctx_clone = Arc::clone(&component_ctx);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
-                    let registry_guard = match registry_clone.lock() {
-                        Ok(g) => g,
-                        Err(_) => return None,
+                    let component = match component_ctx_clone.resolve_component(&parsed.scheme) {
+                        Some(c) => c,
+                        None => return None,
                     };
-                    let component = match registry_guard.get_or_err(&parsed.scheme) {
-                        Ok(c) => c,
-                        Err(_) => return None,
-                    };
-                    let endpoint = match component.create_endpoint(uri) {
-                        Ok(e) => e,
-                        Err(_) => return None,
-                    };
+                    let endpoint =
+                        match component.create_endpoint(uri, component_ctx_clone.as_ref()) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
                     let producer = match endpoint.create_producer(&producer_ctx_clone) {
                         Ok(p) => p,
                         Err(_) => return None,
@@ -630,24 +690,21 @@ pub(crate) fn resolve_steps(
                 use camel_api::EndpointResolver;
 
                 let producer_ctx_clone = producer_ctx.clone();
-                let registry_clone = Arc::clone(registry);
+                let component_ctx_clone = Arc::clone(&component_ctx);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
-                    let registry_guard = match registry_clone.lock() {
-                        Ok(g) => g,
-                        Err(_) => return None,
+                    let component = match component_ctx_clone.resolve_component(&parsed.scheme) {
+                        Some(c) => c,
+                        None => return None,
                     };
-                    let component = match registry_guard.get_or_err(&parsed.scheme) {
-                        Ok(c) => c,
-                        Err(_) => return None,
-                    };
-                    let endpoint = match component.create_endpoint(uri) {
-                        Ok(e) => e,
-                        Err(_) => return None,
-                    };
+                    let endpoint =
+                        match component.create_endpoint(uri, component_ctx_clone.as_ref()) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
                     let producer = match endpoint.create_producer(&producer_ctx_clone) {
                         Ok(p) => p,
                         Err(_) => return None,
@@ -691,24 +748,21 @@ pub(crate) fn resolve_steps(
                 };
 
                 let producer_ctx_clone = producer_ctx.clone();
-                let registry_clone = Arc::clone(registry);
+                let component_ctx_clone = Arc::clone(&component_ctx);
                 let resolver: EndpointResolver = Arc::new(move |uri: &str| {
                     let parsed = match parse_uri(uri) {
                         Ok(p) => p,
                         Err(_) => return None,
                     };
-                    let registry_guard = match registry_clone.lock() {
-                        Ok(g) => g,
-                        Err(_) => return None,
+                    let component = match component_ctx_clone.resolve_component(&parsed.scheme) {
+                        Some(c) => c,
+                        None => return None,
                     };
-                    let component = match registry_guard.get_or_err(&parsed.scheme) {
-                        Ok(c) => c,
-                        Err(_) => return None,
-                    };
-                    let endpoint = match component.create_endpoint(uri) {
-                        Ok(e) => e,
-                        Err(_) => return None,
-                    };
+                    let endpoint =
+                        match component.create_endpoint(uri, component_ctx_clone.as_ref()) {
+                            Ok(e) => e,
+                            Err(_) => return None,
+                        };
                     let producer = match endpoint.create_producer(&producer_ctx_clone) {
                         Ok(p) => p,
                         Err(_) => return None,

@@ -12,6 +12,7 @@ use camel_api::{
 };
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
+use camel_core::lifecycle::domain::DomainError;
 use camel_core::spawn_controller_actor;
 use camel_core::{
     DefaultRouteController, InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore,
@@ -19,7 +20,6 @@ use camel_core::{
     RouteRuntimeState, RuntimeBus, RuntimeExecutionAdapter,
 };
 use tokio::sync::RwLock;
-use camel_core::lifecycle::domain::DomainError;
 
 fn simple_languages() -> camel_core::route_controller::SharedLanguageRegistry {
     let mut map: std::collections::HashMap<String, Arc<dyn camel_language_api::Language>> =
@@ -77,10 +77,7 @@ impl ConflictRouteRepository {
 
 #[async_trait]
 impl RouteRepositoryPort for ConflictRouteRepository {
-    async fn load(
-        &self,
-        _route_id: &str,
-    ) -> Result<Option<RouteRuntimeAggregate>, DomainError> {
+    async fn load(&self, _route_id: &str) -> Result<Option<RouteRuntimeAggregate>, DomainError> {
         Ok(self.route.read().await.clone())
     }
 
@@ -187,7 +184,7 @@ async fn connected_runtime_retry_recovers_after_post_effect_persistence_failure(
     registry
         .lock()
         .expect("registry lock poisoned")
-        .register(TimerComponent::new());
+        .register(std::sync::Arc::new(TimerComponent::new()));
     let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
         Arc::clone(&registry),
         simple_languages(),
@@ -271,7 +268,7 @@ async fn connected_runtime_lifecycle_requires_registered_aggregate() {
     registry
         .lock()
         .expect("registry lock poisoned")
-        .register(TimerComponent::new());
+        .register(std::sync::Arc::new(TimerComponent::new()));
     let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
         Arc::clone(&registry),
         simple_languages(),
@@ -323,7 +320,7 @@ async fn connected_runtime_start_tolerates_suspended_controller_drift() {
     registry
         .lock()
         .expect("registry lock poisoned")
-        .register(TimerComponent::new());
+        .register(std::sync::Arc::new(TimerComponent::new()));
 
     let controller_impl =
         DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
@@ -385,7 +382,7 @@ async fn connected_runtime_suspend_tolerates_already_suspended_controller_drift(
     registry
         .lock()
         .expect("registry lock poisoned")
-        .register(TimerComponent::new());
+        .register(std::sync::Arc::new(TimerComponent::new()));
 
     let controller_impl =
         DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
@@ -454,7 +451,7 @@ async fn connected_runtime_resume_tolerates_already_started_controller_drift() {
     registry
         .lock()
         .expect("registry lock poisoned")
-        .register(TimerComponent::new());
+        .register(std::sync::Arc::new(TimerComponent::new()));
 
     let controller_impl =
         DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
@@ -572,7 +569,7 @@ async fn connected_runtime_reload_requires_registered_aggregate() {
     registry
         .lock()
         .expect("registry lock poisoned")
-        .register(TimerComponent::new());
+        .register(std::sync::Arc::new(TimerComponent::new()));
     let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
         Arc::clone(&registry),
         simple_languages(),
@@ -624,7 +621,7 @@ async fn connected_runtime_remove_tolerates_started_controller_drift() {
     registry
         .lock()
         .expect("registry lock poisoned")
-        .register(TimerComponent::new());
+        .register(std::sync::Arc::new(TimerComponent::new()));
 
     let controller_impl =
         DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
@@ -685,11 +682,11 @@ async fn register_route_accepts_advanced_canonical_steps() {
     registry
         .lock()
         .expect("registry lock poisoned")
-        .register(TimerComponent::new());
+        .register(std::sync::Arc::new(TimerComponent::new()));
     registry
         .lock()
         .expect("registry lock poisoned")
-        .register(MockComponent::new());
+        .register(std::sync::Arc::new(MockComponent::new()));
 
     let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
         Arc::clone(&registry),

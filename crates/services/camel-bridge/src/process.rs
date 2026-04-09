@@ -21,8 +21,10 @@ pub enum BridgeError {
     Transport(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BrokerType {
+    #[serde(alias = "active_mq")]
     ActiveMq,
     Artemis,
     Generic,

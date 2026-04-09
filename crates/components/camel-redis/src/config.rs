@@ -230,13 +230,14 @@ impl FromStr for RedisCommand {
     }
 }
 
-// --- RedisConfig (global defaults, no serde) ---
+// --- RedisConfig (global defaults) ---
 
 /// Global Redis configuration defaults.
 ///
 /// This struct holds component-level defaults that can be set via YAML config
 /// and applied to endpoint configurations when specific values aren't provided.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(default)]
 pub struct RedisConfig {
     pub host: String,
     pub port: u16,

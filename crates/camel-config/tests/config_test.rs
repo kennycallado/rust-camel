@@ -122,18 +122,19 @@ pool_max_idle_per_host = 1000
 
     assert_eq!(config.log_level, "ERROR");
     assert_eq!(config.timeout_ms, 5000); // From default
+    let http = config
+        .components
+        .raw
+        .get("http")
+        .expect("http component config should be present");
     assert_eq!(
-        config
-            .components
-            .http
-            .as_ref()
-            .unwrap()
-            .pool_max_idle_per_host,
-        1000
+        http.get("pool_max_idle_per_host")
+            .and_then(|v| v.as_integer()),
+        Some(1000)
     );
     assert_eq!(
-        config.components.http.as_ref().unwrap().connect_timeout_ms,
-        3000
+        http.get("connect_timeout_ms").and_then(|v| v.as_integer()),
+        Some(3000)
     );
 }
 

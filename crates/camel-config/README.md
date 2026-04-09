@@ -315,15 +315,18 @@ let config = CamelConfig::from_file_with_env("Camel.toml")?;
 
 // Configure context with component defaults from Camel.toml
 // Inside an async function
-let mut ctx = CamelContext::builder().build().await?;
-CamelConfig::configure_context(&config, &mut ctx)?;
+let mut ctx = CamelConfig::configure_context(&config).await?;
 
-// Register components - they will receive global defaults via context
-let http_cfg = ctx.get_component_config::<camel_component_http::HttpConfig>().cloned();
-ctx.register_component(HttpComponent::with_optional_config(http_cfg));
+// Register component bundles — each bundle reads its own config key from [components.*]
+use camel_component_api::ComponentBundle;
 
-let kafka_cfg = ctx.get_component_config::<camel_component_kafka::KafkaConfig>().cloned();
-ctx.register_component(KafkaComponent::with_optional_config(kafka_cfg));
+if let Some(raw) = config.components.raw.get("http").cloned() {
+    camel_component_http::HttpBundle::from_toml(raw)?.register_all(&mut ctx);
+}
+
+if let Some(raw) = config.components.raw.get("kafka").cloned() {
+    camel_component_kafka::KafkaBundle::from_toml(raw)?.register_all(&mut ctx);
+}
 ```
 
 ### Accessing Supervision Configuration
@@ -343,21 +346,23 @@ if let Some(supervision) = &config.supervision {
 
 ### Accessing Component Defaults Programmatically
 
+Component config is stored as raw TOML values under `[components.*]` and owned by each bundle:
+
 ```rust
 use camel_config::CamelConfig;
 
 let config = CamelConfig::from_file("Camel.toml")?;
 
-// Check if HTTP defaults are configured
-if let Some(http) = &config.components.http {
-    println!("HTTP connect timeout: {}ms", http.connect_timeout_ms);
-    println!("HTTP allow private IPs: {}", http.allow_private_ips);
+// Check if HTTP config is present in the raw map
+if let Some(raw) = config.components.raw.get("http") {
+    println!("HTTP config present: {:?}", raw);
 }
 
-// Check if Kafka defaults are configured
-if let Some(kafka) = &config.components.kafka {
-    println!("Kafka brokers: {}", kafka.brokers);
-    println!("Kafka group ID: {}", kafka.group_id);
+// Parse the config via the bundle (same as what camel-cli does)
+use camel_component_api::ComponentBundle;
+if let Some(raw) = config.components.raw.get("kafka").cloned() {
+    let bundle = camel_component_kafka::KafkaBundle::from_toml(raw)?;
+    println!("Kafka bundle ready");
 }
 ```
 

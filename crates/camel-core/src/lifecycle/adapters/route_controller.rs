@@ -18,10 +18,12 @@ use camel_api::aggregator::AggregatorConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
-    BoxProcessor, CamelError, Exchange, IdentityProcessor, ProducerContext, RouteController,
-    RuntimeCommand, RuntimeHandle,
+    BoxProcessor, CamelError, Exchange, IdentityProcessor, NoOpMetrics, ProducerContext,
+    RouteController, RuntimeCommand, RuntimeHandle,
 };
-use camel_component_api::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
+use camel_component_api::{
+    ComponentContext, ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope,
+};
 use camel_endpoint::parse_uri;
 pub use camel_processor::aggregator::SharedLanguageRegistry;
 use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
@@ -67,7 +69,6 @@ pub(crate) struct SyncBoxProcessor(pub(crate) BoxProcessor);
 unsafe impl Sync for SyncBoxProcessor {}
 
 type SharedPipeline = Arc<ArcSwap<SyncBoxProcessor>>;
-
 
 /// Internal state for a managed route.
 pub(super) struct AggregateSplitInfo {
@@ -132,6 +133,40 @@ fn find_top_level_aggregate_with_timeout(
         }
     }
     None
+}
+
+pub(crate) struct ControllerComponentContext {
+    registry: Arc<std::sync::Mutex<Registry>>,
+    languages: SharedLanguageRegistry,
+    metrics: Arc<dyn MetricsCollector>,
+}
+
+impl ControllerComponentContext {
+    pub(crate) fn new(
+        registry: Arc<std::sync::Mutex<Registry>>,
+        languages: SharedLanguageRegistry,
+        metrics: Arc<dyn MetricsCollector>,
+    ) -> Self {
+        Self {
+            registry,
+            languages,
+            metrics,
+        }
+    }
+}
+
+impl ComponentContext for ControllerComponentContext {
+    fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn camel_component_api::Component>> {
+        self.registry.lock().ok()?.get(scheme)
+    }
+
+    fn resolve_language(&self, name: &str) -> Option<Arc<dyn camel_language_api::Language>> {
+        self.languages.lock().ok()?.get(name).cloned()
+    }
+
+    fn metrics(&self) -> Arc<dyn MetricsCollector> {
+        Arc::clone(&self.metrics)
+    }
 }
 
 fn is_pending(ex: &Exchange) -> bool {
@@ -319,13 +354,15 @@ impl DefaultRouteController {
         &self,
         config: ErrorHandlerConfig,
         producer_ctx: &ProducerContext,
-        registry: &Registry,
+        component_ctx: &dyn ComponentContext,
     ) -> Result<ErrorHandlerLayer, CamelError> {
         // Resolve DLC URI → producer.
         let dlc_producer = if let Some(ref uri) = config.dlc_uri {
             let parsed = parse_uri(uri)?;
-            let component = registry.get_or_err(&parsed.scheme)?;
-            let endpoint = component.create_endpoint(uri)?;
+            let component = component_ctx
+                .resolve_component(&parsed.scheme)
+                .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
+            let endpoint = component.create_endpoint(uri, component_ctx)?;
             Some(endpoint.create_producer(producer_ctx)?)
         } else {
             None
@@ -336,8 +373,10 @@ impl DefaultRouteController {
         for policy in config.policies {
             let handler_producer = if let Some(ref uri) = policy.handled_by {
                 let parsed = parse_uri(uri)?;
-                let component = registry.get_or_err(&parsed.scheme)?;
-                let endpoint = component.create_endpoint(uri)?;
+                let component = component_ctx
+                    .resolve_component(&parsed.scheme)
+                    .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
+                let endpoint = component.create_endpoint(uri, component_ctx)?;
                 Some(endpoint.create_producer(producer_ctx)?)
             } else {
                 None
@@ -354,13 +393,15 @@ impl DefaultRouteController {
         &self,
         config: &UnitOfWorkConfig,
         producer_ctx: &ProducerContext,
-        registry: &Registry,
+        component_ctx: &dyn ComponentContext,
         counter: Option<Arc<AtomicU64>>,
     ) -> Result<(ExchangeUoWLayer, Arc<AtomicU64>), CamelError> {
         let resolve_uri = |uri: &str| -> Result<BoxProcessor, CamelError> {
             let parsed = parse_uri(uri)?;
-            let component = registry.get_or_err(&parsed.scheme)?;
-            let endpoint = component.create_endpoint(uri)?;
+            let component = component_ctx
+                .resolve_component(&parsed.scheme)
+                .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
+            let endpoint = component.create_endpoint(uri, component_ctx)?;
             endpoint.create_producer(producer_ctx).map_err(|e| {
                 CamelError::RouteError(format!("UoW hook URI '{uri}' could not be resolved: {e}"))
             })
@@ -381,6 +422,13 @@ impl DefaultRouteController {
         producer_ctx: &ProducerContext,
         registry: &Arc<std::sync::Mutex<Registry>>,
     ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
+        let component_ctx = Arc::new(ControllerComponentContext::new(
+            Arc::clone(registry),
+            Arc::clone(&self.languages),
+            self.tracer_metrics
+                .clone()
+                .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+        ));
 
         super::step_resolution::resolve_steps(
             steps,
@@ -388,8 +436,8 @@ impl DefaultRouteController {
             registry,
             &self.languages,
             &self.beans,
+            component_ctx,
         )
-
     }
 
     /// Add a route definition to the controller.
@@ -483,23 +531,28 @@ impl DefaultRouteController {
         let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
 
         if let Some(config) = eh_config {
-            // Lock registry for error handler resolution
-            let registry = self
-                .registry
-                .lock()
-                .expect("mutex poisoned: another thread panicked while holding this lock");
-            let layer = self.resolve_error_handler(config, &producer_ctx, &registry)?;
+            let component_ctx = ControllerComponentContext::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+            );
+            let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
         }
 
         // Apply UoW layer outermost (after error handler)
         let uow_counter = if let Some(uow_config) = &unit_of_work {
-            let registry = self
-                .registry
-                .lock()
-                .expect("mutex poisoned: registry lock in add_route uow");
+            let component_ctx = ControllerComponentContext::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+            );
             let (uow_layer, counter) =
-                self.resolve_uow_layer(uow_config, &producer_ctx, &registry, None)?;
+                self.resolve_uow_layer(uow_config, &producer_ctx, &component_ctx, None)?;
             pipeline = BoxProcessor::new(uow_layer.layer(pipeline));
             Some(counter)
         } else {
@@ -559,12 +612,14 @@ impl DefaultRouteController {
             .clone()
             .or_else(|| self.global_error_handler.clone());
         if let Some(config) = eh_config {
-            // Lock registry for error handler resolution
-            let registry = self
-                .registry
-                .lock()
-                .expect("mutex poisoned: registry lock in compile_route_definition");
-            let layer = self.resolve_error_handler(config, &producer_ctx, &registry)?;
+            let component_ctx = ControllerComponentContext::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+            );
+            let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
         }
 
@@ -575,13 +630,20 @@ impl DefaultRouteController {
                 .get(&route_id)
                 .and_then(|r| r.in_flight.as_ref().map(Arc::clone));
 
-            let registry = self
-                .registry
-                .lock()
-                .expect("mutex poisoned: registry lock in compile_route_definition uow");
+            let component_ctx = ControllerComponentContext::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+            );
 
-            let (uow_layer, _counter) =
-                self.resolve_uow_layer(uow_config, &producer_ctx, &registry, existing_counter)?;
+            let (uow_layer, _counter) = self.resolve_uow_layer(
+                uow_config,
+                &producer_ctx,
+                &component_ctx,
+                existing_counter,
+            )?;
 
             pipeline = BoxProcessor::new(uow_layer.layer(pipeline));
         }
@@ -769,8 +831,17 @@ impl RouteController for DefaultRouteController {
         let crash_notifier = self.crash_notifier.clone();
         let runtime_for_consumer = self.runtime.clone();
 
-        let (consumer, consumer_concurrency) =
-            super::consumer_management::create_route_consumer(&self.registry, &from_uri)?;
+        let (consumer, consumer_concurrency) = super::consumer_management::create_route_consumer(
+            &self.registry,
+            &from_uri,
+            &ControllerComponentContext::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+            ),
+        )?;
 
         // Resolve effective concurrency: route override > consumer default
         let effective_concurrency = concurrency.unwrap_or(consumer_concurrency);
@@ -1126,8 +1197,17 @@ impl RouteController for DefaultRouteController {
 
         info!(route_id = %route_id, "Resuming route (spawning consumer only)");
 
-        let (consumer, _) =
-            super::consumer_management::create_route_consumer(&self.registry, &from_uri)?;
+        let (consumer, _) = super::consumer_management::create_route_consumer(
+            &self.registry,
+            &from_uri,
+            &ControllerComponentContext::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+            ),
+        )?;
 
         // Get the managed route for mutation
         let managed = self
@@ -1222,8 +1302,6 @@ impl RouteController for DefaultRouteController {
         Ok(())
     }
 }
-
-
 
 #[cfg(test)]
 #[path = "route_controller_tests.rs"]
