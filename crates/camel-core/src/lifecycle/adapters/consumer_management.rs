@@ -139,3 +139,121 @@ pub(super) async fn stop_route_internal(
     info!(route_id = %route_id, "Route stopped");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use async_trait::async_trait;
+    use camel_api::{BoxProcessor, IdentityProcessor};
+    use crate::lifecycle::application::route_definition::RouteDefinition;
+    use crate::lifecycle::adapters::route_controller::SyncBoxProcessor;
+
+    struct FailingConsumer {
+        message: &'static str,
+    }
+
+    #[async_trait]
+    impl Consumer for FailingConsumer {
+        async fn start(&mut self, _context: ConsumerContext) -> Result<(), CamelError> {
+            Err(CamelError::RouteError(self.message.into()))
+        }
+
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+    }
+
+    fn managed_route_with_handles(
+        consumer_handle: Option<JoinHandle<()>>,
+        pipeline_handle: Option<JoinHandle<()>>,
+        channel_sender: Option<mpsc::Sender<camel_component_api::consumer::ExchangeEnvelope>>,
+    ) -> ManagedRoute {
+        ManagedRoute {
+            definition: RouteDefinition::new("timer:test", vec![])
+                .with_route_id("route-1")
+                .to_info(),
+            from_uri: "timer:test".into(),
+            pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(BoxProcessor::new(
+                IdentityProcessor,
+            )))),
+            concurrency: None,
+            consumer_handle,
+            pipeline_handle,
+            consumer_cancel_token: CancellationToken::new(),
+            pipeline_cancel_token: CancellationToken::new(),
+            channel_sender,
+            in_flight: None,
+            aggregate_split: None,
+            agg_service: None,
+        }
+    }
+
+    #[test]
+    fn create_route_consumer_returns_err_for_unknown_scheme() {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+
+        let err = match create_route_consumer(&registry, "unknown:foo") {
+            Ok(_) => panic!("unknown scheme should fail consumer creation"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[tokio::test]
+    async fn stop_route_internal_returns_not_found_when_route_absent() {
+        let mut routes = HashMap::new();
+
+        let err = stop_route_internal(&mut routes, "missing-route")
+            .await
+            .expect_err("stopping a missing route should fail");
+
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn stop_route_internal_short_circuits_when_already_stopped() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut routes = HashMap::new();
+        routes.insert(
+            "route-1".to_string(),
+            managed_route_with_handles(None, None, Some(tx)),
+        );
+
+        let result = stop_route_internal(&mut routes, "route-1").await;
+
+        assert!(result.is_ok());
+        let managed = routes.get("route-1").expect("route must still exist");
+        assert!(managed.channel_sender.is_some());
+    }
+
+    #[tokio::test]
+    async fn spawn_consumer_task_resume_failure_sends_crash_notification() {
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        let (crash_tx, mut crash_rx) = mpsc::channel(1);
+
+        let handle = spawn_consumer_task(
+            "route-resume".to_string(),
+            Box::new(FailingConsumer {
+                message: "resume start failed",
+            }),
+            ctx,
+            Some(crash_tx),
+            None,
+            true,
+        );
+
+        handle.await.expect("consumer task should join cleanly");
+
+        let notification = crash_rx
+            .recv()
+            .await
+            .expect("crash notification should be sent");
+        assert_eq!(notification.route_id, "route-resume");
+        assert!(notification.error.contains("resume start failed"));
+    }
+}

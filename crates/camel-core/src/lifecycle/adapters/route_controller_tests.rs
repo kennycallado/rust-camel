@@ -462,3 +462,311 @@ async fn compile_and_swap_errors_for_missing_route() {
         .expect_err("missing route swap must fail");
     assert!(err.to_string().contains("not found"));
 }
+
+#[test]
+fn resolve_steps_covers_remaining_builder_step_arms() {
+    use camel_api::LanguageExpressionDef;
+
+    let mut controller = build_controller_with_components();
+    register_simple_language(&mut controller);
+    let producer_ctx = ProducerContext::new();
+
+    let expr = |source: &str| LanguageExpressionDef {
+        language: "simple".into(),
+        source: source.into(),
+    };
+
+    let resolved = controller
+        .resolve_steps(
+            vec![BuilderStep::Processor(BoxProcessor::new(IdentityProcessor))],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect("processor step should resolve");
+    assert_eq!(resolved.len(), 1);
+
+    let resolved = controller
+        .resolve_steps(
+            vec![BuilderStep::Delay {
+                config: camel_api::DelayConfig::new(1),
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect("delay step should resolve");
+    assert_eq!(resolved.len(), 1);
+
+    let resolved = controller
+        .resolve_steps(
+            vec![BuilderStep::DeclarativeSetBody {
+                value: ValueSourceDef::Literal(Value::Null),
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect("declarative set body null should resolve");
+    assert_eq!(resolved.len(), 1);
+
+    let resolved = controller
+        .resolve_steps(
+            vec![BuilderStep::DeclarativeSetBody {
+                value: ValueSourceDef::Literal(Value::String("hello".into())),
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect("declarative set body string should resolve");
+    assert_eq!(resolved.len(), 1);
+
+    let resolved = controller
+        .resolve_steps(
+            vec![BuilderStep::DeclarativeSetBody {
+                value: ValueSourceDef::Literal(Value::Bool(true)),
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect("declarative set body json should resolve");
+    assert_eq!(resolved.len(), 1);
+
+    let resolved = controller
+        .resolve_steps(
+            vec![BuilderStep::RoutingSlip {
+                config: camel_api::RoutingSlipConfig::new(Arc::new(|_| Some("mock:rs".into()))),
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect("routing slip step should resolve");
+    assert_eq!(resolved.len(), 1);
+
+    let resolved = controller
+        .resolve_steps(
+            vec![BuilderStep::DeclarativeRoutingSlip {
+                expression: expr("${body}"),
+                uri_delimiter: ";".into(),
+                cache_size: 16,
+                ignore_invalid_endpoints: true,
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect("declarative routing slip step should resolve");
+    assert_eq!(resolved.len(), 1);
+
+    let resolved = controller
+        .resolve_steps(
+            vec![BuilderStep::RecipientList {
+                config: camel_api::recipient_list::RecipientListConfig::new(Arc::new(|_| {
+                    "mock:r1,mock:r2".into()
+                })),
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect("recipient list step should resolve");
+    assert_eq!(resolved.len(), 1);
+
+    let resolved = controller
+        .resolve_steps(
+            vec![BuilderStep::DeclarativeRecipientList {
+                expression: expr("${body}"),
+                delimiter: ",".into(),
+                parallel: true,
+                parallel_limit: Some(2),
+                stop_on_exception: false,
+                aggregation: "collect".into(),
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect("declarative recipient list step should resolve");
+    assert_eq!(resolved.len(), 1);
+
+    let resolved = controller
+        .resolve_steps(
+            vec![BuilderStep::DeclarativeDynamicRouter {
+                expression: expr("${body}"),
+                uri_delimiter: ",".into(),
+                cache_size: 8,
+                ignore_invalid_endpoints: true,
+                max_iterations: 3,
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect("declarative dynamic router step should resolve");
+    assert_eq!(resolved.len(), 1);
+}
+
+#[test]
+fn resolve_steps_error_paths_unknown_scheme_and_language() {
+    use camel_api::LanguageExpressionDef;
+    use camel_language_api::{Expression, Language, LanguageError, MutatingExpression, Predicate};
+
+    struct ConstExpr;
+    impl Expression for ConstExpr {
+        fn evaluate(&self, _exchange: &camel_api::Exchange) -> Result<Value, LanguageError> {
+            Ok(Value::Null)
+        }
+    }
+
+    struct ConstPred;
+    impl Predicate for ConstPred {
+        fn matches(&self, _exchange: &camel_api::Exchange) -> Result<bool, LanguageError> {
+            Ok(true)
+        }
+    }
+
+    struct FailingMutatingExpr;
+    impl MutatingExpression for FailingMutatingExpr {
+        fn evaluate(
+            &self,
+            _exchange: &mut camel_api::Exchange,
+        ) -> Result<Value, LanguageError> {
+            Ok(Value::Null)
+        }
+    }
+
+    struct FailingMutatingLanguage;
+    impl Language for FailingMutatingLanguage {
+        fn name(&self) -> &'static str {
+            "failing"
+        }
+
+        fn create_expression(&self, _script: &str) -> Result<Box<dyn Expression>, LanguageError> {
+            Ok(Box::new(ConstExpr))
+        }
+
+        fn create_predicate(&self, _script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
+            Ok(Box::new(ConstPred))
+        }
+
+        fn create_mutating_expression(
+            &self,
+            _script: &str,
+        ) -> Result<Box<dyn MutatingExpression>, LanguageError> {
+            let _ = FailingMutatingExpr;
+            Err(LanguageError::EvalError("boom".into()))
+        }
+    }
+
+    let mut controller = build_controller_with_components();
+    register_simple_language(&mut controller);
+    controller.languages.lock().expect("languages lock").insert(
+        "failing".into(),
+        Arc::new(FailingMutatingLanguage),
+    );
+
+    let producer_ctx = ProducerContext::new();
+
+    let err = controller
+        .resolve_steps(
+            vec![BuilderStep::To("missing:out".into())],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect_err("unknown scheme in to should fail");
+    assert!(err.to_string().contains("missing"));
+
+    let err = controller
+        .resolve_steps(
+            vec![BuilderStep::WireTap {
+                uri: "missing:tap".into(),
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect_err("unknown scheme in wiretap should fail");
+    assert!(err.to_string().contains("missing"));
+
+    let err = controller
+        .resolve_steps(
+            vec![BuilderStep::DeclarativeFilter {
+                predicate: LanguageExpressionDef {
+                    language: "unknown".into(),
+                    source: "x".into(),
+                },
+                steps: vec![BuilderStep::Stop],
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect_err("unknown language in declarative filter should fail");
+    assert!(err.to_string().contains("not registered"));
+
+    let err = controller
+        .resolve_steps(
+            vec![BuilderStep::DeclarativeChoice {
+                whens: vec![crate::lifecycle::application::route_definition::DeclarativeWhenStep {
+                    predicate: LanguageExpressionDef {
+                        language: "unknown".into(),
+                        source: "x".into(),
+                    },
+                    steps: vec![BuilderStep::Stop],
+                }],
+                otherwise: None,
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect_err("unknown language in declarative choice should fail");
+    assert!(err.to_string().contains("not registered"));
+
+    let err = controller
+        .resolve_steps(
+            vec![BuilderStep::DeclarativeLog {
+                level: camel_processor::LogLevel::Info,
+                message: ValueSourceDef::Expression(LanguageExpressionDef {
+                    language: "unknown".into(),
+                    source: "x".into(),
+                }),
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect_err("unknown language in declarative log should fail");
+    assert!(err.to_string().contains("not registered"));
+
+    let err = controller
+        .resolve_steps(
+            vec![BuilderStep::DeclarativeScript {
+                expression: LanguageExpressionDef {
+                    language: "failing".into(),
+                    source: "x".into(),
+                },
+            }],
+            &producer_ctx,
+            &controller.registry,
+        )
+        .expect_err("declarative script generic language error should fail");
+    assert!(
+        err.to_string()
+            .contains("Failed to create mutating expression for language 'failing'")
+    );
+    assert!(err.to_string().contains("boom"));
+
+    let err = match crate::lifecycle::adapters::step_resolution::resolve_language(
+        &controller.languages,
+        "not-registered",
+    ) {
+        Ok(_) => panic!("resolve_language should fail for unknown language"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("not registered"));
+
+    let err = match crate::lifecycle::adapters::step_resolution::compile_language_expression(
+        &controller.languages,
+        &LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${unknown}".into(),
+        },
+    ) {
+        Ok(_) => panic!("compile_language_expression should fail for invalid source"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("failed to compile simple expression `${unknown}`")
+    );
+}

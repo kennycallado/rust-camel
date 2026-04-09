@@ -624,12 +624,67 @@ pub fn spawn_supervision_task(
 
 #[cfg(test)]
 mod tests {
-    use super::{RouteControllerCommand, RouteControllerHandle, spawn_controller_actor};
-    use crate::lifecycle::adapters::route_controller::DefaultRouteController;
+    use super::{
+        RouteControllerCommand, RouteControllerHandle, spawn_controller_actor,
+        spawn_supervision_task,
+    };
+    use crate::lifecycle::adapters::route_controller::{CrashNotification, DefaultRouteController};
+    use crate::lifecycle::application::route_definition::RouteDefinition;
     use crate::shared::components::domain::Registry;
-    use camel_api::CamelError;
+    use crate::shared::observability::domain::TracerConfig;
+    use camel_api::{
+        CamelError, ErrorHandlerConfig, RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult,
+        RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult, SupervisionConfig,
+    };
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::mpsc;
+    use tokio::time::sleep;
+
+    fn build_actor_with_components() -> (RouteControllerHandle, tokio::task::JoinHandle<()>) {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        {
+            let mut guard = registry.lock().expect("lock");
+            guard.register(camel_component_timer::TimerComponent::new());
+            guard.register(camel_component_mock::MockComponent::new());
+        }
+        let controller = DefaultRouteController::new(Arc::clone(&registry));
+        spawn_controller_actor(controller)
+    }
+
+    fn build_empty_actor() -> (RouteControllerHandle, tokio::task::JoinHandle<()>) {
+        let controller =
+            DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new())));
+        spawn_controller_actor(controller)
+    }
+
+    fn route_def(route_id: &str, from_uri: &str) -> RouteDefinition {
+        RouteDefinition::new(from_uri, vec![]).with_route_id(route_id)
+    }
+
+    struct NoopRuntime;
+
+    #[async_trait::async_trait]
+    impl RuntimeCommandBus for NoopRuntime {
+        async fn execute(&self, _cmd: RuntimeCommand) -> Result<RuntimeCommandResult, CamelError> {
+            Ok(RuntimeCommandResult::Accepted)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeQueryBus for NoopRuntime {
+        async fn ask(&self, query: RuntimeQuery) -> Result<RuntimeQueryResult, CamelError> {
+            Ok(match query {
+                RuntimeQuery::GetRouteStatus { route_id }
+                | RuntimeQuery::InFlightCount { route_id } => {
+                    RuntimeQueryResult::RouteNotFound { route_id }
+                }
+                RuntimeQuery::ListRoutes => RuntimeQueryResult::Routes {
+                    route_ids: Vec::new(),
+                },
+            })
+        }
+    }
 
     #[tokio::test]
     async fn start_route_sends_command_and_returns_reply() {
@@ -676,5 +731,218 @@ mod tests {
 
         handle.shutdown().await.expect("shutdown send");
         join_handle.await.expect("actor join");
+    }
+
+    #[tokio::test]
+    async fn actor_handle_introspection_and_mutation_commands() {
+        let (handle, join_handle) = build_actor_with_components();
+        let definition = route_def("h-1", "timer:tick?period=100");
+
+        handle.add_route(definition).await.expect("add route");
+        assert!(handle.route_exists("h-1").await.expect("route exists h-1"));
+        assert!(!handle
+            .route_exists("no-such")
+            .await
+            .expect("route exists no-such"));
+
+        let from_uri = handle.route_from_uri("h-1").await.expect("route_from_uri");
+        assert_eq!(from_uri.as_deref(), Some("timer:tick?period=100"));
+        assert_eq!(handle.route_count().await.expect("route_count"), 1);
+
+        let auto_ids = handle
+            .auto_startup_route_ids()
+            .await
+            .expect("auto_startup_route_ids");
+        assert!(auto_ids.iter().any(|id| id == "h-1"));
+
+        let shutdown_ids = handle
+            .shutdown_route_ids()
+            .await
+            .expect("shutdown_route_ids");
+        assert!(shutdown_ids.iter().any(|id| id == "h-1"));
+
+        let compiled = handle
+            .compile_route_definition(route_def("h-1", "timer:tick?period=100"))
+            .await
+            .expect("compile_route_definition");
+
+        assert!(handle
+            .get_pipeline("h-1")
+            .await
+            .expect("get_pipeline")
+            .is_some());
+        handle
+            .swap_pipeline("h-1", compiled)
+            .await
+            .expect("swap_pipeline");
+
+        let _ = handle
+            .in_flight_count("h-1")
+            .await
+            .expect("in_flight_count");
+        let _ = handle.route_source_hash("h-1").await;
+
+        handle
+            .set_error_handler(ErrorHandlerConfig::dead_letter_channel("log:dlq"))
+            .await
+            .expect("set_error_handler");
+        handle
+            .set_tracer_config(TracerConfig::default())
+            .await
+            .expect("set_tracer_config");
+        handle
+            .set_runtime_handle(Arc::new(NoopRuntime))
+            .await
+            .expect("set_runtime_handle");
+
+        handle.remove_route("h-1").await.expect("remove_route");
+        assert_eq!(handle.route_count().await.expect("route_count after remove"), 0);
+        handle
+            .stop_all_routes()
+            .await
+            .expect("stop_all_routes on empty");
+
+        handle.shutdown().await.expect("shutdown send");
+        join_handle.await.expect("actor join");
+    }
+
+    #[tokio::test]
+    async fn actor_handle_lifecycle_start_stop_restart_suspend_resume() {
+        let (handle, join_handle) = build_actor_with_components();
+        handle
+            .add_route(route_def("lc-1", "timer:tick?period=50"))
+            .await
+            .expect("add route lc-1");
+
+        handle.start_route("lc-1").await.expect("start_route");
+        sleep(Duration::from_millis(20)).await;
+
+        handle.restart_route("lc-1").await.expect("restart_route");
+        sleep(Duration::from_millis(20)).await;
+
+        handle.suspend_route("lc-1").await.expect("suspend_route");
+        handle.resume_route("lc-1").await.expect("resume_route");
+        sleep(Duration::from_millis(20)).await;
+
+        handle.stop_route("lc-1").await.expect("stop_route");
+        handle.start_all_routes().await.expect("start_all_routes");
+        sleep(Duration::from_millis(20)).await;
+        handle.stop_all_routes().await.expect("stop_all_routes");
+
+        handle
+            .start_route_reload("lc-1")
+            .await
+            .expect("start_route_reload");
+        handle
+            .stop_route_reload("lc-1")
+            .await
+            .expect("stop_route_reload");
+
+        handle.shutdown().await.expect("shutdown send");
+        join_handle.await.expect("actor join");
+    }
+
+    #[tokio::test]
+    async fn spawn_supervision_restarts_route_on_crash() {
+        let (handle, join_handle) = build_actor_with_components();
+        handle
+            .add_route(route_def("sup-1", "timer:tick?period=100"))
+            .await
+            .expect("add route sup-1");
+        handle.start_route("sup-1").await.expect("start_route sup-1");
+
+        let (crash_tx, crash_rx) = mpsc::channel(8);
+        let supervision = spawn_supervision_task(
+            handle.clone(),
+            SupervisionConfig {
+                initial_delay: Duration::from_millis(10),
+                max_attempts: Some(2),
+                ..SupervisionConfig::default()
+            },
+            None,
+            crash_rx,
+        );
+
+        crash_tx
+            .send(CrashNotification {
+                route_id: "sup-1".to_string(),
+                error: "simulated".to_string(),
+            })
+            .await
+            .expect("send crash notification");
+
+        sleep(Duration::from_millis(150)).await;
+        drop(crash_tx);
+        supervision.await.expect("supervision join");
+
+        handle.shutdown().await.expect("shutdown send");
+        join_handle.await.expect("actor join");
+    }
+
+    #[tokio::test]
+    async fn supervision_skips_duplicate_and_gives_up_after_max_attempts() {
+        let (handle, join_handle) = build_actor_with_components();
+        handle
+            .add_route(route_def("sup-2", "timer:tick?period=100"))
+            .await
+            .expect("add route sup-2");
+        handle.start_route("sup-2").await.expect("start_route sup-2");
+
+        let (crash_tx, crash_rx) = mpsc::channel(8);
+        let supervision = spawn_supervision_task(
+            handle.clone(),
+            SupervisionConfig {
+                initial_delay: Duration::from_millis(10),
+                max_attempts: Some(1),
+                ..SupervisionConfig::default()
+            },
+            None,
+            crash_rx,
+        );
+
+        crash_tx
+            .send(CrashNotification {
+                route_id: "sup-2".to_string(),
+                error: "attempt-1".to_string(),
+            })
+            .await
+            .expect("send crash attempt-1");
+        crash_tx
+            .send(CrashNotification {
+                route_id: "sup-2".to_string(),
+                error: "attempt-2".to_string(),
+            })
+            .await
+            .expect("send crash attempt-2");
+
+        sleep(Duration::from_millis(200)).await;
+        drop(crash_tx);
+        supervision.await.expect("supervision join");
+
+        handle.shutdown().await.expect("shutdown send");
+        join_handle.await.expect("actor join");
+    }
+
+    #[tokio::test]
+    async fn try_set_runtime_handle_succeeds_on_fresh_actor() {
+        let (handle, join_handle) = build_empty_actor();
+
+        handle
+            .try_set_runtime_handle(Arc::new(NoopRuntime))
+            .expect("try_set_runtime_handle should succeed");
+
+        handle.shutdown().await.expect("shutdown send");
+        join_handle.await.expect("actor join");
+    }
+
+    #[tokio::test]
+    async fn shutdown_returns_error_when_actor_stopped() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        let handle = RouteControllerHandle { tx };
+        let result = handle.shutdown().await;
+
+        assert!(matches!(result, Err(CamelError::ProcessorError(_))));
     }
 }
