@@ -43,7 +43,7 @@ async fn main() -> Result<(), CamelError> {
     let brokers = format!("127.0.0.1:{port}");
     println!("Kafka broker available at {brokers}");
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(KafkaComponent::new());

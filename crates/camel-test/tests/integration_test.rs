@@ -490,7 +490,8 @@ async fn global_error_handler_fallback() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"))
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-route-12")
@@ -524,7 +525,8 @@ async fn per_route_overrides_global() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"))
+        .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-route-13")

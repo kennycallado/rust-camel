@@ -50,6 +50,8 @@ pub async fn execute_query(
 
 #[cfg(test)]
 mod tests {
+    use crate::lifecycle::domain::DomainError;
+
     use super::*;
     use crate::lifecycle::ports::{ProjectionStorePort, RouteStatusProjection};
     use async_trait::async_trait;
@@ -62,7 +64,7 @@ mod tests {
 
     #[async_trait]
     impl ProjectionStorePort for TestProjectionStore {
-        async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), CamelError> {
+        async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), DomainError> {
             self.statuses.lock().unwrap().push(status);
             Ok(())
         }
@@ -70,7 +72,7 @@ mod tests {
         async fn get_status(
             &self,
             route_id: &str,
-        ) -> Result<Option<RouteStatusProjection>, CamelError> {
+        ) -> Result<Option<RouteStatusProjection>, DomainError> {
             Ok(self
                 .statuses
                 .lock()
@@ -80,11 +82,11 @@ mod tests {
                 .cloned())
         }
 
-        async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, CamelError> {
+        async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, DomainError> {
             Ok(self.statuses.lock().unwrap().clone())
         }
 
-        async fn remove_status(&self, route_id: &str) -> Result<(), CamelError> {
+        async fn remove_status(&self, route_id: &str) -> Result<(), DomainError> {
             self.statuses
                 .lock()
                 .unwrap()

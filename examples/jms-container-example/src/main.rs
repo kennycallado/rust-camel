@@ -139,7 +139,7 @@ async fn main() -> Result<(), CamelError> {
          &env=ARTEMIS_PASSWORD={BROKER_PASS}"
     );
 
-    let mut init_ctx = CamelContext::new();
+    let mut init_ctx = CamelContext::builder().build().await.unwrap();
     init_ctx.register_component(TimerComponent::new());
     init_ctx.register_component(ContainerComponent::new());
 
@@ -187,7 +187,7 @@ async fn main() -> Result<(), CamelError> {
     };
     let pool = Arc::new(JmsBridgePool::from_config(pool_config)?);
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(JmsComponent::with_scheme("jms", Arc::clone(&pool)));

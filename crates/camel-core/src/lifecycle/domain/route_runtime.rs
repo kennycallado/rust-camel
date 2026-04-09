@@ -1,4 +1,4 @@
-use crate::CamelError;
+use crate::lifecycle::domain::DomainError;
 use crate::lifecycle::domain::RuntimeEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,7 @@ pub enum RouteLifecycleCommand {
     Resume,
     Reload,
     Fail(String),
+    Remove,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,15 @@ impl RouteRuntimeAggregate {
             state: RouteRuntimeState::Registered,
             version: 0,
         }
+    }
+
+    /// Constructor that returns both the aggregate and the initial `RouteRegistered` event.
+    /// Used by command handlers — avoids duplicating event construction outside the domain.
+    pub fn register(route_id: impl Into<String>) -> (Self, Vec<RuntimeEvent>) {
+        let route_id = route_id.into();
+        let aggregate = Self::new(route_id.clone());
+        let events = vec![RuntimeEvent::RouteRegistered { route_id }];
+        (aggregate, events)
     }
 
     pub fn from_snapshot(
@@ -62,12 +72,31 @@ impl RouteRuntimeAggregate {
         &self.route_id
     }
 
+    /// Map a persisted RuntimeEvent to the resulting RouteRuntimeState.
+    /// Used for event replay — avoids duplicating the state machine outside the domain.
+    pub fn state_from_event(event: &RuntimeEvent) -> Option<RouteRuntimeState> {
+        match event {
+            RuntimeEvent::RouteRegistered { .. } => Some(RouteRuntimeState::Registered),
+            RuntimeEvent::RouteStartRequested { .. } => Some(RouteRuntimeState::Starting),
+            RuntimeEvent::RouteStarted { .. } => Some(RouteRuntimeState::Started),
+            RuntimeEvent::RouteStopped { .. } => Some(RouteRuntimeState::Stopped),
+            RuntimeEvent::RouteSuspended { .. } => Some(RouteRuntimeState::Suspended),
+            RuntimeEvent::RouteResumed { .. } => Some(RouteRuntimeState::Started),
+            RuntimeEvent::RouteFailed { error, .. } => {
+                Some(RouteRuntimeState::Failed(error.clone()))
+            }
+            RuntimeEvent::RouteReloaded { .. } => Some(RouteRuntimeState::Started),
+            RuntimeEvent::RouteRemoved { .. } => None,
+        }
+    }
+
     pub fn apply_command(
         &mut self,
         cmd: RouteLifecycleCommand,
-    ) -> Result<Vec<RuntimeEvent>, CamelError> {
-        let invalid = |from: &RouteRuntimeState, to: &str| {
-            CamelError::ProcessorError(format!("invalid transition: {from:?} -> {to}"))
+    ) -> Result<Vec<RuntimeEvent>, DomainError> {
+        let invalid = |from: &RouteRuntimeState, to: &str| DomainError::InvalidTransition {
+            from: format!("{from:?}"),
+            to: to.to_string(),
         };
 
         let events = match cmd {
@@ -133,6 +162,16 @@ impl RouteRuntimeAggregate {
                     error,
                 }]
             }
+            RouteLifecycleCommand::Remove => match self.state {
+                RouteRuntimeState::Registered | RouteRuntimeState::Stopped => {
+                    vec![RuntimeEvent::RouteRemoved {
+                        route_id: self.route_id.clone(),
+                    }]
+                }
+                _ => {
+                    return Err(invalid(&self.state, "Removed"));
+                }
+            },
         };
 
         self.version += 1;
@@ -158,10 +197,113 @@ mod tests {
     fn start_emits_route_started_event() {
         let mut agg = RouteRuntimeAggregate::new("r1");
         let events = agg.apply_command(RouteLifecycleCommand::Start).unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, RuntimeEvent::RouteStarted { route_id } if route_id == "r1"))
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::RouteStarted { route_id } if route_id == "r1")));
+    }
+
+    #[test]
+    fn register_returns_aggregate_and_event() {
+        let (agg, events) = RouteRuntimeAggregate::register("r1");
+        assert_eq!(agg.route_id(), "r1");
+        assert_eq!(agg.state(), &RouteRuntimeState::Registered);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            RuntimeEvent::RouteRegistered { route_id } if route_id == "r1"
+        ));
+    }
+
+    #[test]
+    fn remove_from_registered_emits_removed() {
+        let mut agg = RouteRuntimeAggregate::new("r1");
+        let events = agg.apply_command(RouteLifecycleCommand::Remove).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            RuntimeEvent::RouteRemoved { route_id } if route_id == "r1"
+        ));
+    }
+
+    #[test]
+    fn remove_from_started_is_invalid() {
+        let mut agg = RouteRuntimeAggregate::new("r1");
+        agg.apply_command(RouteLifecycleCommand::Start).unwrap();
+        let err = agg
+            .apply_command(RouteLifecycleCommand::Remove)
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid transition"));
+    }
+
+    #[test]
+    fn remove_from_stopped_emits_removed() {
+        let mut agg = RouteRuntimeAggregate::new("r1");
+        agg.apply_command(RouteLifecycleCommand::Start).unwrap();
+        agg.apply_command(RouteLifecycleCommand::Stop).unwrap();
+        let events = agg.apply_command(RouteLifecycleCommand::Remove).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            RuntimeEvent::RouteRemoved { route_id } if route_id == "r1"
+        ));
+    }
+
+    #[test]
+    fn state_from_event_maps_all_variants() {
+        assert_eq!(
+            RouteRuntimeAggregate::state_from_event(&RuntimeEvent::RouteRegistered {
+                route_id: "r".into()
+            }),
+            Some(RouteRuntimeState::Registered)
+        );
+        assert_eq!(
+            RouteRuntimeAggregate::state_from_event(&RuntimeEvent::RouteStartRequested {
+                route_id: "r".into()
+            }),
+            Some(RouteRuntimeState::Starting)
+        );
+        assert_eq!(
+            RouteRuntimeAggregate::state_from_event(&RuntimeEvent::RouteStarted {
+                route_id: "r".into()
+            }),
+            Some(RouteRuntimeState::Started)
+        );
+        assert_eq!(
+            RouteRuntimeAggregate::state_from_event(&RuntimeEvent::RouteStopped {
+                route_id: "r".into()
+            }),
+            Some(RouteRuntimeState::Stopped)
+        );
+        assert_eq!(
+            RouteRuntimeAggregate::state_from_event(&RuntimeEvent::RouteSuspended {
+                route_id: "r".into()
+            }),
+            Some(RouteRuntimeState::Suspended)
+        );
+        assert_eq!(
+            RouteRuntimeAggregate::state_from_event(&RuntimeEvent::RouteResumed {
+                route_id: "r".into()
+            }),
+            Some(RouteRuntimeState::Started)
+        );
+        assert_eq!(
+            RouteRuntimeAggregate::state_from_event(&RuntimeEvent::RouteFailed {
+                route_id: "r".into(),
+                error: "e".into()
+            }),
+            Some(RouteRuntimeState::Failed("e".into()))
+        );
+        assert_eq!(
+            RouteRuntimeAggregate::state_from_event(&RuntimeEvent::RouteReloaded {
+                route_id: "r".into()
+            }),
+            Some(RouteRuntimeState::Started)
+        );
+        assert_eq!(
+            RouteRuntimeAggregate::state_from_event(&RuntimeEvent::RouteRemoved {
+                route_id: "r".into()
+            }),
+            None
         );
     }
 }

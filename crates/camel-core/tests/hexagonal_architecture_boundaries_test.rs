@@ -249,22 +249,26 @@ fn supervision_loop_decisions_are_runtime_query_driven() {
     let supervising = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("lifecycle")
-        .join("application")
-        .join("supervision_service.rs");
+        .join("adapters")
+        .join("controller_actor.rs");
 
     assert_file_section_contains(
         &supervising,
-        "async fn supervision_loop(",
+        "pub fn spawn_supervision_task(",
         &[
-            "RuntimeQuery::GetRouteStatus",
-            "RuntimeCommand::FailRoute",
-            "RuntimeCommand::ReloadRoute",
+            "controller: RouteControllerHandle",
+            "controller.restart_route(route_id.clone()).await",
         ],
     );
     assert_file_section_not_contains(
         &supervising,
-        "async fn supervision_loop(",
-        &[".route_status("],
+        "pub fn spawn_supervision_task(",
+        &[
+            "RuntimeQuery::GetRouteStatus",
+            "RuntimeCommand::FailRoute",
+            "RuntimeCommand::ReloadRoute",
+            ".route_status(",
+        ],
     );
 }
 

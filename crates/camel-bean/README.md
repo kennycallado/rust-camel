@@ -213,7 +213,8 @@ The bean system integrates with the core route controller:
 use camel_core::context::CamelContext;
 use camel_bean::BeanRegistry;
 
-let mut ctx = CamelContext::new();
+// Inside an async function
+let mut ctx = CamelContext::builder().build().await?;
 let bean_registry = Arc::new(BeanRegistry::new());
 
 // Register beans

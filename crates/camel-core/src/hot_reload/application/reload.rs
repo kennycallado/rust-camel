@@ -11,7 +11,7 @@ use crate::context::RuntimeExecutionHandle;
 use crate::hot_reload::application::drain::drain_route;
 use crate::hot_reload::domain::ReloadAction;
 #[cfg(test)]
-use crate::lifecycle::adapters::route_controller::RouteControllerInternal;
+use crate::lifecycle::adapters::route_controller::DefaultRouteController;
 use crate::lifecycle::application::route_definition::RouteDefinition;
 
 static RELOAD_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -47,7 +47,7 @@ pub(crate) struct ReloadError {
 #[cfg(test)]
 fn compute_reload_actions(
     new_definitions: &[RouteDefinition],
-    controller: &dyn RouteControllerInternal,
+    controller: &DefaultRouteController,
 ) -> Vec<ReloadAction> {
     let active_ids: std::collections::HashSet<String> =
         controller.route_ids().into_iter().collect();
@@ -433,19 +433,12 @@ mod tests {
     use super::*;
     use crate::lifecycle::adapters::route_controller::DefaultRouteController;
     use crate::shared::components::domain::Registry;
-    use camel_api::RouteController;
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::sync::Mutex;
 
     fn make_controller() -> DefaultRouteController {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        let mut controller = DefaultRouteController::new(registry);
-        let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-            DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
-        ));
-        controller.set_self_ref(controller_arc);
-        controller
+        DefaultRouteController::new(registry)
     }
 
     #[test]
@@ -641,7 +634,7 @@ mod tests {
         use crate::CamelContext;
         use camel_component_timer::TimerComponent;
 
-        let mut ctx = CamelContext::new();
+        let mut ctx = CamelContext::builder().build().await.unwrap();
         ctx.register_component(TimerComponent::new());
         ctx.start().await.unwrap();
 
@@ -674,7 +667,7 @@ mod tests {
         use crate::CamelContext;
         use camel_component_timer::TimerComponent;
 
-        let mut ctx = CamelContext::new();
+        let mut ctx = CamelContext::builder().build().await.unwrap();
         ctx.register_component(TimerComponent::new());
         ctx.start().await.unwrap();
 
@@ -716,7 +709,7 @@ mod tests {
         use crate::CamelContext;
         use camel_component_timer::TimerComponent;
 
-        let mut ctx = CamelContext::new();
+        let mut ctx = CamelContext::builder().build().await.unwrap();
         ctx.register_component(TimerComponent::new());
         ctx.start().await.unwrap();
 
@@ -757,7 +750,7 @@ mod tests {
         use camel_api::{RuntimeQuery, RuntimeQueryResult};
         use camel_component_timer::TimerComponent;
 
-        let mut ctx = CamelContext::new();
+        let mut ctx = CamelContext::builder().build().await.unwrap();
         ctx.register_component(TimerComponent::new());
         ctx.start().await.unwrap();
 

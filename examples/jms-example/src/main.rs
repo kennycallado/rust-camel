@@ -68,7 +68,7 @@ async fn main() -> Result<(), CamelError> {
     let pool_config = JmsPoolConfig::single_broker(&broker_url, BrokerType::ActiveMq);
     let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(JmsComponent::with_scheme("jms", Arc::clone(&pool)));

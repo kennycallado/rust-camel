@@ -258,8 +258,12 @@ async fn main() -> Result<(), CamelError> {
     };
 
     // Create context with supervision + metrics and enable tracing
-    let mut ctx = CamelContext::with_supervision_and_metrics(supervision_config, metrics);
-    ctx.set_tracing(true); // spans for all 24 routes → showcase-trace.log
+    let mut ctx = CamelContext::builder()
+        .supervision(supervision_config)
+        .metrics(metrics)
+        .build()
+        .await?;
+    ctx.set_tracing(true).await; // spans for all 24 routes → showcase-trace.log
 
     // Register all components
     ctx.register_component(TimerComponent::new());
@@ -275,7 +279,8 @@ async fn main() -> Result<(), CamelError> {
     // Global error handler (fallback for routes without their own)
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel(
         "log:global-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
-    ));
+    ))
+    .await;
 
     // Setup temp directory for file routes
     let output_dir = std::env::temp_dir().join("rust-camel-showcase");

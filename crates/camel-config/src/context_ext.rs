@@ -189,24 +189,22 @@ impl CamelConfig {
             .as_ref()
             .is_some_and(|o| o.enabled);
 
-        // Build context with optional supervision
-        let mut ctx = if let Some(ref sup) = config.supervision {
-            if let Some(ref jcfg) = config.runtime_journal {
-                CamelContext::with_supervision_and_metrics_and_redb_journal(
-                    sup.clone().into_supervision_config(),
-                    std::sync::Arc::new(camel_api::NoOpMetrics),
-                    jcfg.path.clone(),
-                    jcfg.into(),
-                )
-                .await?
-            } else {
-                CamelContext::with_supervision(sup.clone().into_supervision_config())
-            }
-        } else if let Some(ref jcfg) = config.runtime_journal {
-            CamelContext::new_with_redb_journal(jcfg.path.clone(), jcfg.into()).await?
-        } else {
-            CamelContext::new()
-        };
+        // Build context with optional supervision + durable runtime journal
+        let mut builder = CamelContext::builder();
+
+        if let Some(ref sup) = config.supervision {
+            builder = builder.supervision(sup.clone().into_supervision_config());
+        }
+
+        if let Some(ref jcfg) = config.runtime_journal {
+            let options: camel_core::RedbJournalOptions = jcfg.into();
+            let journal =
+                camel_core::RedbRuntimeEventJournal::new(jcfg.path.clone(), options).await?;
+            let store = camel_core::InMemoryRuntimeStore::default().with_journal(Arc::new(journal));
+            builder = builder.runtime_store(store);
+        }
+
+        let mut ctx = builder.build().await?;
 
         ctx.set_shutdown_timeout(std::time::Duration::from_millis(config.timeout_ms));
 
@@ -409,7 +407,7 @@ impl CamelConfig {
             ctx.set_component_config(ws_config);
         }
 
-        ctx.set_tracer_config(tracer_config);
+        ctx.set_tracer_config(tracer_config).await;
         Ok(ctx)
     }
 

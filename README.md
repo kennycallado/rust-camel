@@ -67,10 +67,16 @@ let status = ctx.runtime_route_status("my-route").await?;
 
 ```rust
 // Enable redb-backed event journal for runtime state recovery
-let ctx = CamelContext::new_with_redb_journal(
-    ".camel/runtime.redb",
-    RedbJournalOptions::default(),
-).await?;
+let ctx = CamelContext::builder()
+    .runtime_store(camel_core::InMemoryRuntimeStore::default().with_journal(std::sync::Arc::new(
+        camel_core::RedbRuntimeEventJournal::new(
+            ".camel/runtime.redb",
+            RedbJournalOptions::default(),
+        )
+        .await?,
+    )))
+    .build()
+    .await?;
 ```
 
 ## Quick Example
@@ -86,7 +92,7 @@ use camel_core::context::CamelContext;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt::init();
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await?;
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
@@ -280,7 +286,7 @@ Export metrics to Prometheus with automatic lifecycle management:
 ```rust
 use camel_prometheus::PrometheusService;
 
-let ctx = CamelContext::new()
+let ctx = CamelContext::builder().build().await?
     .with_lifecycle(PrometheusService::new(9090))
     .with_tracing();
 
@@ -569,7 +575,7 @@ let config = CamelConfig::from_file("Camel.toml")
     .map_err(|e| CamelError::Config(e.to_string()))?;
 
 // Create context and register components
-let mut ctx = CamelContext::new();
+let mut ctx = CamelContext::builder().build().await?;
 ctx.register_component(TimerComponent::new());
 ctx.register_component(LogComponent::new());
 

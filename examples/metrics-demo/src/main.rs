@@ -76,7 +76,7 @@ async fn main() -> Result<(), CamelError> {
     let metrics_for_print = Arc::clone(&metrics);
 
     // Create context with custom metrics collector
-    let mut ctx = CamelContext::with_metrics(metrics);
+    let mut ctx = CamelContext::builder().metrics(metrics).build().await?;
 
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());

@@ -64,7 +64,7 @@ async fn test_watcher_swaps_pipeline_on_file_change() {
     write_route_yaml(&route_file, "watcher-test", 30, "v1");
 
     let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(mock.clone());
 
@@ -142,7 +142,7 @@ async fn test_watcher_removes_route_on_file_deletion() {
     write_route_yaml(&route_file, "deletion-test", 30, "del-test");
 
     let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(mock.clone());
 
@@ -239,7 +239,7 @@ async fn test_watcher_restart_preserves_non_running_route_state() {
     );
 
     let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(mock.clone());
 
@@ -329,7 +329,7 @@ async fn test_restart_with_from_uri_change_processes_exchanges_via_new_endpoint(
     write_route_yaml(&route_file, "drain-test", 30, "drain-v1");
 
     let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(mock.clone());
 

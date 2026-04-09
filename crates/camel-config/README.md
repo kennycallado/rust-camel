@@ -314,7 +314,8 @@ use camel_component_kafka::KafkaComponent;
 let config = CamelConfig::from_file_with_env("Camel.toml")?;
 
 // Configure context with component defaults from Camel.toml
-let mut ctx = CamelContext::new();
+// Inside an async function
+let mut ctx = CamelContext::builder().build().await?;
 CamelConfig::configure_context(&config, &mut ctx)?;
 
 // Register components - they will receive global defaults via context

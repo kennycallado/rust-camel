@@ -59,7 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build CamelContext with the OtelService as a lifecycle service.
     // with_lifecycle() auto-registers the metrics collector from OtelService.
-    let mut ctx = CamelContext::new()
+    let mut ctx = CamelContext::builder()
+        .build()
+        .await
+        .unwrap()
         .with_lifecycle(otel_service)
         .with_tracer_config(TracerConfig {
             enabled: true,
@@ -72,7 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 file: None,
             },
             ..Default::default()
-        });
+        })
+        .await;
 
     // Register required components
     ctx.register_component(TimerComponent::new());

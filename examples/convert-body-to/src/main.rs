@@ -23,7 +23,7 @@ async fn main() -> Result<(), CamelError> {
     // Initialize tracing for structured logging
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
 
     // Register required components
     ctx.register_component(TimerComponent::new());

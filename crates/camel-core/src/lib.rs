@@ -24,10 +24,10 @@
 //!
 //! Or enable it programmatically:
 //!
-//! ```rust
+//! ```ignore
 //! use camel_core::CamelContext;
-//! let mut ctx = CamelContext::new();
-//! ctx.set_tracing(true);
+//! let mut ctx = CamelContext::builder().build().await.unwrap();
+//! ctx.set_tracing(true).await;
 //! ```
 //!
 //! ### Span Fields
@@ -77,7 +77,7 @@ pub mod route_controller {
 }
 
 pub mod supervising_route_controller {
-    pub use crate::lifecycle::application::supervision_service::*;
+    pub use crate::lifecycle::adapters::controller_actor::spawn_supervision_task;
 }
 
 pub mod reload_watcher {
@@ -85,6 +85,9 @@ pub mod reload_watcher {
 }
 
 pub use crate::hot_reload::adapters::ReloadWatcher;
+pub use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
+pub use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
+pub use crate::lifecycle::adapters::controller_actor::spawn_supervision_task;
 pub use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
 pub use crate::lifecycle::adapters::redb_journal::{
     JournalDurability, JournalEntry, JournalInspectFilter, RedbJournalOptions,
@@ -96,7 +99,6 @@ pub use crate::lifecycle::adapters::{
     InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore, InMemoryRouteRepository,
     InMemoryRuntimeStore, RuntimeExecutionAdapter,
 };
-pub use crate::lifecycle::application::SupervisingRouteController;
 pub use crate::lifecycle::application::runtime_bus::RuntimeBus;
 pub use crate::lifecycle::application::{BuilderStep, RouteDefinition};
 pub use crate::lifecycle::domain::{

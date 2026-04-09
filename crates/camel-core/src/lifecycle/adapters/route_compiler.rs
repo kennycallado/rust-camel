@@ -130,7 +130,8 @@ impl Service<Exchange> for SequentialPipeline {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if let Some(first) = self.steps.first_mut() {
+        if let Some(first) = self.steps.first() {
+            let mut first = first.clone();
             first.poll_ready(cx)
         } else {
             Poll::Ready(Ok(()))
@@ -138,10 +139,10 @@ impl Service<Exchange> for SequentialPipeline {
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        let mut steps = self.steps.clone();
+        let steps = self.steps.clone();
         Box::pin(async move {
             let mut ex = exchange;
-            for step in &mut steps {
+            for mut step in steps {
                 ex = step.ready().await?.call(ex).await?;
             }
             Ok(ex)
@@ -161,7 +162,8 @@ impl Service<Exchange> for TracedPipeline {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if let Some(first) = self.steps.first_mut() {
+        if let Some(first) = self.steps.first() {
+            let mut first = first.clone();
             first.poll_ready(cx)
         } else {
             Poll::Ready(Ok(()))
@@ -169,10 +171,10 @@ impl Service<Exchange> for TracedPipeline {
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        let mut steps = self.steps.clone();
+        let steps = self.steps.clone();
         Box::pin(async move {
             let mut ex = exchange;
-            for step in &mut steps {
+            for mut step in steps {
                 ex = step.ready().await?.call(ex).await?;
             }
             Ok(ex)

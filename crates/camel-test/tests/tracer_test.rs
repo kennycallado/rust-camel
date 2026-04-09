@@ -10,7 +10,7 @@ async fn tracer_enabled_spans_emitted() {
         .with_mock()
         .build()
         .await;
-    h.ctx().lock().await.set_tracing(true);
+    h.ctx().lock().await.set_tracing(true).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-trace-route")

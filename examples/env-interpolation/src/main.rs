@@ -49,7 +49,7 @@ async fn main() -> Result<(), CamelError> {
     let config =
         CamelConfig::from_file("Camel.toml").map_err(|e| CamelError::Config(e.to_string()))?;
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 

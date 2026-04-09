@@ -16,7 +16,7 @@ async fn main() -> Result<(), CamelError> {
         CamelConfig::from_file("Camel.toml").map_err(|e| CamelError::Config(e.to_string()))?;
 
     // Create context
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
 
     // Register components
     ctx.register_component(TimerComponent::new());

@@ -31,7 +31,7 @@ async fn main() -> Result<(), CamelError> {
         .with_target(false)
         .init();
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(DirectComponent::new());

@@ -40,7 +40,7 @@ async fn main() -> Result<(), CamelError> {
 
     println!("[1] Creating Camel context and registering components...");
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
 
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());

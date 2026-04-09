@@ -152,7 +152,7 @@ use camel_core::context::CamelContext;
 use camel_component_timer::TimerComponent;
 use camel_component_log::LogComponent;
 
-let mut ctx = CamelContext::new();
+let mut ctx = CamelContext::builder().build().await?;
 ctx.register_component(TimerComponent::new());
 ctx.register_component(LogComponent::new());
 

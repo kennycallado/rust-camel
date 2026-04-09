@@ -18,7 +18,7 @@ fn now_ms() -> u64 {
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(HttpComponent::new());
 
     // Route 1: /slow — no DSL override.

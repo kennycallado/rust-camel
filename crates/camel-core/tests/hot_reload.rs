@@ -12,7 +12,6 @@ use camel_core::route::RouteDefinition;
 use camel_core::route_controller::DefaultRouteController;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -23,10 +22,6 @@ async fn test_swap_pipeline_is_picked_up_by_new_requests() {
 
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
     let mut controller = DefaultRouteController::new(registry);
-    let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-        DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
-    ));
-    controller.set_self_ref(controller_arc);
 
     let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("hot-test");
     controller.add_route(def).unwrap();
@@ -49,10 +44,6 @@ async fn test_hot_reload_in_flight_requests_use_old_pipeline() {
     // Setup controller
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
     let mut controller = DefaultRouteController::new(registry);
-    let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-        DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
-    ));
-    controller.set_self_ref(controller_arc);
 
     // Create route
     let def = RouteDefinition::new("direct:test", vec![]).with_route_id("hot-reload-test");
@@ -133,10 +124,6 @@ async fn test_hot_reload_multiple_swaps_preserve_correctness() {
 
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
     let mut controller = DefaultRouteController::new(registry);
-    let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-        DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
-    ));
-    controller.set_self_ref(controller_arc);
 
     let def = RouteDefinition::new("direct:multi-swap", vec![]).with_route_id("multi-swap-test");
     controller.add_route(def).unwrap();
@@ -175,10 +162,6 @@ async fn test_hot_reload_concurrent_access_no_panic() {
 
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
     let mut controller = DefaultRouteController::new(registry);
-    let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-        DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
-    ));
-    controller.set_self_ref(controller_arc);
 
     let def = RouteDefinition::new("direct:concurrent", vec![]).with_route_id("concurrent-test");
     controller.add_route(def).unwrap();
@@ -222,12 +205,7 @@ async fn test_hot_reload_concurrent_access_no_panic() {
 
 fn make_controller() -> DefaultRouteController {
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-    let mut controller = DefaultRouteController::new(registry);
-    let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-        DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
-    ));
-    controller.set_self_ref(controller_arc);
-    controller
+    DefaultRouteController::new(registry)
 }
 
 #[tokio::test]
@@ -266,10 +244,6 @@ async fn test_remove_route_rejects_running_route() {
         .unwrap()
         .register(camel_component_timer::TimerComponent::new());
     let mut controller = DefaultRouteController::new(Arc::clone(&registry));
-    let controller_arc: Arc<Mutex<dyn RouteController>> = Arc::new(Mutex::new(
-        DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new()))),
-    ));
-    controller.set_self_ref(controller_arc);
 
     let def =
         RouteDefinition::new("timer:tick?period=100", vec![]).with_route_id("running-remove-test");

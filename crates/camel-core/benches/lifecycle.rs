@@ -18,7 +18,7 @@ fn bench_lifecycle(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.to_async(&rt).iter(|| async move {
-                    let mut ctx = CamelContext::new();
+                    let mut ctx = CamelContext::builder().build().await.unwrap();
                     ctx.register_component(TimerComponent::new());
 
                     for i in 0..count {

@@ -151,7 +151,12 @@ async fn test_prometheus_service_with_context() {
     let port_accessor = prometheus.port_accessor();
     let metrics = prometheus.as_metrics_collector().unwrap();
 
-    let mut ctx = CamelContext::with_metrics(metrics).with_lifecycle(prometheus);
+    let mut ctx = CamelContext::builder()
+        .metrics(metrics)
+        .build()
+        .await
+        .unwrap()
+        .with_lifecycle(prometheus);
 
     // Start context (which starts the prometheus service)
     ctx.start()

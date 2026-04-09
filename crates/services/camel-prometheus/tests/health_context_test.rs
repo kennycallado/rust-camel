@@ -32,7 +32,11 @@ async fn test_health_with_context() {
     let prometheus = PrometheusService::new(addr);
     let port_accessor = prometheus.port_accessor();
 
-    let mut ctx = CamelContext::new().with_lifecycle(prometheus);
+    let mut ctx = CamelContext::builder()
+        .build()
+        .await
+        .unwrap()
+        .with_lifecycle(prometheus);
 
     ctx.start().await.unwrap();
 

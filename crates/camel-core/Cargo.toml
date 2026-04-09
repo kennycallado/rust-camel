@@ -62,3 +62,19 @@ harness = false
 [[bench]]
 name = "lifecycle"
 harness = false
+
+[[bench]]
+name = "swap_pipeline_latency"
+harness = false
+
+[[bench]]
+name = "lock_contention"
+harness = false
+
+[[bench]]
+name = "tracing_overhead"
+harness = false
+
+[[bench]]
+name = "pipeline_throughput"
+harness = false

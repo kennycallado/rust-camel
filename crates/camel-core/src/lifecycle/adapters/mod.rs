@@ -1,4 +1,6 @@
 pub(crate) mod body_coercing;
+pub(crate) mod consumer_management;
+pub(crate) mod controller_actor;
 pub mod exchange_uow;
 pub mod in_memory;
 pub mod redb_journal;
@@ -6,6 +8,7 @@ pub(crate) mod route_compiler;
 pub mod route_controller;
 pub mod route_types;
 pub mod runtime_execution;
+pub(crate) mod step_resolution;
 // supervising_route_controller lives in lifecycle/application/ after Task 7
 
 pub use in_memory::{

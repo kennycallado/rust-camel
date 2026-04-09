@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
 
-use camel_api::CamelError;
+use crate::lifecycle::domain::DomainError;
 
 use crate::lifecycle::domain::{RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent};
 use crate::lifecycle::ports::{
@@ -19,12 +19,12 @@ pub struct InMemoryRouteRepository {
 
 #[async_trait]
 impl RouteRepositoryPort for InMemoryRouteRepository {
-    async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, CamelError> {
+    async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, DomainError> {
         let routes = self.routes.read().await;
         Ok(routes.get(route_id).cloned())
     }
 
-    async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), CamelError> {
+    async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), DomainError> {
         let mut routes = self.routes.write().await;
         routes.insert(aggregate.route_id().to_string(), aggregate);
         Ok(())
@@ -34,17 +34,17 @@ impl RouteRepositoryPort for InMemoryRouteRepository {
         &self,
         aggregate: RouteRuntimeAggregate,
         expected_version: u64,
-    ) -> Result<(), CamelError> {
+    ) -> Result<(), DomainError> {
         let mut routes = self.routes.write().await;
         let route_id = aggregate.route_id().to_string();
         let current = routes.get(&route_id).ok_or_else(|| {
-            CamelError::RouteError(format!(
+            DomainError::InvalidState(format!(
                 "optimistic lock conflict for route '{route_id}': route not found"
             ))
         })?;
 
         if current.version() != expected_version {
-            return Err(CamelError::RouteError(format!(
+            return Err(DomainError::InvalidState(format!(
                 "optimistic lock conflict for route '{route_id}': expected version {expected_version}, actual {}",
                 current.version()
             )));
@@ -54,7 +54,7 @@ impl RouteRepositoryPort for InMemoryRouteRepository {
         Ok(())
     }
 
-    async fn delete(&self, route_id: &str) -> Result<(), CamelError> {
+    async fn delete(&self, route_id: &str) -> Result<(), DomainError> {
         let mut routes = self.routes.write().await;
         routes.remove(route_id);
         Ok(())
@@ -68,7 +68,7 @@ pub struct InMemoryProjectionStore {
 
 #[async_trait]
 impl ProjectionStorePort for InMemoryProjectionStore {
-    async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), CamelError> {
+    async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), DomainError> {
         let mut statuses = self.statuses.write().await;
         statuses.insert(status.route_id.clone(), status);
         Ok(())
@@ -77,17 +77,17 @@ impl ProjectionStorePort for InMemoryProjectionStore {
     async fn get_status(
         &self,
         route_id: &str,
-    ) -> Result<Option<RouteStatusProjection>, CamelError> {
+    ) -> Result<Option<RouteStatusProjection>, DomainError> {
         let statuses = self.statuses.read().await;
         Ok(statuses.get(route_id).cloned())
     }
 
-    async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, CamelError> {
+    async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, DomainError> {
         let statuses = self.statuses.read().await;
         Ok(statuses.values().cloned().collect())
     }
 
-    async fn remove_status(&self, route_id: &str) -> Result<(), CamelError> {
+    async fn remove_status(&self, route_id: &str) -> Result<(), DomainError> {
         let mut statuses = self.statuses.write().await;
         statuses.remove(route_id);
         Ok(())
@@ -107,7 +107,7 @@ impl InMemoryEventPublisher {
 
 #[async_trait]
 impl EventPublisherPort for InMemoryEventPublisher {
-    async fn publish(&self, events: &[RuntimeEvent]) -> Result<(), CamelError> {
+    async fn publish(&self, events: &[RuntimeEvent]) -> Result<(), DomainError> {
         let mut stored = self.events.write().await;
         stored.extend(events.iter().cloned());
         Ok(())
@@ -121,12 +121,12 @@ pub struct InMemoryCommandDedup {
 
 #[async_trait]
 impl CommandDedupPort for InMemoryCommandDedup {
-    async fn first_seen(&self, command_id: &str) -> Result<bool, CamelError> {
+    async fn first_seen(&self, command_id: &str) -> Result<bool, DomainError> {
         let mut seen = self.seen.write().await;
         Ok(seen.insert(command_id.to_string()))
     }
 
-    async fn forget_seen(&self, command_id: &str) -> Result<(), CamelError> {
+    async fn forget_seen(&self, command_id: &str) -> Result<(), DomainError> {
         let mut seen = self.seen.write().await;
         seen.remove(command_id);
         Ok(())
@@ -188,6 +188,18 @@ fn upsert_replayed_route(
     );
 }
 
+fn state_label(state: &RouteRuntimeState) -> &'static str {
+    match state {
+        RouteRuntimeState::Registered => "Registered",
+        RouteRuntimeState::Starting => "Starting",
+        RouteRuntimeState::Started => "Started",
+        RouteRuntimeState::Suspended => "Suspended",
+        RouteRuntimeState::Stopping => "Stopping",
+        RouteRuntimeState::Stopped => "Stopped",
+        RouteRuntimeState::Failed(_) => "Failed",
+    }
+}
+
 fn apply_replayed_event(state: &mut RuntimeStoreState, event: &RuntimeEvent) {
     match event {
         RuntimeEvent::RouteRegistered { route_id } => {
@@ -203,58 +215,31 @@ fn apply_replayed_event(state: &mut RuntimeStoreState, event: &RuntimeEvent) {
                 },
             );
         }
-        RuntimeEvent::RouteStartRequested { route_id } => {
-            upsert_replayed_route(
-                state,
-                route_id,
-                RouteRuntimeState::Starting,
-                "Starting",
-                true,
-            );
-        }
-        RuntimeEvent::RouteStarted { route_id } => {
-            let increment_version = !matches!(
-                state.routes.get(route_id).map(|agg| agg.state()),
-                Some(RouteRuntimeState::Starting)
-            );
-            upsert_replayed_route(
-                state,
-                route_id,
-                RouteRuntimeState::Started,
-                "Started",
-                increment_version,
-            );
-        }
-        RuntimeEvent::RouteFailed { route_id, error } => {
-            upsert_replayed_route(
-                state,
-                route_id,
-                RouteRuntimeState::Failed(error.clone()),
-                "Failed",
-                true,
-            );
-        }
-        RuntimeEvent::RouteStopped { route_id } => {
-            upsert_replayed_route(state, route_id, RouteRuntimeState::Stopped, "Stopped", true);
-        }
-        RuntimeEvent::RouteSuspended { route_id } => {
-            upsert_replayed_route(
-                state,
-                route_id,
-                RouteRuntimeState::Suspended,
-                "Suspended",
-                true,
-            );
-        }
-        RuntimeEvent::RouteResumed { route_id } => {
-            upsert_replayed_route(state, route_id, RouteRuntimeState::Started, "Started", true);
-        }
-        RuntimeEvent::RouteReloaded { route_id } => {
-            upsert_replayed_route(state, route_id, RouteRuntimeState::Started, "Started", true);
-        }
         RuntimeEvent::RouteRemoved { route_id } => {
             state.routes.remove(route_id);
             state.statuses.remove(route_id);
+        }
+        _ => {
+            // Use the domain's state machine to derive the next state from the event.
+            let Some(next_state) = RouteRuntimeAggregate::state_from_event(event) else {
+                return;
+            };
+            let route_id = match event {
+                RuntimeEvent::RouteStartRequested { route_id }
+                | RuntimeEvent::RouteStarted { route_id }
+                | RuntimeEvent::RouteFailed { route_id, .. }
+                | RuntimeEvent::RouteStopped { route_id }
+                | RuntimeEvent::RouteSuspended { route_id }
+                | RuntimeEvent::RouteResumed { route_id }
+                | RuntimeEvent::RouteReloaded { route_id } => route_id,
+                _ => return,
+            };
+            let status = state_label(&next_state);
+            let increment_version = !matches!(
+                (event, state.routes.get(route_id).map(|agg| agg.state())),
+                (RuntimeEvent::RouteStarted { .. }, Some(RouteRuntimeState::Starting))
+            );
+            upsert_replayed_route(state, route_id, next_state, status, increment_version);
         }
     }
 }
@@ -270,12 +255,12 @@ impl Default for InMemoryRuntimeStore {
 
 #[async_trait]
 impl RouteRepositoryPort for InMemoryRuntimeStore {
-    async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, CamelError> {
+    async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, DomainError> {
         let guard = self.inner.lock().await;
         Ok(guard.routes.get(route_id).cloned())
     }
 
-    async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), CamelError> {
+    async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         guard
             .routes
@@ -287,17 +272,17 @@ impl RouteRepositoryPort for InMemoryRuntimeStore {
         &self,
         aggregate: RouteRuntimeAggregate,
         expected_version: u64,
-    ) -> Result<(), CamelError> {
+    ) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         let route_id = aggregate.route_id().to_string();
         let current = guard.routes.get(&route_id).ok_or_else(|| {
-            CamelError::RouteError(format!(
+            DomainError::InvalidState(format!(
                 "optimistic lock conflict for route '{route_id}': route not found"
             ))
         })?;
 
         if current.version() != expected_version {
-            return Err(CamelError::RouteError(format!(
+            return Err(DomainError::InvalidState(format!(
                 "optimistic lock conflict for route '{route_id}': expected version {expected_version}, actual {}",
                 current.version()
             )));
@@ -307,7 +292,7 @@ impl RouteRepositoryPort for InMemoryRuntimeStore {
         Ok(())
     }
 
-    async fn delete(&self, route_id: &str) -> Result<(), CamelError> {
+    async fn delete(&self, route_id: &str) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         guard.routes.remove(route_id);
         Ok(())
@@ -316,7 +301,7 @@ impl RouteRepositoryPort for InMemoryRuntimeStore {
 
 #[async_trait]
 impl ProjectionStorePort for InMemoryRuntimeStore {
-    async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), CamelError> {
+    async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         guard.statuses.insert(status.route_id.clone(), status);
         Ok(())
@@ -325,17 +310,17 @@ impl ProjectionStorePort for InMemoryRuntimeStore {
     async fn get_status(
         &self,
         route_id: &str,
-    ) -> Result<Option<RouteStatusProjection>, CamelError> {
+    ) -> Result<Option<RouteStatusProjection>, DomainError> {
         let guard = self.inner.lock().await;
         Ok(guard.statuses.get(route_id).cloned())
     }
 
-    async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, CamelError> {
+    async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, DomainError> {
         let guard = self.inner.lock().await;
         Ok(guard.statuses.values().cloned().collect())
     }
 
-    async fn remove_status(&self, route_id: &str) -> Result<(), CamelError> {
+    async fn remove_status(&self, route_id: &str) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         guard.statuses.remove(route_id);
         Ok(())
@@ -344,7 +329,7 @@ impl ProjectionStorePort for InMemoryRuntimeStore {
 
 #[async_trait]
 impl EventPublisherPort for InMemoryRuntimeStore {
-    async fn publish(&self, events: &[RuntimeEvent]) -> Result<(), CamelError> {
+    async fn publish(&self, events: &[RuntimeEvent]) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         if let Some(journal) = &self.journal {
             journal.append_batch(events).await?;
@@ -356,7 +341,7 @@ impl EventPublisherPort for InMemoryRuntimeStore {
 
 #[async_trait]
 impl CommandDedupPort for InMemoryRuntimeStore {
-    async fn first_seen(&self, command_id: &str) -> Result<bool, CamelError> {
+    async fn first_seen(&self, command_id: &str) -> Result<bool, DomainError> {
         let mut guard = self.inner.lock().await;
         if !guard.seen.insert(command_id.to_string()) {
             return Ok(false);
@@ -372,7 +357,7 @@ impl CommandDedupPort for InMemoryRuntimeStore {
         Ok(true)
     }
 
-    async fn forget_seen(&self, command_id: &str) -> Result<(), CamelError> {
+    async fn forget_seen(&self, command_id: &str) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         let removed = guard.seen.remove(command_id);
         if removed && let Some(journal) = &self.journal {
@@ -390,17 +375,17 @@ impl RuntimeUnitOfWorkPort for InMemoryRuntimeStore {
         expected_version: Option<u64>,
         projection: RouteStatusProjection,
         events: &[RuntimeEvent],
-    ) -> Result<(), CamelError> {
+    ) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         if let Some(expected) = expected_version {
             let route_id = aggregate.route_id().to_string();
             let current = guard.routes.get(&route_id).ok_or_else(|| {
-                CamelError::RouteError(format!(
+                DomainError::InvalidState(format!(
                     "optimistic lock conflict for route '{route_id}': route not found"
                 ))
             })?;
             if current.version() != expected {
-                return Err(CamelError::RouteError(format!(
+                return Err(DomainError::InvalidState(format!(
                     "optimistic lock conflict for route '{route_id}': expected version {expected}, actual {}",
                     current.version()
                 )));
@@ -425,7 +410,7 @@ impl RuntimeUnitOfWorkPort for InMemoryRuntimeStore {
         &self,
         route_id: &str,
         events: &[RuntimeEvent],
-    ) -> Result<(), CamelError> {
+    ) -> Result<(), DomainError> {
         let mut guard = self.inner.lock().await;
         if let Some(journal) = &self.journal {
             journal.append_batch(events).await?;
@@ -436,7 +421,7 @@ impl RuntimeUnitOfWorkPort for InMemoryRuntimeStore {
         Ok(())
     }
 
-    async fn recover_from_journal(&self) -> Result<(), CamelError> {
+    async fn recover_from_journal(&self) -> Result<(), DomainError> {
         let Some(journal) = &self.journal else {
             return Ok(());
         };
@@ -473,11 +458,11 @@ mod tests {
 
     #[async_trait]
     impl RuntimeEventJournalPort for ReplayJournal {
-        async fn append_batch(&self, _events: &[RuntimeEvent]) -> Result<(), CamelError> {
+        async fn append_batch(&self, _events: &[RuntimeEvent]) -> Result<(), DomainError> {
             Ok(())
         }
 
-        async fn load_all(&self) -> Result<Vec<RuntimeEvent>, CamelError> {
+        async fn load_all(&self) -> Result<Vec<RuntimeEvent>, DomainError> {
             Ok(self.events.clone())
         }
     }

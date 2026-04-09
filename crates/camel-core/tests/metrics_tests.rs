@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-#[test]
-fn test_context_with_default_metrics() {
-    let context = CamelContext::new();
+#[tokio::test]
+async fn test_context_with_default_metrics() {
+    let context = CamelContext::builder().build().await.unwrap();
     let metrics = context.metrics();
 
     // Should have NoOpMetrics by default
@@ -19,8 +19,8 @@ fn test_context_with_default_metrics() {
     // If we get here without panicking, the default metrics work
 }
 
-#[test]
-fn test_context_with_custom_metrics() {
+#[tokio::test]
+async fn test_context_with_custom_metrics() {
     struct TestMetrics {
         exchange_count: AtomicU64,
     }
@@ -60,8 +60,11 @@ fn test_context_with_custom_metrics() {
     }
 
     let test_metrics = Arc::new(TestMetrics::new());
-    let context =
-        CamelContext::with_metrics(Arc::clone(&test_metrics) as Arc<dyn MetricsCollector>);
+    let context = CamelContext::builder()
+        .metrics(Arc::clone(&test_metrics) as Arc<dyn MetricsCollector>)
+        .build()
+        .await
+        .unwrap();
 
     let metrics = context.metrics();
 

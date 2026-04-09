@@ -157,7 +157,7 @@ async fn main() -> Result<(), CamelError> {
     println!("This example demonstrates bean registration and invocation in rust-camel\n");
 
     // Create Camel context
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(LogComponent::new());
 
     // Create and configure bean registry

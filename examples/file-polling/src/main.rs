@@ -23,7 +23,7 @@ async fn main() -> Result<(), CamelError> {
 
     let input_path = input_dir.to_str().unwrap();
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(FileComponent::new());
     ctx.register_component(LogComponent::new());
 

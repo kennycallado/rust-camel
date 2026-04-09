@@ -103,8 +103,8 @@ match service.status() {
 Health monitoring integrates with `CamelContext` (in `camel-core`) to aggregate service status:
 
 ```rust
-// In camel-core
-let ctx = CamelContext::new();
+// In camel-core (inside an async context)
+let ctx = CamelContext::builder().build().await?;
 let report = ctx.health_check(); // Returns HealthReport
 ```
 

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use camel_api::CamelError;
 
-use crate::lifecycle::domain::RuntimeEvent;
+use crate::lifecycle::domain::{DomainError, RuntimeEvent};
 use crate::lifecycle::ports::RuntimeEventJournalPort;
 
 // ── Table definitions ─────────────────────────────────────────────────────────
@@ -313,7 +313,7 @@ impl RuntimeEventExt for RuntimeEvent {
 
 #[async_trait]
 impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
-    async fn append_batch(&self, events: &[RuntimeEvent]) -> Result<(), CamelError> {
+    async fn append_batch(&self, events: &[RuntimeEvent]) -> Result<(), DomainError> {
         if events.is_empty() {
             return Ok(());
         }
@@ -352,7 +352,8 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
             Ok::<_, CamelError>(())
         })
         .await
-        .map_err(|e| CamelError::Io(format!("spawn_blocking join: {e}")))??;
+        .map_err(|e| DomainError::InvalidState(format!("spawn_blocking join: {e}")))?
+        .map_err(|e| DomainError::InvalidState(e.to_string()))?;
 
         // Trigger compaction if threshold exceeded. Non-fatal if it fails.
         // Both event_count() and compact() do blocking redb I/O — run in spawn_blocking.
@@ -375,7 +376,7 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
         Ok(())
     }
 
-    async fn load_all(&self) -> Result<Vec<RuntimeEvent>, CamelError> {
+    async fn load_all(&self) -> Result<Vec<RuntimeEvent>, DomainError> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || {
             let tx = db
@@ -397,10 +398,11 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
             Ok(events)
         })
         .await
-        .map_err(|e| CamelError::Io(format!("spawn_blocking join: {e}")))?
+        .map_err(|e| DomainError::InvalidState(format!("spawn_blocking join: {e}")))?
+        .map_err(|e: CamelError| DomainError::InvalidState(e.to_string()))
     }
 
-    async fn append_command_id(&self, command_id: &str) -> Result<(), CamelError> {
+    async fn append_command_id(&self, command_id: &str) -> Result<(), DomainError> {
         let db = Arc::clone(&self.db);
         let durability = self.redb_durability();
         let id = command_id.to_string();
@@ -423,10 +425,11 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
             Ok::<_, CamelError>(())
         })
         .await
-        .map_err(|e| CamelError::Io(format!("spawn_blocking join: {e}")))?
+        .map_err(|e| DomainError::InvalidState(format!("spawn_blocking join: {e}")))?
+        .map_err(|e| DomainError::InvalidState(e.to_string()))
     }
 
-    async fn remove_command_id(&self, command_id: &str) -> Result<(), CamelError> {
+    async fn remove_command_id(&self, command_id: &str) -> Result<(), DomainError> {
         let db = Arc::clone(&self.db);
         let durability = self.redb_durability();
         let id = command_id.to_string();
@@ -449,10 +452,11 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
             Ok::<_, CamelError>(())
         })
         .await
-        .map_err(|e| CamelError::Io(format!("spawn_blocking join: {e}")))?
+        .map_err(|e| DomainError::InvalidState(format!("spawn_blocking join: {e}")))?
+        .map_err(|e| DomainError::InvalidState(e.to_string()))
     }
 
-    async fn load_command_ids(&self) -> Result<Vec<String>, CamelError> {
+    async fn load_command_ids(&self) -> Result<Vec<String>, DomainError> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || {
             let tx = db
@@ -472,7 +476,8 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
             Ok(ids)
         })
         .await
-        .map_err(|e| CamelError::Io(format!("spawn_blocking join: {e}")))?
+        .map_err(|e| DomainError::InvalidState(format!("spawn_blocking join: {e}")))?
+        .map_err(|e: CamelError| DomainError::InvalidState(e.to_string()))
     }
 }
 

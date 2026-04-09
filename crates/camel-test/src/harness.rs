@@ -59,7 +59,7 @@ impl CamelTestContextBuilder<NoTimeControl> {
 
     /// Build the harness without time control.
     pub async fn build(self) -> CamelTestContext {
-        build_context(self.registrations, self.mock)
+        build_context(self.registrations, self.mock).await
     }
 }
 
@@ -70,7 +70,7 @@ impl CamelTestContextBuilder<WithTimeControl> {
     /// [`TimeController`] to advance the clock inside the test.
     pub async fn build(self) -> (CamelTestContext, TimeController) {
         tokio::time::pause();
-        let ctx = build_context(self.registrations, self.mock);
+        let ctx = build_context(self.registrations, self.mock).await;
         (ctx, TimeController)
     }
 }
@@ -130,8 +130,8 @@ impl_builder_methods!(WithTimeControl);
 // Internal build helper
 // ---------------------------------------------------------------------------
 
-fn build_context(registrations: Vec<Registration>, mock: MockComponent) -> CamelTestContext {
-    let mut ctx = CamelContext::new();
+async fn build_context(registrations: Vec<Registration>, mock: MockComponent) -> CamelTestContext {
+    let mut ctx = CamelContext::builder().build().await.unwrap();
 
     // MockComponent is always registered.
     ctx.register_component(mock.clone());

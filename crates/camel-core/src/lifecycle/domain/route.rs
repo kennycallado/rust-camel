@@ -2,8 +2,8 @@
 /// No framework dependencies — pure domain type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteSpec {
-    pub route_id: String,
-    pub from_uri: String,
+    route_id: String,
+    from_uri: String,
 }
 
 impl RouteSpec {
@@ -12,6 +12,14 @@ impl RouteSpec {
             route_id: route_id.into(),
             from_uri: from_uri.into(),
         }
+    }
+
+    pub fn route_id(&self) -> &str {
+        &self.route_id
+    }
+
+    pub fn from_uri(&self) -> &str {
+        &self.from_uri
     }
 }
 
@@ -22,7 +30,7 @@ mod tests {
     #[test]
     fn route_spec_new_sets_fields() {
         let spec = RouteSpec::new("r1", "direct:start");
-        assert_eq!(spec.route_id, "r1");
-        assert_eq!(spec.from_uri, "direct:start");
+        assert_eq!(spec.route_id(), "r1");
+        assert_eq!(spec.from_uri(), "direct:start");
     }
 }

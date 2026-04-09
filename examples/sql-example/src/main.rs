@@ -71,7 +71,7 @@ async fn main() -> Result<(), CamelError> {
     // -------------------------------------------------------------------------
     // Step 2: Create CamelContext and register components
     // -------------------------------------------------------------------------
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(SqlComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(TimerComponent::new());

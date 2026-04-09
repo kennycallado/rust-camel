@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service, ServiceExt};
@@ -18,25 +18,22 @@ use camel_api::aggregator::AggregatorConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
-    BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProducerContext,
-    RouteController, RuntimeCommand, RuntimeHandle, Value, body::Body,
+    BoxProcessor, CamelError, Exchange, IdentityProcessor, ProducerContext, RouteController,
+    RuntimeCommand, RuntimeHandle,
 };
 use camel_component_api::{ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope};
 use camel_endpoint::parse_uri;
-use camel_language_api::{Expression, Language, LanguageError, Predicate};
 pub use camel_processor::aggregator::SharedLanguageRegistry;
 use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::error_handler::ErrorHandlerLayer;
-use camel_processor::script_mutator::ScriptMutator;
-use camel_processor::{ChoiceService, WhenClause};
 
 use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
 use crate::lifecycle::adapters::route_compiler::{
     compose_pipeline, compose_traced_pipeline_with_contracts,
 };
 use crate::lifecycle::application::route_definition::{
-    BuilderStep, LanguageExpressionDef, RouteDefinition, RouteDefinitionInfo, ValueSourceDef,
+    BuilderStep, RouteDefinition, RouteDefinitionInfo,
 };
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::{DetailLevel, TracerConfig};
@@ -44,9 +41,6 @@ use arc_swap::ArcSwap;
 use camel_bean::BeanRegistry;
 
 /// Notification sent when a route crashes.
-///
-/// Used by [`SupervisingRouteController`](crate::supervising_route_controller::SupervisingRouteController)
-/// to monitor and restart failed routes.
 #[derive(Debug, Clone)]
 pub struct CrashNotification {
     /// The ID of the crashed route.
@@ -74,104 +68,43 @@ unsafe impl Sync for SyncBoxProcessor {}
 
 type SharedPipeline = Arc<ArcSwap<SyncBoxProcessor>>;
 
-/// Internal trait extending [`RouteController`] with methods needed by [`CamelContext`]
-/// that are not part of the public lifecycle API.
-///
-/// Both [`DefaultRouteController`] and the future `SupervisingRouteController` implement
-/// this trait, allowing `CamelContext` to hold either as `Arc<Mutex<dyn RouteControllerInternal>>`.
-#[async_trait::async_trait]
-pub trait RouteControllerInternal: RouteController + Send {
-    /// Add a route definition to the controller.
-    fn add_route(&mut self, def: RouteDefinition) -> Result<(), CamelError>;
-
-    /// Atomically swap the pipeline of a running route (for hot-reload).
-    fn swap_pipeline(&self, route_id: &str, pipeline: BoxProcessor) -> Result<(), CamelError>;
-
-    /// Returns the `from_uri` of a route by ID.
-    fn route_from_uri(&self, route_id: &str) -> Option<String>;
-
-    /// Set a global error handler applied to all routes.
-    fn set_error_handler(&mut self, config: ErrorHandlerConfig);
-
-    /// Set the self-reference needed to create `ProducerContext`.
-    fn set_self_ref(&mut self, self_ref: Arc<Mutex<dyn RouteController>>);
-
-    /// Set runtime handle for ProducerContext command/query access.
-    fn set_runtime_handle(&mut self, runtime: Arc<dyn RuntimeHandle>);
-
-    /// Returns the number of routes in the controller.
-    fn route_count(&self) -> usize;
-
-    /// Returns the current in-flight count for a route, or `None` if route not found.
-    fn in_flight_count(&self, route_id: &str) -> Option<u64>;
-
-    /// Returns `true` if a route with the given ID exists.
-    fn route_exists(&self, route_id: &str) -> bool;
-
-    /// Returns all route IDs.
-    fn route_ids(&self) -> Vec<String>;
-
-    fn route_source_hash(&self, route_id: &str) -> Option<u64>;
-
-    /// Returns route IDs that should auto-start, sorted by startup order (ascending).
-    fn auto_startup_route_ids(&self) -> Vec<String>;
-
-    /// Returns route IDs sorted by shutdown order (startup order descending).
-    fn shutdown_route_ids(&self) -> Vec<String>;
-
-    /// Configure tracing from a [`TracerConfig`].
-    fn set_tracer_config(&mut self, config: &TracerConfig);
-
-    /// Compile a `RouteDefinition` into a `BoxProcessor` without inserting it into the route map.
-    /// Used by hot-reload to prepare a new pipeline for atomic swap.
-    fn compile_route_definition(&self, def: RouteDefinition) -> Result<BoxProcessor, CamelError>;
-
-    /// Remove a route from the controller map (route must be stopped first).
-    fn remove_route(&mut self, route_id: &str) -> Result<(), CamelError>;
-
-    /// Start a route by ID (for use by hot-reload, where async_trait is required).
-    async fn start_route_reload(&mut self, route_id: &str) -> Result<(), CamelError>;
-
-    /// Stop a route by ID (for use by hot-reload, where async_trait is required).
-    async fn stop_route_reload(&mut self, route_id: &str) -> Result<(), CamelError>;
-}
 
 /// Internal state for a managed route.
-struct AggregateSplitInfo {
-    pre_pipeline: SharedPipeline,
-    agg_config: AggregatorConfig,
-    post_pipeline: SharedPipeline,
+pub(super) struct AggregateSplitInfo {
+    pub(super) pre_pipeline: SharedPipeline,
+    pub(super) agg_config: AggregatorConfig,
+    pub(super) post_pipeline: SharedPipeline,
 }
 
-struct ManagedRoute {
+pub(super) struct ManagedRoute {
     /// The route definition metadata (for introspection).
-    definition: RouteDefinitionInfo,
+    pub(super) definition: RouteDefinitionInfo,
     /// Source endpoint URI.
-    from_uri: String,
+    pub(super) from_uri: String,
     /// Resolved processor pipeline (wrapped for atomic swap).
-    pipeline: SharedPipeline,
+    pub(super) pipeline: SharedPipeline,
     /// Concurrency model override (if any).
-    concurrency: Option<ConcurrencyModel>,
+    pub(super) concurrency: Option<ConcurrencyModel>,
     /// Handle for the consumer task (if running).
-    consumer_handle: Option<JoinHandle<()>>,
+    pub(super) consumer_handle: Option<JoinHandle<()>>,
     /// Handle for the pipeline task (if running).
-    pipeline_handle: Option<JoinHandle<()>>,
+    pub(super) pipeline_handle: Option<JoinHandle<()>>,
     /// Cancellation token for stopping the consumer task.
     /// This allows independent control of the consumer lifecycle (for suspend/resume).
-    consumer_cancel_token: CancellationToken,
+    pub(super) consumer_cancel_token: CancellationToken,
     /// Cancellation token for stopping the pipeline task.
     /// This allows independent control of the pipeline lifecycle (for suspend/resume).
-    pipeline_cancel_token: CancellationToken,
+    pub(super) pipeline_cancel_token: CancellationToken,
     /// Channel sender for sending exchanges to the pipeline.
     /// Stored to allow resuming a suspended route without recreating the channel.
-    channel_sender: Option<mpsc::Sender<ExchangeEnvelope>>,
+    pub(super) channel_sender: Option<mpsc::Sender<ExchangeEnvelope>>,
     /// In-flight exchange counter. `None` when UoW is not configured for this route.
-    in_flight: Option<Arc<std::sync::atomic::AtomicU64>>,
-    aggregate_split: Option<AggregateSplitInfo>,
-    agg_service: Option<Arc<std::sync::Mutex<AggregatorService>>>,
+    pub(super) in_flight: Option<Arc<std::sync::atomic::AtomicU64>>,
+    pub(super) aggregate_split: Option<AggregateSplitInfo>,
+    pub(super) agg_service: Option<Arc<std::sync::Mutex<AggregatorService>>>,
 }
 
-fn handle_is_running(handle: &Option<JoinHandle<()>>) -> bool {
+pub(super) fn handle_is_running(handle: &Option<JoinHandle<()>>) -> bool {
     handle.as_ref().is_some_and(|h| !h.is_finished())
 }
 
@@ -253,7 +186,7 @@ fn runtime_failure_command(route_id: &str, error: &str) -> RuntimeCommand {
     }
 }
 
-async fn publish_runtime_failure(
+pub(super) async fn publish_runtime_failure(
     runtime: Option<Weak<dyn RuntimeHandle>>,
     route_id: &str,
     error: &str,
@@ -287,9 +220,6 @@ pub struct DefaultRouteController {
     languages: SharedLanguageRegistry,
     /// Bean registry for bean method invocation.
     beans: Arc<std::sync::Mutex<BeanRegistry>>,
-    /// Self-reference for creating ProducerContext.
-    /// Set after construction via `set_self_ref()`.
-    self_ref: Option<Arc<Mutex<dyn RouteController>>>,
     /// Runtime handle injected into ProducerContext for command/query operations.
     runtime: Option<Weak<dyn RuntimeHandle>>,
     /// Optional global error handler applied to all routes without a per-route handler.
@@ -323,7 +253,6 @@ impl DefaultRouteController {
             registry,
             languages: Arc::new(std::sync::Mutex::new(HashMap::new())),
             beans,
-            self_ref: None,
             runtime: None,
             global_error_handler: None,
             crash_notifier: None,
@@ -343,7 +272,6 @@ impl DefaultRouteController {
             registry,
             languages,
             beans: Arc::new(std::sync::Mutex::new(BeanRegistry::new())),
-            self_ref: None,
             runtime: None,
             global_error_handler: None,
             crash_notifier: None,
@@ -353,29 +281,9 @@ impl DefaultRouteController {
         }
     }
 
-    /// Set the self-reference for creating ProducerContext.
-    ///
-    /// This must be called after wrapping the controller in `Arc<Mutex<>>`.
-    pub fn set_self_ref(&mut self, self_ref: Arc<Mutex<dyn RouteController>>) {
-        self.self_ref = Some(self_ref);
-    }
-
     /// Set runtime handle for ProducerContext creation.
     pub fn set_runtime_handle(&mut self, runtime: Arc<dyn RuntimeHandle>) {
         self.runtime = Some(Arc::downgrade(&runtime));
-    }
-
-    /// Get the self-reference, if set.
-    ///
-    /// Used by [`SupervisingRouteController`](crate::supervising_route_controller::SupervisingRouteController)
-    /// to spawn the supervision loop.
-    pub fn self_ref_for_supervision(&self) -> Option<Arc<Mutex<dyn RouteController>>> {
-        self.self_ref.clone()
-    }
-
-    /// Get runtime handle for supervision-triggered lifecycle commands, if set.
-    pub fn runtime_handle_for_supervision(&self) -> Option<Arc<dyn RuntimeHandle>> {
-        self.runtime.as_ref().and_then(Weak::upgrade)
     }
 
     /// Set the crash notifier for supervision.
@@ -466,66 +374,6 @@ impl DefaultRouteController {
         Ok((layer, counter))
     }
 
-    fn resolve_language(&self, language: &str) -> Result<Arc<dyn Language>, CamelError> {
-        let guard = self
-            .languages
-            .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
-        guard.get(language).cloned().ok_or_else(|| {
-            CamelError::RouteError(format!(
-                "language `{language}` is not registered in CamelContext"
-            ))
-        })
-    }
-
-    fn compile_language_expression(
-        &self,
-        expression: &LanguageExpressionDef,
-    ) -> Result<Arc<dyn Expression>, CamelError> {
-        let language = self.resolve_language(&expression.language)?;
-        let compiled = language
-            .create_expression(&expression.source)
-            .map_err(|e| {
-                CamelError::RouteError(format!(
-                    "failed to compile {} expression `{}`: {e}",
-                    expression.language, expression.source
-                ))
-            })?;
-        Ok(Arc::from(compiled))
-    }
-
-    fn compile_language_predicate(
-        &self,
-        expression: &LanguageExpressionDef,
-    ) -> Result<Arc<dyn Predicate>, CamelError> {
-        let language = self.resolve_language(&expression.language)?;
-        let compiled = language.create_predicate(&expression.source).map_err(|e| {
-            CamelError::RouteError(format!(
-                "failed to compile {} predicate `{}`: {e}",
-                expression.language, expression.source
-            ))
-        })?;
-        Ok(Arc::from(compiled))
-    }
-
-    fn compile_filter_predicate(
-        &self,
-        expression: &LanguageExpressionDef,
-    ) -> Result<FilterPredicate, CamelError> {
-        let predicate = self.compile_language_predicate(expression)?;
-        Ok(Arc::new(move |exchange: &Exchange| {
-            predicate.matches(exchange).unwrap_or(false)
-        }))
-    }
-
-    fn value_to_body(value: Value) -> Body {
-        match value {
-            Value::Null => Body::Empty,
-            Value::String(text) => Body::Text(text),
-            other => Body::Json(other),
-        }
-    }
-
     /// Resolve BuilderSteps into BoxProcessors.
     pub(crate) fn resolve_steps(
         &self,
@@ -533,648 +381,15 @@ impl DefaultRouteController {
         producer_ctx: &ProducerContext,
         registry: &Arc<std::sync::Mutex<Registry>>,
     ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
-        let resolve_producer = |uri: &str| -> Result<BoxProcessor, CamelError> {
-            let parsed = parse_uri(uri)?;
-            let registry_guard = registry
-                .lock()
-                .expect("mutex poisoned: another thread panicked while holding this lock");
-            let component = registry_guard.get_or_err(&parsed.scheme)?;
-            let endpoint = component.create_endpoint(uri)?;
-            endpoint.create_producer(producer_ctx)
-        };
 
-        let mut processors: Vec<(BoxProcessor, Option<camel_api::BodyType>)> = Vec::new();
-        for step in steps {
-            match step {
-                BuilderStep::Processor(svc) => {
-                    processors.push((svc, None));
-                }
-                BuilderStep::To(uri) => {
-                    let parsed = parse_uri(&uri)?;
-                    let registry_guard = registry
-                        .lock()
-                        .expect("mutex poisoned: another thread panicked while holding this lock");
-                    let component = registry_guard.get_or_err(&parsed.scheme)?;
-                    let endpoint = component.create_endpoint(&uri)?;
-                    let contract = endpoint.body_contract();
-                    let producer = endpoint.create_producer(producer_ctx)?;
-                    processors.push((producer, contract));
-                }
-                BuilderStep::Stop => {
-                    processors.push((BoxProcessor::new(camel_processor::StopService), None));
-                }
-                BuilderStep::Delay { config } => {
-                    let svc = camel_processor::delayer::DelayerService::new(config);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::Log { level, message } => {
-                    let svc = camel_processor::LogProcessor::new(level, message);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::DeclarativeSetHeader { key, value } => match value {
-                    ValueSourceDef::Literal(value) => {
-                        let svc = camel_processor::SetHeader::new(IdentityProcessor, key, value);
-                        processors.push((BoxProcessor::new(svc), None));
-                    }
-                    ValueSourceDef::Expression(expression) => {
-                        let expression = self.compile_language_expression(&expression)?;
-                        let svc = camel_processor::DynamicSetHeader::new(
-                            IdentityProcessor,
-                            key,
-                            move |exchange: &Exchange| {
-                                expression.evaluate(exchange).unwrap_or(Value::Null)
-                            },
-                        );
-                        processors.push((BoxProcessor::new(svc), None));
-                    }
-                },
-                BuilderStep::DeclarativeSetBody { value } => match value {
-                    ValueSourceDef::Literal(value) => {
-                        let body = Self::value_to_body(value);
-                        let svc = camel_processor::SetBody::new(
-                            IdentityProcessor,
-                            move |_exchange: &Exchange| body.clone(),
-                        );
-                        processors.push((BoxProcessor::new(svc), None));
-                    }
-                    ValueSourceDef::Expression(expression) => {
-                        let expression = self.compile_language_expression(&expression)?;
-                        let svc = camel_processor::SetBody::new(
-                            IdentityProcessor,
-                            move |exchange: &Exchange| {
-                                let value = expression.evaluate(exchange).unwrap_or(Value::Null);
-                                Self::value_to_body(value)
-                            },
-                        );
-                        processors.push((BoxProcessor::new(svc), None));
-                    }
-                },
-                BuilderStep::DeclarativeFilter { predicate, steps } => {
-                    let predicate = self.compile_filter_predicate(&predicate)?;
-                    let sub_pairs = self.resolve_steps(steps, producer_ctx, registry)?;
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
-                    let sub_pipeline = compose_pipeline(sub_processors);
-                    let svc =
-                        camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::DeclarativeChoice { whens, otherwise } => {
-                    let mut when_clauses = Vec::new();
-                    for when_step in whens {
-                        let predicate = self.compile_filter_predicate(&when_step.predicate)?;
-                        let sub_pairs =
-                            self.resolve_steps(when_step.steps, producer_ctx, registry)?;
-                        let sub_processors: Vec<BoxProcessor> =
-                            sub_pairs.into_iter().map(|(p, _)| p).collect();
-                        let pipeline = compose_pipeline(sub_processors);
-                        when_clauses.push(WhenClause {
-                            predicate,
-                            pipeline,
-                        });
-                    }
-                    let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
-                        let sub_pairs =
-                            self.resolve_steps(otherwise_steps, producer_ctx, registry)?;
-                        let sub_processors: Vec<BoxProcessor> =
-                            sub_pairs.into_iter().map(|(p, _)| p).collect();
-                        Some(compose_pipeline(sub_processors))
-                    } else {
-                        None
-                    };
-                    let svc = ChoiceService::new(when_clauses, otherwise_pipeline);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::DeclarativeScript { expression } => {
-                    let lang = self.resolve_language(&expression.language)?;
-                    match lang.create_mutating_expression(&expression.source) {
-                        Ok(mut_expr) => {
-                            processors
-                                .push((BoxProcessor::new(ScriptMutator::new(mut_expr)), None));
-                        }
-                        Err(LanguageError::NotSupported { .. }) => {
-                            // Graceful degradation: YAML declarative routes fall back to read-only
-                            // Expression → SetBody when the language doesn't support MutatingExpression.
-                            // This preserves backwards compatibility for languages like Simple that
-                            // only implement Expression. Contrast with the explicit .script() DSL step
-                            // which hard-errors on NotSupported (user opted in to mutation semantics).
-                            // TODO: add integration test asserting Simple language falls back to
-                            // read-only path (requires full CamelContext test harness).
-                            let expression = self.compile_language_expression(&expression)?;
-                            let svc = camel_processor::SetBody::new(
-                                IdentityProcessor,
-                                move |exchange: &Exchange| {
-                                    let value =
-                                        expression.evaluate(exchange).unwrap_or(Value::Null);
-                                    Self::value_to_body(value)
-                                },
-                            );
-                            processors.push((BoxProcessor::new(svc), None));
-                        }
-                        Err(e) => {
-                            return Err(CamelError::RouteError(format!(
-                                "Failed to create mutating expression for language '{}': {}",
-                                expression.language, e
-                            )));
-                        }
-                    }
-                }
-                BuilderStep::Split { config, steps } => {
-                    let sub_pairs = self.resolve_steps(steps, producer_ctx, registry)?;
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
-                    let sub_pipeline = compose_pipeline(sub_processors);
-                    let splitter =
-                        camel_processor::splitter::SplitterService::new(config, sub_pipeline);
-                    processors.push((BoxProcessor::new(splitter), None));
-                }
-                BuilderStep::DeclarativeSplit {
-                    expression,
-                    aggregation,
-                    parallel,
-                    parallel_limit,
-                    stop_on_exception,
-                    steps,
-                } => {
-                    let lang_expr = self.compile_language_expression(&expression)?;
-                    let split_fn = move |exchange: &Exchange| {
-                        let value = lang_expr.evaluate(exchange).unwrap_or(Value::Null);
-                        match value {
-                            Value::String(s) => s
-                                .lines()
-                                .filter(|line| !line.is_empty())
-                                .map(|line| {
-                                    let mut fragment = exchange.clone();
-                                    fragment.input.body = Body::from(line.to_string());
-                                    fragment
-                                })
-                                .collect(),
-                            Value::Array(arr) => arr
-                                .into_iter()
-                                .map(|v| {
-                                    let mut fragment = exchange.clone();
-                                    fragment.input.body = Body::from(v);
-                                    fragment
-                                })
-                                .collect(),
-                            _ => vec![exchange.clone()],
-                        }
-                    };
+        super::step_resolution::resolve_steps(
+            steps,
+            producer_ctx,
+            registry,
+            &self.languages,
+            &self.beans,
+        )
 
-                    let mut config = camel_api::splitter::SplitterConfig::new(Arc::new(split_fn))
-                        .aggregation(aggregation)
-                        .parallel(parallel)
-                        .stop_on_exception(stop_on_exception);
-                    if let Some(limit) = parallel_limit {
-                        config = config.parallel_limit(limit);
-                    }
-
-                    let sub_pairs = self.resolve_steps(steps, producer_ctx, registry)?;
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
-                    let sub_pipeline = compose_pipeline(sub_processors);
-                    let splitter =
-                        camel_processor::splitter::SplitterService::new(config, sub_pipeline);
-                    processors.push((BoxProcessor::new(splitter), None));
-                }
-                BuilderStep::Aggregate { config } => {
-                    let (late_tx, _late_rx) = mpsc::channel(256);
-                    let registry: SharedLanguageRegistry =
-                        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-                    let cancel = CancellationToken::new();
-                    let svc =
-                        camel_processor::AggregatorService::new(config, late_tx, registry, cancel);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::Filter { predicate, steps } => {
-                    let sub_pairs = self.resolve_steps(steps, producer_ctx, registry)?;
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
-                    let sub_pipeline = compose_pipeline(sub_processors);
-                    let svc =
-                        camel_processor::FilterService::from_predicate(predicate, sub_pipeline);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::Choice { whens, otherwise } => {
-                    // Resolve each when clause's sub-steps into a pipeline.
-                    let mut when_clauses = Vec::new();
-                    for when_step in whens {
-                        let sub_pairs =
-                            self.resolve_steps(when_step.steps, producer_ctx, registry)?;
-                        let sub_processors: Vec<BoxProcessor> =
-                            sub_pairs.into_iter().map(|(p, _)| p).collect();
-                        let pipeline = compose_pipeline(sub_processors);
-                        when_clauses.push(WhenClause {
-                            predicate: when_step.predicate,
-                            pipeline,
-                        });
-                    }
-                    // Resolve otherwise branch (if present).
-                    let otherwise_pipeline = if let Some(otherwise_steps) = otherwise {
-                        let sub_pairs =
-                            self.resolve_steps(otherwise_steps, producer_ctx, registry)?;
-                        let sub_processors: Vec<BoxProcessor> =
-                            sub_pairs.into_iter().map(|(p, _)| p).collect();
-                        Some(compose_pipeline(sub_processors))
-                    } else {
-                        None
-                    };
-                    let svc = ChoiceService::new(when_clauses, otherwise_pipeline);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::WireTap { uri } => {
-                    let producer = resolve_producer(&uri)?;
-                    let svc = camel_processor::WireTapService::new(producer);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::Multicast { config, steps } => {
-                    // Each top-level step in the multicast scope becomes an independent endpoint.
-                    let mut endpoints = Vec::new();
-                    for step in steps {
-                        let sub_pairs = self.resolve_steps(vec![step], producer_ctx, registry)?;
-                        let sub_processors: Vec<BoxProcessor> =
-                            sub_pairs.into_iter().map(|(p, _)| p).collect();
-                        let endpoint = compose_pipeline(sub_processors);
-                        endpoints.push(endpoint);
-                    }
-                    let svc = camel_processor::MulticastService::new(endpoints, config);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::DeclarativeLog { level, message } => {
-                    let ValueSourceDef::Expression(expression) = message else {
-                        // Literal case is already converted to a Processor in compile.rs;
-                        // this arm should never be reached for literals.
-                        unreachable!(
-                            "DeclarativeLog with Literal should have been compiled to a Processor"
-                        );
-                    };
-                    let expression = self.compile_language_expression(&expression)?;
-                    let svc =
-                        camel_processor::log::DynamicLog::new(level, move |exchange: &Exchange| {
-                            expression
-                                .evaluate(exchange)
-                                .unwrap_or_else(|e| {
-                                    warn!(error = %e, "log expression evaluation failed");
-                                    Value::Null
-                                })
-                                .to_string()
-                        });
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::Bean { name, method } => {
-                    // Lock beans registry to lookup bean
-                    let beans = self.beans.lock().expect(
-                        "beans mutex poisoned: another thread panicked while holding this lock",
-                    );
-
-                    // Lookup bean by name
-                    let bean = beans.get(&name).ok_or_else(|| {
-                        CamelError::ProcessorError(format!("Bean not found: {}", name))
-                    })?;
-
-                    // Clone Arc for async closure (release lock before async)
-                    let bean_clone = Arc::clone(&bean);
-                    let method = method.clone();
-
-                    // Create processor that invokes bean method
-                    let processor = tower::service_fn(move |mut exchange: Exchange| {
-                        let bean = Arc::clone(&bean_clone);
-                        let method = method.clone();
-
-                        async move {
-                            bean.call(&method, &mut exchange).await?;
-                            Ok(exchange)
-                        }
-                    });
-
-                    processors.push((BoxProcessor::new(processor), None));
-                }
-                BuilderStep::Script { language, script } => {
-                    let lang = self.resolve_language(&language)?;
-                    match lang.create_mutating_expression(&script) {
-                        Ok(mut_expr) => {
-                            processors
-                                .push((BoxProcessor::new(ScriptMutator::new(mut_expr)), None));
-                        }
-                        Err(LanguageError::NotSupported {
-                            feature,
-                            language: ref lang_name,
-                        }) => {
-                            // Hard error: the .script() DSL step explicitly requests mutation semantics.
-                            // If the language doesn't support MutatingExpression, the route is mis-configured.
-                            return Err(CamelError::RouteError(format!(
-                                "Language '{}' does not support {} (required for .script() step)",
-                                lang_name, feature
-                            )));
-                        }
-                        Err(e) => {
-                            return Err(CamelError::RouteError(format!(
-                                "Failed to create mutating expression for language '{}': {}",
-                                language, e
-                            )));
-                        }
-                    }
-                }
-                BuilderStep::Throttle { config, steps } => {
-                    let sub_pairs = self.resolve_steps(steps, producer_ctx, registry)?;
-                    let sub_processors: Vec<BoxProcessor> =
-                        sub_pairs.into_iter().map(|(p, _)| p).collect();
-                    let sub_pipeline = compose_pipeline(sub_processors);
-                    let svc =
-                        camel_processor::throttler::ThrottlerService::new(config, sub_pipeline);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::LoadBalance { config, steps } => {
-                    // Each top-level step in the load_balance scope becomes an independent endpoint.
-                    let mut endpoints = Vec::new();
-                    for step in steps {
-                        let sub_pairs = self.resolve_steps(vec![step], producer_ctx, registry)?;
-                        let sub_processors: Vec<BoxProcessor> =
-                            sub_pairs.into_iter().map(|(p, _)| p).collect();
-                        let endpoint = compose_pipeline(sub_processors);
-                        endpoints.push(endpoint);
-                    }
-                    let svc =
-                        camel_processor::load_balancer::LoadBalancerService::new(endpoints, config);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::DynamicRouter { config } => {
-                    use camel_api::EndpointResolver;
-
-                    let producer_ctx_clone = producer_ctx.clone();
-                    let registry_clone = Arc::clone(registry);
-                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
-                        let parsed = match parse_uri(uri) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        let registry_guard = match registry_clone.lock() {
-                            Ok(g) => g,
-                            Err(_) => return None, // mutex poisoned
-                        };
-                        let component = match registry_guard.get_or_err(&parsed.scheme) {
-                            Ok(c) => c,
-                            Err(_) => return None,
-                        };
-                        let endpoint = match component.create_endpoint(uri) {
-                            Ok(e) => e,
-                            Err(_) => return None,
-                        };
-                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        Some(BoxProcessor::new(producer))
-                    });
-                    let svc = camel_processor::dynamic_router::DynamicRouterService::new(
-                        config, resolver,
-                    );
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::DeclarativeDynamicRouter {
-                    expression,
-                    uri_delimiter,
-                    cache_size,
-                    ignore_invalid_endpoints,
-                    max_iterations,
-                } => {
-                    use camel_api::EndpointResolver;
-
-                    let expression = self.compile_language_expression(&expression)?;
-                    let expression: camel_api::RouterExpression =
-                        Arc::new(move |exchange: &Exchange| {
-                            let value = expression.evaluate(exchange).unwrap_or(Value::Null);
-                            match value {
-                                Value::Null => None,
-                                Value::String(s) => Some(s),
-                                other => Some(other.to_string()),
-                            }
-                        });
-
-                    // Note: timeout defaults to 60s (DynamicRouterConfig::new default).
-                    // Apache Camel does not expose a timeout option on dynamicRouter —
-                    // our timeout is a rust-camel extension.
-                    let config = camel_api::DynamicRouterConfig::new(expression)
-                        .uri_delimiter(uri_delimiter)
-                        .cache_size(cache_size)
-                        .ignore_invalid_endpoints(ignore_invalid_endpoints)
-                        .max_iterations(max_iterations);
-
-                    let producer_ctx_clone = producer_ctx.clone();
-                    let registry_clone = Arc::clone(registry);
-                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
-                        let parsed = match parse_uri(uri) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        let registry_guard = match registry_clone.lock() {
-                            Ok(g) => g,
-                            Err(_) => return None,
-                        };
-                        let component = match registry_guard.get_or_err(&parsed.scheme) {
-                            Ok(c) => c,
-                            Err(_) => return None,
-                        };
-                        let endpoint = match component.create_endpoint(uri) {
-                            Ok(e) => e,
-                            Err(_) => return None,
-                        };
-                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        Some(BoxProcessor::new(producer))
-                    });
-                    let svc = camel_processor::dynamic_router::DynamicRouterService::new(
-                        config, resolver,
-                    );
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::RoutingSlip { config } => {
-                    use camel_api::EndpointResolver;
-
-                    let producer_ctx_clone = producer_ctx.clone();
-                    let registry_clone = Arc::clone(registry);
-                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
-                        let parsed = match parse_uri(uri) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        let registry_guard = match registry_clone.lock() {
-                            Ok(g) => g,
-                            Err(_) => return None,
-                        };
-                        let component = match registry_guard.get_or_err(&parsed.scheme) {
-                            Ok(c) => c,
-                            Err(_) => return None,
-                        };
-                        let endpoint = match component.create_endpoint(uri) {
-                            Ok(e) => e,
-                            Err(_) => return None,
-                        };
-                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        Some(BoxProcessor::new(producer))
-                    });
-
-                    let svc =
-                        camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::DeclarativeRoutingSlip {
-                    expression,
-                    uri_delimiter,
-                    cache_size,
-                    ignore_invalid_endpoints,
-                } => {
-                    use camel_api::EndpointResolver;
-
-                    let expression = self.compile_language_expression(&expression)?;
-                    let expression: camel_api::RoutingSlipExpression =
-                        Arc::new(move |exchange: &Exchange| {
-                            let value = expression.evaluate(exchange).unwrap_or(Value::Null);
-                            match value {
-                                Value::Null => None,
-                                Value::String(s) => Some(s),
-                                other => Some(other.to_string()),
-                            }
-                        });
-
-                    let config = camel_api::RoutingSlipConfig::new(expression)
-                        .uri_delimiter(uri_delimiter)
-                        .cache_size(cache_size)
-                        .ignore_invalid_endpoints(ignore_invalid_endpoints);
-
-                    let producer_ctx_clone = producer_ctx.clone();
-                    let registry_clone = Arc::clone(registry);
-                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
-                        let parsed = match parse_uri(uri) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        let registry_guard = match registry_clone.lock() {
-                            Ok(g) => g,
-                            Err(_) => return None,
-                        };
-                        let component = match registry_guard.get_or_err(&parsed.scheme) {
-                            Ok(c) => c,
-                            Err(_) => return None,
-                        };
-                        let endpoint = match component.create_endpoint(uri) {
-                            Ok(e) => e,
-                            Err(_) => return None,
-                        };
-                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        Some(BoxProcessor::new(producer))
-                    });
-
-                    let svc =
-                        camel_processor::routing_slip::RoutingSlipService::new(config, resolver);
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::RecipientList { config } => {
-                    use camel_api::EndpointResolver;
-                    let producer_ctx_clone = producer_ctx.clone();
-                    let registry_clone = Arc::clone(registry);
-                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
-                        let parsed = match parse_uri(uri) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        let registry_guard = match registry_clone.lock() {
-                            Ok(g) => g,
-                            Err(_) => return None,
-                        };
-                        let component = match registry_guard.get_or_err(&parsed.scheme) {
-                            Ok(c) => c,
-                            Err(_) => return None,
-                        };
-                        let endpoint = match component.create_endpoint(uri) {
-                            Ok(e) => e,
-                            Err(_) => return None,
-                        };
-                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        Some(BoxProcessor::new(producer))
-                    });
-                    let svc = camel_processor::recipient_list::RecipientListService::new(
-                        config, resolver,
-                    );
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-                BuilderStep::DeclarativeRecipientList {
-                    expression,
-                    delimiter,
-                    parallel,
-                    parallel_limit,
-                    stop_on_exception,
-                    aggregation,
-                } => {
-                    use camel_api::EndpointResolver;
-                    let expression = self.compile_language_expression(&expression)?;
-                    let expression: camel_api::recipient_list::RecipientListExpression =
-                        Arc::new(move |exchange: &Exchange| {
-                            let value = expression.evaluate(exchange).unwrap_or(Value::Null);
-                            match value {
-                                Value::String(s) => s,
-                                Value::Null => String::new(),
-                                _ => value.to_string(),
-                            }
-                        });
-                    let strategy = match aggregation.as_str() {
-                        "collect_all" => camel_api::MulticastStrategy::CollectAll,
-                        "original" => camel_api::MulticastStrategy::Original,
-                        _ => camel_api::MulticastStrategy::LastWins,
-                    };
-                    let config = camel_api::recipient_list::RecipientListConfig::new(expression)
-                        .delimiter(delimiter)
-                        .parallel(parallel)
-                        .stop_on_exception(stop_on_exception)
-                        .strategy(strategy);
-                    let config = match parallel_limit {
-                        Some(limit) => config.parallel_limit(limit),
-                        None => config,
-                    };
-                    let producer_ctx_clone = producer_ctx.clone();
-                    let registry_clone = Arc::clone(registry);
-                    let resolver: EndpointResolver = Arc::new(move |uri: &str| {
-                        let parsed = match parse_uri(uri) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        let registry_guard = match registry_clone.lock() {
-                            Ok(g) => g,
-                            Err(_) => return None,
-                        };
-                        let component = match registry_guard.get_or_err(&parsed.scheme) {
-                            Ok(c) => c,
-                            Err(_) => return None,
-                        };
-                        let endpoint = match component.create_endpoint(uri) {
-                            Ok(e) => e,
-                            Err(_) => return None,
-                        };
-                        let producer = match endpoint.create_producer(&producer_ctx_clone) {
-                            Ok(p) => p,
-                            Err(_) => return None,
-                        };
-                        Some(BoxProcessor::new(producer))
-                    });
-                    let svc = camel_processor::recipient_list::RecipientListService::new(
-                        config, resolver,
-                    );
-                    processors.push((BoxProcessor::new(svc), None));
-                }
-            }
-        }
-        Ok(processors)
     }
 
     /// Add a route definition to the controller.
@@ -1494,93 +709,15 @@ impl DefaultRouteController {
 
     /// Internal stop implementation that can set custom status.
     async fn stop_route_internal(&mut self, route_id: &str) -> Result<(), CamelError> {
-        let managed = self
-            .routes
-            .get_mut(route_id)
-            .ok_or_else(|| CamelError::RouteError(format!("Route '{}' not found", route_id)))?;
+        super::consumer_management::stop_route_internal(&mut self.routes, route_id).await
+    }
 
-        if !handle_is_running(&managed.consumer_handle)
-            && !handle_is_running(&managed.pipeline_handle)
-        {
-            return Ok(());
-        }
+    pub async fn start_route_reload(&mut self, route_id: &str) -> Result<(), CamelError> {
+        self.start_route(route_id).await
+    }
 
-        info!(route_id = %route_id, "Stopping route");
-
-        // Cancel both tokens to signal shutdown for consumer and pipeline independently
-        let managed = self
-            .routes
-            .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
-        managed.consumer_cancel_token.cancel();
-
-        // Aggregator v2: force-complete pending buckets before cancelling pipeline
-        let managed = self
-            .routes
-            .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
-        if let Some(agg_svc) = &managed.agg_service {
-            let guard = agg_svc.lock().unwrap();
-            guard.force_complete_all();
-        }
-
-        let managed = self
-            .routes
-            .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
-        managed.pipeline_cancel_token.cancel();
-
-        // Take handles directly (no Arc<Mutex> wrapper needed)
-        let managed = self
-            .routes
-            .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
-        let consumer_handle = managed.consumer_handle.take();
-        let pipeline_handle = managed.pipeline_handle.take();
-
-        // IMPORTANT: Drop channel_sender early so rx.recv() returns None
-        // This ensures the pipeline task can exit even if idle on recv()
-        let managed = self
-            .routes
-            .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
-        managed.channel_sender = None;
-
-        // Wait for tasks to complete with timeout
-        // The CancellationToken already signaled tasks to stop gracefully.
-        // Combined with the select! in pipeline loops, this should exit quickly.
-        let timeout_result = tokio::time::timeout(Duration::from_secs(30), async {
-            match (consumer_handle, pipeline_handle) {
-                (Some(c), Some(p)) => {
-                    let _ = tokio::join!(c, p);
-                }
-                (Some(c), None) => {
-                    let _ = c.await;
-                }
-                (None, Some(p)) => {
-                    let _ = p.await;
-                }
-                (None, None) => {}
-            }
-        })
-        .await;
-
-        if timeout_result.is_err() {
-            warn!(route_id = %route_id, "Route shutdown timed out after 30s — tasks may still be running");
-        }
-
-        // Get the managed route again (can't hold across await)
-        let managed = self
-            .routes
-            .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
-
-        // Create fresh cancellation tokens for next start
-        managed.consumer_cancel_token = CancellationToken::new();
-        managed.pipeline_cancel_token = CancellationToken::new();
-
-        info!(route_id = %route_id, "Route stopped");
-        Ok(())
+    pub async fn stop_route_reload(&mut self, route_id: &str) -> Result<(), CamelError> {
+        self.stop_route(route_id).await
     }
 }
 
@@ -1632,18 +769,8 @@ impl RouteController for DefaultRouteController {
         let crash_notifier = self.crash_notifier.clone();
         let runtime_for_consumer = self.runtime.clone();
 
-        // Parse from URI and create consumer (lock registry for lookup)
-        let parsed = parse_uri(&from_uri)?;
-        let registry = self
-            .registry
-            .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
-        let component = registry.get_or_err(&parsed.scheme)?;
-        let endpoint = component.create_endpoint(&from_uri)?;
-        let mut consumer = endpoint.create_consumer()?;
-        let consumer_concurrency = consumer.concurrency_model();
-        // Drop the lock before spawning tasks
-        drop(registry);
+        let (consumer, consumer_concurrency) =
+            super::consumer_management::create_route_consumer(&self.registry, &from_uri)?;
 
         // Resolve effective concurrency: route override > consumer default
         let effective_concurrency = concurrency.unwrap_or(consumer_concurrency);
@@ -1688,27 +815,14 @@ impl RouteController for DefaultRouteController {
             let post_pipeline = Arc::clone(&split.post_pipeline);
 
             // Spawn consumer task (same as normal route)
-            let route_id_for_consumer = route_id.to_string();
-            let consumer_handle = tokio::spawn(async move {
-                if let Err(e) = consumer.start(consumer_ctx).await {
-                    error!(route_id = %route_id_for_consumer, "Consumer error: {e}");
-                    let error_msg = e.to_string();
-                    if let Some(tx) = crash_notifier {
-                        let _ = tx
-                            .send(CrashNotification {
-                                route_id: route_id_for_consumer.clone(),
-                                error: error_msg.clone(),
-                            })
-                            .await;
-                    }
-                    publish_runtime_failure(
-                        runtime_for_consumer,
-                        &route_id_for_consumer,
-                        &error_msg,
-                    )
-                    .await;
-                }
-            });
+            let consumer_handle = super::consumer_management::spawn_consumer_task(
+                route_id.to_string(),
+                consumer,
+                consumer_ctx,
+                crash_notifier,
+                runtime_for_consumer,
+                false,
+            );
 
             // Spawn biased select forward loop
             let pipeline_handle = tokio::spawn(async move {
@@ -1745,7 +859,10 @@ impl RouteController for DefaultRouteController {
                                     };
 
                                     let ex = {
-                                        let cloned_svc = agg.lock().unwrap().clone();
+                                        let cloned_svc = agg
+                                            .lock()
+                                            .expect("mutex poisoned: another thread panicked while holding this lock")
+                                            .clone();
                                         cloned_svc.oneshot(ex).await
                                     };
 
@@ -1770,7 +887,9 @@ impl RouteController for DefaultRouteController {
 
                         _ = pipeline_cancel.cancelled() => {
                             {
-                                let guard = agg.lock().unwrap();
+                                let guard = agg
+                                    .lock()
+                                    .expect("mutex poisoned: another thread panicked while holding this lock");
                                 guard.force_complete_all();
                             }
                             let mut rx_guard = late_rx.lock().await;
@@ -1798,26 +917,14 @@ impl RouteController for DefaultRouteController {
         // --- End aggregator v2 branch ---
 
         // Start consumer in background task.
-        let route_id_for_consumer = route_id.to_string();
-        let consumer_handle = tokio::spawn(async move {
-            if let Err(e) = consumer.start(consumer_ctx).await {
-                error!(route_id = %route_id_for_consumer, "Consumer error: {e}");
-                let error_msg = e.to_string();
-
-                // Send crash notification if notifier is configured
-                if let Some(tx) = crash_notifier {
-                    let _ = tx
-                        .send(CrashNotification {
-                            route_id: route_id_for_consumer.clone(),
-                            error: error_msg.clone(),
-                        })
-                        .await;
-                }
-
-                publish_runtime_failure(runtime_for_consumer, &route_id_for_consumer, &error_msg)
-                    .await;
-            }
-        });
+        let consumer_handle = super::consumer_management::spawn_consumer_task(
+            route_id.to_string(),
+            consumer,
+            consumer_ctx,
+            crash_notifier,
+            runtime_for_consumer,
+            false,
+        );
 
         // Spawn pipeline task with its own cancellation token
         let pipeline_handle = match effective_concurrency {
@@ -2019,17 +1126,8 @@ impl RouteController for DefaultRouteController {
 
         info!(route_id = %route_id, "Resuming route (spawning consumer only)");
 
-        // Parse from URI and create consumer (lock registry for lookup)
-        let parsed = parse_uri(&from_uri)?;
-        let registry = self
-            .registry
-            .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
-        let component = registry.get_or_err(&parsed.scheme)?;
-        let endpoint = component.create_endpoint(&from_uri)?;
-        let mut consumer = endpoint.create_consumer()?;
-        // Drop the lock before spawning tasks
-        drop(registry);
+        let (consumer, _) =
+            super::consumer_management::create_route_consumer(&self.registry, &from_uri)?;
 
         // Get the managed route for mutation
         let managed = self
@@ -2047,26 +1145,14 @@ impl RouteController for DefaultRouteController {
         let consumer_ctx = ConsumerContext::new(sender, consumer_cancel.clone());
 
         // Spawn consumer task
-        let route_id_for_consumer = route_id.to_string();
-        let consumer_handle = tokio::spawn(async move {
-            if let Err(e) = consumer.start(consumer_ctx).await {
-                error!(route_id = %route_id_for_consumer, "Consumer error on resume: {e}");
-                let error_msg = e.to_string();
-
-                // Send crash notification if notifier is configured
-                if let Some(tx) = crash_notifier {
-                    let _ = tx
-                        .send(CrashNotification {
-                            route_id: route_id_for_consumer.clone(),
-                            error: error_msg.clone(),
-                        })
-                        .await;
-                }
-
-                publish_runtime_failure(runtime_for_consumer, &route_id_for_consumer, &error_msg)
-                    .await;
-            }
-        });
+        let consumer_handle = super::consumer_management::spawn_consumer_task(
+            route_id.to_string(),
+            consumer,
+            consumer_ctx,
+            crash_notifier,
+            runtime_for_consumer,
+            true,
+        );
 
         // Store consumer handle and update status
         let managed = self
@@ -2137,571 +1223,8 @@ impl RouteController for DefaultRouteController {
     }
 }
 
-#[async_trait::async_trait]
-impl RouteControllerInternal for DefaultRouteController {
-    fn add_route(&mut self, def: RouteDefinition) -> Result<(), CamelError> {
-        DefaultRouteController::add_route(self, def)
-    }
 
-    fn swap_pipeline(&self, route_id: &str, pipeline: BoxProcessor) -> Result<(), CamelError> {
-        DefaultRouteController::swap_pipeline(self, route_id, pipeline)
-    }
-
-    fn route_from_uri(&self, route_id: &str) -> Option<String> {
-        // Call the inherent method which now returns Option<String>
-        DefaultRouteController::route_from_uri(self, route_id)
-    }
-
-    fn set_error_handler(&mut self, config: ErrorHandlerConfig) {
-        DefaultRouteController::set_error_handler(self, config)
-    }
-
-    fn set_self_ref(&mut self, self_ref: Arc<Mutex<dyn RouteController>>) {
-        DefaultRouteController::set_self_ref(self, self_ref)
-    }
-
-    fn set_runtime_handle(&mut self, runtime: Arc<dyn RuntimeHandle>) {
-        DefaultRouteController::set_runtime_handle(self, runtime)
-    }
-
-    fn route_count(&self) -> usize {
-        DefaultRouteController::route_count(self)
-    }
-
-    fn in_flight_count(&self, route_id: &str) -> Option<u64> {
-        DefaultRouteController::in_flight_count(self, route_id)
-    }
-
-    fn route_exists(&self, route_id: &str) -> bool {
-        DefaultRouteController::route_exists(self, route_id)
-    }
-
-    fn route_ids(&self) -> Vec<String> {
-        DefaultRouteController::route_ids(self)
-    }
-
-    fn route_source_hash(&self, route_id: &str) -> Option<u64> {
-        DefaultRouteController::route_source_hash(self, route_id)
-    }
-
-    fn auto_startup_route_ids(&self) -> Vec<String> {
-        DefaultRouteController::auto_startup_route_ids(self)
-    }
-
-    fn shutdown_route_ids(&self) -> Vec<String> {
-        DefaultRouteController::shutdown_route_ids(self)
-    }
-
-    fn set_tracer_config(&mut self, config: &TracerConfig) {
-        DefaultRouteController::set_tracer_config(self, config)
-    }
-
-    fn compile_route_definition(&self, def: RouteDefinition) -> Result<BoxProcessor, CamelError> {
-        DefaultRouteController::compile_route_definition(self, def)
-    }
-
-    fn remove_route(&mut self, route_id: &str) -> Result<(), CamelError> {
-        DefaultRouteController::remove_route(self, route_id)
-    }
-
-    async fn start_route_reload(&mut self, route_id: &str) -> Result<(), CamelError> {
-        DefaultRouteController::start_route(self, route_id).await
-    }
-
-    async fn stop_route_reload(&mut self, route_id: &str) -> Result<(), CamelError> {
-        DefaultRouteController::stop_route(self, route_id).await
-    }
-}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::shared::components::domain::Registry;
-
-    fn build_controller() -> DefaultRouteController {
-        DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new())))
-    }
-
-    fn build_controller_with_components() -> DefaultRouteController {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        {
-            let mut guard = registry.lock().expect("registry lock");
-            guard.register(camel_component_timer::TimerComponent::new());
-            guard.register(camel_component_mock::MockComponent::new());
-            guard.register(camel_component_log::LogComponent::new());
-        }
-        DefaultRouteController::new(registry)
-    }
-
-    fn set_self_ref(controller: &mut DefaultRouteController) {
-        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        let other: Arc<Mutex<dyn RouteController>> =
-            Arc::new(Mutex::new(DefaultRouteController::new(registry)));
-        controller.set_self_ref(other);
-    }
-
-    fn register_simple_language(controller: &mut DefaultRouteController) {
-        controller.languages.lock().expect("languages lock").insert(
-            "simple".into(),
-            Arc::new(camel_language_simple::SimpleLanguage),
-        );
-    }
-
-    #[test]
-    fn test_route_controller_internal_is_object_safe() {
-        let _: Option<Box<dyn RouteControllerInternal>> = None;
-    }
-
-    #[test]
-    fn helper_functions_cover_non_async_branches() {
-        let managed = ManagedRoute {
-            definition: RouteDefinition::new("timer:a", vec![])
-                .with_route_id("r")
-                .to_info(),
-            from_uri: "timer:a".into(),
-            pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(BoxProcessor::new(
-                IdentityProcessor,
-            )))),
-            concurrency: None,
-            consumer_handle: None,
-            pipeline_handle: None,
-            consumer_cancel_token: CancellationToken::new(),
-            pipeline_cancel_token: CancellationToken::new(),
-            channel_sender: None,
-            in_flight: None,
-            aggregate_split: None,
-            agg_service: None,
-        };
-
-        assert_eq!(inferred_lifecycle_label(&managed), "Stopped");
-        assert!(!handle_is_running(&managed.consumer_handle));
-
-        let cmd = runtime_failure_command("route-x", "boom");
-        match cmd {
-            RuntimeCommand::FailRoute {
-                route_id, error, ..
-            } => {
-                assert_eq!(route_id, "route-x");
-                assert_eq!(error, "boom");
-            }
-            _ => panic!("expected FailRoute command"),
-        }
-    }
-
-    #[test]
-    fn add_route_detects_duplicates() {
-        let mut controller = build_controller();
-        set_self_ref(&mut controller);
-
-        controller
-            .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
-            .expect("add route");
-
-        let dup_err = controller
-            .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
-            .expect_err("duplicate must fail");
-        assert!(dup_err.to_string().contains("already exists"));
-    }
-
-    #[test]
-    fn route_introspection_and_ordering_helpers_work() {
-        let mut controller = build_controller();
-        set_self_ref(&mut controller);
-
-        controller
-            .add_route(
-                RouteDefinition::new("timer:a", vec![])
-                    .with_route_id("a")
-                    .with_startup_order(20),
-            )
-            .unwrap();
-        controller
-            .add_route(
-                RouteDefinition::new("timer:b", vec![])
-                    .with_route_id("b")
-                    .with_startup_order(10),
-            )
-            .unwrap();
-        controller
-            .add_route(
-                RouteDefinition::new("timer:c", vec![])
-                    .with_route_id("c")
-                    .with_auto_startup(false)
-                    .with_startup_order(5),
-            )
-            .unwrap();
-
-        assert_eq!(controller.route_count(), 3);
-        assert_eq!(controller.route_from_uri("a"), Some("timer:a".into()));
-        assert!(controller.route_ids().contains(&"a".to_string()));
-        assert_eq!(
-            controller.auto_startup_route_ids(),
-            vec!["b".to_string(), "a".to_string()]
-        );
-        assert_eq!(
-            controller.shutdown_route_ids(),
-            vec!["a".to_string(), "b".to_string(), "c".to_string()]
-        );
-    }
-
-    #[test]
-    fn swap_pipeline_and_remove_route_behaviors() {
-        let mut controller = build_controller();
-        set_self_ref(&mut controller);
-
-        controller
-            .add_route(RouteDefinition::new("timer:a", vec![]).with_route_id("swap"))
-            .unwrap();
-
-        controller
-            .swap_pipeline("swap", BoxProcessor::new(IdentityProcessor))
-            .unwrap();
-        assert!(controller.get_pipeline("swap").is_some());
-
-        controller.remove_route("swap").unwrap();
-        assert_eq!(controller.route_count(), 0);
-
-        let err = controller
-            .remove_route("swap")
-            .expect_err("missing route must fail");
-        assert!(err.to_string().contains("not found"));
-    }
-
-    #[test]
-    fn resolve_steps_covers_declarative_and_eip_variants() {
-        use camel_api::LanguageExpressionDef;
-        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
-
-        let mut controller = build_controller_with_components();
-        set_self_ref(&mut controller);
-        register_simple_language(&mut controller);
-
-        let expr = |source: &str| LanguageExpressionDef {
-            language: "simple".into(),
-            source: source.into(),
-        };
-
-        let steps = vec![
-            BuilderStep::To("mock:out".into()),
-            BuilderStep::Stop,
-            BuilderStep::Log {
-                level: camel_processor::LogLevel::Info,
-                message: "log".into(),
-            },
-            BuilderStep::DeclarativeSetHeader {
-                key: "k".into(),
-                value: ValueSourceDef::Literal(Value::String("v".into())),
-            },
-            BuilderStep::DeclarativeSetHeader {
-                key: "k2".into(),
-                value: ValueSourceDef::Expression(expr("${body}")),
-            },
-            BuilderStep::DeclarativeSetBody {
-                value: ValueSourceDef::Expression(expr("${body}")),
-            },
-            BuilderStep::DeclarativeFilter {
-                predicate: expr("${body} != null"),
-                steps: vec![BuilderStep::Stop],
-            },
-            BuilderStep::DeclarativeChoice {
-                whens: vec![
-                    crate::lifecycle::application::route_definition::DeclarativeWhenStep {
-                        predicate: expr("${body} == 'x'"),
-                        steps: vec![BuilderStep::Stop],
-                    },
-                ],
-                otherwise: Some(vec![BuilderStep::Stop]),
-            },
-            BuilderStep::DeclarativeScript {
-                expression: expr("${body}"),
-            },
-            BuilderStep::Split {
-                config: SplitterConfig::new(split_body_lines())
-                    .aggregation(AggregationStrategy::CollectAll),
-                steps: vec![BuilderStep::Stop],
-            },
-            BuilderStep::DeclarativeSplit {
-                expression: expr("${body}"),
-                aggregation: AggregationStrategy::Original,
-                parallel: false,
-                parallel_limit: Some(2),
-                stop_on_exception: true,
-                steps: vec![BuilderStep::Stop],
-            },
-            BuilderStep::Aggregate {
-                config: camel_api::AggregatorConfig::correlate_by("id")
-                    .complete_when_size(1)
-                    .build(),
-            },
-            BuilderStep::Filter {
-                predicate: Arc::new(|_| true),
-                steps: vec![BuilderStep::Stop],
-            },
-            BuilderStep::Choice {
-                whens: vec![crate::lifecycle::application::route_definition::WhenStep {
-                    predicate: Arc::new(|_| true),
-                    steps: vec![BuilderStep::Stop],
-                }],
-                otherwise: Some(vec![BuilderStep::Stop]),
-            },
-            BuilderStep::WireTap {
-                uri: "mock:tap".into(),
-            },
-            BuilderStep::Multicast {
-                steps: vec![
-                    BuilderStep::To("mock:m1".into()),
-                    BuilderStep::To("mock:m2".into()),
-                ],
-                config: camel_api::MulticastConfig::new(),
-            },
-            BuilderStep::DeclarativeLog {
-                level: camel_processor::LogLevel::Info,
-                message: ValueSourceDef::Expression(expr("${body}")),
-            },
-            BuilderStep::Throttle {
-                config: camel_api::ThrottlerConfig::new(10, Duration::from_millis(100)),
-                steps: vec![BuilderStep::To("mock:t".into())],
-            },
-            BuilderStep::LoadBalance {
-                config: camel_api::LoadBalancerConfig::round_robin(),
-                steps: vec![
-                    BuilderStep::To("mock:l1".into()),
-                    BuilderStep::To("mock:l2".into()),
-                ],
-            },
-            BuilderStep::DynamicRouter {
-                config: camel_api::DynamicRouterConfig::new(Arc::new(|_| Some("mock:dr".into()))),
-            },
-            BuilderStep::RoutingSlip {
-                config: camel_api::RoutingSlipConfig::new(Arc::new(|_| Some("mock:rs".into()))),
-            },
-        ];
-
-        let producer_ctx = ProducerContext::new();
-        let resolved = controller
-            .resolve_steps(steps, &producer_ctx, &controller.registry)
-            .expect("resolve should succeed");
-        assert!(!resolved.is_empty());
-    }
-
-    #[test]
-    fn resolve_steps_script_requires_mutating_language_support() {
-        use camel_api::LanguageExpressionDef;
-
-        let mut controller = build_controller_with_components();
-        set_self_ref(&mut controller);
-        register_simple_language(&mut controller);
-
-        let steps = vec![BuilderStep::Script {
-            language: "simple".into(),
-            script: "${body}".into(),
-        }];
-
-        let err = controller
-            .resolve_steps(steps, &ProducerContext::new(), &controller.registry)
-            .expect_err("simple script should fail for mutating expression");
-        assert!(err.to_string().contains("does not support"));
-
-        let bean_missing = vec![BuilderStep::Bean {
-            name: "unknown".into(),
-            method: "run".into(),
-        }];
-        let bean_err = controller
-            .resolve_steps(bean_missing, &ProducerContext::new(), &controller.registry)
-            .expect_err("missing bean must fail");
-        assert!(bean_err.to_string().contains("Bean not found"));
-
-        let bad_declarative = vec![BuilderStep::DeclarativeScript {
-            expression: LanguageExpressionDef {
-                language: "unknown".into(),
-                source: "x".into(),
-            },
-        }];
-        let lang_err = controller
-            .resolve_steps(
-                bad_declarative,
-                &ProducerContext::new(),
-                &controller.registry,
-            )
-            .expect_err("unknown language must fail");
-        assert!(lang_err.to_string().contains("not registered"));
-    }
-
-    #[tokio::test]
-    async fn lifecycle_methods_report_missing_routes() {
-        let mut controller = build_controller();
-
-        assert!(controller.start_route("missing").await.is_err());
-        assert!(controller.stop_route("missing").await.is_err());
-        assert!(controller.suspend_route("missing").await.is_err());
-        assert!(controller.resume_route("missing").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn start_stop_route_happy_path_with_timer_and_mock() {
-        let mut controller = build_controller_with_components();
-        set_self_ref(&mut controller);
-
-        let route = RouteDefinition::new(
-            "timer:tick?period=10&repeatCount=1",
-            vec![BuilderStep::To("mock:out".into())],
-        )
-        .with_route_id("rt-1");
-        controller.add_route(route).unwrap();
-
-        controller.start_route("rt-1").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        controller.stop_route("rt-1").await.unwrap();
-
-        controller.remove_route("rt-1").unwrap();
-    }
-
-    #[tokio::test]
-    async fn suspend_resume_and_restart_cover_execution_transitions() {
-        let mut controller = build_controller_with_components();
-        set_self_ref(&mut controller);
-
-        let route = RouteDefinition::new(
-            "timer:tick?period=30",
-            vec![BuilderStep::To("mock:out".into())],
-        )
-        .with_route_id("rt-2");
-        controller.add_route(route).unwrap();
-
-        controller.start_route("rt-2").await.unwrap();
-        controller.suspend_route("rt-2").await.unwrap();
-        controller.resume_route("rt-2").await.unwrap();
-        controller.restart_route("rt-2").await.unwrap();
-        controller.stop_route("rt-2").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn remove_route_rejects_running_route() {
-        let mut controller = build_controller_with_components();
-        set_self_ref(&mut controller);
-
-        let route = RouteDefinition::new(
-            "timer:tick?period=25",
-            vec![BuilderStep::To("mock:out".into())],
-        )
-        .with_route_id("rt-running");
-        controller.add_route(route).unwrap();
-        controller.start_route("rt-running").await.unwrap();
-
-        let err = controller
-            .remove_route("rt-running")
-            .expect_err("running route removal must fail");
-        assert!(err.to_string().contains("must be stopped before removal"));
-
-        controller.stop_route("rt-running").await.unwrap();
-        controller.remove_route("rt-running").unwrap();
-    }
-
-    #[tokio::test]
-    async fn start_route_on_suspended_state_returns_guidance_error() {
-        let mut controller = build_controller_with_components();
-        set_self_ref(&mut controller);
-
-        let route = RouteDefinition::new(
-            "timer:tick?period=40",
-            vec![BuilderStep::To("mock:out".into())],
-        )
-        .with_route_id("rt-suspend");
-        controller.add_route(route).unwrap();
-
-        controller.start_route("rt-suspend").await.unwrap();
-        controller.suspend_route("rt-suspend").await.unwrap();
-
-        let err = controller
-            .start_route("rt-suspend")
-            .await
-            .expect_err("start from suspended must fail");
-        assert!(err.to_string().contains("use resume_route"));
-
-        controller.resume_route("rt-suspend").await.unwrap();
-        controller.stop_route("rt-suspend").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn suspend_and_resume_validate_execution_state() {
-        let mut controller = build_controller_with_components();
-        set_self_ref(&mut controller);
-
-        controller
-            .add_route(
-                RouteDefinition::new("timer:tick?period=50", vec![]).with_route_id("rt-state"),
-            )
-            .unwrap();
-
-        let suspend_err = controller
-            .suspend_route("rt-state")
-            .await
-            .expect_err("suspend before start must fail");
-        assert!(suspend_err.to_string().contains("Cannot suspend route"));
-
-        controller.start_route("rt-state").await.unwrap();
-        let resume_err = controller
-            .resume_route("rt-state")
-            .await
-            .expect_err("resume while started must fail");
-        assert!(resume_err.to_string().contains("Cannot resume route"));
-
-        controller.stop_route("rt-state").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn concurrent_concurrency_override_path_executes() {
-        let mut controller = build_controller_with_components();
-        set_self_ref(&mut controller);
-
-        let route = RouteDefinition::new(
-            "timer:tick?period=10&repeatCount=2",
-            vec![BuilderStep::To("mock:out".into())],
-        )
-        .with_route_id("rt-concurrent")
-        .with_concurrency(ConcurrencyModel::Concurrent { max: Some(2) });
-
-        controller.add_route(route).unwrap();
-        controller.start_route("rt-concurrent").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        controller.stop_route("rt-concurrent").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn add_route_with_circuit_breaker_and_error_handler_compiles() {
-        use camel_api::circuit_breaker::CircuitBreakerConfig;
-        use camel_api::error_handler::ErrorHandlerConfig;
-
-        let mut controller = build_controller_with_components();
-        set_self_ref(&mut controller);
-
-        let route = RouteDefinition::new("timer:tick?period=25", vec![BuilderStep::Stop])
-            .with_route_id("rt-eh")
-            .with_circuit_breaker(CircuitBreakerConfig::new())
-            .with_error_handler(ErrorHandlerConfig::dead_letter_channel("log:dlq"));
-
-        controller
-            .add_route(route)
-            .expect("route with layers should compile");
-        controller.start_route("rt-eh").await.unwrap();
-        controller.stop_route("rt-eh").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn compile_and_swap_errors_for_missing_route() {
-        let mut controller = build_controller_with_components();
-        set_self_ref(&mut controller);
-
-        let compiled = controller
-            .compile_route_definition(
-                RouteDefinition::new("timer:tick?period=10", vec![BuilderStep::Stop])
-                    .with_route_id("compiled"),
-            )
-            .expect("compile should work");
-
-        let err = controller
-            .swap_pipeline("nope", compiled)
-            .expect_err("missing route swap must fail");
-        assert!(err.to_string().contains("not found"));
-    }
-}
+#[path = "route_controller_tests.rs"]
+mod tests;

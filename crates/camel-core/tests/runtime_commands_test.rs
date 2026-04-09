@@ -7,19 +7,19 @@ use camel_api::runtime::{
     CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
 };
 use camel_api::{
-    CamelError, CanonicalRouteSpec, LanguageExpressionDef, RouteController, RuntimeCommand,
-    RuntimeCommandBus, RuntimeCommandResult, RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult,
+    CanonicalRouteSpec, LanguageExpressionDef, RuntimeCommand, RuntimeCommandBus,
+    RuntimeCommandResult, RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult,
 };
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
-use camel_core::route_controller::RouteControllerInternal;
+use camel_core::spawn_controller_actor;
 use camel_core::{
     DefaultRouteController, InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore,
     InMemoryRouteRepository, Registry, RouteRepositoryPort, RouteRuntimeAggregate,
     RouteRuntimeState, RuntimeBus, RuntimeExecutionAdapter,
 };
-use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use camel_core::lifecycle::domain::DomainError;
 
 fn simple_languages() -> camel_core::route_controller::SharedLanguageRegistry {
     let mut map: std::collections::HashMap<String, Arc<dyn camel_language_api::Language>> =
@@ -80,11 +80,11 @@ impl RouteRepositoryPort for ConflictRouteRepository {
     async fn load(
         &self,
         _route_id: &str,
-    ) -> Result<Option<RouteRuntimeAggregate>, camel_api::CamelError> {
+    ) -> Result<Option<RouteRuntimeAggregate>, DomainError> {
         Ok(self.route.read().await.clone())
     }
 
-    async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), camel_api::CamelError> {
+    async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), DomainError> {
         *self.route.write().await = Some(aggregate);
         Ok(())
     }
@@ -93,13 +93,13 @@ impl RouteRepositoryPort for ConflictRouteRepository {
         &self,
         _aggregate: RouteRuntimeAggregate,
         _expected_version: u64,
-    ) -> Result<(), camel_api::CamelError> {
-        Err(camel_api::CamelError::RouteError(
+    ) -> Result<(), DomainError> {
+        Err(DomainError::InvalidState(
             "forced optimistic lock conflict".to_string(),
         ))
     }
 
-    async fn delete(&self, _route_id: &str) -> Result<(), camel_api::CamelError> {
+    async fn delete(&self, _route_id: &str) -> Result<(), DomainError> {
         *self.route.write().await = None;
         Ok(())
     }
@@ -113,11 +113,11 @@ struct FailFirstSaveIfVersionRepository {
 
 #[async_trait]
 impl RouteRepositoryPort for FailFirstSaveIfVersionRepository {
-    async fn load(&self, _route_id: &str) -> Result<Option<RouteRuntimeAggregate>, CamelError> {
+    async fn load(&self, _route_id: &str) -> Result<Option<RouteRuntimeAggregate>, DomainError> {
         Ok(self.route.read().await.clone())
     }
 
-    async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), CamelError> {
+    async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), DomainError> {
         *self.route.write().await = Some(aggregate);
         Ok(())
     }
@@ -126,19 +126,19 @@ impl RouteRepositoryPort for FailFirstSaveIfVersionRepository {
         &self,
         aggregate: RouteRuntimeAggregate,
         expected_version: u64,
-    ) -> Result<(), CamelError> {
+    ) -> Result<(), DomainError> {
         if self.save_if_version_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Err(CamelError::RouteError(
+            return Err(DomainError::InvalidState(
                 "forced post-effect save_if_version failure".to_string(),
             ));
         }
 
         let mut guard = self.route.write().await;
         let current = guard.as_ref().ok_or_else(|| {
-            CamelError::RouteError("optimistic lock conflict: route not found".to_string())
+            DomainError::InvalidState("optimistic lock conflict: route not found".to_string())
         })?;
         if current.version() != expected_version {
-            return Err(CamelError::RouteError(format!(
+            return Err(DomainError::InvalidState(format!(
                 "optimistic lock conflict: expected version {expected_version}, actual {}",
                 current.version()
             )));
@@ -148,7 +148,7 @@ impl RouteRepositoryPort for FailFirstSaveIfVersionRepository {
         Ok(())
     }
 
-    async fn delete(&self, _route_id: &str) -> Result<(), CamelError> {
+    async fn delete(&self, _route_id: &str) -> Result<(), DomainError> {
         *self.route.write().await = None;
         Ok(())
     }
@@ -188,8 +188,9 @@ async fn connected_runtime_retry_recovers_after_post_effect_persistence_failure(
         .lock()
         .expect("registry lock poisoned")
         .register(TimerComponent::new());
-    let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
-        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages()),
+    let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
+        Arc::clone(&registry),
+        simple_languages(),
     ));
 
     let repo = Arc::new(FailFirstSaveIfVersionRepository::default());
@@ -200,19 +201,11 @@ async fn connected_runtime_retry_recovers_after_post_effect_persistence_failure(
             Arc::new(InMemoryEventPublisher::default()),
             Arc::new(InMemoryCommandDedup::default()),
         )
-        .with_execution(Arc::new(RuntimeExecutionAdapter::new(Arc::clone(
-            &controller,
-        )))),
+        .with_execution(Arc::new(RuntimeExecutionAdapter::new(controller.clone()))),
     );
 
-    {
-        let mut guard = controller.lock().await;
-        let self_ref: Arc<Mutex<dyn camel_api::RouteController>> =
-            Arc::clone(&controller) as Arc<Mutex<dyn camel_api::RouteController>>;
-        guard.set_self_ref(self_ref);
-        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
-        guard.set_runtime_handle(runtime_handle);
-    }
+    let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+    controller.set_runtime_handle(runtime_handle).await.unwrap();
 
     runtime
         .execute(RuntimeCommand::RegisterRoute {
@@ -279,8 +272,9 @@ async fn connected_runtime_lifecycle_requires_registered_aggregate() {
         .lock()
         .expect("registry lock poisoned")
         .register(TimerComponent::new());
-    let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
-        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages()),
+    let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
+        Arc::clone(&registry),
+        simple_languages(),
     ));
 
     let runtime = Arc::new(
@@ -290,19 +284,11 @@ async fn connected_runtime_lifecycle_requires_registered_aggregate() {
             Arc::new(InMemoryEventPublisher::default()),
             Arc::new(InMemoryCommandDedup::default()),
         )
-        .with_execution(Arc::new(RuntimeExecutionAdapter::new(Arc::clone(
-            &controller,
-        )))),
+        .with_execution(Arc::new(RuntimeExecutionAdapter::new(controller.clone()))),
     );
 
-    {
-        let mut guard = controller.lock().await;
-        let self_ref: Arc<Mutex<dyn camel_api::RouteController>> =
-            Arc::clone(&controller) as Arc<Mutex<dyn camel_api::RouteController>>;
-        guard.set_self_ref(self_ref);
-        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
-        guard.set_runtime_handle(runtime_handle);
-    }
+    let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+    controller.set_runtime_handle(runtime_handle).await.unwrap();
 
     runtime
         .execute(RuntimeCommand::RegisterRoute {
@@ -339,11 +325,9 @@ async fn connected_runtime_start_tolerates_suspended_controller_drift() {
         .expect("registry lock poisoned")
         .register(TimerComponent::new());
 
-    let controller_impl = Arc::new(Mutex::new(DefaultRouteController::with_languages(
-        Arc::clone(&registry),
-        simple_languages(),
-    )));
-    let controller: Arc<Mutex<dyn RouteControllerInternal>> = controller_impl.clone();
+    let controller_impl =
+        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
+    let (controller, _actor_join) = spawn_controller_actor(controller_impl);
 
     let runtime = Arc::new(
         RuntimeBus::new(
@@ -352,19 +336,11 @@ async fn connected_runtime_start_tolerates_suspended_controller_drift() {
             Arc::new(InMemoryEventPublisher::default()),
             Arc::new(InMemoryCommandDedup::default()),
         )
-        .with_execution(Arc::new(RuntimeExecutionAdapter::new(Arc::clone(
-            &controller,
-        )))),
+        .with_execution(Arc::new(RuntimeExecutionAdapter::new(controller.clone()))),
     );
 
-    {
-        let mut guard = controller.lock().await;
-        let self_ref: Arc<Mutex<dyn camel_api::RouteController>> =
-            Arc::clone(&controller) as Arc<Mutex<dyn camel_api::RouteController>>;
-        guard.set_self_ref(self_ref);
-        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
-        guard.set_runtime_handle(runtime_handle);
-    }
+    let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+    controller.set_runtime_handle(runtime_handle).await.unwrap();
 
     runtime
         .execute(RuntimeCommand::RegisterRoute {
@@ -377,9 +353,8 @@ async fn connected_runtime_start_tolerates_suspended_controller_drift() {
 
     {
         // Simulate legacy drift: lifecycle was changed through controller path only.
-        let mut ctrl = controller_impl.lock().await;
-        ctrl.start_route("drift-start-r1").await.unwrap();
-        ctrl.suspend_route("drift-start-r1").await.unwrap();
+        controller.start_route("drift-start-r1").await.unwrap();
+        controller.suspend_route("drift-start-r1").await.unwrap();
     }
 
     // Aggregate still sees route as Registered; Start should succeed and reconcile side effect.
@@ -412,11 +387,9 @@ async fn connected_runtime_suspend_tolerates_already_suspended_controller_drift(
         .expect("registry lock poisoned")
         .register(TimerComponent::new());
 
-    let controller_impl = Arc::new(Mutex::new(DefaultRouteController::with_languages(
-        Arc::clone(&registry),
-        simple_languages(),
-    )));
-    let controller: Arc<Mutex<dyn RouteControllerInternal>> = controller_impl.clone();
+    let controller_impl =
+        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
+    let (controller, _actor_join) = spawn_controller_actor(controller_impl);
 
     let runtime = Arc::new(
         RuntimeBus::new(
@@ -425,19 +398,11 @@ async fn connected_runtime_suspend_tolerates_already_suspended_controller_drift(
             Arc::new(InMemoryEventPublisher::default()),
             Arc::new(InMemoryCommandDedup::default()),
         )
-        .with_execution(Arc::new(RuntimeExecutionAdapter::new(Arc::clone(
-            &controller,
-        )))),
+        .with_execution(Arc::new(RuntimeExecutionAdapter::new(controller.clone()))),
     );
 
-    {
-        let mut guard = controller.lock().await;
-        let self_ref: Arc<Mutex<dyn camel_api::RouteController>> =
-            Arc::clone(&controller) as Arc<Mutex<dyn camel_api::RouteController>>;
-        guard.set_self_ref(self_ref);
-        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
-        guard.set_runtime_handle(runtime_handle);
-    }
+    let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+    controller.set_runtime_handle(runtime_handle).await.unwrap();
 
     runtime
         .execute(RuntimeCommand::RegisterRoute {
@@ -459,8 +424,7 @@ async fn connected_runtime_suspend_tolerates_already_suspended_controller_drift(
 
     {
         // Drift: controller already suspended, aggregate still Started.
-        let mut ctrl = controller_impl.lock().await;
-        ctrl.suspend_route("drift-suspend-r1").await.unwrap();
+        controller.suspend_route("drift-suspend-r1").await.unwrap();
     }
 
     runtime
@@ -492,11 +456,9 @@ async fn connected_runtime_resume_tolerates_already_started_controller_drift() {
         .expect("registry lock poisoned")
         .register(TimerComponent::new());
 
-    let controller_impl = Arc::new(Mutex::new(DefaultRouteController::with_languages(
-        Arc::clone(&registry),
-        simple_languages(),
-    )));
-    let controller: Arc<Mutex<dyn RouteControllerInternal>> = controller_impl.clone();
+    let controller_impl =
+        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
+    let (controller, _actor_join) = spawn_controller_actor(controller_impl);
 
     let runtime = Arc::new(
         RuntimeBus::new(
@@ -505,19 +467,11 @@ async fn connected_runtime_resume_tolerates_already_started_controller_drift() {
             Arc::new(InMemoryEventPublisher::default()),
             Arc::new(InMemoryCommandDedup::default()),
         )
-        .with_execution(Arc::new(RuntimeExecutionAdapter::new(Arc::clone(
-            &controller,
-        )))),
+        .with_execution(Arc::new(RuntimeExecutionAdapter::new(controller.clone()))),
     );
 
-    {
-        let mut guard = controller.lock().await;
-        let self_ref: Arc<Mutex<dyn camel_api::RouteController>> =
-            Arc::clone(&controller) as Arc<Mutex<dyn camel_api::RouteController>>;
-        guard.set_self_ref(self_ref);
-        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
-        guard.set_runtime_handle(runtime_handle);
-    }
+    let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+    controller.set_runtime_handle(runtime_handle).await.unwrap();
 
     runtime
         .execute(RuntimeCommand::RegisterRoute {
@@ -548,8 +502,7 @@ async fn connected_runtime_resume_tolerates_already_started_controller_drift() {
 
     {
         // Drift: controller already resumed, aggregate still Suspended.
-        let mut ctrl = controller_impl.lock().await;
-        ctrl.resume_route("drift-resume-r1").await.unwrap();
+        controller.resume_route("drift-resume-r1").await.unwrap();
     }
 
     runtime
@@ -575,7 +528,7 @@ async fn connected_runtime_resume_tolerates_already_started_controller_drift() {
 
 #[tokio::test]
 async fn remove_route_fails_when_route_is_not_stopped() {
-    let mut ctx = camel_core::CamelContext::new();
+    let mut ctx = camel_core::CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     let runtime = ctx.runtime();
 
@@ -620,8 +573,9 @@ async fn connected_runtime_reload_requires_registered_aggregate() {
         .lock()
         .expect("registry lock poisoned")
         .register(TimerComponent::new());
-    let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
-        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages()),
+    let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
+        Arc::clone(&registry),
+        simple_languages(),
     ));
 
     let runtime = Arc::new(
@@ -631,19 +585,11 @@ async fn connected_runtime_reload_requires_registered_aggregate() {
             Arc::new(InMemoryEventPublisher::default()),
             Arc::new(InMemoryCommandDedup::default()),
         )
-        .with_execution(Arc::new(RuntimeExecutionAdapter::new(Arc::clone(
-            &controller,
-        )))),
+        .with_execution(Arc::new(RuntimeExecutionAdapter::new(controller.clone()))),
     );
 
-    {
-        let mut guard = controller.lock().await;
-        let self_ref: Arc<Mutex<dyn camel_api::RouteController>> =
-            Arc::clone(&controller) as Arc<Mutex<dyn camel_api::RouteController>>;
-        guard.set_self_ref(self_ref);
-        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
-        guard.set_runtime_handle(runtime_handle);
-    }
+    let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+    controller.set_runtime_handle(runtime_handle).await.unwrap();
 
     runtime
         .execute(RuntimeCommand::RegisterRoute {
@@ -680,11 +626,9 @@ async fn connected_runtime_remove_tolerates_started_controller_drift() {
         .expect("registry lock poisoned")
         .register(TimerComponent::new());
 
-    let controller_impl = Arc::new(Mutex::new(DefaultRouteController::with_languages(
-        Arc::clone(&registry),
-        simple_languages(),
-    )));
-    let controller: Arc<Mutex<dyn RouteControllerInternal>> = controller_impl.clone();
+    let controller_impl =
+        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
+    let (controller, _actor_join) = spawn_controller_actor(controller_impl);
 
     let runtime = Arc::new(
         RuntimeBus::new(
@@ -693,19 +637,11 @@ async fn connected_runtime_remove_tolerates_started_controller_drift() {
             Arc::new(InMemoryEventPublisher::default()),
             Arc::new(InMemoryCommandDedup::default()),
         )
-        .with_execution(Arc::new(RuntimeExecutionAdapter::new(Arc::clone(
-            &controller,
-        )))),
+        .with_execution(Arc::new(RuntimeExecutionAdapter::new(controller.clone()))),
     );
 
-    {
-        let mut guard = controller.lock().await;
-        let self_ref: Arc<Mutex<dyn camel_api::RouteController>> =
-            Arc::clone(&controller) as Arc<Mutex<dyn camel_api::RouteController>>;
-        guard.set_self_ref(self_ref);
-        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
-        guard.set_runtime_handle(runtime_handle);
-    }
+    let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+    controller.set_runtime_handle(runtime_handle).await.unwrap();
 
     runtime
         .execute(RuntimeCommand::RegisterRoute {
@@ -718,8 +654,7 @@ async fn connected_runtime_remove_tolerates_started_controller_drift() {
 
     {
         // Simulate drift: controller lifecycle moved independently of aggregate state.
-        let mut ctrl = controller_impl.lock().await;
-        ctrl.start_route("drift-remove-r1").await.unwrap();
+        controller.start_route("drift-remove-r1").await.unwrap();
     }
 
     runtime
@@ -756,8 +691,9 @@ async fn register_route_accepts_advanced_canonical_steps() {
         .expect("registry lock poisoned")
         .register(MockComponent::new());
 
-    let controller: Arc<Mutex<dyn RouteControllerInternal>> = Arc::new(Mutex::new(
-        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages()),
+    let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
+        Arc::clone(&registry),
+        simple_languages(),
     ));
     let runtime = Arc::new(
         RuntimeBus::new(
@@ -766,19 +702,11 @@ async fn register_route_accepts_advanced_canonical_steps() {
             Arc::new(InMemoryEventPublisher::default()),
             Arc::new(InMemoryCommandDedup::default()),
         )
-        .with_execution(Arc::new(RuntimeExecutionAdapter::new(Arc::clone(
-            &controller,
-        )))),
+        .with_execution(Arc::new(RuntimeExecutionAdapter::new(controller.clone()))),
     );
 
-    {
-        let mut guard = controller.lock().await;
-        let self_ref: Arc<Mutex<dyn camel_api::RouteController>> =
-            Arc::clone(&controller) as Arc<Mutex<dyn camel_api::RouteController>>;
-        guard.set_self_ref(self_ref);
-        let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
-        guard.set_runtime_handle(runtime_handle);
-    }
+    let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
+    controller.set_runtime_handle(runtime_handle).await.unwrap();
 
     let route = CanonicalRouteSpec {
         route_id: "advanced-canonical-r1".to_string(),

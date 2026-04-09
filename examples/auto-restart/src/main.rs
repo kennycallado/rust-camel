@@ -182,7 +182,10 @@ async fn main() -> Result<(), CamelError> {
     println!();
 
     // Create context with supervision
-    let mut ctx = CamelContext::with_supervision(supervision_config);
+    let mut ctx = CamelContext::builder()
+        .supervision(supervision_config)
+        .build()
+        .await?;
 
     // Register components
     ctx.register_component(TimerComponent::new());

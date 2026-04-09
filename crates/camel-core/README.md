@@ -72,7 +72,7 @@ use camel_component_log::LogComponent;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await?;
 
     // Register components
     ctx.register_component(TimerComponent::new());
@@ -140,22 +140,35 @@ ctx.add_route_definition(route).await?;
 Enable redb-backed event journal for runtime state recovery across restarts:
 
 ```rust
-use camel_core::{CamelContext, RedbJournalOptions, JournalDurability};
+use std::sync::Arc;
+use camel_core::{
+    CamelContext, InMemoryRuntimeStore, JournalDurability, RedbJournalOptions,
+    RedbRuntimeEventJournal,
+};
 
 // Default options (Immediate durability, compaction at 10_000 events)
-let ctx = CamelContext::new_with_redb_journal(
-    ".camel/runtime.redb",
-    RedbJournalOptions::default(),
-).await?;
+let ctx = CamelContext::builder()
+    .runtime_store(InMemoryRuntimeStore::default().with_journal(Arc::new(
+        RedbRuntimeEventJournal::new(".camel/runtime.redb", RedbJournalOptions::default())
+            .await?,
+    )))
+    .build()
+    .await?;
 
 // Eventual durability (dev/test — no fsync)
-let ctx = CamelContext::new_with_redb_journal(
-    ".camel/runtime.redb",
-    RedbJournalOptions {
-        durability: JournalDurability::Eventual,
-        compaction_threshold_events: 1_000,
-    },
-).await?;
+let ctx = CamelContext::builder()
+    .runtime_store(InMemoryRuntimeStore::default().with_journal(Arc::new(
+        RedbRuntimeEventJournal::new(
+            ".camel/runtime.redb",
+            RedbJournalOptions {
+                durability: JournalDurability::Eventual,
+                compaction_threshold_events: 1_000,
+            },
+        )
+        .await?,
+    )))
+    .build()
+    .await?;
 
 // With supervision and metrics
 let ctx = CamelContext::with_supervision_and_metrics_and_redb_journal(
@@ -209,7 +222,8 @@ Automatic message-flow tracing across all route steps:
 use camel_core::{CamelContext, TracerConfig, DetailLevel, TracerOutputs, StdoutOutput, OutputFormat};
 
 // Simple toggle
-let mut ctx = CamelContext::new();
+// Inside an async function
+let mut ctx = CamelContext::builder().build().await?;
 ctx.set_tracing(true);
 
 // Full configuration

@@ -64,7 +64,7 @@ fn fail_n_times(times: u32) -> BoxProcessor {
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
 
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
@@ -75,7 +75,8 @@ async fn main() -> Result<(), CamelError> {
     // -----------------------------------------------------------------------
     ctx.set_error_handler(ErrorHandlerConfig::dead_letter_channel(
         "log:global-dlc?showHeaders=true&showBody=true&showCorrelationId=true",
-    ));
+    ))
+    .await;
 
     // -----------------------------------------------------------------------
     // Route 1: Basic Dead Letter Channel

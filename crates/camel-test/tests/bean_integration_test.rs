@@ -14,7 +14,6 @@ use camel_dsl::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 // ============================================================================
@@ -108,16 +107,7 @@ fn create_test_controller_with_registry(
     bean_registry: BeanRegistry,
 ) -> DefaultRouteController {
     let bean_registry = Arc::new(StdMutex::new(bean_registry));
-    let mut controller =
-        DefaultRouteController::with_beans(Arc::clone(&registry), Arc::clone(&bean_registry));
-
-    // Set self_ref with the same registries (not a new empty controller)
-    let self_ref: Arc<Mutex<dyn camel_api::RouteController>> = Arc::new(Mutex::new(
-        DefaultRouteController::with_beans(registry, bean_registry),
-    ));
-    controller.set_self_ref(self_ref);
-
-    controller
+    DefaultRouteController::with_beans(registry, bean_registry)
 }
 
 // ============================================================================

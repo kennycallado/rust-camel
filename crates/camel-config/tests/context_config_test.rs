@@ -49,7 +49,7 @@ routes:
     fs::write(routes_dir.join("test.yaml"), route_content).unwrap();
 
     // Create context and register components first
-    let mut ctx = camel_core::CamelContext::new();
+    let mut ctx = camel_core::CamelContext::builder().build().await.unwrap();
     ctx.register_component(camel_component_timer::TimerComponent::new());
     ctx.register_component(camel_component_log::LogComponent::new());
 

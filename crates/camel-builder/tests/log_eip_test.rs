@@ -19,7 +19,7 @@ use camel_processor::LogLevel;
 #[tokio::test]
 async fn test_log_eip_with_timer() {
     let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(mock.clone());
 
@@ -57,7 +57,7 @@ async fn test_log_eip_with_timer() {
 #[tokio::test]
 async fn test_log_eip_with_direct() {
     let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(DirectComponent::new());
     ctx.register_component(mock.clone());
@@ -110,7 +110,7 @@ async fn test_log_eip_with_direct() {
 #[tokio::test]
 async fn test_log_eip_in_filter_scope() {
     let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(mock.clone());
 
@@ -171,7 +171,7 @@ async fn test_log_eip_in_split_scope() {
     use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
 
     let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(mock.clone());
 
@@ -215,7 +215,7 @@ async fn test_log_eip_in_split_scope() {
 #[tokio::test]
 async fn test_log_eip_multiple_levels() {
     let mock = MockComponent::new();
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap();
     ctx.register_component(TimerComponent::new());
     ctx.register_component(mock.clone());
 

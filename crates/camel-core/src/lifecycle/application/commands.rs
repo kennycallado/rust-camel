@@ -16,7 +16,7 @@ use crate::lifecycle::application::route_definition::{
     BuilderStep, DeclarativeWhenStep, RouteDefinition,
 };
 use crate::lifecycle::domain::{
-    RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent,
+    DomainError, RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState,
 };
 use crate::lifecycle::ports::{
     EventPublisherPort, ProjectionStorePort, RouteRepositoryPort, RouteStatusProjection,
@@ -68,9 +68,7 @@ async fn handle_register(
     let route_id = spec.route_id.clone();
 
     if deps.repo.load(&route_id).await?.is_some() {
-        return Err(CamelError::RouteError(format!(
-            "route '{route_id}' is already registered"
-        )));
+        return Err(DomainError::AlreadyExists(route_id).into());
     }
 
     if let Some(execution) = &deps.execution {
@@ -78,10 +76,7 @@ async fn handle_register(
         execution.register_route(route_definition).await?;
     }
 
-    let aggregate = RouteRuntimeAggregate::new(route_id.clone());
-    let events = vec![RuntimeEvent::RouteRegistered {
-        route_id: route_id.clone(),
-    }];
+    let (aggregate, events) = RouteRuntimeAggregate::register(route_id.clone());
     if let Some(uow) = &deps.uow {
         uow.persist_upsert(
             aggregate.clone(),
@@ -118,19 +113,14 @@ pub(crate) async fn handle_register_internal(
     let route_id = def.route_id().to_string();
 
     if deps.repo.load(&route_id).await?.is_some() {
-        return Err(CamelError::RouteError(format!(
-            "route '{route_id}' is already registered"
-        )));
+        return Err(DomainError::AlreadyExists(route_id).into());
     }
 
     if let Some(execution) = &deps.execution {
         execution.register_route(def).await?;
     }
 
-    let aggregate = RouteRuntimeAggregate::new(route_id.clone());
-    let events = vec![RuntimeEvent::RouteRegistered {
-        route_id: route_id.clone(),
-    }];
+    let (aggregate, events) = RouteRuntimeAggregate::register(route_id.clone());
 
     let persist_result: Result<(), CamelError> = if let Some(uow) = &deps.uow {
         uow.persist_upsert(
@@ -140,6 +130,7 @@ pub(crate) async fn handle_register_internal(
             &events,
         )
         .await
+        .map_err(Into::into)
     } else {
         match deps.repo.save(aggregate.clone()).await {
             Ok(()) => {
@@ -154,10 +145,10 @@ pub(crate) async fn handle_register_internal(
                         "post-effect reconciliation recovered after runtime persistence error: {primary_error}"
                     )))
                 } else {
-                    deps.events.publish(&events).await
+                    deps.events.publish(&events).await.map_err(Into::into)
                 }
             }
-            Err(err) => Err(err),
+            Err(err) => Err(err.into()),
         }
     };
 
@@ -250,7 +241,7 @@ async fn apply_runtime_lifecycle(
                 ))
             }),
         },
-        RouteLifecycleCommand::Stop => execution.stop_route(route_id).await,
+        RouteLifecycleCommand::Stop => execution.stop_route(route_id).await.map_err(Into::into),
         RouteLifecycleCommand::Suspend => match execution.suspend_route(route_id).await {
             Ok(()) => Ok(()),
             Err(suspend_error) => {
@@ -277,8 +268,9 @@ async fn apply_runtime_lifecycle(
                 ))
             }),
         },
-        RouteLifecycleCommand::Reload => execution.reload_route(route_id).await,
+        RouteLifecycleCommand::Reload => execution.reload_route(route_id).await.map_err(Into::into),
         RouteLifecycleCommand::Fail(_) => Ok(()),
+        RouteLifecycleCommand::Remove => execution.remove_route(route_id).await.map_err(Into::into),
     }
 }
 
@@ -286,29 +278,18 @@ async fn handle_remove(
     deps: &CommandDeps,
     route_id: String,
 ) -> Result<RuntimeCommandResult, CamelError> {
-    let aggregate = deps
+    let mut aggregate = deps
         .repo
         .load(&route_id)
         .await?
         .ok_or_else(|| CamelError::RouteError(format!("route '{route_id}' not found")))?;
 
-    match aggregate.state() {
-        RouteRuntimeState::Registered | RouteRuntimeState::Stopped => {}
-        _ => {
-            return Err(CamelError::RouteError(format!(
-                "invalid transition: {:?} -> Removed",
-                aggregate.state()
-            )));
-        }
-    }
+    let events = aggregate.apply_command(RouteLifecycleCommand::Remove)?;
 
     if let Some(execution) = &deps.execution {
         remove_runtime_route_with_recovery(execution.as_ref(), &route_id).await?;
     }
 
-    let events = vec![RuntimeEvent::RouteRemoved {
-        route_id: route_id.clone(),
-    }];
     if let Some(uow) = &deps.uow {
         uow.persist_delete(&route_id, &events).await?;
     } else {
@@ -341,7 +322,7 @@ async fn remove_runtime_route_with_recovery(
                 ))
             })
         }
-        Err(err) => Err(err),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -533,12 +514,15 @@ fn canonical_step_to_builder_step(
 
 #[cfg(test)]
 mod tests {
+    use crate::lifecycle::domain::DomainError;
+
     use super::*;
     use camel_api::RuntimeQueryResult;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use crate::lifecycle::domain::RuntimeEvent;
 
     #[derive(Clone, Default)]
     struct InMemoryTestRepo {
@@ -547,7 +531,7 @@ mod tests {
 
     #[async_trait]
     impl RouteRepositoryPort for InMemoryTestRepo {
-        async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, CamelError> {
+        async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, DomainError> {
             Ok(self
                 .routes
                 .lock()
@@ -556,7 +540,7 @@ mod tests {
                 .cloned())
         }
 
-        async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), CamelError> {
+        async fn save(&self, aggregate: RouteRuntimeAggregate) -> Result<(), DomainError> {
             self.routes
                 .lock()
                 .expect("lock test routes")
@@ -568,17 +552,17 @@ mod tests {
             &self,
             aggregate: RouteRuntimeAggregate,
             expected_version: u64,
-        ) -> Result<(), CamelError> {
+        ) -> Result<(), DomainError> {
             let route_id = aggregate.route_id().to_string();
             let mut routes = self.routes.lock().expect("lock test routes");
             let current = routes.get(&route_id).ok_or_else(|| {
-                CamelError::RouteError(format!(
+                DomainError::InvalidState(format!(
                     "optimistic lock conflict for route '{route_id}': route not found"
                 ))
             })?;
 
             if current.version() != expected_version {
-                return Err(CamelError::RouteError(format!(
+                return Err(DomainError::InvalidState(format!(
                     "optimistic lock conflict for route '{route_id}': expected version {expected_version}, actual {}",
                     current.version()
                 )));
@@ -588,7 +572,7 @@ mod tests {
             Ok(())
         }
 
-        async fn delete(&self, route_id: &str) -> Result<(), CamelError> {
+        async fn delete(&self, route_id: &str) -> Result<(), DomainError> {
             self.routes
                 .lock()
                 .expect("lock test routes")
@@ -604,7 +588,7 @@ mod tests {
 
     #[async_trait]
     impl ProjectionStorePort for InMemoryTestProjectionStore {
-        async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), CamelError> {
+        async fn upsert_status(&self, status: RouteStatusProjection) -> Result<(), DomainError> {
             self.statuses
                 .lock()
                 .expect("lock test statuses")
@@ -615,7 +599,7 @@ mod tests {
         async fn get_status(
             &self,
             route_id: &str,
-        ) -> Result<Option<RouteStatusProjection>, CamelError> {
+        ) -> Result<Option<RouteStatusProjection>, DomainError> {
             Ok(self
                 .statuses
                 .lock()
@@ -624,7 +608,7 @@ mod tests {
                 .cloned())
         }
 
-        async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, CamelError> {
+        async fn list_statuses(&self) -> Result<Vec<RouteStatusProjection>, DomainError> {
             Ok(self
                 .statuses
                 .lock()
@@ -634,7 +618,7 @@ mod tests {
                 .collect())
         }
 
-        async fn remove_status(&self, route_id: &str) -> Result<(), CamelError> {
+        async fn remove_status(&self, route_id: &str) -> Result<(), DomainError> {
             self.statuses
                 .lock()
                 .expect("lock test statuses")
@@ -650,7 +634,7 @@ mod tests {
 
     #[async_trait]
     impl EventPublisherPort for InMemoryTestEventPublisher {
-        async fn publish(&self, events: &[RuntimeEvent]) -> Result<(), CamelError> {
+        async fn publish(&self, events: &[RuntimeEvent]) -> Result<(), DomainError> {
             self.events
                 .lock()
                 .expect("lock test events")
@@ -732,7 +716,7 @@ mod tests {
 
     #[async_trait]
     impl RuntimeExecutionPort for TrackingExecutionPort {
-        async fn register_route(&self, definition: RouteDefinition) -> Result<(), CamelError> {
+        async fn register_route(&self, definition: RouteDefinition) -> Result<(), DomainError> {
             self.registered
                 .lock()
                 .expect("lock registered routes")
@@ -740,27 +724,27 @@ mod tests {
             Ok(())
         }
 
-        async fn start_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn start_route(&self, _route_id: &str) -> Result<(), DomainError> {
             Ok(())
         }
 
-        async fn stop_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn stop_route(&self, _route_id: &str) -> Result<(), DomainError> {
             Ok(())
         }
 
-        async fn suspend_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn suspend_route(&self, _route_id: &str) -> Result<(), DomainError> {
             Ok(())
         }
 
-        async fn resume_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn resume_route(&self, _route_id: &str) -> Result<(), DomainError> {
             Ok(())
         }
 
-        async fn reload_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn reload_route(&self, _route_id: &str) -> Result<(), DomainError> {
             Ok(())
         }
 
-        async fn remove_route(&self, route_id: &str) -> Result<(), CamelError> {
+        async fn remove_route(&self, route_id: &str) -> Result<(), DomainError> {
             self.removed
                 .lock()
                 .expect("lock removed routes")
@@ -768,7 +752,7 @@ mod tests {
             Ok(())
         }
 
-        async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, CamelError> {
+        async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, DomainError> {
             Ok(RuntimeQueryResult::RouteNotFound {
                 route_id: route_id.to_string(),
             })
@@ -777,62 +761,62 @@ mod tests {
 
     #[async_trait]
     impl RuntimeExecutionPort for ConfigurableExecutionPort {
-        async fn register_route(&self, _definition: RouteDefinition) -> Result<(), CamelError> {
+        async fn register_route(&self, _definition: RouteDefinition) -> Result<(), DomainError> {
             Ok(())
         }
 
-        async fn start_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn start_route(&self, _route_id: &str) -> Result<(), DomainError> {
             if *self.fail_start.lock().expect("fail_start") {
-                return Err(CamelError::RouteError("start failed".into()));
+                return Err(DomainError::InvalidState("start failed".into()));
             }
             Ok(())
         }
 
-        async fn stop_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn stop_route(&self, _route_id: &str) -> Result<(), DomainError> {
             let mut calls = self.stop_called.lock().expect("stop_called");
             *calls += 1;
             Ok(())
         }
 
-        async fn suspend_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn suspend_route(&self, _route_id: &str) -> Result<(), DomainError> {
             let mut fail_once = self.fail_suspend_once.lock().expect("fail_suspend_once");
             if *fail_once {
                 *fail_once = false;
-                return Err(CamelError::RouteError("suspend failed".into()));
+                return Err(DomainError::InvalidState("suspend failed".into()));
             }
             if *self.fail_suspend_retry.lock().expect("fail_suspend_retry") {
-                return Err(CamelError::RouteError("suspend retry failed".into()));
+                return Err(DomainError::InvalidState("suspend retry failed".into()));
             }
             Ok(())
         }
 
-        async fn resume_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn resume_route(&self, _route_id: &str) -> Result<(), DomainError> {
             if *self.fail_resume.lock().expect("fail_resume") {
-                return Err(CamelError::RouteError("resume failed".into()));
+                return Err(DomainError::InvalidState("resume failed".into()));
             }
             Ok(())
         }
 
-        async fn reload_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn reload_route(&self, _route_id: &str) -> Result<(), DomainError> {
             Ok(())
         }
 
-        async fn remove_route(&self, _route_id: &str) -> Result<(), CamelError> {
+        async fn remove_route(&self, _route_id: &str) -> Result<(), DomainError> {
             let mut first = self
                 .fail_remove_must_stopped
                 .lock()
                 .expect("fail_remove_must_stopped");
             if *first {
                 *first = false;
-                return Err(CamelError::RouteError("must be stopped first".into()));
+                return Err(DomainError::InvalidState("must be stopped first".into()));
             }
             if *self.fail_remove_retry.lock().expect("fail_remove_retry") {
-                return Err(CamelError::RouteError("remove retry failed".into()));
+                return Err(DomainError::InvalidState("remove retry failed".into()));
             }
             Ok(())
         }
 
-        async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, CamelError> {
+        async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, DomainError> {
             Ok(RuntimeQueryResult::RouteNotFound {
                 route_id: route_id.to_string(),
             })
@@ -846,12 +830,12 @@ mod tests {
 
     #[async_trait]
     impl RouteRepositoryPort for FailingSaveRepository {
-        async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, CamelError> {
+        async fn load(&self, route_id: &str) -> Result<Option<RouteRuntimeAggregate>, DomainError> {
             self.inner.load(route_id).await
         }
 
-        async fn save(&self, _aggregate: RouteRuntimeAggregate) -> Result<(), CamelError> {
-            Err(CamelError::RouteError(
+        async fn save(&self, _aggregate: RouteRuntimeAggregate) -> Result<(), DomainError> {
+            Err(DomainError::InvalidState(
                 "simulated repository save failure".to_string(),
             ))
         }
@@ -860,13 +844,13 @@ mod tests {
             &self,
             aggregate: RouteRuntimeAggregate,
             expected_version: u64,
-        ) -> Result<(), CamelError> {
+        ) -> Result<(), DomainError> {
             self.inner
                 .save_if_version(aggregate, expected_version)
                 .await
         }
 
-        async fn delete(&self, route_id: &str) -> Result<(), CamelError> {
+        async fn delete(&self, route_id: &str) -> Result<(), DomainError> {
             self.inner.delete(route_id).await
         }
     }
@@ -934,7 +918,7 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("already registered")
+                .contains("already exists")
         );
     }
 
