@@ -1,4 +1,4 @@
-mod commands;
+use camel_cli::commands;
 
 use clap::{Parser, Subcommand};
 use tokio_util::sync::CancellationToken;
@@ -61,6 +61,9 @@ enum Commands {
         #[command(subcommand)]
         action: JournalAction,
     },
+
+    /// Scaffold a new Camel project
+    New(commands::new::NewArgs),
 }
 
 #[derive(Subcommand)]
@@ -108,6 +111,9 @@ async fn main() {
                 commands::journal::run_inspect(args).await;
             }
         },
+        Commands::New(args) => {
+            commands::new::run_new(args);
+        }
     }
 }
 

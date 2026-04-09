@@ -79,6 +79,18 @@ let ctx = CamelContext::builder()
     .await?;
 ```
 
+## Quick Start with the CLI
+
+```bash
+cargo install camel-cli
+camel new my-integration
+cd my-integration
+camel run
+```
+
+This scaffolds a project with a `Camel.toml`, `routes/hello.yaml`, and runs it.
+See [`crates/camel-cli/README.md`](crates/camel-cli/README.md) for all CLI commands.
+
 ## Quick Example
 
 ```rust

@@ -3,6 +3,10 @@
 A ready-to-run project layout showing how to use `camel run` with a
 `Camel.toml` config file and YAML routes.
 
+> You can generate a similar project layout with `camel new <name>`.
+> This example includes extra routes (scripting, transforms) beyond the
+> default template.
+
 ## Layout
 
 ```

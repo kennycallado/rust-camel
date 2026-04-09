@@ -11,6 +11,10 @@ readme = "README.md"
 keywords = ["camel", "cli", "integration", "messaging"]
 categories = ["command-line-utilities", "development-tools"]
 
+[lib]
+name = "camel_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "camel"
 path = "src/main.rs"
@@ -45,6 +49,8 @@ camel-language-js = { workspace = true, optional = true }
 camel-language-rhai = { workspace = true, optional = true }
 camel-language-jsonpath = { workspace = true, optional = true }
 camel-language-xpath = { workspace = true, optional = true }
+include_dir = "0.7"
+
 [dev-dependencies]
 tempfile = "3"
 serde_json.workspace = true

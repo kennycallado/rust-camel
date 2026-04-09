@@ -14,12 +14,61 @@ cargo install camel-cli
 camel <COMMAND>
 
 Commands:
-  run    Start a Camel context from YAML route files with hot-reload
-  help   Print help
+  new      Scaffold a new Camel project
+  run      Start a Camel context from YAML route files with hot-reload
+  journal  Inspect a runtime journal file
+  help     Print help
 
 Options:
   -h, --help     Print help
   -V, --version  Print version
+```
+
+## `camel new`
+
+Scaffolds a new project directory with a `Camel.toml`, `routes/hello.yaml`, `README.md`, and `.gitignore`.
+
+```bash
+camel new <NAME>
+
+Arguments:
+  <NAME>  Project name and directory to create
+
+Options:
+  --template <TEMPLATE>       Template to use (default: basic)
+  --profile-layout <LAYOUT>   Profile layout: simple or env (default: env)
+  --force                     Overwrite files if the directory already exists
+```
+
+### Examples
+
+```bash
+# Create a project with default (env) profile layout
+camel new my-integration
+
+# Single-profile layout (no development/production sections)
+camel new my-integration --profile-layout simple
+
+# Overwrite an existing directory
+camel new my-integration --force
+```
+
+### Generated layout
+
+```
+my-integration/
+├── Camel.toml          # Route patterns, log level, watch, profiles
+├── README.md
+├── .gitignore
+└── routes/
+    └── hello.yaml      # Timer route that logs every 2s
+```
+
+Then run it:
+
+```bash
+cd my-integration
+camel run
 ```
 
 ## `camel run`
