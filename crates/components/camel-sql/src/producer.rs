@@ -13,7 +13,7 @@ use tokio::sync::OnceCell;
 use tower::Service;
 use tracing::{debug, error, warn};
 
-use crate::config::{SqlEndpointConfig, SqlOutputType};
+use crate::config::{SqlEndpointConfig, SqlOutputType, enrich_db_url_with_ssl};
 use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
@@ -73,6 +73,7 @@ impl Service<Exchange> for SqlProducer {
                 .get_or_try_init(|| async {
                     // Defensive: ensure config is resolved even if caller didn't use create_endpoint
                     config.resolve_defaults();
+                    let db_url = enrich_db_url_with_ssl(&config.db_url, &config)?;
 
                     // Install all compiled-in sqlx drivers so AnyPool can resolve them.
                     // This is idempotent; safe to call multiple times.
@@ -98,7 +99,7 @@ impl Service<Exchange> for SqlProducer {
                                 .max_lifetime_secs
                                 .expect("must be Some after resolve_defaults()"),
                         ));
-                    opts.connect(&config.db_url).await.map_err(|e| {
+                    opts.connect(&db_url).await.map_err(|e| {
                         error!("Failed to connect to database: {}", e);
                         CamelError::EndpointCreationFailed(format!(
                             "Failed to connect to database: {}",
@@ -124,7 +125,7 @@ impl Service<Exchange> for SqlProducer {
             } else {
                 // Non-batch: parse template, resolve params, apply header override
                 let template = parse_query_template(&query_str, config.placeholder)?;
-                let mut prepared = resolve_params(&template, &exchange)?;
+                let mut prepared = resolve_params(&template, &exchange, &config.in_separator)?;
 
                 // CamelSql.Parameters header override
                 if let Some(params_value) = exchange.input.header(headers::PARAMETERS) {
@@ -356,7 +357,7 @@ async fn execute_batch(
         let temp_exchange = Exchange::new(temp_msg);
 
         // Resolve parameters for this batch item
-        let prepared = resolve_params(&template, &temp_exchange)?;
+        let prepared = resolve_params(&template, &temp_exchange, &config.in_separator)?;
 
         // Execute against transaction
         let mut query = sqlx::query(&prepared.sql);

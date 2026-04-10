@@ -42,6 +42,11 @@ pub struct SqlGlobalConfig {
     pub min_connections: u32,
     pub idle_timeout_secs: u64,
     pub max_lifetime_secs: u64,
+    // SSL/TLS
+    pub ssl_mode: Option<String>,
+    pub ssl_root_cert: Option<String>,
+    pub ssl_cert: Option<String>,
+    pub ssl_key: Option<String>,
 }
 
 impl Default for SqlGlobalConfig {
@@ -51,6 +56,10 @@ impl Default for SqlGlobalConfig {
             min_connections: 1,
             idle_timeout_secs: 300,
             max_lifetime_secs: 1800,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
         }
     }
 }
@@ -77,6 +86,26 @@ impl SqlGlobalConfig {
 
     pub fn with_max_lifetime_secs(mut self, value: u64) -> Self {
         self.max_lifetime_secs = value;
+        self
+    }
+
+    pub fn with_ssl_mode(mut self, value: impl Into<String>) -> Self {
+        self.ssl_mode = Some(value.into());
+        self
+    }
+
+    pub fn with_ssl_root_cert(mut self, value: impl Into<String>) -> Self {
+        self.ssl_root_cert = Some(value.into());
+        self
+    }
+
+    pub fn with_ssl_cert(mut self, value: impl Into<String>) -> Self {
+        self.ssl_cert = Some(value.into());
+        self
+    }
+
+    pub fn with_ssl_key(mut self, value: impl Into<String>) -> Self {
+        self.ssl_key = Some(value.into());
         self
     }
 }
@@ -113,6 +142,8 @@ pub struct SqlEndpointConfig {
     pub placeholder: char,
     /// If true, don't execute the query (dry run). Default: false.
     pub noop: bool,
+    /// Separator for IN clause expansion. Default: ", ".
+    pub in_separator: String,
 
     // Consumer (polling)
     /// Delay between polls in milliseconds. Default: 500.
@@ -141,6 +172,16 @@ pub struct SqlEndpointConfig {
     pub batch: bool,
     /// Use message body for SQL. Default: false.
     pub use_message_body_for_sql: bool,
+
+    // SSL/TLS
+    /// SSL mode for the connection. None = use global default.
+    pub ssl_mode: Option<String>,
+    /// Path to SSL root certificate. None = use global default.
+    pub ssl_root_cert: Option<String>,
+    /// Path to SSL client certificate. None = use global default.
+    pub ssl_cert: Option<String>,
+    /// Path to SSL client key. None = use global default.
+    pub ssl_key: Option<String>,
 }
 
 impl SqlEndpointConfig {
@@ -158,6 +199,18 @@ impl SqlEndpointConfig {
         if self.max_lifetime_secs.is_none() {
             self.max_lifetime_secs = Some(defaults.max_lifetime_secs);
         }
+        if self.ssl_mode.is_none() {
+            self.ssl_mode = defaults.ssl_mode.clone();
+        }
+        if self.ssl_root_cert.is_none() {
+            self.ssl_root_cert = defaults.ssl_root_cert.clone();
+        }
+        if self.ssl_cert.is_none() {
+            self.ssl_cert = defaults.ssl_cert.clone();
+        }
+        if self.ssl_key.is_none() {
+            self.ssl_key = defaults.ssl_key.clone();
+        }
     }
 
     /// Resolve any remaining None fields with built-in defaults.
@@ -165,6 +218,101 @@ impl SqlEndpointConfig {
         let defaults = SqlGlobalConfig::default();
         self.apply_defaults(&defaults);
     }
+}
+
+struct SslParamMapping {
+    pg_key: &'static str,
+    mysql_key: &'static str,
+}
+
+const SSL_MAPPINGS: &[(&str, SslParamMapping)] = &[
+    (
+        "sslMode",
+        SslParamMapping {
+            pg_key: "sslmode",
+            mysql_key: "ssl-mode",
+        },
+    ),
+    (
+        "sslRootCert",
+        SslParamMapping {
+            pg_key: "sslrootcert",
+            mysql_key: "ssl-ca",
+        },
+    ),
+    (
+        "sslCert",
+        SslParamMapping {
+            pg_key: "sslcert",
+            mysql_key: "ssl-cert",
+        },
+    ),
+    (
+        "sslKey",
+        SslParamMapping {
+            pg_key: "sslkey",
+            mysql_key: "ssl-key",
+        },
+    ),
+];
+
+pub fn enrich_db_url_with_ssl(
+    db_url: &str,
+    config: &SqlEndpointConfig,
+) -> Result<String, CamelError> {
+    let ssl_params: Vec<(&str, &str)> = [
+        config.ssl_mode.as_deref().map(|v| ("sslMode", v)),
+        config.ssl_root_cert.as_deref().map(|v| ("sslRootCert", v)),
+        config.ssl_cert.as_deref().map(|v| ("sslCert", v)),
+        config.ssl_key.as_deref().map(|v| ("sslKey", v)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if ssl_params.is_empty() {
+        return Ok(db_url.to_string());
+    }
+
+    let mut parsed = url::Url::parse(db_url).map_err(|e| {
+        CamelError::InvalidUri(format!(
+            "Cannot parse database URL for SSL enrichment: {}",
+            e
+        ))
+    })?;
+
+    let scheme = parsed.scheme();
+    if scheme != "postgres" && scheme != "postgresql" && scheme != "mysql" {
+        return Ok(db_url.to_string());
+    }
+    let is_mysql = scheme == "mysql";
+
+    let mut query_pairs = parsed.query_pairs().collect::<Vec<_>>();
+    for (camel_name, value) in &ssl_params {
+        if let Some((_, mapping)) = SSL_MAPPINGS.iter().find(|(name, _)| *name == *camel_name) {
+            let driver_key = if is_mysql {
+                mapping.mysql_key
+            } else {
+                mapping.pg_key
+            };
+
+            if let Some(pos) = query_pairs.iter().position(|(k, _)| k == driver_key) {
+                query_pairs[pos].1 = (*value).into();
+            } else {
+                query_pairs.push((driver_key.into(), (*value).into()));
+            }
+        }
+    }
+
+    {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (k, v) in query_pairs {
+            serializer.append_pair(&k, &v);
+        }
+        parsed.set_query(Some(&serializer.finish()));
+    }
+
+    Ok(parsed.to_string())
 }
 
 impl UriConfig for SqlEndpointConfig {
@@ -227,6 +375,15 @@ impl UriConfig for SqlEndpointConfig {
             .get("noop")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let in_separator = params
+            .get("inSeparator")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| ", ".to_string());
+        if in_separator.is_empty() {
+            return Err(CamelError::InvalidUri(
+                "inSeparator must not be empty".to_string(),
+            ));
+        }
 
         // Consumer parameters
         let delay_ms = params
@@ -268,6 +425,10 @@ impl UriConfig for SqlEndpointConfig {
             .get("useMessageBodyForSql")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let ssl_mode = params.get("sslMode").cloned();
+        let ssl_root_cert = params.get("sslRootCert").cloned();
+        let ssl_cert = params.get("sslCert").cloned();
+        let ssl_key = params.get("sslKey").cloned();
 
         Ok(Self {
             db_url,
@@ -280,6 +441,7 @@ impl UriConfig for SqlEndpointConfig {
             output_type,
             placeholder,
             noop,
+            in_separator,
             delay_ms,
             initial_delay_ms,
             max_messages_per_poll,
@@ -292,6 +454,10 @@ impl UriConfig for SqlEndpointConfig {
             break_batch_on_consume_fail,
             batch,
             use_message_body_for_sql,
+            ssl_mode,
+            ssl_root_cert,
+            ssl_cert,
+            ssl_key,
         })
     }
 }
@@ -314,6 +480,7 @@ mod tests {
         assert_eq!(c.output_type, SqlOutputType::SelectList);
         assert_eq!(c.placeholder, '#');
         assert!(!c.noop);
+        assert_eq!(c.in_separator, ", ");
         assert_eq!(c.delay_ms, 500);
         assert_eq!(c.initial_delay_ms, 1000);
         assert!(c.max_messages_per_poll.is_none());
@@ -326,6 +493,67 @@ mod tests {
         assert!(!c.break_batch_on_consume_fail);
         assert!(!c.batch);
         assert!(!c.use_message_body_for_sql);
+        assert!(c.ssl_mode.is_none());
+        assert!(c.ssl_root_cert.is_none());
+        assert!(c.ssl_cert.is_none());
+        assert!(c.ssl_key.is_none());
+    }
+
+    #[test]
+    fn ssl_none_by_default() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert!(c.ssl_mode.is_none());
+        assert!(c.ssl_root_cert.is_none());
+        assert!(c.ssl_cert.is_none());
+        assert!(c.ssl_key.is_none());
+    }
+
+    #[test]
+    fn ssl_mode_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&sslMode=require",
+        )
+        .unwrap();
+        assert_eq!(c.ssl_mode, Some("require".to_string()));
+        assert!(c.ssl_root_cert.is_none());
+    }
+
+    #[test]
+    fn ssl_all_params_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&sslMode=require&sslRootCert=/ca.pem&sslCert=/cert.pem&sslKey=/key.pem",
+        )
+        .unwrap();
+        assert_eq!(c.ssl_mode, Some("require".to_string()));
+        assert_eq!(c.ssl_root_cert, Some("/ca.pem".to_string()));
+        assert_eq!(c.ssl_cert, Some("/cert.pem".to_string()));
+        assert_eq!(c.ssl_key, Some("/key.pem".to_string()));
+    }
+
+    #[test]
+    fn ssl_global_applied_to_endpoint() {
+        let mut c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        let global = SqlGlobalConfig::default()
+            .with_ssl_mode("require")
+            .with_ssl_root_cert("/etc/ssl/ca.pem");
+        c.apply_defaults(&global);
+        assert_eq!(c.ssl_mode, Some("require".to_string()));
+        assert_eq!(c.ssl_root_cert, Some("/etc/ssl/ca.pem".to_string()));
+        assert!(c.ssl_cert.is_none());
+        assert!(c.ssl_key.is_none());
+    }
+
+    #[test]
+    fn ssl_uri_overrides_global() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&sslMode=verify-full",
+        )
+        .unwrap();
+        let global = SqlGlobalConfig::default().with_ssl_mode("require");
+        c.apply_defaults(&global);
+        assert_eq!(c.ssl_mode, Some("verify-full".to_string()));
     }
 
     #[test]
@@ -354,6 +582,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.output_type, SqlOutputType::StreamList);
+    }
+
+    #[test]
+    fn in_separator_default() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert_eq!(c.in_separator, ", ");
+    }
+
+    #[test]
+    fn in_separator_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&inSeparator=;",
+        )
+        .unwrap();
+        assert_eq!(c.in_separator, ";");
+    }
+
+    #[test]
+    fn in_separator_empty_rejected() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&inSeparator=",
+        );
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("inSeparator") || msg.contains("empty"));
     }
 
     #[test]
@@ -489,12 +743,20 @@ mod tests {
             min_connections: 2,
             idle_timeout_secs: 600,
             max_lifetime_secs: 3600,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
         };
         c.apply_defaults(&global);
         assert_eq!(c.max_connections, Some(10));
         assert_eq!(c.min_connections, Some(2));
         assert_eq!(c.idle_timeout_secs, Some(600));
         assert_eq!(c.max_lifetime_secs, Some(3600));
+        assert!(c.ssl_mode.is_none());
+        assert!(c.ssl_root_cert.is_none());
+        assert!(c.ssl_cert.is_none());
+        assert!(c.ssl_key.is_none());
     }
 
     #[test]
@@ -508,6 +770,10 @@ mod tests {
             min_connections: 2,
             idle_timeout_secs: 600,
             max_lifetime_secs: 3600,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
         };
         c.apply_defaults(&global);
         // URI-set values should NOT be overridden
@@ -537,10 +803,120 @@ mod tests {
             .with_max_connections(20)
             .with_min_connections(3)
             .with_idle_timeout_secs(600)
-            .with_max_lifetime_secs(3600);
+            .with_max_lifetime_secs(3600)
+            .with_ssl_mode("require")
+            .with_ssl_root_cert("/ca.pem")
+            .with_ssl_cert("/cert.pem")
+            .with_ssl_key("/key.pem");
         assert_eq!(c.max_connections, 20);
         assert_eq!(c.min_connections, 3);
         assert_eq!(c.idle_timeout_secs, 600);
         assert_eq!(c.max_lifetime_secs, 3600);
+        assert_eq!(c.ssl_mode, Some("require".to_string()));
+        assert_eq!(c.ssl_root_cert, Some("/ca.pem".to_string()));
+        assert_eq!(c.ssl_cert, Some("/cert.pem".to_string()));
+        assert_eq!(c.ssl_key, Some("/key.pem".to_string()));
+    }
+
+    #[test]
+    fn enrich_postgres_ssl_mode() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&sslMode=require",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
+        assert!(url.contains("sslmode=require"), "got: {}", url);
+    }
+
+    #[test]
+    fn enrich_postgres_all_ssl() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&sslMode=require&sslRootCert=/ca.pem&sslCert=/cert.pem&sslKey=/key.pem",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
+        assert!(url.contains("sslmode=require"), "got: {}", url);
+        assert!(url.contains("sslrootcert="), "got: {}", url);
+        assert!(url.contains("sslcert="), "got: {}", url);
+        assert!(url.contains("sslkey="), "got: {}", url);
+    }
+
+    #[test]
+    fn enrich_mysql_ssl() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=mysql://localhost/test&sslMode=require",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
+        assert!(url.contains("ssl-mode=require"), "got: {}", url);
+    }
+
+    #[test]
+    fn enrich_existing_query_params() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test?existing=1&sslMode=require",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
+        assert!(url.contains("existing=1"), "got: {}", url);
+        assert!(url.contains("sslmode=require"), "got: {}", url);
+    }
+
+    #[test]
+    fn enrich_override_existing() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test?sslmode=allow&sslMode=require",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
+        assert!(url.contains("sslmode=require"), "got: {}", url);
+        assert!(!url.contains("sslmode=allow"), "got: {}", url);
+    }
+
+    #[test]
+    fn enrich_no_params() {
+        let mut c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        c.resolve_defaults();
+        let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
+        assert_eq!(url, "postgres://localhost/test");
+    }
+
+    #[test]
+    fn enrich_url_encodes_paths() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&sslRootCert=/path/to/my%20cert.pem",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
+        assert!(url.contains("sslrootcert="), "got: {}", url);
+    }
+
+    #[test]
+    fn enrich_unsupported_scheme_returns_unchanged() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=sqlite://localhost/test.db&sslMode=require",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
+        assert_eq!(url, "sqlite://localhost/test.db");
+    }
+
+    #[test]
+    fn enrich_invalid_url_returns_error() {
+        let mut c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&sslMode=require",
+        )
+        .unwrap();
+        c.resolve_defaults();
+        let result = enrich_db_url_with_ssl("://not-a-valid-url", &c);
+        assert!(result.is_err());
     }
 }

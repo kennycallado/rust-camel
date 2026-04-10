@@ -204,6 +204,10 @@ max_connections = 5            # Max pool connections (default: 5)
 min_connections = 1            # Min pool connections (default: 1)
 idle_timeout_secs = 300        # Idle connection timeout (default: 300)
 max_lifetime_secs = 1800       # Max connection lifetime (default: 1800)
+ssl_mode = "require"           # SSL mode (optional)
+ssl_root_cert = "/etc/ssl/ca.pem"  # CA certificate path (optional)
+ssl_cert = "/etc/ssl/client.pem"   # Client certificate path (optional)
+ssl_key = "/etc/ssl/client.key"    # Client key path (optional)
 ```
 
 ### File Component

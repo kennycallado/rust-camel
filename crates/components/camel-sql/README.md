@@ -55,7 +55,7 @@ sql:file:<path-to-sql-file>?db_url=<database-url>&options
 |--------|---------|-------------|
 | `outputType` | `SelectList` | Output format: `SelectList`, `SelectOne`, `StreamList` |
 | `placeholder` | `#` | Character used for parameter placeholders |
-| `separator` | `;` | Statement separator for multi-statement queries |
+| `inSeparator` | `", "` | Separator for IN clause expansion (e.g. `", "` → `1, 2, 3`) |
 | `noop` | `false` | If true, preserve original body after DML operations |
 
 ### Consumer Options
@@ -79,6 +79,24 @@ sql:file:<path-to-sql-file>?db_url=<database-url>&options
 |--------|---------|-------------|
 | `batch` | `false` | Enable batch mode (body must be array of arrays) |
 | `useMessageBodyForSql` | `false` | Use message body as SQL query |
+
+### SSL/TLS Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `sslMode` | - | SSL mode (e.g. `require`, `verify-ca`, `verify-full`) |
+| `sslRootCert` | - | Path to CA certificate for server verification |
+| `sslCert` | - | Path to client certificate for mTLS |
+| `sslKey` | - | Path to client private key for mTLS |
+
+SSL parameters are appended as query string parameters to the database URL, with database-specific key names:
+
+| URI Parameter | PostgreSQL Key | MySQL Key |
+|---------------|---------------|-----------|
+| `sslMode` | `sslmode` | `ssl-mode` |
+| `sslRootCert` | `sslrootcert` | `ssl-ca` |
+| `sslCert` | `sslcert` | `ssl-cert` |
+| `sslKey` | `sslkey` | `ssl-key` |
 
 ## Parameter Binding
 
@@ -106,7 +124,15 @@ Values resolved from body (if JSON object), headers, or properties.
 SELECT * FROM users WHERE id IN (:#in:ids)
 ```
 
-Value must be a JSON array: `[1, 2, 3]` → expands to `IN ($1, $2, $3)`
+Value must be a JSON array: `[1, 2, 3]` → expands to `IN ($1, $2, $3)`.
+
+Customize the separator with `inSeparator` (default `", "`):
+
+```
+sql:SELECT * FROM users WHERE id IN (:#in:ids)?...&inSeparator=|
+```
+
+Produces: `IN ($1|$2|$3)`
 
 ### Expression Parameters (`:#${expr}`)
 
@@ -296,6 +322,10 @@ max_connections = 5          # Maximum pool connections (default: 5)
 min_connections = 1          # Minimum pool connections (default: 1)
 idle_timeout_secs = 300      # Idle connection timeout (default: 300)
 max_lifetime_secs = 1800     # Max connection lifetime (default: 1800)
+ssl_mode = "require"         # SSL mode (optional)
+ssl_root_cert = "/etc/ssl/ca.pem"  # CA certificate path (optional)
+ssl_cert = "/etc/ssl/client.pem"   # Client certificate path (optional)
+ssl_key = "/etc/ssl/client.key"    # Client key path (optional)
 ```
 
 URI parameters always override global defaults:

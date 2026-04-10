@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 use camel_component_api::{Body, CamelError, Exchange, Message};
 use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 
-use crate::config::SqlEndpointConfig;
+use crate::config::{SqlEndpointConfig, enrich_db_url_with_ssl};
 use crate::headers;
 use crate::query::{QueryTemplate, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
@@ -38,7 +38,7 @@ impl SqlConsumer {
         let empty_exchange = Exchange::new(Message::default());
 
         // Resolve parameters
-        let prepared = resolve_params(template, &empty_exchange)?;
+        let prepared = resolve_params(template, &empty_exchange, &self.config.in_separator)?;
 
         // Build and execute the query
         let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
@@ -190,7 +190,7 @@ impl SqlConsumer {
         let temp_exchange = Exchange::new(temp_msg);
 
         // Resolve parameters
-        let prepared = resolve_params(&template, &temp_exchange)?;
+        let prepared = resolve_params(&template, &temp_exchange, &self.config.in_separator)?;
 
         // Build and execute the query
         let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
@@ -223,6 +223,7 @@ impl Consumer for SqlConsumer {
                 // Install all compiled-in sqlx drivers so AnyPool can resolve them.
                 // This is idempotent; safe to call multiple times.
                 sqlx::any::install_default_drivers();
+                let db_url = enrich_db_url_with_ssl(&self.config.db_url, &self.config)?;
                 AnyPoolOptions::new()
                     .max_connections(
                         self.config
@@ -244,7 +245,7 @@ impl Consumer for SqlConsumer {
                             .max_lifetime_secs
                             .expect("must be Some after resolve_defaults()"),
                     ))
-                    .connect(&self.config.db_url)
+                    .connect(&db_url)
                     .await
                     .map_err(|e| {
                         CamelError::EndpointCreationFailed(format!(

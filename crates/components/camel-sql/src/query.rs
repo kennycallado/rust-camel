@@ -233,12 +233,14 @@ fn find_matching_brace(chars: &[char], start: usize) -> Option<usize> {
 /// # Arguments
 /// * `tpl` - The parsed query template
 /// * `exchange` - The exchange containing message body, headers, and properties
+/// * `in_separator` - Separator between values in IN clause expansion
 ///
 /// # Returns
 /// A `PreparedQuery` with the final SQL and bindings.
 pub fn resolve_params(
     tpl: &QueryTemplate,
     exchange: &Exchange,
+    in_separator: &str,
 ) -> Result<PreparedQuery, CamelError> {
     let mut sql_parts = Vec::new();
     let mut bindings = Vec::new();
@@ -316,7 +318,7 @@ pub fn resolve_params(
                         .collect();
 
                     // Just output comma-separated placeholders, template has parentheses
-                    sql_parts.push(placeholders.join(", "));
+                    sql_parts.push(placeholders.join(in_separator));
                     bindings.extend(arr.iter().cloned());
                 }
             }
@@ -424,6 +426,15 @@ pub fn is_select_query(sql: &str) -> bool {
         || upper.starts_with("EXPLAIN")
 }
 
+const DEFAULT_IN_SEPARATOR: &str = ", ";
+
+pub fn resolve_params_default(
+    tpl: &QueryTemplate,
+    exchange: &Exchange,
+) -> Result<PreparedQuery, CamelError> {
+    resolve_params(tpl, exchange, DEFAULT_IN_SEPARATOR)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,7 +487,7 @@ mod tests {
         msg.set_header("id", serde_json::json!(42));
         let ex = Exchange::new(msg);
 
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.sql, "select * from t where id = $1");
         assert_eq!(prepared.bindings.len(), 1);
         assert_eq!(prepared.bindings[0], serde_json::json!(42));
@@ -488,7 +499,7 @@ mod tests {
         let msg = Message::new(Body::Json(serde_json::json!({"id": 99})));
         let ex = Exchange::new(msg);
 
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.bindings[0], serde_json::json!(99));
     }
 
@@ -498,7 +509,7 @@ mod tests {
         let msg = Message::new(Body::Json(serde_json::json!(["foo", 42])));
         let ex = Exchange::new(msg);
 
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.sql, "insert into t values ($1, $2)");
         assert_eq!(prepared.bindings[0], serde_json::json!("foo"));
         assert_eq!(prepared.bindings[1], serde_json::json!(42));
@@ -510,7 +521,7 @@ mod tests {
         let mut ex = Exchange::new(Message::default());
         ex.set_property("myProp", serde_json::json!(7));
 
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.bindings[0], serde_json::json!(7));
     }
 
@@ -519,7 +530,7 @@ mod tests {
         let tpl = parse_query_template("select * from t where id = :#missing", '#').unwrap();
         let ex = Exchange::new(Message::default());
 
-        let result = resolve_params(&tpl, &ex);
+        let result = resolve_params(&tpl, &ex, ", ");
         assert!(result.is_err());
     }
 
@@ -530,7 +541,7 @@ mod tests {
         msg.set_header("ids", serde_json::json!([1, 2, 3]));
         let ex = Exchange::new(msg);
 
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.sql, "select * from t where id in ($1, $2, $3)");
         assert_eq!(
             prepared.bindings,
@@ -554,7 +565,7 @@ mod tests {
         msg.set_header("ids", serde_json::json!([10, 20]));
         let ex = Exchange::new(msg);
 
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(
             prepared.sql,
             "select * from t where a = $1 and b = $2 and c in ($3, $4)"
@@ -616,7 +627,7 @@ mod tests {
         msg.set_header("id", serde_json::json!(2)); // This should be ignored
         let ex = Exchange::new(msg);
 
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.bindings[0], serde_json::json!(1)); // From body, not header
     }
 
@@ -629,7 +640,7 @@ mod tests {
         let mut ex = Exchange::new(msg);
         ex.set_property("id", serde_json::json!(20)); // This should be ignored
 
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.bindings[0], serde_json::json!(10)); // From header, not property
     }
 
@@ -652,7 +663,7 @@ mod tests {
         let tpl = parse_query_template("select * from t where id = :#${body.id}", '#').unwrap();
         let msg = Message::new(Body::Json(serde_json::json!({"id": 42})));
         let ex = Exchange::new(msg);
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.sql, "select * from t where id = $1");
         assert_eq!(prepared.bindings[0], serde_json::json!(42));
     }
@@ -664,7 +675,7 @@ mod tests {
         let mut msg = Message::default();
         msg.set_header("name", serde_json::json!("alice"));
         let ex = Exchange::new(msg);
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.bindings[0], serde_json::json!("alice"));
     }
 
@@ -674,7 +685,7 @@ mod tests {
             parse_query_template("select * from t where k = :#${property.myKey}", '#').unwrap();
         let mut ex = Exchange::new(Message::default());
         ex.set_property("myKey", serde_json::json!(99));
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.bindings[0], serde_json::json!(99));
     }
 
@@ -702,8 +713,19 @@ mod tests {
         let mut msg = Message::default();
         msg.set_header("ids", serde_json::json!([]));
         let ex = Exchange::new(msg);
-        let prepared = resolve_params(&tpl, &ex).unwrap();
+        let prepared = resolve_params(&tpl, &ex, ", ").unwrap();
         assert_eq!(prepared.sql, "select * from t where id in (NULL)");
         assert!(prepared.bindings.is_empty());
+    }
+
+    #[test]
+    fn in_clause_custom_separator() {
+        let tpl = parse_query_template("select * from t where id in (:#in:ids)", '#').unwrap();
+        let mut msg = Message::default();
+        msg.set_header("ids", serde_json::json!([1, 2, 3]));
+        let ex = Exchange::new(msg);
+
+        let prepared = resolve_params(&tpl, &ex, ";").unwrap();
+        assert_eq!(prepared.sql, "select * from t where id in ($1;$2;$3)");
     }
 }
