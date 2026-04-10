@@ -452,7 +452,7 @@ async fn add_route_with_circuit_breaker_and_error_handler_compiles() {
 
 #[tokio::test]
 async fn compile_and_swap_errors_for_missing_route() {
-    let mut controller = build_controller_with_components();
+    let controller = build_controller_with_components();
 
     let compiled = controller
         .compile_route_definition(
