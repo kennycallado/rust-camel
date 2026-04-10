@@ -312,9 +312,12 @@ async fn run_queue_consumer(
                         // This is normal for blocking POP with timeout
                     }
                     Err(e) => {
-                        error!("{} error: {}", queue_cmd, e);
-                        // Brief pause before retrying to avoid tight error loop
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        if e.is_timeout() {
+                            // Timeout - continue loop silently
+                        } else {
+                            error!("{} error: {}", queue_cmd, e);
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
                     }
                 }
             }

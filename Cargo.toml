@@ -40,6 +40,7 @@ members = [
     "crates/camel-bench",
     "examples/hello-world",
     "examples/kafka-example",
+    "examples/redis-example",
     "examples/jms-example",
     "examples/jms-container-example",
     "examples/content-based-routing",
@@ -201,7 +202,7 @@ config = "0.14"
 glob = "0.3"
 notify = { version = "6", features = ["macos_fsevent"] }
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["kafka", "postgres"] }
+testcontainers-modules = { version = "0.11", features = ["kafka", "postgres", "redis"] }
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 prometheus = "0.14"
 rand = "0.8"
