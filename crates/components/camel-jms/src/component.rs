@@ -216,6 +216,41 @@ impl JmsBridgePool {
         }
     }
 
+    /// Recreate the tonic channel for an existing running bridge process.
+    ///
+    /// Useful when a channel becomes stale after transport-level failures while
+    /// the underlying bridge process is still alive.
+    pub async fn refresh_slot_channel(&self, broker_name: &str) -> Result<(), CamelError> {
+        let slot = self
+            .slots
+            .get(broker_name)
+            .map(|s| Arc::clone(&*s))
+            .ok_or_else(|| {
+                CamelError::ProcessorError(format!("Unknown JMS broker '{}'", broker_name))
+            })?;
+
+        let port = {
+            let guard = slot.process.lock().await;
+            let process = guard.as_ref().ok_or_else(|| {
+                CamelError::ProcessorError(format!(
+                    "JMS broker '{}' has no running bridge process",
+                    broker_name
+                ))
+            })?;
+            process.grpc_port()
+        };
+
+        let channel = connect_channel(port).await.map_err(|e| {
+            CamelError::ProcessorError(format!(
+                "JMS broker '{}' channel refresh failed: {}",
+                broker_name, e
+            ))
+        })?;
+
+        let _ = slot.state_tx.send(BridgeState::Ready { channel });
+        Ok(())
+    }
+
     /// Shutdown all slots: stop all bridge processes concurrently.
     pub async fn shutdown(&self) -> Result<(), CamelError> {
         let names: Vec<String> = self.slots.iter().map(|e| e.key().clone()).collect();
@@ -261,14 +296,28 @@ impl JmsBridgePool {
                     BridgeState::Ready { ref channel } => {
                         tokio::time::sleep(Duration::from_millis(health_interval)).await;
                         let mut client = BridgeServiceClient::new(channel.clone());
-                        match client.health(HealthRequest {}).await {
-                            Ok(_) => {}
-                            Err(e) => {
+                        let health_timeout = Duration::from_secs(3);
+                        match tokio::time::timeout(health_timeout, client.health(HealthRequest {}))
+                            .await
+                        {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => {
                                 warn!(
                                     "Health check failed for broker '{}': {e}. Marking Degraded.",
                                     slot.name
                                 );
                                 let _ = slot.state_tx.send(BridgeState::Degraded(e.to_string()));
+                            }
+                            Err(_) => {
+                                let msg = format!(
+                                    "health RPC timed out after {}ms",
+                                    health_timeout.as_millis()
+                                );
+                                warn!(
+                                    "Health check timed out for broker '{}': {}. Marking Degraded.",
+                                    slot.name, msg
+                                );
+                                let _ = slot.state_tx.send(BridgeState::Degraded(msg));
                             }
                         }
                     }
@@ -558,13 +607,41 @@ impl Service<Exchange> for LazyJmsProducer {
                 match state {
                     BridgeState::Ready { channel } => {
                         let mut producer = JmsProducer::new(channel, endpoint_config.clone());
-                        let result = producer.call(exchange).await;
-                        if let Err(ref err) = result
-                            && is_bridge_transport_error(err)
-                        {
-                            pool.restart_slot(&broker_name);
+                        match producer.call(exchange.clone()).await {
+                            Ok(done) => return Ok(done),
+                            Err(first_err) if is_bridge_transport_error(&first_err) => {
+                                warn!(
+                                    broker = %broker_name,
+                                    error = %first_err,
+                                    "JMS send transport error; refreshing channel and retrying once"
+                                );
+
+                                if let Err(refresh_err) = pool.refresh_slot_channel(&broker_name).await {
+                                    warn!(
+                                        broker = %broker_name,
+                                        error = %refresh_err,
+                                        "JMS channel refresh failed; requesting bridge restart"
+                                    );
+                                    pool.restart_slot(&broker_name);
+                                    return Err(first_err);
+                                }
+
+                                let refreshed = match slot.state_rx.borrow().clone() {
+                                    BridgeState::Ready { channel } => channel,
+                                    other => {
+                                        return Err(CamelError::ProcessorError(format!(
+                                            "JMS broker '{}' not ready after channel refresh: {:?}",
+                                            broker_name, other
+                                        )));
+                                    }
+                                };
+
+                                let mut retry_producer =
+                                    JmsProducer::new(refreshed, endpoint_config.clone());
+                                return retry_producer.call(exchange).await;
+                            }
+                            Err(other_err) => return Err(other_err),
                         }
-                        return result;
                     }
                     BridgeState::Degraded(reason) => {
                         return Err(CamelError::ProcessorError(format!(
@@ -918,5 +995,70 @@ mod tests {
 
         let err = producer.call(exchange).await.unwrap_err();
         assert!(err.to_string().contains("is degraded"), "got: {}", err);
+    }
+
+    /// A send transport error should trigger a channel refresh attempt first.
+    /// If refresh cannot be performed (e.g. no running bridge process metadata),
+    /// the producer requests a bridge restart as fallback.
+    #[tokio::test]
+    async fn lazy_producer_requests_restart_when_refresh_unavailable() {
+        use tokio::sync::watch;
+        use tonic::transport::Endpoint as TonicEndpoint;
+        use tower::Service;
+
+        // Build a lazy channel to a port where nothing is listening.
+        // connect_lazy() succeeds immediately; the error manifests on the actual RPC call.
+        let dead_channel = TonicEndpoint::from_static("http://127.0.0.1:1")
+            .connect_lazy();
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Ready {
+            channel: dead_channel.clone(),
+        });
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+
+        // Manually insert a slot with the dead-channel in Ready state.
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx: state_rx.clone(),
+            state_tx: state_tx.clone(),
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let endpoint_config =
+            crate::config::JmsEndpointConfig::from_uri("jms:queue:test-retry").unwrap();
+
+        let mut producer = LazyJmsProducer {
+            pool: Arc::clone(&pool),
+            broker_name: "default".to_string(),
+            endpoint_config,
+            resolved_broker_type: BrokerType::ActiveMq,
+        };
+
+        let mut exchange = Exchange::default();
+        exchange.input.body = camel_component_api::Body::Text("hello".to_string());
+
+        // The send will fail because the channel points to a dead port.
+        let result = producer.call(exchange).await;
+        assert!(result.is_err(), "expected send to fail");
+
+        // Refresh cannot run in this setup (slot has no BridgeProcess), so the
+        // fallback path requests a restart.
+        let state_after = state_rx.borrow().clone();
+        assert!(
+            matches!(state_after, BridgeState::Restarting { .. }),
+            "slot must enter Restarting when refresh is unavailable; got: {:?}",
+            state_after
+        );
     }
 }

@@ -11,7 +11,7 @@ use tonic::transport::Channel;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::component::{BridgeState, JmsBridgePool};
+use crate::component::{BridgeState, JmsBridgePool, is_bridge_transport_error};
 use crate::config::{DestinationType, JmsEndpointConfig};
 use crate::headers::apply_jms_headers;
 use crate::proto::{JmsMessage, SubscribeRequest, bridge_service_client::BridgeServiceClient};
@@ -117,6 +117,7 @@ impl Consumer for JmsConsumer {
 
         let handle = tokio::spawn(async move {
             let destination = destination(&endpoint_config);
+            let mut consecutive_transport_failures: u32 = 0;
             loop {
                 let channel = tokio::select! {
                     _ = cancel.cancelled() => {
@@ -159,10 +160,36 @@ impl Consumer for JmsConsumer {
                         CamelError::ProcessorError(format!("JMS gRPC subscribe error: {e}"))
                     }) {
                     Ok(resp) => {
+                        consecutive_transport_failures = 0;
                         info!(broker = %broker_name, destination = %destination, "JMS consumer subscribed successfully");
                         resp.into_inner()
                     }
                     Err(e) => {
+                        if is_bridge_transport_error(&e) {
+                            consecutive_transport_failures += 1;
+                            if consecutive_transport_failures >= 2 {
+                                warn!(
+                                    broker = %broker_name,
+                                    destination = %destination,
+                                    failures = consecutive_transport_failures,
+                                    "JMS subscribe transport failures exceeded threshold; refreshing channel"
+                                );
+                                if let Err(refresh_err) =
+                                    pool.refresh_slot_channel(&broker_name).await
+                                {
+                                    warn!(
+                                        broker = %broker_name,
+                                        destination = %destination,
+                                        error = %refresh_err,
+                                        "JMS channel refresh failed; requesting bridge restart"
+                                    );
+                                    pool.restart_slot(&broker_name);
+                                }
+                                consecutive_transport_failures = 0;
+                            }
+                        } else {
+                            consecutive_transport_failures = 0;
+                        }
                         warn!(
                             broker = %broker_name,
                             destination = %destination,
@@ -204,6 +231,31 @@ impl Consumer for JmsConsumer {
                                     let subscribe_err = CamelError::ProcessorError(format!(
                                         "JMS gRPC subscribe error: {e}"
                                     ));
+                                    if is_bridge_transport_error(&subscribe_err) {
+                                        consecutive_transport_failures += 1;
+                                        if consecutive_transport_failures >= 2 {
+                                            warn!(
+                                                broker = %broker_name,
+                                                destination = %destination,
+                                                failures = consecutive_transport_failures,
+                                                "JMS stream transport failures exceeded threshold; refreshing channel"
+                                            );
+                                            if let Err(refresh_err) =
+                                                pool.refresh_slot_channel(&broker_name).await
+                                            {
+                                                warn!(
+                                                    broker = %broker_name,
+                                                    destination = %destination,
+                                                    error = %refresh_err,
+                                                    "JMS channel refresh failed; requesting bridge restart"
+                                                );
+                                                pool.restart_slot(&broker_name);
+                                            }
+                                            consecutive_transport_failures = 0;
+                                        }
+                                    } else {
+                                        consecutive_transport_failures = 0;
+                                    }
                                     warn!(
                                         broker = %broker_name,
                                         destination = %destination,
