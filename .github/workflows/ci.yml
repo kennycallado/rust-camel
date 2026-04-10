@@ -43,14 +43,10 @@ jobs:
         run: cargo test -p camel-core --test hexagonal_architecture_boundaries_test
       - name: Build JMS bridge binary
         run: cargo xtask build-jms-bridge
-      - name: JMS integration tests (ActiveMQ)
+      - name: JMS integration tests
         env:
           CAMEL_JMS_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/jms/build/native/jms-bridge
-        run: >-
-          cargo test -p camel-test --features integration-tests --test jms_test -- --test-threads=1
-          --skip jms_consumer_receives_from_artemis
-          --skip jms_producer_sends_to_artemis
-          --skip jms_artemis_bridge_stable_under_mandatory_auth
+        run: cargo test -p camel-test --features integration-tests --test jms_test -- --test-threads=1
       - name: Test (full workspace)
         run: cargo test --workspace
 
