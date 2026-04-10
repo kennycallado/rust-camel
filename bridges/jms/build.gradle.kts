@@ -1,6 +1,7 @@
 plugins {
     java
     id("io.quarkus") version "3.20.0"
+    id("com.diffplug.spotless") version "6.25.0"
 }
 
 version = project.findProperty("version")?.toString() ?: "0.1.1"
@@ -35,6 +36,12 @@ dependencies {
 java {
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
+}
+
+spotless {
+    java {
+        googleJavaFormat("1.24.0")
+    }
 }
 
 tasks.wrapper {

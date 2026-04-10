@@ -16,47 +16,56 @@ import javax.jms.TextMessage;
 
 @ApplicationScoped
 public class JmsProducer {
-    @Inject JmsClientFactory factory;
-    private static final Logger LOG = Logger.getLogger(JmsProducer.class.getName());
+  @Inject JmsClientFactory factory;
+  private static final Logger LOG = Logger.getLogger(JmsProducer.class.getName());
 
-    public String send(String destination, byte[] body, Map<String, String> headers, String contentType) throws JMSException {
-        try (Connection conn = factory.createConnection();
-             Session session = conn.createSession(false, Session.AUTO_ACKNOWLEDGE)) {
-            conn.start();
-            Destination dest = parseDestination(session, destination);
-            MessageProducer producer = session.createProducer(dest);
+  public String send(
+      String destination, byte[] body, Map<String, String> headers, String contentType)
+      throws JMSException {
+    try (Connection conn = factory.createConnection();
+        Session session = conn.createSession(false, Session.AUTO_ACKNOWLEDGE)) {
+      conn.start();
+      Destination dest = parseDestination(session, destination);
+      MessageProducer producer = session.createProducer(dest);
 
-            Message msg;
-            if (contentType != null && contentType.startsWith("text/")) {
-                TextMessage tm = session.createTextMessage(new String(body, java.nio.charset.StandardCharsets.UTF_8));
-                msg = tm;
-            } else {
-                BytesMessage bm = session.createBytesMessage();
-                bm.writeBytes(body);
-                msg = bm;
-            }
+      Message msg;
+      if (contentType != null && contentType.startsWith("text/")) {
+        TextMessage tm =
+            session.createTextMessage(new String(body, java.nio.charset.StandardCharsets.UTF_8));
+        msg = tm;
+      } else {
+        BytesMessage bm = session.createBytesMessage();
+        bm.writeBytes(body);
+        msg = bm;
+      }
 
-            if (contentType != null && !contentType.isEmpty()) {
-                msg.setStringProperty("ContentType", contentType);
-            }
-            for (var entry : headers.entrySet()) {
-                String key = entry.getKey();
-                if (key.startsWith("JMS") && !key.startsWith("JMSX")) continue;
-                try {
-                    msg.setStringProperty(key, entry.getValue());
-                } catch (Exception e) {
-                    LOG.log(Level.FINE, "Failed to set JMS property ''{0}'': {1}", new Object[]{key, e.getMessage()});
-                }
-            }
-            producer.send(msg);
-            LOG.log(Level.FINE, "Sent message to {0}, msgId={1}", new Object[]{destination, msg.getJMSMessageID()});
-            return msg.getJMSMessageID();
+      if (contentType != null && !contentType.isEmpty()) {
+        msg.setStringProperty("ContentType", contentType);
+      }
+      for (var entry : headers.entrySet()) {
+        String key = entry.getKey();
+        if (key.startsWith("JMS") && !key.startsWith("JMSX")) continue;
+        try {
+          msg.setStringProperty(key, entry.getValue());
+        } catch (Exception e) {
+          LOG.log(
+              Level.FINE,
+              "Failed to set JMS property ''{0}'': {1}",
+              new Object[] {key, e.getMessage()});
         }
+      }
+      producer.send(msg);
+      LOG.log(
+          Level.FINE,
+          "Sent message to {0}, msgId={1}",
+          new Object[] {destination, msg.getJMSMessageID()});
+      return msg.getJMSMessageID();
     }
+  }
 
-    static Destination parseDestination(Session session, String dest) throws JMSException {
-        if (dest.startsWith("queue:")) return session.createQueue(dest.substring(6));
-        if (dest.startsWith("topic:")) return session.createTopic(dest.substring(6));
-        return session.createQueue(dest);
-    }
+  static Destination parseDestination(Session session, String dest) throws JMSException {
+    if (dest.startsWith("queue:")) return session.createQueue(dest.substring(6));
+    if (dest.startsWith("topic:")) return session.createTopic(dest.substring(6));
+    return session.createQueue(dest);
+  }
 }

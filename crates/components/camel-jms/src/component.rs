@@ -616,7 +616,9 @@ impl Service<Exchange> for LazyJmsProducer {
                                     "JMS send transport error; refreshing channel and retrying once"
                                 );
 
-                                if let Err(refresh_err) = pool.refresh_slot_channel(&broker_name).await {
+                                if let Err(refresh_err) =
+                                    pool.refresh_slot_channel(&broker_name).await
+                                {
                                     warn!(
                                         broker = %broker_name,
                                         error = %refresh_err,
@@ -1008,8 +1010,7 @@ mod tests {
 
         // Build a lazy channel to a port where nothing is listening.
         // connect_lazy() succeeds immediately; the error manifests on the actual RPC call.
-        let dead_channel = TonicEndpoint::from_static("http://127.0.0.1:1")
-            .connect_lazy();
+        let dead_channel = TonicEndpoint::from_static("http://127.0.0.1:1").connect_lazy();
 
         let (state_tx, state_rx) = watch::channel(BridgeState::Ready {
             channel: dead_channel.clone(),
