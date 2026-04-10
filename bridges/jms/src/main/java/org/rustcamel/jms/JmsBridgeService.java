@@ -8,6 +8,7 @@ import io.smallrye.common.annotation.Blocking;
 import jakarta.annotation.PreDestroy;
 import jakarta.inject.Inject;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import jms_bridge.BridgeServiceGrpc;
 import jms_bridge.HealthRequest;
 import jms_bridge.HealthResponse;
@@ -57,8 +58,16 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
         String subId = request.getSubscriptionId();
         activeConsumers.put(subId, consumer);
 
+        // Tracks whether the gRPC client cancelled the stream.
+        // Passed to JmsConsumer so the polling thread never calls onCompleted()
+        // or onError() after cancellation — doing so throws StatusRuntimeException
+        // from a Vert.x worker thread and causes Quarkus to tear down the H2
+        // connection, breaking all other concurrent gRPC streams.
+        AtomicBoolean clientCancelled = new AtomicBoolean(false);
+
         if (responseObserver instanceof ServerCallStreamObserver<JmsMessage> serverObs) {
             serverObs.setOnCancelHandler(() -> {
+                clientCancelled.set(true);
                 consumer.stop();
                 activeConsumers.remove(subId);
                 consumerFactory.destroy(consumer);
@@ -68,7 +77,7 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
         consumer.subscribe(request.getDestination(), subId, new StreamObserver<>() {
             @Override
             public void onNext(JmsMessage msg) {
-                responseObserver.onNext(msg);
+                if (!clientCancelled.get()) responseObserver.onNext(msg);
             }
 
             @Override
@@ -76,7 +85,11 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
                 consumer.stop();
                 activeConsumers.remove(subId);
                 consumerFactory.destroy(consumer);
-                responseObserver.onError(t);
+                // Guard: the polling thread may race with OnCancelHandler. If the
+                // client already cancelled, calling onError() throws
+                // StatusRuntimeException from the Vert.x worker, potentially
+                // tearing down the shared H2 connection.
+                if (!clientCancelled.get()) responseObserver.onError(t);
             }
 
             @Override
@@ -84,9 +97,9 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
                 consumer.stop();
                 activeConsumers.remove(subId);
                 consumerFactory.destroy(consumer);
-                responseObserver.onCompleted();
+                if (!clientCancelled.get()) responseObserver.onCompleted();
             }
-        });
+        }, clientCancelled);
     }
 
     @Override
