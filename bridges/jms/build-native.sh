@@ -57,19 +57,19 @@ fi
 
 echo "Native runner: $RUNNER"
 
-# Copy to canonical path
+# Copy to canonical path — use install(1) instead of cp so that if the
+# destination binary is currently executing (ETXTBSY), install writes to a
+# fresh inode and atomically renames it into place rather than overwriting
+# the live file.
 mkdir -p build/native
-cp "$RUNNER" build/native/jms-bridge
-# Make the binary world-writable so the host user (e.g. on NixOS) can
-# run patchelf on it after the container exits, regardless of uid mismatch.
-chmod a+wx build/native/jms-bridge
+install -m 0777 "$RUNNER" build/native/jms-bridge
 echo "Binary: build/native/jms-bridge"
 
 # Package release tarball
 DIST_NAME="jms-bridge-${VERSION}-linux-x86_64"
 BUILD_DIR="build/release"
 mkdir -p "${BUILD_DIR}/${DIST_NAME}/bin"
-cp build/native/jms-bridge "${BUILD_DIR}/${DIST_NAME}/bin/jms-bridge"
+install -m 0777 build/native/jms-bridge "${BUILD_DIR}/${DIST_NAME}/bin/jms-bridge"
 
 tar -czf "${BUILD_DIR}/${DIST_NAME}.tar.gz" -C "${BUILD_DIR}" "${DIST_NAME}"
 SHA256=$(sha256sum "${BUILD_DIR}/${DIST_NAME}.tar.gz" | cut -d' ' -f1)
