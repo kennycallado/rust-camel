@@ -14,7 +14,7 @@ pub use config::default_bridge_cache_dir;
 pub use config::{BrokerConfig, DestinationType, JmsEndpointConfig, JmsPoolConfig};
 
 /// Version of the Java bridge binary this crate is compatible with.
-pub const BRIDGE_VERSION: &str = "0.1.1";
+pub const BRIDGE_VERSION: &str = "0.2.0";
 
 pub mod proto {
     tonic::include_proto!("jms_bridge");
