@@ -8,7 +8,7 @@ A Rust-native, Tower-native integration framework inspired by [Apache Camel](htt
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `kafka`, `redis`, `sql`, `jms`, `container`, `controlbus`.
+Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `redis`, `sql`, `jms`, `container`, `controlbus`.
 
 ## Architecture
 
@@ -572,6 +572,9 @@ Supported component configurations:
 - **`[components.jms]`**: `default_broker`, `max_bridges`, `bridge_cache_dir`, `bridge_start_timeout_ms`, `broker_reconnect_interval_ms`. Brokers are declared as named entries under `[components.jms.brokers.<name>]`, each with `broker_url`, `broker_type` (`activemq`|`artemis`), and optional `username`/`password`. URI schemes `activemq:` and `artemis:` lock the broker type automatically and support shorthand destinations (e.g. `activemq:orders` → queue). Use the `broker=<name>` URI query param to select a specific broker from the pool.
 - **`[components.file]`**: `delay_ms`, `initial_delay_ms`, `read_timeout_ms`, `write_timeout_ms`
 - **`[components.container]`**: `docker_host`
+- **`[components.ws]`**: `max_connections`, `max_message_size`, `heartbeat_interval_ms`, `idle_timeout_ms`
+
+Each optional component (http, ws, kafka, redis, sql, jms, file, container) implements `ComponentBundle` — it owns its config key, deserializes its own TOML block, and registers one or more schemes. See `examples/custom-component-bundle` for a full walkthrough of implementing your own bundle.
 
 ### Loading Configuration
 

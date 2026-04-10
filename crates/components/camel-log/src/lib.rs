@@ -208,6 +208,7 @@ impl Service<Exchange> for LogProducer {
 mod tests {
     use super::*;
     use camel_component_api::Message;
+    use camel_component_api::NoOpComponentContext;
     use tower::ServiceExt;
 
     fn test_producer_ctx() -> ProducerContext {
@@ -248,7 +249,9 @@ mod tests {
     #[test]
     fn test_log_endpoint_no_consumer() {
         let component = LogComponent::new();
-        let endpoint = component.create_endpoint("log:info").unwrap();
+        let endpoint = component
+            .create_endpoint("log:info", &NoOpComponentContext)
+            .unwrap();
         assert!(endpoint.create_consumer().is_err());
     }
 
@@ -256,7 +259,9 @@ mod tests {
     fn test_log_endpoint_creates_producer() {
         let ctx = test_producer_ctx();
         let component = LogComponent::new();
-        let endpoint = component.create_endpoint("log:info").unwrap();
+        let endpoint = component
+            .create_endpoint("log:info", &NoOpComponentContext)
+            .unwrap();
         assert!(endpoint.create_producer(&ctx).is_ok());
     }
 
@@ -265,7 +270,7 @@ mod tests {
         let ctx = test_producer_ctx();
         let component = LogComponent::new();
         let endpoint = component
-            .create_endpoint("log:test?showHeaders=true")
+            .create_endpoint("log:test?showHeaders=true", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 

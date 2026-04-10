@@ -332,7 +332,7 @@ async fn test_bean_route_with_other_steps() {
     // For this test, we need to register the mock component
     use camel_component_mock::MockComponent;
     let registry = Arc::new(StdMutex::new(Registry::new()));
-    registry.lock().unwrap().register(MockComponent::new());
+    registry.lock().unwrap().register(Arc::new(MockComponent::new()));
 
     let controller = create_test_controller_with_registry(registry, bean_registry);
 

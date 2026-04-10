@@ -400,7 +400,7 @@ async fn send_to_direct(h: &CamelTestContext, endpoint_uri: &str, exchange: Exch
             .get("direct")
             .expect("direct component not registered");
         let endpoint = component
-            .create_endpoint(endpoint_uri)
+            .create_endpoint(endpoint_uri, &*ctx)
             .expect("failed to create direct endpoint");
         endpoint
             .create_producer(&producer_ctx)
@@ -424,7 +424,7 @@ async fn send_to_direct_ignore_error(h: &CamelTestContext, endpoint_uri: &str, e
             .get("direct")
             .expect("direct component not registered");
         let endpoint = component
-            .create_endpoint(endpoint_uri)
+            .create_endpoint(endpoint_uri, &*ctx)
             .expect("failed to create direct endpoint");
         endpoint
             .create_producer(&producer_ctx)

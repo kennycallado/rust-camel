@@ -333,9 +333,10 @@ fn command_id(route_id: &str, operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use camel_component_api::Message;
-    use tower::ServiceExt;
+     use super::*;
+     use camel_component_api::Message;
+     use camel_component_api::NoOpComponentContext;
+     use tower::ServiceExt;
 
     struct MockRuntime {
         statuses: std::collections::HashMap<String, String>,
@@ -448,14 +449,14 @@ mod tests {
     #[test]
     fn test_endpoint_requires_action_for_route_command() {
         let comp = ControlBusComponent::new();
-        let result = comp.create_endpoint("controlbus:route?routeId=foo");
+        let result = comp.create_endpoint("controlbus:route?routeId=foo", &NoOpComponentContext);
         assert!(result.is_err(), "Should error when action is missing");
     }
 
     #[test]
     fn test_endpoint_rejects_unknown_action() {
         let comp = ControlBusComponent::new();
-        let result = comp.create_endpoint("controlbus:route?routeId=foo&action=banana");
+        let result = comp.create_endpoint("controlbus:route?routeId=foo&action=banana", &NoOpComponentContext);
         assert!(result.is_err(), "Should error for unknown action");
     }
 
@@ -463,7 +464,7 @@ mod tests {
     fn test_endpoint_parses_valid_uri() {
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=foo&action=start")
+            .create_endpoint("controlbus:route?routeId=foo&action=start", &NoOpComponentContext)
             .unwrap();
         assert_eq!(endpoint.uri(), "controlbus:route?routeId=foo&action=start");
     }
@@ -472,7 +473,7 @@ mod tests {
     fn test_endpoint_returns_no_consumer() {
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=foo&action=stop")
+            .create_endpoint("controlbus:route?routeId=foo&action=stop", &NoOpComponentContext)
             .unwrap();
         assert!(endpoint.create_consumer().is_err());
     }
@@ -482,7 +483,7 @@ mod tests {
         let ctx = test_producer_ctx();
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=foo&action=start")
+            .create_endpoint("controlbus:route?routeId=foo&action=start", &NoOpComponentContext)
             .unwrap();
         assert!(endpoint.create_producer(&ctx).is_ok());
     }
@@ -498,7 +499,7 @@ mod tests {
         let ctx = test_producer_ctx_with_route("my-route", RouteStatus::Stopped);
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=my-route&action=start")
+            .create_endpoint("controlbus:route?routeId=my-route&action=start", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -512,7 +513,7 @@ mod tests {
         let ctx = test_producer_ctx_with_route("my-route", RouteStatus::Started);
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=my-route&action=stop")
+            .create_endpoint("controlbus:route?routeId=my-route&action=stop", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -528,7 +529,7 @@ mod tests {
         let ctx = ProducerContext::new().with_runtime(runtime);
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=my-route&action=restart")
+            .create_endpoint("controlbus:route?routeId=my-route&action=restart", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -545,7 +546,7 @@ mod tests {
         let ctx = test_producer_ctx_with_route("my-route", RouteStatus::Started);
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=my-route&action=status")
+            .create_endpoint("controlbus:route?routeId=my-route&action=status", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -563,7 +564,7 @@ mod tests {
             test_producer_ctx_with_route("my-route", RouteStatus::Failed("error msg".to_string()));
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=my-route&action=status")
+            .create_endpoint("controlbus:route?routeId=my-route&action=status", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -580,7 +581,7 @@ mod tests {
         let ctx = test_producer_ctx_with_runtime_status("runtime-route", "Started");
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=runtime-route&action=status")
+            .create_endpoint("controlbus:route?routeId=runtime-route&action=status", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -597,7 +598,7 @@ mod tests {
         let ctx = test_producer_ctx_with_empty_runtime();
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=my-route&action=status")
+            .create_endpoint("controlbus:route?routeId=my-route&action=status", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -615,7 +616,7 @@ mod tests {
         let comp = ControlBusComponent::new();
         // No routeId in URI
         let endpoint = comp
-            .create_endpoint("controlbus:route?action=status")
+            .create_endpoint("controlbus:route?action=status", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -638,7 +639,7 @@ mod tests {
         // Use ctx which has "from-uri" route
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=from-uri&action=status")
+            .create_endpoint("controlbus:route?routeId=from-uri&action=status", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -660,7 +661,7 @@ mod tests {
         let ctx = test_producer_ctx();
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?action=status")
+            .create_endpoint("controlbus:route?action=status", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -680,7 +681,7 @@ mod tests {
         let ctx = test_producer_ctx(); // No routes
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=nonexistent&action=status")
+            .create_endpoint("controlbus:route?routeId=nonexistent&action=status", &NoOpComponentContext)
             .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -699,7 +700,7 @@ mod tests {
     fn test_endpoint_parses_suspend_action() {
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=foo&action=suspend")
+            .create_endpoint("controlbus:route?routeId=foo&action=suspend", &NoOpComponentContext)
             .unwrap();
         assert_eq!(
             endpoint.uri(),
@@ -711,7 +712,7 @@ mod tests {
     fn test_endpoint_parses_resume_action() {
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=foo&action=resume")
+            .create_endpoint("controlbus:route?routeId=foo&action=resume", &NoOpComponentContext)
             .unwrap();
         assert_eq!(endpoint.uri(), "controlbus:route?routeId=foo&action=resume");
     }
@@ -720,7 +721,7 @@ mod tests {
     fn test_endpoint_parses_restart_action() {
         let comp = ControlBusComponent::new();
         let endpoint = comp
-            .create_endpoint("controlbus:route?routeId=foo&action=restart")
+            .create_endpoint("controlbus:route?routeId=foo&action=restart", &NoOpComponentContext)
             .unwrap();
         assert_eq!(
             endpoint.uri(),
@@ -731,7 +732,7 @@ mod tests {
     #[test]
     fn test_endpoint_rejects_unknown_command() {
         let comp = ControlBusComponent::new();
-        let result = comp.create_endpoint("controlbus:unknown?action=start");
+        let result = comp.create_endpoint("controlbus:unknown?action=start", &NoOpComponentContext);
         assert!(result.is_err(), "Should error for unknown command");
     }
 }

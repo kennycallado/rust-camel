@@ -415,9 +415,10 @@ impl ExchangeAssert {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use camel_component_api::Message;
-    use tower::ServiceExt;
+     use super::*;
+     use camel_component_api::Message;
+     use camel_component_api::NoOpComponentContext;
+     use tower::ServiceExt;
 
     fn test_producer_ctx() -> ProducerContext {
         ProducerContext::new()
@@ -432,21 +433,21 @@ mod tests {
     #[test]
     fn test_mock_creates_endpoint() {
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:result");
+        let endpoint = component.create_endpoint("mock:result", &NoOpComponentContext);
         assert!(endpoint.is_ok());
     }
 
     #[test]
     fn test_mock_wrong_scheme() {
         let component = MockComponent::new();
-        let result = component.create_endpoint("timer:tick");
+        let result = component.create_endpoint("timer:tick", &NoOpComponentContext);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_mock_endpoint_no_consumer() {
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:result").unwrap();
+        let endpoint = component.create_endpoint("mock:result", &NoOpComponentContext).unwrap();
         assert!(endpoint.create_consumer().is_err());
     }
 
@@ -454,7 +455,7 @@ mod tests {
     fn test_mock_endpoint_creates_producer() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:result").unwrap();
+        let endpoint = component.create_endpoint("mock:result", &NoOpComponentContext).unwrap();
         assert!(endpoint.create_producer(&ctx).is_ok());
     }
 
@@ -462,7 +463,7 @@ mod tests {
     async fn test_mock_producer_records_exchange() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:test").unwrap();
+        let endpoint = component.create_endpoint("mock:test", &NoOpComponentContext).unwrap();
 
         let mut producer = endpoint.create_producer(&ctx).unwrap();
 
@@ -484,7 +485,7 @@ mod tests {
     async fn test_mock_producer_passes_through_exchange() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:passthrough").unwrap();
+        let endpoint = component.create_endpoint("mock:passthrough", &NoOpComponentContext).unwrap();
 
         let producer = endpoint.create_producer(&ctx).unwrap();
         let exchange = Exchange::new(Message::new("hello"));
@@ -497,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_assert_count_passes() {
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:count").unwrap();
+        let endpoint = component.create_endpoint("mock:count", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("count").unwrap();
 
         inner.assert_exchange_count(0).await;
@@ -518,7 +519,7 @@ mod tests {
         let component = MockComponent::new();
         // Endpoint not created yet, so get_endpoint returns None.
         // Create it first, then assert.
-        let _endpoint = component.create_endpoint("mock:fail").unwrap();
+        let _endpoint = component.create_endpoint("mock:fail", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("fail").unwrap();
 
         inner.assert_exchange_count(5).await;
@@ -527,8 +528,8 @@ mod tests {
     #[tokio::test]
     async fn test_mock_component_shared_registry() {
         let component = MockComponent::new();
-        let ep1 = component.create_endpoint("mock:shared").unwrap();
-        let ep2 = component.create_endpoint("mock:shared").unwrap();
+        let ep1 = component.create_endpoint("mock:shared", &NoOpComponentContext).unwrap();
+        let ep2 = component.create_endpoint("mock:shared", &NoOpComponentContext).unwrap();
 
         // Producing via ep1's producer...
         let ctx = test_producer_ctx();
@@ -557,7 +558,7 @@ mod tests {
         // If exchanges are already present, await_exchanges returns without timeout.
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:immediate").unwrap();
+        let endpoint = component.create_endpoint("mock:immediate", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("immediate").unwrap();
 
         let mut producer = endpoint.create_producer(&ctx).unwrap();
@@ -581,7 +582,7 @@ mod tests {
         // await_exchanges unblocks when a producer sends after the call.
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:waiter").unwrap();
+        let endpoint = component.create_endpoint("mock:waiter", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("waiter").unwrap();
 
         // Spawn producer that sends after a short delay.
@@ -608,7 +609,7 @@ mod tests {
     #[should_panic(expected = "timed out waiting for 5 exchanges")]
     async fn await_exchanges_times_out() {
         let component = MockComponent::new();
-        let _endpoint = component.create_endpoint("mock:timeout").unwrap();
+        let _endpoint = component.create_endpoint("mock:timeout", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("timeout").unwrap();
 
         // Nobody sends — should panic after timeout.
@@ -621,7 +622,7 @@ mod tests {
     async fn exchange_idx_returns_assert() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:assert-idx").unwrap();
+        let endpoint = component.create_endpoint("mock:assert-idx", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("assert-idx").unwrap();
 
         let mut producer = endpoint.create_producer(&ctx).unwrap();
@@ -642,7 +643,7 @@ mod tests {
     async fn exchange_idx_out_of_bounds() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:oob").unwrap();
+        let endpoint = component.create_endpoint("mock:oob", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("oob").unwrap();
 
         let mut producer = endpoint.create_producer(&ctx).unwrap();
@@ -662,7 +663,7 @@ mod tests {
     async fn assert_body_text_pass() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:body-text-pass").unwrap();
+        let endpoint = component.create_endpoint("mock:body-text-pass", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("body-text-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         producer
@@ -680,7 +681,7 @@ mod tests {
     async fn assert_body_text_fail() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:body-text-fail").unwrap();
+        let endpoint = component.create_endpoint("mock:body-text-fail", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("body-text-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         producer
@@ -698,7 +699,7 @@ mod tests {
         use camel_component_api::Body;
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:body-json-pass").unwrap();
+        let endpoint = component.create_endpoint("mock:body-json-pass", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("body-json-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut msg = Message::new("");
@@ -718,7 +719,7 @@ mod tests {
         use camel_component_api::Body;
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:body-json-fail").unwrap();
+        let endpoint = component.create_endpoint("mock:body-json-fail", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("body-json-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut msg = Message::new("");
@@ -738,7 +739,7 @@ mod tests {
         use camel_component_api::Body;
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:body-bytes-pass").unwrap();
+        let endpoint = component.create_endpoint("mock:body-bytes-pass", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("body-bytes-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut msg = Message::new("");
@@ -757,7 +758,7 @@ mod tests {
         use camel_component_api::Body;
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:body-bytes-fail").unwrap();
+        let endpoint = component.create_endpoint("mock:body-bytes-fail", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("body-bytes-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut msg = Message::new("");
@@ -773,7 +774,7 @@ mod tests {
     async fn assert_header_pass() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:hdr-pass").unwrap();
+        let endpoint = component.create_endpoint("mock:hdr-pass", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("hdr-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut msg = Message::new("body");
@@ -793,7 +794,7 @@ mod tests {
     async fn assert_header_fail() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:hdr-fail").unwrap();
+        let endpoint = component.create_endpoint("mock:hdr-fail", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("hdr-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut msg = Message::new("body");
@@ -812,7 +813,7 @@ mod tests {
     async fn assert_header_exists_pass() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:hdr-exists-pass").unwrap();
+        let endpoint = component.create_endpoint("mock:hdr-exists-pass", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("hdr-exists-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut msg = Message::new("body");
@@ -830,7 +831,7 @@ mod tests {
     async fn assert_header_exists_fail() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:hdr-exists-fail").unwrap();
+        let endpoint = component.create_endpoint("mock:hdr-exists-fail", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("hdr-exists-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         producer
@@ -847,7 +848,7 @@ mod tests {
     async fn assert_has_error_pass() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:err-pass").unwrap();
+        let endpoint = component.create_endpoint("mock:err-pass", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("err-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut ex = Exchange::new(Message::new("body"));
@@ -866,7 +867,7 @@ mod tests {
     async fn assert_has_error_fail() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:has-err-fail").unwrap();
+        let endpoint = component.create_endpoint("mock:has-err-fail", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("has-err-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         producer
@@ -883,7 +884,7 @@ mod tests {
     async fn assert_no_error_pass() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:no-err-pass").unwrap();
+        let endpoint = component.create_endpoint("mock:no-err-pass", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("no-err-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         producer
@@ -901,7 +902,7 @@ mod tests {
     async fn assert_no_error_fail() {
         let ctx = test_producer_ctx();
         let component = MockComponent::new();
-        let endpoint = component.create_endpoint("mock:no-err-fail").unwrap();
+        let endpoint = component.create_endpoint("mock:no-err-fail", &NoOpComponentContext).unwrap();
         let inner = component.get_endpoint("no-err-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut ex = Exchange::new(Message::new("body"));

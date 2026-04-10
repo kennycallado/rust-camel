@@ -234,6 +234,7 @@ mod tests {
     use super::*;
     use camel_component_api::ExchangeEnvelope;
     use camel_component_api::Message;
+    use camel_component_api::NoOpComponentContext;
     use tower::ServiceExt;
 
     fn test_producer_ctx() -> ProducerContext {
@@ -249,21 +250,23 @@ mod tests {
     #[test]
     fn test_direct_creates_endpoint() {
         let component = DirectComponent::new();
-        let endpoint = component.create_endpoint("direct:foo");
+        let endpoint = component.create_endpoint("direct:foo", &NoOpComponentContext);
         assert!(endpoint.is_ok());
     }
 
     #[test]
     fn test_direct_wrong_scheme() {
         let component = DirectComponent::new();
-        let result = component.create_endpoint("timer:tick");
+        let result = component.create_endpoint("timer:tick", &NoOpComponentContext);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_direct_endpoint_creates_consumer() {
         let component = DirectComponent::new();
-        let endpoint = component.create_endpoint("direct:foo").unwrap();
+        let endpoint = component
+            .create_endpoint("direct:foo", &NoOpComponentContext)
+            .unwrap();
         assert!(endpoint.create_consumer().is_ok());
     }
 
@@ -271,7 +274,9 @@ mod tests {
     fn test_direct_endpoint_creates_producer() {
         let ctx = test_producer_ctx();
         let component = DirectComponent::new();
-        let endpoint = component.create_endpoint("direct:foo").unwrap();
+        let endpoint = component
+            .create_endpoint("direct:foo", &NoOpComponentContext)
+            .unwrap();
         assert!(endpoint.create_producer(&ctx).is_ok());
     }
 
@@ -279,7 +284,9 @@ mod tests {
     async fn test_direct_producer_no_consumer_registered() {
         let ctx = test_producer_ctx();
         let component = DirectComponent::new();
-        let endpoint = component.create_endpoint("direct:missing").unwrap();
+        let endpoint = component
+            .create_endpoint("direct:missing", &NoOpComponentContext)
+            .unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("test"));
@@ -292,7 +299,9 @@ mod tests {
         let component = DirectComponent::new();
 
         // Create consumer endpoint and start it
-        let consumer_endpoint = component.create_endpoint("direct:test").unwrap();
+        let consumer_endpoint = component
+            .create_endpoint("direct:test", &NoOpComponentContext)
+            .unwrap();
         let mut consumer = consumer_endpoint.create_consumer().unwrap();
 
         // The route channel now carries ExchangeEnvelope (request-reply support).
@@ -319,7 +328,9 @@ mod tests {
 
         // Now send an exchange via the producer
         let ctx = test_producer_ctx();
-        let producer_endpoint = component.create_endpoint("direct:test").unwrap();
+        let producer_endpoint = component
+            .create_endpoint("direct:test", &NoOpComponentContext)
+            .unwrap();
         let producer = producer_endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("hello direct"));
@@ -334,7 +345,9 @@ mod tests {
     async fn test_direct_propagates_error_when_no_handler() {
         let component = DirectComponent::new();
 
-        let consumer_endpoint = component.create_endpoint("direct:err-test").unwrap();
+        let consumer_endpoint = component
+            .create_endpoint("direct:err-test", &NoOpComponentContext)
+            .unwrap();
         let mut consumer = consumer_endpoint.create_consumer().unwrap();
 
         let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
@@ -356,7 +369,9 @@ mod tests {
         });
 
         let ctx = test_producer_ctx();
-        let producer_endpoint = component.create_endpoint("direct:err-test").unwrap();
+        let producer_endpoint = component
+            .create_endpoint("direct:err-test", &NoOpComponentContext)
+            .unwrap();
         let producer = producer_endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("test"));
@@ -368,7 +383,9 @@ mod tests {
     #[tokio::test]
     async fn test_direct_consumer_stop_unregisters() {
         let component = DirectComponent::new();
-        let endpoint = component.create_endpoint("direct:cleanup").unwrap();
+        let endpoint = component
+            .create_endpoint("direct:cleanup", &NoOpComponentContext)
+            .unwrap();
 
         // We need a consumer to register
         let mut consumer = endpoint.create_consumer().unwrap();

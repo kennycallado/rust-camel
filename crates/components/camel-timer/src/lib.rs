@@ -186,6 +186,7 @@ impl Consumer for TimerConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::NoOpComponentContext;
 
     #[test]
     fn test_timer_config_defaults() {
@@ -221,7 +222,7 @@ mod tests {
     #[test]
     fn test_timer_component_creates_endpoint() {
         let component = TimerComponent::new();
-        let endpoint = component.create_endpoint("timer:tick?period=1000");
+        let endpoint = component.create_endpoint("timer:tick?period=1000", &NoOpComponentContext);
         assert!(endpoint.is_ok());
     }
 
@@ -229,7 +230,7 @@ mod tests {
     fn test_timer_endpoint_no_producer() {
         let ctx = ProducerContext::new();
         let component = TimerComponent::new();
-        let endpoint = component.create_endpoint("timer:tick").unwrap();
+        let endpoint = component.create_endpoint("timer:tick", &NoOpComponentContext).unwrap();
         let producer = endpoint.create_producer(&ctx);
         assert!(producer.is_err());
     }
@@ -238,7 +239,7 @@ mod tests {
     async fn test_timer_consumer_fires() {
         let component = TimerComponent::new();
         let endpoint = component
-            .create_endpoint("timer:test?period=50&repeatCount=3")
+            .create_endpoint("timer:test?period=50&repeatCount=3", &NoOpComponentContext)
             .unwrap();
         let mut consumer = endpoint.create_consumer().unwrap();
 

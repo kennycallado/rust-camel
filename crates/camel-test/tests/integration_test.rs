@@ -1000,7 +1000,7 @@ async fn http_component_registration_and_endpoint_creation() {
 
     // Verify endpoint can be created with config
     let endpoint = component
-        .create_endpoint("http://example.com/api?httpMethod=POST&connectTimeout=5000")
+        .create_endpoint("http://example.com/api?httpMethod=POST&connectTimeout=5000", &camel_component_api::NoOpComponentContext)
         .unwrap();
     assert!(endpoint.uri().contains("httpMethod=POST"));
 }
@@ -2642,7 +2642,7 @@ async fn delay_step_waits_configured_duration() {
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();
-        let endpoint = component.create_endpoint("direct:delay-in").unwrap();
+        let endpoint = component.create_endpoint("direct:delay-in", &*ctx).unwrap();
         endpoint.create_producer(&producer_ctx).unwrap()
     };
 
@@ -2702,7 +2702,7 @@ async fn xml_body_pipeline() {
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();
-        let endpoint = component.create_endpoint("direct:xml-in").unwrap();
+        let endpoint = component.create_endpoint("direct:xml-in", &*ctx).unwrap();
         endpoint.create_producer(&producer_ctx).unwrap()
     };
 
