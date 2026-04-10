@@ -1000,7 +1000,10 @@ async fn http_component_registration_and_endpoint_creation() {
 
     // Verify endpoint can be created with config
     let endpoint = component
-        .create_endpoint("http://example.com/api?httpMethod=POST&connectTimeout=5000", &camel_component_api::NoOpComponentContext)
+        .create_endpoint(
+            "http://example.com/api?httpMethod=POST&connectTimeout=5000",
+            &camel_component_api::NoOpComponentContext,
+        )
         .unwrap();
     assert!(endpoint.uri().contains("httpMethod=POST"));
 }

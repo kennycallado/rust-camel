@@ -30,8 +30,14 @@ async fn main() -> Result<(), CamelError> {
         .init();
 
     println!("Starting Redis via testcontainers (requires Docker)...");
-    let container = Redis::default().start().await.expect("Failed to start Redis container — is Docker running?");
-    let port = container.get_host_port_ipv4(6379).await.expect("Failed to get Redis port");
+    let container = Redis::default()
+        .start()
+        .await
+        .expect("Failed to start Redis container — is Docker running?");
+    let port = container
+        .get_host_port_ipv4(6379)
+        .await
+        .expect("Failed to get Redis port");
     let conn_str = format!("127.0.0.1:{port}");
     println!("Redis available at {conn_str}");
 
@@ -57,7 +63,10 @@ async fn main() -> Result<(), CamelError> {
     let string_producer = RouteBuilder::from("timer:tick?period=3000&repeatCount=3")
         .route_id("redis-string-producer")
         .set_header("CamelRedis.Key", Value::String("greeting".into()))
-        .set_header("CamelRedis.Value", Value::String("hello from rust-camel!".into()))
+        .set_header(
+            "CamelRedis.Value",
+            Value::String("hello from rust-camel!".into()),
+        )
         .to(format!("redis://{conn_str}?command=SET"))
         .to("log:info?showHeaders=true")
         .build()?;
@@ -82,7 +91,10 @@ async fn main() -> Result<(), CamelError> {
     let pubsub_producer = RouteBuilder::from("timer:pub?period=3000&repeatCount=2")
         .route_id("redis-pubsub-producer")
         .set_header("CamelRedis.Channel", Value::String("demo-channel".into()))
-        .set_header("CamelRedis.Value", Value::String("pubsub message from rust-camel!".into()))
+        .set_header(
+            "CamelRedis.Value",
+            Value::String("pubsub message from rust-camel!".into()),
+        )
         .to(format!("redis://{conn_str}?command=PUBLISH"))
         .to("log:info?showHeaders=true")
         .build()?;

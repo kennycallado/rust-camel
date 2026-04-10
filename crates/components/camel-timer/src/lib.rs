@@ -230,7 +230,9 @@ mod tests {
     fn test_timer_endpoint_no_producer() {
         let ctx = ProducerContext::new();
         let component = TimerComponent::new();
-        let endpoint = component.create_endpoint("timer:tick", &NoOpComponentContext).unwrap();
+        let endpoint = component
+            .create_endpoint("timer:tick", &NoOpComponentContext)
+            .unwrap();
         let producer = endpoint.create_producer(&ctx);
         assert!(producer.is_err());
     }
