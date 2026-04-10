@@ -46,7 +46,7 @@ jobs:
       - name: JMS integration tests
         env:
           CAMEL_JMS_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/jms/build/native/jms-bridge
-        run: cargo test -p camel-test --features integration-tests --test jms_test -- --test-threads=1
+        run: cargo test -p camel-test --features integration-tests
       - name: Test (full workspace)
         run: cargo test --workspace
 
