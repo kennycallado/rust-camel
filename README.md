@@ -2,7 +2,7 @@
 
 A Rust-native, Tower-native integration framework inspired by [Apache Camel](https://camel.apache.org/), built for async pipelines, EIP patterns, and production observability.
 
-> **Status:** Pre-release (`0.5.8`). APIs will change.
+> **Status:** Pre-release (`0.6.0`). APIs will change.
 
 ## Overview
 
