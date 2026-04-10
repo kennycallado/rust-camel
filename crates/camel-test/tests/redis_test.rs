@@ -50,7 +50,7 @@ async fn redis_string_commands() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("testkey".into()))
@@ -107,7 +107,7 @@ async fn redis_list_commands() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("mylist".into()))
@@ -164,7 +164,7 @@ async fn redis_hash_commands() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("myhash".into()))
@@ -222,7 +222,7 @@ async fn redis_set_commands() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("myset".into()))
@@ -279,7 +279,7 @@ async fn redis_pubsub_producer() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Channel", Value::String("mychannel".into()))
@@ -336,7 +336,7 @@ async fn redis_consumer_queue_mode() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let consumer_route = RouteBuilder::from(&format!(
         "redis://{}?command=BRPOP&key=myqueue&timeout=1",
@@ -403,7 +403,7 @@ async fn redis_consumer_blpop_reads_left_side_first() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let consumer_route = RouteBuilder::from(&format!(
         "redis://{}?command=BLPOP&key=myqueue&timeout=1",
@@ -486,7 +486,7 @@ async fn redis_consumer_brpop_reads_right_side_first() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let consumer_route = RouteBuilder::from(&format!(
         "redis://{}?command=BRPOP&key=myqueue&timeout=1",
@@ -573,7 +573,7 @@ async fn redis_consumer_pubsub_mode() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let consumer_route = RouteBuilder::from(&format!(
         "redis://{}?command=SUBSCRIBE&channels=testchannel",

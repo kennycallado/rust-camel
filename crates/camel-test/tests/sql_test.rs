@@ -103,7 +103,7 @@ async fn producer_select() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .to(format!(
@@ -169,7 +169,7 @@ async fn producer_insert() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("name", Value::String("Charlie".into()))
@@ -235,7 +235,7 @@ async fn producer_update() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("new_value", Value::Number(999.into()))
@@ -301,7 +301,7 @@ async fn producer_delete() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("target_name", Value::String("ToDelete".into()))
@@ -366,7 +366,7 @@ async fn producer_select_one() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .to(format!(
@@ -423,7 +423,7 @@ async fn producer_batch() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let batch_body = serde_json::json!([["Alice", 100], ["Bob", 200], ["Charlie", 300]]);
 
@@ -490,7 +490,7 @@ async fn producer_noop() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_body(Body::Text("OriginalBody".into()))
@@ -562,7 +562,7 @@ async fn consumer_polling() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_consumer WHERE name = 'ConsumerRow'?db_url={}&delay=100&initialDelay=50",
@@ -633,7 +633,7 @@ async fn consumer_on_consume() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_on_consume?db_url={}&delay=100&initialDelay=50&onConsume=INSERT INTO processed_rows (id, name) VALUES (:#id, :#name)",
@@ -686,7 +686,7 @@ async fn consumer_empty_result() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_empty?db_url={}&delay=100&initialDelay=50&routeEmptyResultSet=false",
@@ -796,7 +796,7 @@ async fn consumer_empty_result_routed() {
     h.ctx()
         .lock()
         .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"));
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error")).await;
 
     let sql_uri = format!(
         "sql:SELECT * FROM test_empty_routed?db_url={}&delay=100&initialDelay=50&routeEmptyResultSet=true&useIterator=false",
