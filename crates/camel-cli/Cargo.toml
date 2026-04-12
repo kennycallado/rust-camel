@@ -20,52 +20,45 @@ name = "camel"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-tokio.workspace = true
-tokio-util.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
 chrono.workspace = true
+clap = { version = "4", features = ["derive"] }
+config.workspace = true
+include_dir = "0.7"
 serde_json.workspace = true
-camel-core.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+tracing.workspace = true
 camel-api.workspace = true
 camel-dsl.workspace = true
-camel-config = { workspace = true }
-config.workspace = true
-camel-component-timer.workspace = true
-camel-component-log.workspace = true
+camel-core.workspace = true
+camel-config = { workspace = true, features = ["otel"] }
+camel-component-api.workspace = true
+camel-component-container.workspace = true
+camel-component-controlbus.workspace = true
 camel-component-direct.workspace = true
 camel-component-file.workspace = true
 camel-component-http.workspace = true
-camel-component-mock.workspace = true
-camel-component-controlbus.workspace = true
-camel-component-ws.workspace = true
-camel-component-api.workspace = true
-camel-component-container = { workspace = true }
-camel-component-redis = { workspace = true, optional = true }
+camel-component-jms.workspace = true
 camel-component-kafka = { workspace = true, optional = true }
-camel-component-sql = { workspace = true, optional = true }
-camel-component-jms = { workspace = true, optional = true }
-camel-language-js = { workspace = true, optional = true }
-camel-language-rhai = { workspace = true, optional = true }
-camel-language-jsonpath = { workspace = true, optional = true }
-camel-language-xpath = { workspace = true, optional = true }
-include_dir = "0.7"
+camel-component-log.workspace = true
+camel-component-mock.workspace = true
+camel-component-redis.workspace = true
+camel-component-sql.workspace = true
+camel-component-timer.workspace = true
+camel-component-ws.workspace = true
+camel-language-js.workspace = true
+camel-language-jsonpath.workspace = true
+camel-language-rhai.workspace = true
+camel-language-xpath.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
 serde_json.workspace = true
 
 [features]
-default = ["redis", "sql", "jms", "lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath"]
-redis = ["dep:camel-component-redis"]
+default = ["otel"]
+otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 kafka = ["dep:camel-component-kafka", "dynamic-linking"]
-sql = ["dep:camel-component-sql"]
-jms = ["dep:camel-component-jms"]
-lang-js = ["camel-core/lang-js", "dep:camel-language-js"]
-lang-rhai = ["camel-core/lang-rhai", "dep:camel-language-rhai"]
-lang-jsonpath = ["camel-core/lang-jsonpath", "dep:camel-language-jsonpath"]
-lang-xpath = ["camel-core/lang-xpath", "dep:camel-language-xpath"]
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]
-all-components = ["redis", "kafka", "sql", "jms"]

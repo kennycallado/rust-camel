@@ -233,8 +233,6 @@ async fn run(
     );
 
     // Register optional/feature-gated bundles
-    #[cfg(feature = "jms")]
-    // JMS needs explicit pool capture for shutdown — handled below
     let jms_pool = {
         if let Some(raw) = camel_config.components.raw.get("jms").cloned() {
             match <camel_component_jms::JmsBundle as camel_component_api::ComponentBundle>::from_toml(raw) {
@@ -253,14 +251,10 @@ async fn run(
             None
         }
     };
-    #[cfg(not(feature = "jms"))]
-    let jms_pool: Option<()> = None;
 
     #[cfg(feature = "kafka")]
     register_bundle!(ctx, camel_config, camel_component_kafka::KafkaBundle);
-    #[cfg(feature = "redis")]
     register_bundle!(ctx, camel_config, camel_component_redis::RedisBundle);
-    #[cfg(feature = "sql")]
     register_bundle!(ctx, camel_config, camel_component_sql::SqlBundle);
 
     // 5. Discover and load initial routes
@@ -336,7 +330,6 @@ async fn run(
         tracing::error!("Error during shutdown: {}", e);
     });
 
-    #[cfg(feature = "jms")]
     if let Some(pool) = jms_pool
         && let Err(e) = pool.shutdown().await
     {
