@@ -131,8 +131,8 @@ impl std::fmt::Debug for BrokerConfig {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct JmsPoolConfig {
+    #[serde(default)]
     pub brokers: HashMap<String, BrokerConfig>,
-    pub default_broker: String,
     #[serde(default = "default_max_bridges")]
     pub max_bridges: usize,
     #[serde(default = "default_bridge_start_timeout_ms")]
@@ -149,7 +149,6 @@ impl Default for JmsPoolConfig {
     fn default() -> Self {
         Self {
             brokers: HashMap::new(),
-            default_broker: String::new(),
             max_bridges: default_max_bridges(),
             bridge_start_timeout_ms: default_bridge_start_timeout_ms(),
             broker_reconnect_interval_ms: default_broker_reconnect_interval_ms(),
@@ -176,13 +175,12 @@ impl JmsPoolConfig {
         );
         Self {
             brokers,
-            default_broker: "default".to_string(),
             max_bridges: 1,
             ..Self::default()
         }
     }
 
-    /// Validates the config: all brokers must have non-empty URLs, default_broker must exist.
+    /// Validates the config: all brokers must have non-empty URLs.
     pub fn validate(&self) -> Result<(), camel_component_api::CamelError> {
         for (name, bc) in &self.brokers {
             if bc.broker_url.is_empty() {
@@ -191,18 +189,6 @@ impl JmsPoolConfig {
                     name
                 )));
             }
-        }
-        if self.brokers.is_empty() {
-            // valid at config time; usage may fail later
-        } else if self.default_broker.is_empty() {
-            return Err(camel_component_api::CamelError::ProcessorError(
-                "jms: default_broker must be set when brokers map is non-empty".to_string(),
-            ));
-        } else if !self.brokers.contains_key(&self.default_broker) {
-            return Err(camel_component_api::CamelError::ProcessorError(format!(
-                "jms: default_broker '{}' is not declared in brokers map",
-                self.default_broker
-            )));
         }
         Ok(())
     }
@@ -290,7 +276,6 @@ mod tests {
     fn single_broker_convenience() {
         let cfg = JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq);
         assert_eq!(cfg.max_bridges, 1);
-        assert_eq!(cfg.default_broker, "default");
         assert!(cfg.brokers.contains_key("default"));
         let bc = &cfg.brokers["default"];
         assert_eq!(bc.broker_url, "tcp://localhost:61616");
@@ -301,7 +286,6 @@ mod tests {
     fn default_pool_config() {
         let cfg = JmsPoolConfig::default();
         assert_eq!(cfg.max_bridges, 8);
-        assert!(cfg.default_broker.is_empty());
         assert!(cfg.brokers.is_empty());
         assert_eq!(cfg.bridge_start_timeout_ms, 30_000);
         assert_eq!(cfg.broker_reconnect_interval_ms, 5_000);
@@ -313,39 +297,6 @@ mod tests {
         let cfg = JmsPoolConfig::single_broker("", BrokerType::ActiveMq);
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("empty broker_url"), "got: {}", err);
-    }
-
-    #[test]
-    fn validate_missing_default_broker() {
-        let mut cfg = JmsPoolConfig::default();
-        cfg.brokers.insert(
-            "declared".to_string(),
-            BrokerConfig {
-                broker_url: "tcp://localhost:61616".to_string(),
-                broker_type: BrokerType::ActiveMq,
-                username: None,
-                password: None,
-            },
-        );
-        cfg.default_broker = "missing".to_string();
-        let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("not declared"), "got: {}", err);
-    }
-
-    #[test]
-    fn validate_non_empty_brokers_requires_default_broker() {
-        let mut cfg = JmsPoolConfig::default();
-        cfg.brokers.insert(
-            "mybroker".to_string(),
-            BrokerConfig {
-                broker_url: "tcp://localhost:61616".to_string(),
-                broker_type: BrokerType::ActiveMq,
-                username: None,
-                password: None,
-            },
-        );
-        let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("default_broker"), "got: {}", err);
     }
 
     #[test]

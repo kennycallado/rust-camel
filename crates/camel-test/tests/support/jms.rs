@@ -29,7 +29,6 @@ pub async fn shared_jms_activemq() -> JmsComponent {
             let (_, broker_url) = shared_activemq().await;
             let pool_config = JmsPoolConfig {
                 max_bridges: 1,
-                default_broker: "default".to_string(),
                 brokers: HashMap::from([(
                     "default".to_string(),
                     BrokerConfig {
@@ -57,7 +56,6 @@ pub async fn shared_jms_artemis() -> JmsComponent {
             let (_, broker_url) = shared_artemis().await;
             let pool_config = JmsPoolConfig {
                 max_bridges: 1,
-                default_broker: "default".to_string(),
                 brokers: HashMap::from([(
                     "default".to_string(),
                     BrokerConfig {
@@ -85,7 +83,6 @@ pub async fn shared_jms_artemis_auth() -> JmsComponent {
             let (_, broker_url) = shared_artemis_auth().await;
             let pool_config = JmsPoolConfig {
                 max_bridges: 1,
-                default_broker: "default".to_string(),
                 brokers: HashMap::from([(
                     "default".to_string(),
                     BrokerConfig {

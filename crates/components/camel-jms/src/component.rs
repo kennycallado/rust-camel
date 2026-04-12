@@ -65,7 +65,6 @@ impl std::fmt::Debug for BridgeSlot {
 pub struct JmsBridgePool {
     pub(crate) slots: DashMap<String, Arc<BridgeSlot>>,
     pub(crate) config: HashMap<String, BrokerConfig>,
-    pub default_broker: String,
     pub(crate) bridge_start_timeout_ms: u64,
     pub(crate) broker_reconnect_interval_ms: u64,
     pub(crate) health_check_interval_ms: u64,
@@ -79,7 +78,6 @@ impl JmsBridgePool {
         Ok(Self {
             slots: DashMap::new(),
             config: pool_config.brokers,
-            default_broker: pool_config.default_broker,
             bridge_start_timeout_ms: pool_config.bridge_start_timeout_ms,
             broker_reconnect_interval_ms: pool_config.broker_reconnect_interval_ms,
             health_check_interval_ms: pool_config.health_check_interval_ms,
@@ -88,19 +86,34 @@ impl JmsBridgePool {
         })
     }
 
-    /// Resolve broker name: use provided name if Some, fall back to default_broker.
+    /// Resolve broker name from the URI `broker=` param.
+    ///
+    /// - If `Some(name)` → validate it exists in config and return it.
+    /// - If `None` and exactly one broker is configured → use it implicitly.
+    /// - If `None` and multiple brokers are configured → error asking for `?broker=`.
+    /// - If `None` and no brokers are configured → error asking to declare brokers.
     pub fn resolve_broker_name(&self, name: Option<&str>) -> Result<String, CamelError> {
-        let resolved = match name {
-            Some(n) => n.to_string(),
-            None => self.default_broker.clone(),
-        };
-        if !self.config.contains_key(&resolved) {
-            return Err(CamelError::ProcessorError(format!(
-                "Unknown JMS broker '{}' — declare it in [components.jms.brokers] in Camel.toml",
-                resolved
-            )));
+        match name {
+            Some(n) => {
+                if self.config.contains_key(n) {
+                    Ok(n.to_string())
+                } else {
+                    Err(CamelError::ProcessorError(format!(
+                        "Unknown JMS broker '{n}' — declare it in [components.jms.brokers] in Camel.toml",
+                    )))
+                }
+            }
+            None => match self.config.len() {
+                0 => Err(CamelError::ProcessorError(
+                    "No JMS brokers configured — declare at least one in [components.jms.brokers] in Camel.toml".to_string(),
+                )),
+                1 => Ok(self.config.keys().next().unwrap().clone()),
+                _ => Err(CamelError::ProcessorError(format!(
+                    "Multiple JMS brokers configured ({}); specify one with ?broker=<name> in the URI",
+                    self.config.keys().cloned().collect::<Vec<_>>().join(", ")
+                ))),
+            },
         }
-        Ok(resolved)
     }
 
     /// Resolve broker type: activemq/artemis schemes hard-override config type; jms uses config.
@@ -488,10 +501,8 @@ impl JmsComponent {
         body: &[u8],
         content_type: &str,
     ) -> Result<String, CamelError> {
-        let slot = self
-            .pool
-            .get_or_create_slot(&self.pool.default_broker)
-            .await?;
+        let broker_name = self.pool.resolve_broker_name(None)?;
+        let slot = self.pool.get_or_create_slot(&broker_name).await?;
         let channel = match &*slot.state_rx.borrow() {
             BridgeState::Ready { channel } => channel.clone(),
             other => {
@@ -694,25 +705,6 @@ mod tests {
     }
 
     #[test]
-    fn from_config_rejects_missing_default_broker() {
-        let pool_config = JmsPoolConfig {
-            brokers: HashMap::from([(
-                "mybroker".to_string(),
-                BrokerConfig {
-                    broker_url: "tcp://localhost:61616".to_string(),
-                    broker_type: BrokerType::ActiveMq,
-                    username: None,
-                    password: None,
-                },
-            )]),
-            default_broker: String::new(),
-            ..JmsPoolConfig::default()
-        };
-        let err = JmsBridgePool::from_config(pool_config).err().unwrap();
-        assert!(err.to_string().contains("default_broker"), "got: {}", err);
-    }
-
-    #[test]
     fn resolve_broker_name_with_explicit_name() {
         let pool = JmsBridgePool::from_config(JmsPoolConfig::single_broker(
             "tcp://localhost:61616",
@@ -783,7 +775,6 @@ mod tests {
                     password: None,
                 },
             )]),
-            default_broker: "main".to_string(),
             ..JmsPoolConfig::default()
         })
         .unwrap();
@@ -857,7 +848,6 @@ mod tests {
                         },
                     ),
                 ]),
-                default_broker: "primary".to_string(),
                 ..JmsPoolConfig::default()
             })
             .unwrap(),
@@ -909,7 +899,6 @@ mod tests {
                         password: None,
                     },
                 )]),
-                default_broker: "test".to_string(),
                 bridge_start_timeout_ms: 100,
                 ..JmsPoolConfig::default()
             })
@@ -974,7 +963,6 @@ mod tests {
                         password: None,
                     },
                 )]),
-                default_broker: "default".to_string(),
                 bridge_start_timeout_ms: 100,
                 ..JmsPoolConfig::default()
             })

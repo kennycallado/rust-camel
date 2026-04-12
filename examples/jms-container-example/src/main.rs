@@ -170,7 +170,6 @@ async fn main() -> Result<(), CamelError> {
     let broker_url = format!("tcp://127.0.0.1:{BROKER_PORT}");
     let pool_config = JmsPoolConfig {
         max_bridges: 1,
-        default_broker: "default".to_string(),
         brokers: HashMap::from([(
             "default".to_string(),
             BrokerConfig {

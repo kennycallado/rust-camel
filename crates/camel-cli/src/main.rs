@@ -193,27 +193,27 @@ async fn run(
 
     tracing::info!("camel-cli: loading routes from patterns: {:?}", patterns);
 
-    // Define register_bundle! macro — looks up config key in ComponentsConfig::raw
+    // Define register_bundle! macro — looks up config key in ComponentsConfig::raw,
+    // falling back to an empty table so bundles always register with their serde defaults.
     // Uses UFCS to invoke ComponentBundle methods without requiring trait in scope
     macro_rules! register_bundle {
         ($ctx:expr, $cfg:expr, $Bundle:ty) => {
-            if let Some(raw) = $cfg
+            let raw = $cfg
                 .components
                 .raw
                 .get(<$Bundle as camel_component_api::ComponentBundle>::config_key())
                 .cloned()
-            {
-                match <$Bundle as camel_component_api::ComponentBundle>::from_toml(raw) {
-                    Ok(bundle) => <$Bundle as camel_component_api::ComponentBundle>::register_all(
-                        bundle, &mut $ctx,
-                    ),
-                    Err(e) => {
-                        return Err(camel_api::CamelError::Config(format!(
-                            "Failed to load {} config: {}",
-                            <$Bundle as camel_component_api::ComponentBundle>::config_key(),
-                            e
-                        )));
-                    }
+                .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+            match <$Bundle as camel_component_api::ComponentBundle>::from_toml(raw) {
+                Ok(bundle) => <$Bundle as camel_component_api::ComponentBundle>::register_all(
+                    bundle, &mut $ctx,
+                ),
+                Err(e) => {
+                    return Err(camel_api::CamelError::Config(format!(
+                        "Failed to load {} config: {}",
+                        <$Bundle as camel_component_api::ComponentBundle>::config_key(),
+                        e
+                    )));
                 }
             }
         };
@@ -238,21 +238,25 @@ async fn run(
 
     // Register optional/feature-gated bundles
     let jms_pool = {
-        if let Some(raw) = camel_config.components.raw.get("jms").cloned() {
-            match <camel_component_jms::JmsBundle as camel_component_api::ComponentBundle>::from_toml(raw) {
-                Ok(bundle) => {
-                    let pool = bundle.pool();
-                    <camel_component_jms::JmsBundle as camel_component_api::ComponentBundle>::register_all(bundle, &mut ctx);
-                    Some(pool)
-                }
-                Err(e) => {
-                    return Err(camel_api::CamelError::Config(format!(
-                        "Failed to load jms config: {e}"
-                    )));
-                }
+        let raw = camel_config
+            .components
+            .raw
+            .get("jms")
+            .cloned()
+            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+        match <camel_component_jms::JmsBundle as camel_component_api::ComponentBundle>::from_toml(
+            raw,
+        ) {
+            Ok(bundle) => {
+                let pool = bundle.pool();
+                <camel_component_jms::JmsBundle as camel_component_api::ComponentBundle>::register_all(bundle, &mut ctx);
+                pool
             }
-        } else {
-            None
+            Err(e) => {
+                return Err(camel_api::CamelError::Config(format!(
+                    "Failed to load jms config: {e}"
+                )));
+            }
         }
     };
 
@@ -342,9 +346,7 @@ async fn run(
         tracing::error!("Error during shutdown: {}", e);
     });
 
-    if let Some(pool) = jms_pool
-        && let Err(e) = pool.shutdown().await
-    {
+    if let Err(e) = jms_pool.shutdown().await {
         tracing::error!("JMS pool shutdown error: {e}");
     }
 

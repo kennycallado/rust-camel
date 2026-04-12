@@ -68,7 +68,6 @@ mod tests {
     #[test]
     fn jms_bundle_from_toml_valid() {
         let toml_str = r#"
-            default_broker = "default"
             [brokers.default]
             broker_url = "tcp://localhost:61616"
             broker_type = "activemq"
@@ -85,7 +84,6 @@ mod tests {
     #[test]
     fn jms_bundle_registers_expected_schemes() {
         let toml_str = r#"
-            default_broker = "default"
             [brokers.default]
             broker_url = "tcp://localhost:61616"
             broker_type = "activemq"
