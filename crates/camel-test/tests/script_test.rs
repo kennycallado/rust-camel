@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use camel_api::{Exchange, Message, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_core::LanguageRegistryError;
 use camel_language_api::LanguageError;
 use camel_language_rhai::RhaiLanguage;
 use camel_test::CamelTestContext;
@@ -14,8 +15,7 @@ use tower::ServiceExt;
 
 fn ensure_rhai_registered(ctx: &mut camel_core::CamelContext) {
     match ctx.register_language("rhai", Box::new(RhaiLanguage::new())) {
-        Ok(()) | Err(LanguageError::AlreadyRegistered(_)) => {}
-        Err(e) => panic!("failed to register rhai language: {e}"),
+        Ok(()) | Err(LanguageRegistryError::AlreadyRegistered { .. }) => {}
     }
 }
 

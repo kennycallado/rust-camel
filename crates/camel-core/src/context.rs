@@ -12,7 +12,6 @@ use camel_api::{
 };
 use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;
-use camel_language_api::LanguageError;
 
 use crate::lifecycle::adapters::RuntimeExecutionAdapter;
 use crate::lifecycle::adapters::controller_actor::{
@@ -23,6 +22,7 @@ use crate::lifecycle::adapters::route_controller::{
 };
 use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::lifecycle::application::runtime_bus::RuntimeBus;
+use crate::lifecycle::domain::LanguageRegistryError;
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::TracerConfig;
 
@@ -283,21 +283,22 @@ impl CamelContext {
 
     /// Register a language with this context, keyed by name.
     ///
-    /// Returns `Err(LanguageError::AlreadyRegistered)` if a language with the
-    /// same name is already registered. Use [`resolve_language`](Self::resolve_language)
-    /// to check before registering, or choose a distinct name.
+    /// Returns `Err(LanguageRegistryError::AlreadyRegistered)` if a language
+    /// with the same name is already registered. Use
+    /// [`resolve_language`](Self::resolve_language) to check before
+    /// registering, or choose a distinct name.
     pub fn register_language(
         &mut self,
         name: impl Into<String>,
         lang: Box<dyn Language>,
-    ) -> Result<(), LanguageError> {
+    ) -> Result<(), LanguageRegistryError> {
         let name = name.into();
         let mut languages = self
             .languages
             .lock()
             .expect("mutex poisoned: another thread panicked while holding this lock");
         if languages.contains_key(&name) {
-            return Err(LanguageError::AlreadyRegistered(name));
+            return Err(LanguageRegistryError::AlreadyRegistered { name });
         }
         languages.insert(name, Arc::from(lang));
         Ok(())

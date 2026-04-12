@@ -221,9 +221,7 @@ mod tests {
     #[test]
     fn test_double_quoted_literal_unescapes_tab_and_quote() {
         let lang = SimpleLanguage;
-        let expr = lang
-            .create_expression("\"col1\\t\\\"quoted\\\"\"")
-            .unwrap();
+        let expr = lang.create_expression("\"col1\\t\\\"quoted\\\"\"").unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).unwrap();
         assert_eq!(val, Value::String("col1\t\"quoted\"".to_string()));
@@ -232,9 +230,7 @@ mod tests {
     #[test]
     fn test_double_quoted_literal_unescapes_backspace_formfeed_and_slash() {
         let lang = SimpleLanguage;
-        let expr = lang
-            .create_expression("\"a\\bb\\fc\\/d\"")
-            .unwrap();
+        let expr = lang.create_expression("\"a\\bb\\fc\\/d\"").unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).unwrap();
         assert_eq!(val, Value::String("a\u{0008}b\u{000C}c/d".to_string()));

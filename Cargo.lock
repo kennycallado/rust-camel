@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "aggregator"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -220,7 +220,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auto-restart"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -406,7 +406,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bean-demo"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-bean",
@@ -675,7 +675,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "camel-api"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "camel-bean"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "camel-bean-macros"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "camel-bench"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-core",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "camel-bridge"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bytes",
  "dirs",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "camel-builder"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-api",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "camel-cli"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-api",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-api"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -822,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-container"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "bollard",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-controlbus"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-component-api",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-direct"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-component-api",
@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-file"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-http"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-jms"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-kafka"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-log"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-component-api",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-mock"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-redis"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-component-api",
@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-sql"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-timer"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-component-api",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "camel-component-ws"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "camel-config"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "camel-core"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "camel-dsl"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-api",
@@ -1137,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "camel-endpoint"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1150,7 +1150,7 @@ dependencies = [
 
 [[package]]
 name = "camel-endpoint-macros"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1159,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "camel-health"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-api"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "thiserror 2.0.18",
@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-js"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "boa_engine",
  "camel-api",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-jsonpath"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-language-api",
  "jsonpath-rust",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-rhai"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-language-api",
  "rhai",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-simple"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-language-api",
  "criterion",
@@ -1223,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "camel-language-xpath"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-language-api",
  "serde_json",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "camel-otel"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "camel-processor"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "camel-prometheus"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "camel-support"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -1303,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "camel-test"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-bean",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "camel-util"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -1425,7 +1425,7 @@ dependencies = [
 
 [[package]]
 name = "circuit-breaker"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "config-basic"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "config-profiles"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "container-example"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bollard",
  "camel-api",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "container-hot-reload"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-container",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "container-nginx"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-container",
@@ -1640,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "content-based-routing"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "controlbus"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -1667,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "convert-body-to"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bytes",
  "camel-api",
@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "custom-component-bundle"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-api",
@@ -1942,7 +1942,7 @@ checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
 name = "delayer"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2058,7 +2058,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamic-router"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2089,7 +2089,7 @@ dependencies = [
 
 [[package]]
 name = "env-interpolation"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "error-handling"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2165,7 +2165,7 @@ dependencies = [
 
 [[package]]
 name = "exchange-uow"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2191,7 +2191,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "file-pipeline"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2204,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "file-polling"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "file-streaming"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2579,7 +2579,7 @@ dependencies = [
 
 [[package]]
 name = "health-demo"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2600,7 +2600,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello-world"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2652,7 +2652,7 @@ dependencies = [
 
 [[package]]
 name = "hot-reload"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2668,7 +2668,7 @@ dependencies = [
 
 [[package]]
 name = "hot-reload-yaml"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-log",
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "http-client"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2734,7 +2734,7 @@ dependencies = [
 
 [[package]]
 name = "http-server"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "http-streaming"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bytes",
  "camel-api",
@@ -3277,7 +3277,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jms-container-example"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3293,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "jms-example"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3354,7 +3354,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-example"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3390,7 +3390,7 @@ dependencies = [
 
 [[package]]
 name = "language-js"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3404,7 +3404,7 @@ dependencies = [
 
 [[package]]
 name = "language-jsonpath"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3420,7 +3420,7 @@ dependencies = [
 
 [[package]]
 name = "language-rhai"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3435,7 +3435,7 @@ dependencies = [
 
 [[package]]
 name = "language-simple"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3450,7 +3450,7 @@ dependencies = [
 
 [[package]]
 name = "language-xpath"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3465,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "lazy-route"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3558,7 +3558,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "load-balancer"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3586,7 +3586,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "log-eip"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3609,7 +3609,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "marshal-unmarshal"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3672,7 +3672,7 @@ dependencies = [
 
 [[package]]
 name = "metrics-demo"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3731,7 +3731,7 @@ dependencies = [
 
 [[package]]
 name = "multi-route-direct"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -3745,7 +3745,7 @@ dependencies = [
 
 [[package]]
 name = "multicast"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4053,7 +4053,7 @@ dependencies = [
 
 [[package]]
 name = "otel-demo"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4276,7 +4276,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pipeline-concurrency"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4429,7 +4429,7 @@ dependencies = [
 
 [[package]]
 name = "prometheus-demo"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -4841,7 +4841,7 @@ dependencies = [
 
 [[package]]
 name = "redis-example"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -5052,7 +5052,7 @@ dependencies = [
 
 [[package]]
 name = "routing-slip"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -5482,7 +5482,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "showcase"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "camel-api",
@@ -5607,7 +5607,7 @@ dependencies = [
 
 [[package]]
 name = "splitter"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -5627,7 +5627,7 @@ checksum = "3b9b39299b249ad65f3b7e96443bad61c02ca5cd3589f46cb6d610a0fd6c0d6a"
 
 [[package]]
 name = "sql-example"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -5644,7 +5644,7 @@ dependencies = [
 
 [[package]]
 name = "sql-streaming"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6084,7 +6084,7 @@ dependencies = [
 
 [[package]]
 name = "throttler"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6508,7 +6508,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracer-demo"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -6612,7 +6612,7 @@ dependencies = [
 
 [[package]]
 name = "transform-pipeline"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -7344,7 +7344,7 @@ dependencies = [
 
 [[package]]
 name = "wiretap"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -7464,7 +7464,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "ws-server"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-builder",
@@ -7488,7 +7488,7 @@ dependencies = [
 
 [[package]]
 name = "xml-body"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "serde_json",
@@ -7497,7 +7497,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "clap",
  "hex",
@@ -7513,7 +7513,7 @@ checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yaml-dsl"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "camel-api",
  "camel-component-direct",

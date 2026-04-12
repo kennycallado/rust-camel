@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use camel_api::body::Body;
 use camel_api::{Exchange, Message, Value};
+use camel_core::LanguageRegistryError;
 use camel_dsl::parse_yaml;
 use camel_language_api::LanguageError;
 use camel_language_jsonpath::JsonPathLanguage;
@@ -10,8 +11,7 @@ use tower::ServiceExt;
 
 fn ensure_jsonpath_registered(ctx: &mut camel_core::CamelContext) {
     match ctx.register_language("jsonpath", Box::new(JsonPathLanguage)) {
-        Ok(()) | Err(LanguageError::AlreadyRegistered(_)) => {}
-        Err(e) => panic!("failed to register jsonpath language: {e}"),
+        Ok(()) | Err(LanguageRegistryError::AlreadyRegistered { .. }) => {}
     }
 }
 

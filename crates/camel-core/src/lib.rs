@@ -102,7 +102,8 @@ pub use crate::lifecycle::adapters::{
 pub use crate::lifecycle::application::runtime_bus::RuntimeBus;
 pub use crate::lifecycle::application::{BuilderStep, RouteDefinition};
 pub use crate::lifecycle::domain::{
-    RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState, RuntimeEvent,
+    LanguageRegistryError, RouteLifecycleCommand, RouteRuntimeAggregate, RouteRuntimeState,
+    RuntimeEvent,
 };
 pub use crate::lifecycle::ports::{
     CommandDedupPort, EventPublisherPort, ProjectionStorePort, RouteRepositoryPort,
