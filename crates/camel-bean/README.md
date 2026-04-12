@@ -5,6 +5,7 @@ The `camel-bean` crate provides a bean/registry system for rust-camel, enabling 
 ## Overview
 
 The bean system allows you to:
+
 - Define business logic as structured beans with typed methods
 - Register beans in a central registry for lookup by name
 - Invoke bean methods from routes with automatic parameter binding
@@ -15,13 +16,15 @@ This enables clean separation between route configuration and business logic, si
 ## Quick Start
 
 1. Add `camel-bean` to your `Cargo.toml`:
+
 ```toml
 [dependencies]
-camel-bean = "0.6.1"
-camel-bean-macros = "0.6.1"
+camel-bean = "x.x.x"
+camel-bean-macros = "x.x.x"
 ```
 
 2. Define a bean with handlers:
+
 ```rust
 use camel_bean::{bean_impl, handler};
 
@@ -38,6 +41,7 @@ impl OrderService {
 ```
 
 3. Register and use the bean:
+
 ```rust
 use camel_bean::BeanRegistry;
 
@@ -49,6 +53,7 @@ registry.invoke("orderService", "process", &mut exchange).await?;
 ```
 
 4. Use in YAML DSL:
+
 ```yaml
 routes:
   - id: "process-order"
@@ -98,7 +103,7 @@ use camel_bean::BeanProcessor;
 #[async_trait]
 pub trait BeanProcessor: Send + Sync {
     async fn call(&self, method: &str, exchange: &mut Exchange) -> Result<(), CamelError>;
-    
+
     fn methods(&self) -> Vec<&'static str>;
 }
 ```
@@ -136,11 +141,11 @@ The bean system supports automatic parameter binding from the exchange to handle
 
 ### Supported Parameter Types
 
-| Parameter Type | Source | Description |
-|---------------|--------|-------------|
-| `body: T` | Message body | Deserialized from JSON if needed |
-| `headers: Headers` | Exchange headers | All headers as a struct |
-| `exchange: &mut Exchange` | Full exchange | Complete exchange object |
+| Parameter Type            | Source           | Description                      |
+| ------------------------- | ---------------- | -------------------------------- |
+| `body: T`                 | Message body     | Deserialized from JSON if needed |
+| `headers: Headers`        | Exchange headers | All headers as a struct          |
+| `exchange: &mut Exchange` | Full exchange    | Complete exchange object         |
 
 ### Example with Multiple Parameters
 
@@ -201,6 +206,7 @@ impl From<BeanError> for camel_api::CamelError {
 ### Handler Return Types
 
 Handlers can return:
+
 - `Result<T, E>` where `E: Display` - for successful/failed processing
 - `T` - simple successful response
 - Any type that implements `serde::Serialize` for JSON response
@@ -225,6 +231,7 @@ ctx.set_bean_registry(bean_registry);
 ```
 
 This enables:
+
 - Bean invocation from YAML DSL routes
 - Bean discovery and management
 - Integration with route lifecycle
@@ -232,6 +239,7 @@ This enables:
 ## Examples
 
 See the following examples for complete usage:
+
 - `examples/bean-demo` - Comprehensive bean usage demonstration
 - `examples/yaml-dsl` - YAML DSL integration example
 
@@ -246,6 +254,7 @@ See the following examples for complete usage:
 ## Type Safety
 
 The bean system provides compile-time type safety:
+
 - Handler signatures are validated at compile time
 - Parameter binding is checked for supported types
 - Return types must be serializable
@@ -296,6 +305,7 @@ impl Orchestrator {
 ## Future Enhancements
 
 Planned features include:
+
 - Constructor dependency injection
 - Lifecycle callbacks
 - Bean scopes (singleton, prototype)

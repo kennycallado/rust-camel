@@ -2,7 +2,7 @@
 
 A Rust-native, Tower-native integration framework inspired by [Apache Camel](https://camel.apache.org/), built for async pipelines, EIP patterns, and production observability.
 
-> **Status:** Pre-release (`0.6.1`). APIs will change.
+> **Status:** Pre-release (`0.6.2`). APIs will change.
 
 ## Overview
 
@@ -154,7 +154,7 @@ cargo run -p hello-world
 | `camel-file`              | File producer and consumer                                                                                                                                                        |
 | `camel-kafka`             | Kafka producer and consumer with SSL/SASL and manual commit                                                                                                                       |
 | `camel-redis`             | Redis producer and consumer                                                                                                                                                       |
-| `camel-sql`               | SQL producer/consumer with IN clause separator, SSL/TLS, streaming result support                                                                                               |
+| `camel-sql`               | SQL producer/consumer with IN clause separator, SSL/TLS, streaming result support                                                                                                 |
 | `camel-jms`               | JMS producer and consumer via native-image bridge (ActiveMQ Classic, Artemis)                                                                                                     |
 | `camel-container`         | Docker container producer/consumer via `bollard`                                                                                                                                  |
 | `camel-language-api`      | Language trait API: `Language`, `Expression`, `Predicate`                                                                                                                         |
