@@ -39,6 +39,7 @@ pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError
         Expr::ExchangeProperty(key) => Ok(exchange.property(key).cloned().unwrap_or(Value::Null)),
 
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
+        Expr::EscapedString(s) => Ok(Value::String(s.clone())),
         Expr::NumberLit(n) => serde_json::Number::from_f64(*n)
             .map(Value::Number)
             .ok_or_else(|| LanguageError::EvalError(format!("non-finite number: {n}"))),

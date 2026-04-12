@@ -21,6 +21,7 @@ pub enum Expr {
     /// Example: `"Got ${body} from ${header.source}"` →
     ///   `[Literal("Got "), Expr(Body), Literal(" from "), Expr(Header("source"))]`
     Interpolated(Vec<InterpolatedPart>),
+    EscapedString(String),
 }
 
 /// One segment inside an `Expr::Interpolated`.
@@ -212,6 +213,11 @@ fn parse_atom(s: &str) -> Result<Expr, LanguageError> {
         return Ok(Expr::StringLit(s[1..s.len() - 1].to_string()));
     }
 
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        let raw = &s[1..s.len() - 1];
+        return Ok(Expr::EscapedString(unescape_double_quoted(raw)));
+    }
+
     if let Ok(n) = s.parse::<f64>() {
         return Ok(Expr::NumberLit(n));
     }
@@ -220,6 +226,36 @@ fn parse_atom(s: &str) -> Result<Expr, LanguageError> {
         expr: s.to_string(),
         reason: "unrecognized token".to_string(),
     })
+}
+
+fn unescape_double_quoted(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                match next {
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    'b' => out.push('\u{0008}'),
+                    'f' => out.push('\u{000C}'),
+                    '/' => out.push('/'),
+                    '\\' => out.push('\\'),
+                    '"' => out.push('"'),
+                    other => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                }
+            } else {
+                out.push('\\');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Parse `"user.address.city"` or `"items.0.name"` into `Vec<PathSegment>`.
