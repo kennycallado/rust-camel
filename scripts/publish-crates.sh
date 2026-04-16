@@ -117,6 +117,7 @@ publish_crate "camel-component-direct" "crates/components/camel-direct"
 
 # Remaining core crates
 publish_crate "camel-health" "crates/camel-health"
+publish_crate "camel-platform-kubernetes" "crates/platforms/camel-platform-kubernetes"
 publish_crate "camel-dsl" "crates/camel-dsl"
 publish_crate "camel-builder" "crates/camel-builder"
 
