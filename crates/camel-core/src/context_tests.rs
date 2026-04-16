@@ -108,6 +108,55 @@ async fn test_context_resolves_simple_language() {
 }
 
 #[tokio::test]
+async fn test_builder_with_leader_elector_default_is_noop() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    let handle = ctx
+        .leader_elector()
+        .start(camel_api::PlatformIdentity::local("test"))
+        .await
+        .unwrap();
+    assert!(handle.is_leader());
+}
+
+#[tokio::test]
+async fn test_builder_with_platform_identity() {
+    let identity = camel_api::PlatformIdentity::local("my-pod");
+    let ctx = CamelContext::builder()
+        .platform_identity(identity)
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(ctx.platform_identity().node_id, "my-pod");
+}
+
+#[tokio::test]
+async fn test_builder_with_custom_leader_elector() {
+    use camel_api::{LeaderElector, LeadershipHandle, PlatformError, PlatformIdentity};
+    use std::sync::Arc;
+
+    struct AlwaysFollower;
+
+    #[async_trait::async_trait]
+    impl LeaderElector for AlwaysFollower {
+        async fn start(&self, _: PlatformIdentity) -> Result<LeadershipHandle, PlatformError> {
+            Err(PlatformError::NotAvailable("follower".into()))
+        }
+    }
+
+    let ctx = CamelContext::builder()
+        .leader_elector(Arc::new(AlwaysFollower))
+        .build()
+        .await
+        .unwrap();
+
+    let result = ctx
+        .leader_elector()
+        .start(PlatformIdentity::local("test"))
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
 async fn test_simple_language_via_context() {
     let ctx = CamelContext::builder().build().await.unwrap();
     let lang = ctx.resolve_language("simple").unwrap();

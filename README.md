@@ -144,6 +144,7 @@ cargo run -p hello-world
 | `camel-bean-macros`       | Proc-macro crate for `#[bean]` attribute                                                                                                                                          |
 | `camel-dsl`               | YAML DSL: load and run routes from `.yaml` files                                                                                                                                  |
 | `camel-health`            | Health check types and endpoint support                                                                                                                                           |
+| `camel-platform-kubernetes` | Kubernetes-native platform SPI: leader election, readiness gates, pod identity |
 | `camel-timer`             | Timer source component                                                                                                                                                            |
 | `camel-log`               | Log sink component                                                                                                                                                                |
 | `camel-direct`            | In-memory synchronous component                                                                                                                                                   |
@@ -323,6 +324,12 @@ Built-in health endpoints for Kubernetes:
 - `/healthz` - Liveness probe
 - `/readyz` - Readiness probe
 - `/health` - Detailed health report
+
+Platform SPI support for Kubernetes:
+
+- Leader election via Kubernetes Leases
+- Readiness gate via pod status conditions
+- Pod identity auto-detection from Downward API
 
 ```yaml
 livenessProbe:

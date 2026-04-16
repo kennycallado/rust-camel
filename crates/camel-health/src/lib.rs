@@ -8,17 +8,53 @@ use camel_api::{HealthChecker, HealthReport, HealthStatus};
 
 pub use server::HealthServer;
 
-pub fn health_router(checker: Option<HealthChecker>) -> Router<()> {
+pub fn health_router(
+    readyz_checker: Option<HealthChecker>,
+    liveness_checker: Option<HealthChecker>,
+    startup_checker: Option<HealthChecker>,
+) -> Router<()> {
     let healthz = {
-        let c = checker.clone();
-        move || async move {
-            let _ = &c;
-            StatusCode::OK
+        let c = liveness_checker.clone();
+        move || {
+            let c = c.clone();
+            async move {
+                match c.as_ref() {
+                    Some(checker) => {
+                        let report = checker();
+                        if report.status == HealthStatus::Healthy {
+                            (StatusCode::OK, Json(report)).into_response()
+                        } else {
+                            (StatusCode::SERVICE_UNAVAILABLE, Json(report)).into_response()
+                        }
+                    }
+                    None => (StatusCode::OK, Json(HealthReport::default())).into_response(),
+                }
+            }
         }
     };
 
     let readyz = {
-        let c = checker.clone();
+        let c = readyz_checker.clone();
+        move || {
+            let c = c.clone();
+            async move {
+                match c.as_ref() {
+                    Some(checker) => {
+                        let report = checker();
+                        if report.status == HealthStatus::Healthy {
+                            (StatusCode::OK, Json(report)).into_response()
+                        } else {
+                            (StatusCode::SERVICE_UNAVAILABLE, Json(report)).into_response()
+                        }
+                    }
+                    None => (StatusCode::OK, Json(HealthReport::default())).into_response(),
+                }
+            }
+        }
+    };
+
+    let startupz = {
+        let c = startup_checker.clone();
         move || {
             let c = c.clone();
             async move {
@@ -38,7 +74,7 @@ pub fn health_router(checker: Option<HealthChecker>) -> Router<()> {
     };
 
     let health = {
-        let c = checker.clone();
+        let c = readyz_checker.clone();
         move || {
             let c = c.clone();
             async move {
@@ -56,6 +92,7 @@ pub fn health_router(checker: Option<HealthChecker>) -> Router<()> {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/startupz", get(startupz))
         .route("/health", get(health))
 }
 
@@ -69,7 +106,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_healthz_returns_200() {
-        let app = health_router(None);
+        let app = health_router(None, None, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -85,7 +122,7 @@ mod tests {
     #[tokio::test]
     async fn test_healthz_with_checker_returns_200() {
         let checker = Arc::new(HealthReport::default) as HealthChecker;
-        let app = health_router(Some(checker));
+        let app = health_router(None, Some(checker), None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -100,7 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_readyz_no_checker_returns_200() {
-        let app = health_router(None);
+        let app = health_router(None, None, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -119,7 +156,7 @@ mod tests {
             status: HealthStatus::Healthy,
             ..Default::default()
         }) as HealthChecker;
-        let app = health_router(Some(checker));
+        let app = health_router(Some(checker), None, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -138,7 +175,7 @@ mod tests {
             status: HealthStatus::Unhealthy,
             ..Default::default()
         }) as HealthChecker;
-        let app = health_router(Some(checker));
+        let app = health_router(Some(checker), None, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -153,7 +190,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_no_checker_returns_200_with_default_report() {
-        let app = health_router(None);
+        let app = health_router(None, None, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -176,7 +213,7 @@ mod tests {
             }],
             ..Default::default()
         }) as HealthChecker;
-        let app = health_router(Some(checker));
+        let app = health_router(Some(checker), None, None);
         let response = app
             .oneshot(
                 Request::builder()
@@ -193,5 +230,58 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "Healthy");
         assert_eq!(json["services"][0]["name"], "test-service");
+    }
+
+    #[tokio::test]
+    async fn test_healthz_with_liveness_checker_unhealthy_returns_503() {
+        let checker = Arc::new(|| HealthReport {
+            status: HealthStatus::Unhealthy,
+            ..Default::default()
+        }) as HealthChecker;
+        let app = health_router(None, Some(checker), None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_startupz_no_checker_returns_200() {
+        let app = health_router(None, None, None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/startupz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_startupz_unhealthy_returns_503() {
+        let checker = Arc::new(|| HealthReport {
+            status: HealthStatus::Unhealthy,
+            ..Default::default()
+        }) as HealthChecker;
+        let app = health_router(None, None, Some(checker));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/startupz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

@@ -87,6 +87,7 @@ members = [
     "examples/bean-demo",
     "examples/prometheus-demo",
     "examples/health-demo",
+    "examples/kubernetes-platform",
     "examples/otel-demo",
     "examples/container-example",
     "examples/container-nginx",
@@ -100,6 +101,7 @@ members = [
     "crates/components/camel-container",
     "crates/services/camel-prometheus",
     "crates/services/camel-otel",
+    "crates/platforms/camel-platform-kubernetes",
 ]
 
 [workspace.metadata.crane]
@@ -177,6 +179,8 @@ tracing = "0.1"
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 dashmap = "6"
 chrono = { version = "0.4", features = ["serde"] }
+kube = { version = "0.99", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.24", features = ["v1_31"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

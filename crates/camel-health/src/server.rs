@@ -17,6 +17,8 @@ pub struct HealthServer {
     bound_port: Arc<AtomicU16>,
     status: Arc<AtomicU8>,
     health_checker: Option<HealthChecker>,
+    liveness_checker: Option<HealthChecker>,
+    startup_checker: Option<HealthChecker>,
 }
 
 impl HealthServer {
@@ -27,6 +29,8 @@ impl HealthServer {
             bound_port: Arc::new(AtomicU16::new(0)),
             status: Arc::new(AtomicU8::new(STATUS_STOPPED)),
             health_checker: None,
+            liveness_checker: None,
+            startup_checker: None,
         }
     }
 
@@ -37,11 +41,21 @@ impl HealthServer {
             bound_port: Arc::new(AtomicU16::new(0)),
             status: Arc::new(AtomicU8::new(STATUS_STOPPED)),
             health_checker: checker,
+            liveness_checker: None,
+            startup_checker: None,
         }
     }
 
     pub fn set_health_checker(&mut self, checker: HealthChecker) {
         self.health_checker = Some(checker);
+    }
+
+    pub fn set_liveness_checker(&mut self, checker: HealthChecker) {
+        self.liveness_checker = Some(checker);
+    }
+
+    pub fn set_startup_checker(&mut self, checker: HealthChecker) {
+        self.startup_checker = Some(checker);
     }
 
     pub fn port(&self) -> u16 {
@@ -50,6 +64,29 @@ impl HealthServer {
 
     pub fn status_arc(&self) -> Arc<AtomicU8> {
         Arc::clone(&self.status)
+    }
+}
+
+impl camel_api::HealthSource for HealthServer {
+    fn liveness(&self) -> camel_api::HealthStatus {
+        self.liveness_checker
+            .as_ref()
+            .map(|c| c().status)
+            .unwrap_or(camel_api::HealthStatus::Healthy)
+    }
+
+    fn readiness(&self) -> camel_api::HealthStatus {
+        self.health_checker
+            .as_ref()
+            .map(|c| c().status)
+            .unwrap_or(camel_api::HealthStatus::Healthy)
+    }
+
+    fn startup(&self) -> camel_api::HealthStatus {
+        self.startup_checker
+            .as_ref()
+            .map(|c| c().status)
+            .unwrap_or(camel_api::HealthStatus::Healthy)
     }
 }
 
@@ -79,10 +116,12 @@ impl Lifecycle for HealthServer {
         self.bound_port.store(actual_port, Ordering::SeqCst);
 
         let checker = self.health_checker.take();
+        let liveness = self.liveness_checker.take();
+        let startup = self.startup_checker.take();
         let port = actual_port;
 
         let handle = tokio::spawn(async move {
-            let app = crate::health_router(checker);
+            let app = crate::health_router(checker, liveness, startup);
             info!("Health server listening on port {}", port);
             if let Err(e) = axum::serve(listener, app).await {
                 tracing::error!("Health server error: {}", e);
@@ -184,5 +223,55 @@ mod tests {
         assert_eq!(status_arc.load(Ordering::SeqCst), STATUS_STARTED);
         server.stop().await.unwrap();
         assert_eq!(status_arc.load(Ordering::SeqCst), STATUS_STOPPED);
+    }
+}
+
+#[cfg(test)]
+mod server_tests {
+    use super::*;
+    use camel_api::{HealthReport, HealthSource, HealthStatus};
+
+    fn make_server() -> HealthServer {
+        HealthServer::new("127.0.0.1:0".parse().unwrap())
+    }
+
+    #[test]
+    fn test_health_source_liveness_no_checker_returns_healthy() {
+        let server = make_server();
+        assert_eq!(server.liveness(), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_health_source_readiness_no_checker_returns_healthy() {
+        let server = make_server();
+        assert_eq!(server.readiness(), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_health_source_startup_no_checker_returns_healthy() {
+        let server = make_server();
+        assert_eq!(server.startup(), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_health_source_liveness_with_unhealthy_checker() {
+        let mut server = make_server();
+        let checker = Arc::new(|| HealthReport {
+            status: HealthStatus::Unhealthy,
+            ..Default::default()
+        }) as camel_api::HealthChecker;
+        server.set_liveness_checker(checker);
+        assert_eq!(server.liveness(), HealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn test_health_source_startup_with_unhealthy_checker() {
+        let mut server = make_server();
+        let checker = Arc::new(|| HealthReport {
+            status: HealthStatus::Unhealthy,
+            ..Default::default()
+        }) as camel_api::HealthChecker;
+        server.set_startup_checker(checker);
+        assert_eq!(server.startup(), HealthStatus::Unhealthy);
     }
 }

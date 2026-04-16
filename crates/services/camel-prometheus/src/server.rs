@@ -21,7 +21,7 @@ impl MetricsServer {
         metrics: Arc<PrometheusMetrics>,
         checker: Option<HealthChecker>,
     ) {
-        let health = camel_health::health_router(checker);
+        let health = camel_health::health_router(checker, None, None);
         let app = Router::new()
             .route("/metrics", get(Self::metrics_handler))
             .with_state(metrics)
@@ -44,7 +44,7 @@ impl MetricsServer {
         metrics: Arc<PrometheusMetrics>,
         checker: Option<HealthChecker>,
     ) {
-        let health = camel_health::health_router(checker);
+        let health = camel_health::health_router(checker, None, None);
         let app = Router::new()
             .route("/metrics", get(Self::metrics_handler))
             .with_state(metrics)

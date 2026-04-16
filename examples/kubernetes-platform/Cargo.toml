@@ -1,0 +1,15 @@
+[package]
+name = "camel-platform-kubernetes-example"
+description = "Platform SPI with Kubernetes leader election/readiness example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-platform-kubernetes = { path = "../../crates/platforms/camel-platform-kubernetes" }
+k8s-openapi = { workspace = true }
+kube.workspace = true
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["k3s"] }
+tokio = { workspace = true, features = ["full"] }

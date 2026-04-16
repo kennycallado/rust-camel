@@ -36,9 +36,58 @@ pub struct ServiceHealth {
 
 pub type HealthChecker = Arc<dyn Fn() -> HealthReport + Send + Sync>;
 
+/// Programmatic health state readable by platform adapters.
+/// `camel-health` implements this; `camel-platform-kubernetes` consumes it via this trait.
+/// Neither crate depends on the other.
+pub trait HealthSource: Send + Sync {
+    fn liveness(&self) -> HealthStatus;
+    fn readiness(&self) -> HealthStatus;
+
+    /// Default: `Healthy` — non-K8s implementors need not override.
+    fn startup(&self) -> HealthStatus {
+        HealthStatus::Healthy
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_health_source_default_startup() {
+        struct MinimalSource;
+        impl HealthSource for MinimalSource {
+            fn liveness(&self) -> HealthStatus {
+                HealthStatus::Healthy
+            }
+
+            fn readiness(&self) -> HealthStatus {
+                HealthStatus::Healthy
+            }
+        }
+        let s = MinimalSource;
+        assert_eq!(s.startup(), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_health_source_custom_startup() {
+        struct BootingSource;
+        impl HealthSource for BootingSource {
+            fn liveness(&self) -> HealthStatus {
+                HealthStatus::Healthy
+            }
+
+            fn readiness(&self) -> HealthStatus {
+                HealthStatus::Healthy
+            }
+
+            fn startup(&self) -> HealthStatus {
+                HealthStatus::Unhealthy
+            }
+        }
+        let s = BootingSource;
+        assert_eq!(s.startup(), HealthStatus::Unhealthy);
+    }
 
     #[test]
     fn test_health_report_serialization() {

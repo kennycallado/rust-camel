@@ -18,6 +18,7 @@ pub mod load_balancer;
 pub mod message;
 pub mod metrics;
 pub mod multicast;
+pub mod platform;
 pub mod processor;
 pub mod producer;
 pub mod recipient_list;
@@ -51,12 +52,16 @@ pub use error_handler::ExponentialBackoff;
 pub use exchange::{Exchange, ExchangePattern};
 pub use filter::FilterPredicate;
 pub use from_body::FromBody;
-pub use health::{HealthChecker, HealthReport, ServiceHealth};
+pub use health::{HealthChecker, HealthReport, HealthSource, ServiceHealth};
 pub use lifecycle::{HealthStatus, Lifecycle, ServiceStatus};
 pub use load_balancer::{LoadBalanceStrategy, LoadBalancerConfig};
 pub use message::Message;
 pub use metrics::{MetricsCollector, NoOpMetrics};
 pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
+pub use platform::{
+    LeaderElector, LeadershipEvent, LeadershipHandle, NoopLeaderElector, NoopReadinessGate,
+    PlatformError, PlatformIdentity, ReadinessGate,
+};
 pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn};
 pub use producer::ProducerContext;
 pub use route_controller::{RouteAction, RouteController, RouteStatus};

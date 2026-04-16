@@ -117,6 +117,68 @@ The `camel-prometheus` crate exposes these endpoints:
 
 See `camel-prometheus` documentation for Kubernetes integration examples.
 
+## Platform SPI
+
+`camel-api` defines platform ports for distributed coordination and platform-aware runtime wiring.
+
+### `PlatformIdentity`
+
+`PlatformIdentity` carries node identity (`node_id`), optional namespace, and free-form labels.
+
+```rust
+use camel_api::PlatformIdentity;
+
+let identity = PlatformIdentity::local("dev-node");
+```
+
+### `LeaderElector`
+
+Use `LeaderElector` to run singleton workloads safely across replicas.
+
+```rust
+use camel_api::{LeaderElector, PlatformError, PlatformIdentity};
+use async_trait::async_trait;
+
+struct MyElector;
+
+#[async_trait]
+impl LeaderElector for MyElector {
+    async fn start(
+        &self,
+        identity: PlatformIdentity,
+    ) -> Result<camel_api::LeadershipHandle, PlatformError> {
+        let _ = identity;
+        todo!("start election loop")
+    }
+}
+```
+
+### `ReadinessGate`
+
+Use `ReadinessGate` to signal ready/not-ready/starting state to your platform adapter.
+
+```rust
+use camel_api::ReadinessGate;
+use async_trait::async_trait;
+
+struct MyReadinessGate;
+
+#[async_trait]
+impl ReadinessGate for MyReadinessGate {
+    async fn notify_ready(&self) {}
+    async fn notify_not_ready(&self, _reason: &str) {}
+    async fn notify_starting(&self) {}
+}
+```
+
+### `HealthSource`
+
+`HealthSource` exposes liveness/readiness/startup state for platform integrations without coupling crates. See `camel-health` for the HTTP endpoint implementation (`/healthz`, `/readyz`, `/startupz`) and concrete adapters.
+
+### Local and test defaults
+
+`NoopLeaderElector` and `NoopReadinessGate` are provided for local development and tests.
+
 ## Installation
 
 Add to your `Cargo.toml`:

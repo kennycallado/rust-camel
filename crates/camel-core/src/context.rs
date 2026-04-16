@@ -7,7 +7,8 @@ use tracing::{info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    CamelError, HealthReport, HealthStatus, Lifecycle, MetricsCollector, NoOpMetrics,
+    CamelError, HealthReport, HealthStatus, LeaderElector, Lifecycle, MetricsCollector,
+    NoOpMetrics, NoopLeaderElector, NoopReadinessGate, PlatformIdentity, ReadinessGate,
     RuntimeCommandBus, RuntimeQueryBus, ServiceHealth, ServiceStatus, SupervisionConfig,
 };
 use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
@@ -32,6 +33,10 @@ pub struct CamelContextBuilder {
     registry: Option<Arc<std::sync::Mutex<Registry>>>,
     languages: Option<SharedLanguageRegistry>,
     metrics: Option<Arc<dyn MetricsCollector>>,
+    // Platform ports
+    leader_elector: Option<Arc<dyn LeaderElector>>,
+    readiness_gate: Option<Arc<dyn ReadinessGate>>,
+    platform_identity: Option<PlatformIdentity>,
     supervision_config: Option<SupervisionConfig>,
     runtime_store: Option<crate::lifecycle::adapters::InMemoryRuntimeStore>,
     shutdown_timeout: std::time::Duration,
@@ -52,6 +57,10 @@ pub struct CamelContext {
     runtime: Arc<RuntimeBus>,
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsCollector>,
+    // Platform ports
+    leader_elector: Arc<dyn LeaderElector>,
+    readiness_gate: Arc<dyn ReadinessGate>,
+    platform_identity: PlatformIdentity,
     languages: SharedLanguageRegistry,
     shutdown_timeout: std::time::Duration,
     services: Vec<Box<dyn Lifecycle>>,
@@ -354,6 +363,21 @@ impl CamelContext {
         Arc::clone(&self.metrics)
     }
 
+    /// Get the leader elector port.
+    pub fn leader_elector(&self) -> Arc<dyn LeaderElector> {
+        Arc::clone(&self.leader_elector)
+    }
+
+    /// Get the readiness gate port.
+    pub fn readiness_gate(&self) -> Arc<dyn ReadinessGate> {
+        Arc::clone(&self.readiness_gate)
+    }
+
+    /// Get the platform identity.
+    pub fn platform_identity(&self) -> &PlatformIdentity {
+        &self.platform_identity
+    }
+
     /// Get runtime command/query bus handle.
     pub fn runtime(&self) -> Arc<dyn camel_api::RuntimeHandle> {
         self.runtime.clone()
@@ -586,6 +610,9 @@ impl CamelContextBuilder {
             registry: None,
             languages: None,
             metrics: None,
+            leader_elector: None,
+            readiness_gate: None,
+            platform_identity: None,
             supervision_config: None,
             runtime_store: None,
             shutdown_timeout: std::time::Duration::from_secs(30),
@@ -604,6 +631,24 @@ impl CamelContextBuilder {
 
     pub fn metrics(mut self, metrics: Arc<dyn MetricsCollector>) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// Set a custom leader elector port.
+    pub fn leader_elector(mut self, elector: Arc<dyn LeaderElector>) -> Self {
+        self.leader_elector = Some(elector);
+        self
+    }
+
+    /// Set a custom readiness gate port.
+    pub fn readiness_gate(mut self, gate: Arc<dyn ReadinessGate>) -> Self {
+        self.readiness_gate = Some(gate);
+        self
+    }
+
+    /// Set a custom platform identity.
+    pub fn platform_identity(mut self, identity: PlatformIdentity) -> Self {
+        self.platform_identity = Some(identity);
         self
     }
 
@@ -633,6 +678,15 @@ impl CamelContextBuilder {
             .languages
             .unwrap_or_else(CamelContext::built_in_languages);
         let metrics = self.metrics.unwrap_or_else(|| Arc::new(NoOpMetrics));
+        let leader_elector = self
+            .leader_elector
+            .unwrap_or_else(|| Arc::new(NoopLeaderElector));
+        let readiness_gate = self
+            .readiness_gate
+            .unwrap_or_else(|| Arc::new(NoopReadinessGate));
+        let platform_identity = self
+            .platform_identity
+            .unwrap_or_else(|| PlatformIdentity::local("local"));
 
         let (controller, actor_join, supervision_join) =
             if let Some(config) = self.supervision_config {
@@ -674,6 +728,9 @@ impl CamelContextBuilder {
             runtime,
             cancel_token: CancellationToken::new(),
             metrics,
+            leader_elector,
+            readiness_gate,
+            platform_identity,
             languages,
             shutdown_timeout: self.shutdown_timeout,
             services: Vec::new(),
