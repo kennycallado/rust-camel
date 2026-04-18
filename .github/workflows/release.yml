@@ -69,7 +69,9 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           vcpkg install libxml2:x64-windows
+          echo "VCPKGRS_DYNAMIC=1" >> $GITHUB_ENV
           echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> $GITHUB_ENV
+        shell: bash
 
       - name: Install target
         if: matrix.use-cross == false
