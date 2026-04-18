@@ -8,7 +8,6 @@ use std::time::Duration;
 use camel_api::{Exchange, Message, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_core::LanguageRegistryError;
-use camel_language_api::LanguageError;
 use camel_language_rhai::RhaiLanguage;
 use camel_test::CamelTestContext;
 use tower::ServiceExt;
