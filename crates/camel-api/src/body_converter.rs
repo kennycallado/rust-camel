@@ -26,8 +26,12 @@ fn validate_xml(s: &str) -> Result<(), CamelError> {
         ));
     }
     let parser = libxml::parser::Parser::default();
+    let options = libxml::parser::ParserOptions {
+        recover: false,
+        ..Default::default()
+    };
     let doc = parser
-        .parse_string(s.as_bytes())
+        .parse_string_with_options(s.as_bytes(), options)
         .map_err(|e| CamelError::TypeConversionFailed(format!("invalid XML: {e}")))?;
 
     if doc.get_root_element().is_none() {
