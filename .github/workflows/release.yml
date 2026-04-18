@@ -71,6 +71,8 @@ jobs:
           vcpkg install libxml2:x64-windows zlib:x64-windows
           echo "VCPKGRS_DYNAMIC=1" >> $GITHUB_ENV
           echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> $GITHUB_ENV
+          echo "VCPKG_TARGET_TRIPLET=x64-windows" >> $GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
         shell: bash
 
       - name: Install target
