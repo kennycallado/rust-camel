@@ -4,6 +4,15 @@ pre-build = [
     "dpkg --add-architecture arm64",
     "apt-get update",
     "apt-get install -y cmake pkg-config libcurl4-openssl-dev:arm64 libssl-dev:arm64 libsasl2-dev:arm64 zlib1g-dev:arm64 libzstd-dev:arm64 libxml2-dev:arm64",
+    # librdkafka's CMake build uses find_package(ZLIB) which honors the
+    # toolchain CMAKE_FIND_ROOT_PATH (/usr/aarch64-linux-gnu) but not the
+    # multiarch directories. Expose libz headers/libs there via symlinks.
+    "mkdir -p /usr/aarch64-linux-gnu/include /usr/aarch64-linux-gnu/lib",
+    "ln -sf /usr/include/zlib.h /usr/aarch64-linux-gnu/include/zlib.h",
+    "ln -sf /usr/include/zconf.h /usr/aarch64-linux-gnu/include/zconf.h",
+    "ln -sf /usr/lib/aarch64-linux-gnu/libz.so /usr/aarch64-linux-gnu/lib/libz.so",
+    "ln -sf /usr/lib/aarch64-linux-gnu/libz.so.1 /usr/aarch64-linux-gnu/lib/libz.so.1",
+    "ln -sf /usr/lib/aarch64-linux-gnu/libz.a /usr/aarch64-linux-gnu/lib/libz.a",
 ]
 
 [target.aarch64-unknown-linux-gnu.env]
