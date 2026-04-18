@@ -2,7 +2,7 @@
 pre-build = [
     "dpkg --add-architecture arm64",
     "apt-get update",
-    "apt-get install -y cmake pkg-config libcurl4-openssl-dev:arm64 libssl-dev:arm64 libsasl2-dev:arm64 zlib1g-dev:arm64 libzstd-dev:arm64 libxml2-dev:arm64",
+    "apt-get install -y cmake pkg-config libcurl4-openssl-dev:arm64 libssl-dev:arm64 libsasl2-dev:arm64 zlib1g-dev:arm64 libzstd-dev:arm64 libxml2-dev:arm64 libclang-dev",
 ]
 
 [target.aarch64-unknown-linux-gnu.env]
