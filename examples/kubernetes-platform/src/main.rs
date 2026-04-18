@@ -38,7 +38,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         retry_period: Duration::from_secs(1),
     };
 
-    println!("[2/6] Creating two electors for lease '{}'", config.lease_name);
+    println!(
+        "[2/6] Creating two electors for lease '{}'",
+        config.lease_name
+    );
     let elector_alpha = KubernetesLeaderElector::new(client.clone(), config.clone());
     let elector_beta = KubernetesLeaderElector::new(client.clone(), config.clone());
 
@@ -55,7 +58,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     println!("[4/6] Waiting up to 30s for first leader...");
-    let first_leader = wait_for_leader(&handle_alpha, &handle_beta, Duration::from_secs(30)).await?;
+    let first_leader =
+        wait_for_leader(&handle_alpha, &handle_beta, Duration::from_secs(30)).await?;
     println!("      ✅ Initial leader is {}", first_leader.name());
 
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -69,9 +73,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             handle.step_down().await?;
         }
         Pod::Beta => {
-            let handle = handle_beta.take().ok_or_else(|| {
-                std::io::Error::other("pod-beta handle missing before step-down")
-            })?;
+            let handle = handle_beta
+                .take()
+                .ok_or_else(|| std::io::Error::other("pod-beta handle missing before step-down"))?;
             handle.step_down().await?;
         }
     }
@@ -100,8 +104,12 @@ async fn wait_for_leader(
 ) -> Result<Pod, Box<dyn Error>> {
     let winner = tokio::time::timeout(timeout, async {
         loop {
-            let alpha_is_leader = handle_alpha.as_ref().is_some_and(LeadershipHandle::is_leader);
-            let beta_is_leader = handle_beta.as_ref().is_some_and(LeadershipHandle::is_leader);
+            let alpha_is_leader = handle_alpha
+                .as_ref()
+                .is_some_and(LeadershipHandle::is_leader);
+            let beta_is_leader = handle_beta
+                .as_ref()
+                .is_some_and(LeadershipHandle::is_leader);
 
             if alpha_is_leader {
                 return Pod::Alpha;

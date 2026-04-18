@@ -217,6 +217,25 @@ pub trait StepAccumulator: Sized {
         self
     }
 
+    /// Validate the exchange body against a schema file.
+    ///
+    /// Shorthand for `to("validator:path")`. Supports XSD, JSON Schema, and YAML.
+    ///
+    /// # Example
+    /// ```ignore
+    /// route.validate("schemas/order.xsd").to("direct:out")
+    /// ```
+    fn validate(mut self, schema_path: impl Into<String>) -> Self {
+        let path = schema_path.into();
+        let uri = if path.starts_with("validator:") {
+            path
+        } else {
+            format!("validator:{path}")
+        };
+        self.steps_mut().push(BuilderStep::To(uri));
+        self
+    }
+
     /// Execute a script that can modify the exchange (headers, properties, body).
     ///
     /// The script has access to `headers`, `properties`, and `body` variables
@@ -2487,6 +2506,22 @@ mod tests {
             .build()
             .unwrap();
         assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn validate_adds_to_step_with_validator_uri() {
+        let def = RouteBuilder::from("direct:in")
+            .route_id("test")
+            .validate("schemas/order.xsd")
+            .build()
+            .unwrap();
+        let steps = def.steps();
+        assert_eq!(steps.len(), 1);
+        assert!(
+            matches!(&steps[0], BuilderStep::To(uri) if uri == "validator:schemas/order.xsd"),
+            "got: {:?}",
+            steps[0]
+        );
     }
 
     #[test]

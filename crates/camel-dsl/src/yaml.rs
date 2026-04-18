@@ -24,8 +24,8 @@ pub use crate::yaml_ast::{
     PredicateBlock, RecipientListData, RecipientListStep, RoutingSlipData, RoutingSlipStep,
     ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep,
     SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, ThrottleData,
-    ThrottleStep, ToStep, TransformStep, UnmarshalStep, WireTapStep, YamlRoute, YamlRoutes,
-    YamlStep,
+    ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep, YamlRoute,
+    YamlRoutes, YamlStep,
 };
 
 const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 21] = [
@@ -644,6 +644,14 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 delay_ms,
                 dynamic_header,
             }))
+        }
+        YamlStep::Validate(ValidateStep { validate }) => {
+            let uri = if validate.starts_with("validator:") {
+                validate
+            } else {
+                format!("validator:{validate}")
+            };
+            Ok(DeclarativeStep::To(ToStepDef::new(uri)))
         }
     }
 }
@@ -1501,5 +1509,37 @@ routes:
 "#;
         let result = parse_yaml(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_step_parses_to_validator_uri() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "direct:in"
+    steps:
+      - validate: "schemas/order.xsd"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let step = &routes[0].steps[0];
+        assert!(
+            matches!(step, DeclarativeStep::To(uri) if uri.uri == "validator:schemas/order.xsd"),
+            "got: {step:?}"
+        );
+    }
+
+    #[test]
+    fn validate_step_does_not_break_untagged_resolution_order() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "direct:in"
+    steps:
+      - to: "direct:next"
+      - validate: "schemas/order.xsd"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert!(matches!(routes[0].steps[0], DeclarativeStep::To(_)));
+        assert!(matches!(routes[0].steps[1], DeclarativeStep::To(_)));
     }
 }

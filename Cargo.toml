@@ -31,6 +31,7 @@ members = [
     "crates/components/camel-jms",
     "crates/components/camel-sql",
     "crates/components/camel-controlbus",
+    "crates/components/camel-validator",
     "crates/languages/camel-language-api",
     "crates/languages/camel-language-js",
     "crates/languages/camel-language-rhai",
@@ -84,6 +85,7 @@ members = [
     "examples/tracer-demo",
     "examples/convert-body-to",
     "examples/marshal-unmarshal",
+    "examples/validator",
     "examples/bean-demo",
     "examples/prometheus-demo",
     "examples/health-demo",
@@ -151,6 +153,7 @@ camel-component-kafka = { path = "crates/components/camel-kafka", version = "=0.
 camel-component-jms = { path = "crates/components/camel-jms", version = "=0.6.2" }
 camel-component-sql = { path = "crates/components/camel-sql", version = "=0.6.2" }
 camel-component-controlbus = { path = "crates/components/camel-controlbus", version = "=0.6.2" }
+camel-component-validator = { path = "crates/components/camel-validator", version = "=0.6.2" }
 camel-component-prometheus = { path = "crates/services/camel-prometheus", version = "=0.6.2" }
 camel-component-otel = { path = "crates/services/camel-otel", version = "=0.6.2" }
 camel-otel = { path = "crates/services/camel-otel", version = "=0.6.2" }
@@ -210,7 +213,9 @@ testcontainers-modules = { version = "0.11", features = ["kafka", "postgres", "r
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 prometheus = "0.14"
 rand = "0.8"
-quick-xml = { version = "0.37", features = ["serialize"] }
+libxml = "0.3"
+jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
+serde_yml = "0.0.12"
 toml = "0.8"
 
 # OpenTelemetry dependencies

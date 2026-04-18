@@ -150,6 +150,7 @@ pub enum YamlStep {
     Marshal(MarshalStep),
     Unmarshal(UnmarshalStep),
     Delay(DelayStep),
+    Validate(ValidateStep),
 }
 
 #[derive(Deserialize, Debug)]
@@ -447,6 +448,11 @@ pub struct MarshalStep {
 #[derive(Deserialize, Debug)]
 pub struct UnmarshalStep {
     pub unmarshal: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ValidateStep {
+    pub validate: String,
 }
 
 #[derive(Deserialize, Debug)]

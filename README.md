@@ -8,7 +8,7 @@ A Rust-native, Tower-native integration framework inspired by [Apache Camel](htt
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `redis`, `sql`, `jms`, `container`, `controlbus`.
+Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `redis`, `sql`, `jms`, `container`, `controlbus`, `validator`.
 
 ## Architecture
 
@@ -151,6 +151,7 @@ cargo run -p hello-world
 | `camel-mock`              | Test component with assertions on received exchanges (`await_exchanges`, `ExchangeAssert`)                                                                                        |
 | `camel-test`              | Integration test harness                                                                                                                                                          |
 | `camel-controlbus`        | Control routes dynamically from within routes                                                                                                                                     |
+| `camel-validator`         | Validate body against XSD, JSON Schema, or YAML schema files                                                                                                                      |
 | `camel-http`              | HTTP producer (client) and HTTP consumer (server, native streaming)                                                                                                               |
 | `camel-file`              | File producer and consumer                                                                                                                                                        |
 | `camel-kafka`             | Kafka producer and consumer with SSL/SASL and manual commit                                                                                                                       |

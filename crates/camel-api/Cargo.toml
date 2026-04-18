@@ -25,7 +25,7 @@ tokio-util = { workspace = true, features = ["io"] }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
 opentelemetry = { workspace = true }
-quick-xml = { workspace = true }
+libxml = { workspace = true }
 
 [dev-dependencies]
 criterion.workspace = true

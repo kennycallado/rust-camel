@@ -49,6 +49,10 @@
           inherit src;
           pname = "rust-camel";
           strictDeps = true;
+          nativeBuildInputs = with pkgs; [ pkg-config ];
+          buildInputs = with pkgs; [ libxml2 ];
+          LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+          BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -108,11 +112,15 @@
             patchelf
             nix-ld
             pkg-config
+            libxml2
+            libclang
             pkgsUnstable.rdkafka
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           LLVM_COV = "${pkgs.llvm}/bin/llvm-cov";
           LLVM_PROFDATA = "${pkgs.llvm}/bin/llvm-profdata";
+          LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+          BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.glibc.dev}/include";
           shellHook = ''
             export RUSTC_WRAPPER=sccache
             sccache --stop-server 2>/dev/null || true

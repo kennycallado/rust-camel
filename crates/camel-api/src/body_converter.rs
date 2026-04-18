@@ -1,7 +1,6 @@
 use crate::body::Body;
 use crate::error::CamelError;
 use bytes::Bytes;
-use quick_xml::Reader;
 
 /// Target type for body conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,61 +18,21 @@ pub enum BodyType {
 /// - Must not be empty or whitespace-only.
 /// - Must contain at least one root element (not just a prolog/declaration).
 /// - Must not contain multiple root elements.
-/// - Must be parseable by quick_xml without errors.
+/// - Must be parseable by libxml without errors.
 fn validate_xml(s: &str) -> Result<(), CamelError> {
     if s.trim().is_empty() {
         return Err(CamelError::TypeConversionFailed(
             "invalid XML: document is empty".to_string(),
         ));
     }
+    let parser = libxml::parser::Parser::default();
+    let doc = parser
+        .parse_string(s.as_bytes())
+        .map_err(|e| CamelError::TypeConversionFailed(format!("invalid XML: {e}")))?;
 
-    let mut reader = Reader::from_str(s);
-    let mut buf = Vec::new();
-    let mut root_element_count: u32 = 0;
-    let mut depth: u32 = 0;
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Eof) => break,
-            Ok(quick_xml::events::Event::Start(_)) => {
-                depth += 1;
-                if depth == 1 {
-                    root_element_count += 1;
-                    if root_element_count > 1 {
-                        return Err(CamelError::TypeConversionFailed(
-                            "invalid XML: document has multiple root elements".to_string(),
-                        ));
-                    }
-                }
-                buf.clear();
-            }
-            Ok(quick_xml::events::Event::End(_)) => {
-                depth = depth.saturating_sub(1);
-                buf.clear();
-            }
-            Ok(quick_xml::events::Event::Empty(_)) => {
-                if depth == 0 {
-                    root_element_count += 1;
-                    if root_element_count > 1 {
-                        return Err(CamelError::TypeConversionFailed(
-                            "invalid XML: document has multiple root elements".to_string(),
-                        ));
-                    }
-                }
-                buf.clear();
-            }
-            Ok(_) => buf.clear(),
-            Err(e) => {
-                return Err(CamelError::TypeConversionFailed(format!(
-                    "invalid XML: {e}"
-                )));
-            }
-        }
-    }
-
-    if root_element_count == 0 {
+    if doc.get_root_element().is_none() {
         return Err(CamelError::TypeConversionFailed(
-            "invalid XML: document has no root element".to_string(),
+            "invalid XML: missing root element".to_string(),
         ));
     }
 

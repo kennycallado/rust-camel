@@ -47,6 +47,7 @@ camel-component-mock.workspace = true
 camel-component-redis.workspace = true
 camel-component-sql.workspace = true
 camel-component-timer.workspace = true
+camel-component-validator.workspace = true
 camel-component-ws.workspace = true
 camel-language-js.workspace = true
 camel-language-jsonpath.workspace = true
