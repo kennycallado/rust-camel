@@ -55,9 +55,22 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
 
-      - name: Install build deps for rdkafka (Linux native)
+      - name: Install build deps (Linux native)
         if: matrix.install-librdkafka == true
-        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev pkg-config libxml2-dev
+
+      - name: Install libxml2 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libxml2
+          echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig" >> $GITHUB_ENV
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+
+      - name: Install libxml2 (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          vcpkg install libxml2:x64-windows
+          echo "LIBXML2_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> $GITHUB_ENV
 
       - name: Install target
         if: matrix.use-cross == false
