@@ -30,7 +30,7 @@ jobs:
             use-cross: true
             bin-suffix: ""
             kafka-features: "cmake-build"
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             use-cross: false
             bin-suffix: ""
@@ -65,10 +65,10 @@ jobs:
           brew install libxml2
           echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig" >> $GITHUB_ENV
 
-      - name: Install libxml2 (Windows)
+      - name: Install native deps (Windows)
         if: runner.os == 'Windows'
         run: |
-          vcpkg install libxml2:x64-windows
+          vcpkg install libxml2:x64-windows zlib:x64-windows
           echo "VCPKGRS_DYNAMIC=1" >> $GITHUB_ENV
           echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> $GITHUB_ENV
         shell: bash
