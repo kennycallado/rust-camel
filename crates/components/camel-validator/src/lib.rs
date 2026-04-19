@@ -15,7 +15,7 @@ pub use component::ValidatorComponent;
 pub use config::{SchemaType, ValidatorConfig};
 
 /// Version of the Java XML bridge binary this crate is compatible with.
-pub const BRIDGE_VERSION: &str = "0.2.0";
+pub const BRIDGE_VERSION: &str = "0.1.0";
 
 pub mod proto {
     tonic::include_proto!("xml_bridge");

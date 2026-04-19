@@ -16,7 +16,7 @@ mod endpoint;
 mod error;
 mod producer;
 
-pub const BRIDGE_VERSION: &str = "0.2.0";
+pub const BRIDGE_VERSION: &str = "0.1.0";
 
 pub use client::{BridgeState, StylesheetId, XsltBridgeClient, XsltTransformBackend};
 pub use component::XsltComponent;
