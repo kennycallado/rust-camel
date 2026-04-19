@@ -166,6 +166,7 @@ camel-language-simple = { path = "crates/languages/camel-language-simple", versi
 camel-language-jsonpath = { path = "crates/languages/camel-language-jsonpath", version = "=0.6.3" }
 camel-language-xpath = { path = "crates/languages/camel-language-xpath", version = "=0.6.3" }
 camel-config = { path = "crates/camel-config", version = "=0.6.3" }
+camel-platform-kubernetes = { path = "crates/platforms/camel-platform-kubernetes", version = "=0.6.3" }
 
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.12" }
