@@ -1,0 +1,17 @@
+#!/bin/sh
+#
+# Gradle wrapper script for Unix/macOS
+#
+APP_HOME=$( cd "${APP_HOME:-./}" && pwd -P ) || exit
+
+JAR_FILE="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+JAVA_EXE="$JAVA_HOME/bin/java"
+
+if [ ! -x "$JAVA_EXE" ]; then
+    JAVA_EXE=$(which java)
+fi
+
+exec "$JAVA_EXE" \
+    -classpath "$JAR_FILE" \
+    org.gradle.wrapper.GradleWrapperMain \
+    "$@"

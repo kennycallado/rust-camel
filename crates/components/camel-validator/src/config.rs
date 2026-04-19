@@ -7,6 +7,8 @@ pub enum SchemaType {
     Xml,
     Json,
     Yaml,
+    RelaxNg,
+    Schematron,
 }
 
 #[derive(Debug, Clone)]
@@ -42,9 +44,11 @@ impl ValidatorConfig {
                 Some("xml") | Some("xml-schema") | Some("xsd") => SchemaType::Xml,
                 Some("json") | Some("json-schema") => SchemaType::Json,
                 Some("yaml") | Some("yaml-schema") => SchemaType::Yaml,
+                Some("rng") | Some("relaxng") => SchemaType::RelaxNg,
+                Some("sch") | Some("schematron") => SchemaType::Schematron,
                 Some(other) => {
                     return Err(CamelError::EndpointCreationFailed(format!(
-                        "unknown schema type '{other}'; expected xml, json, or yaml"
+                        "unknown schema type '{other}'; expected xml, json, yaml, rng, or schematron"
                     )));
                 }
                 None => detect_type_from_extension(&schema_path)?,
@@ -65,8 +69,10 @@ fn detect_type_from_extension(path: &Path) -> Result<SchemaType, CamelError> {
         Some("xsd") => Ok(SchemaType::Xml),
         Some("json") => Ok(SchemaType::Json),
         Some("yaml") | Some("yml") => Ok(SchemaType::Yaml),
+        Some("rng") | Some("rnc") => Ok(SchemaType::RelaxNg),
+        Some("sch") => Ok(SchemaType::Schematron),
         ext => Err(CamelError::EndpointCreationFailed(format!(
-            "cannot infer schema type from extension {ext:?}; use ?type=xml|json|yaml"
+            "cannot infer schema type from extension {ext:?}; use ?type=xml|json|yaml|rng|schematron"
         ))),
     }
 }

@@ -32,6 +32,8 @@ members = [
     "crates/components/camel-sql",
     "crates/components/camel-controlbus",
     "crates/components/camel-validator",
+    "crates/components/camel-xslt",
+    "crates/components/camel-xj",
     "crates/components/camel-master",
     "crates/languages/camel-language-api",
     "crates/languages/camel-language-js",
@@ -89,6 +91,8 @@ members = [
     "examples/convert-body-to",
     "examples/marshal-unmarshal",
     "examples/validator",
+    "examples/xslt-example",
+    "examples/xj-example",
     "examples/bean-demo",
     "examples/prometheus-demo",
     "examples/health-demo",
@@ -157,6 +161,8 @@ camel-component-jms = { path = "crates/components/camel-jms", version = "=0.6.3"
 camel-component-sql = { path = "crates/components/camel-sql", version = "=0.6.3" }
 camel-component-controlbus = { path = "crates/components/camel-controlbus", version = "=0.6.3" }
 camel-component-validator = { path = "crates/components/camel-validator", version = "=0.6.3" }
+camel-xslt = { path = "crates/components/camel-xslt", version = "=0.6.3" }
+camel-xj = { path = "crates/components/camel-xj", version = "=0.6.3" }
 camel-master = { path = "crates/components/camel-master", version = "=0.6.3" }
 camel-component-prometheus = { path = "crates/services/camel-prometheus", version = "=0.6.3" }
 camel-component-otel = { path = "crates/services/camel-otel", version = "=0.6.3" }
@@ -218,7 +224,7 @@ testcontainers-modules = { version = "0.11", features = ["kafka", "postgres", "r
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 prometheus = "0.14"
 rand = "0.8"
-libxml = "0.3"
+sxd-document = "0.3"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
 serde_yml = "0.0.12"
 toml = "0.8"

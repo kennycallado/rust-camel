@@ -50,6 +50,8 @@ camel-component-sql.workspace = true
 camel-component-timer.workspace = true
 camel-component-validator.workspace = true
 camel-component-ws.workspace = true
+camel-xslt = { workspace = true }
+camel-xj = { workspace = true }
 camel-language-js.workspace = true
 camel-language-jsonpath.workspace = true
 camel-language-rhai.workspace = true

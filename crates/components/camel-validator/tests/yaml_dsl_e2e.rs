@@ -8,19 +8,10 @@ async fn yaml_route_validate_step_works_end_to_end() {
     use std::io::Write;
     use tower::ServiceExt;
 
-    let xsd = r#"<?xml version="1.0"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-  <xs:element name="order">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="id" type="xs:string"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#;
+    let json_schema = r#"{"type":"object","required":["id"]}"#;
 
-    let mut f = tempfile::Builder::new().suffix(".xsd").tempfile().unwrap();
-    f.write_all(xsd.as_bytes()).unwrap();
+    let mut f = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+    f.write_all(json_schema.as_bytes()).unwrap();
 
     let yaml = format!(
         r#"
@@ -53,9 +44,7 @@ routes:
         endpoint.create_producer(&producer_ctx).unwrap()
     };
 
-    let valid = Exchange::new(Message::new(Body::Xml(
-        "<order><id>42</id></order>".to_string(),
-    )));
+    let valid = Exchange::new(Message::new(Body::Json(serde_json::json!({"id": "42"}))));
     assert!(producer.oneshot(valid).await.is_ok());
 
     let producer = {
@@ -68,7 +57,7 @@ routes:
         endpoint.create_producer(&producer_ctx).unwrap()
     };
 
-    let invalid = Exchange::new(Message::new(Body::Xml("<order/>".to_string())));
+    let invalid = Exchange::new(Message::new(Body::Json(serde_json::json!({"name": "x"}))));
     let err = producer.oneshot(invalid).await.unwrap_err();
     assert!(err.to_string().contains("validation failed"), "got: {err}");
 

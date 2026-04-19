@@ -8,16 +8,26 @@ use tracing::debug;
 
 use crate::compiled::CompiledValidator;
 use crate::config::ValidatorConfig;
+use crate::xsd_bridge::{XsdBridge, XsdBridgeBackend};
 use camel_component_api::ComponentContext;
 use camel_component_api::{
     BoxProcessor, CamelError, Component, Consumer, Endpoint, Exchange, ProducerContext,
 };
 
-pub struct ValidatorComponent;
+pub struct ValidatorComponent {
+    xsd_bridge: Arc<dyn XsdBridge>,
+}
 
 impl ValidatorComponent {
     pub fn new() -> Self {
-        Self
+        Self {
+            xsd_bridge: Arc::new(XsdBridgeBackend::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_xsd_bridge(xsd_bridge: Arc<dyn XsdBridge>) -> Self {
+        Self { xsd_bridge }
     }
 }
 
@@ -38,7 +48,8 @@ impl Component for ValidatorComponent {
         _ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let config = ValidatorConfig::from_uri(uri)?;
-        let compiled = CompiledValidator::compile(&config)?;
+        let xsd_bridge = Arc::clone(&self.xsd_bridge);
+        let compiled = CompiledValidator::compile(&config, xsd_bridge)?;
         Ok(Box::new(ValidatorEndpoint {
             uri: uri.to_string(),
             compiled: Arc::new(compiled),
@@ -90,7 +101,7 @@ impl Service<Exchange> for ValidatorProducer {
         let uri = self.uri.clone();
         Box::pin(async move {
             debug!(uri = uri, "validating exchange body");
-            compiled.validate(&exchange.input.body)?;
+            compiled.validate(&exchange.input.body).await?;
             Ok(exchange)
         })
     }
@@ -99,8 +110,11 @@ impl Service<Exchange> for ValidatorProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ValidatorError;
+    use async_trait::async_trait;
     use camel_component_api::{Message, NoOpComponentContext};
     use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 
     fn json_schema_file() -> tempfile::NamedTempFile {
@@ -116,6 +130,37 @@ mod tests {
             br#"<?xml version="1.0"?><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="order" type="xs:string"/></xs:schema>"#,
         ).unwrap();
         f
+    }
+
+    #[derive(Debug)]
+    struct MockXsdBridge {
+        register_calls: AtomicUsize,
+        validate_calls: AtomicUsize,
+        register_error: Option<ValidatorError>,
+        validate_error: Option<ValidatorError>,
+    }
+
+    #[async_trait]
+    impl XsdBridge for MockXsdBridge {
+        async fn register(&self, _xsd_bytes: Vec<u8>) -> Result<String, ValidatorError> {
+            self.register_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(err) = &self.register_error {
+                return Err(err.clone());
+            }
+            Ok("xsd-mock-id".to_string())
+        }
+
+        async fn validate(
+            &self,
+            _schema_id: &str,
+            _doc_bytes: Vec<u8>,
+        ) -> Result<(), ValidatorError> {
+            self.validate_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(err) = &self.validate_error {
+                return Err(err.clone());
+            }
+            Ok(())
+        }
     }
 
     #[test]
@@ -174,9 +219,15 @@ mod tests {
 
     #[tokio::test]
     async fn valid_xml_body_passes() {
+        let backend = Arc::new(MockXsdBridge {
+            register_calls: AtomicUsize::new(0),
+            validate_calls: AtomicUsize::new(0),
+            register_error: None,
+            validate_error: None,
+        });
         let f = xsd_file();
         let uri = format!("validator:{}", f.path().display());
-        let ep = ValidatorComponent::new()
+        let ep = ValidatorComponent::with_xsd_bridge(backend)
             .create_endpoint(&uri, &NoOpComponentContext)
             .unwrap();
         let producer = ep.create_producer(&ProducerContext::new()).unwrap();
@@ -184,5 +235,57 @@ mod tests {
             "<order>hello</order>".to_string(),
         )));
         assert!(producer.oneshot(exchange).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn xsd_bridge_register_and_validate_mock() {
+        let backend = Arc::new(MockXsdBridge {
+            register_calls: AtomicUsize::new(0),
+            validate_calls: AtomicUsize::new(0),
+            register_error: None,
+            validate_error: None,
+        });
+
+        let f = xsd_file();
+        let uri = format!("validator:{}", f.path().display());
+        let ep = ValidatorComponent::with_xsd_bridge(Arc::clone(&backend) as Arc<dyn XsdBridge>)
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+
+        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let exchange = Exchange::new(Message::new(camel_component_api::Body::Xml(
+            "<order>ok</order>".to_string(),
+        )));
+        assert!(producer.oneshot(exchange).await.is_ok());
+        assert_eq!(backend.register_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.validate_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn xsd_bridge_register_error_propagates_on_validate() {
+        let backend = Arc::new(MockXsdBridge {
+            register_calls: AtomicUsize::new(0),
+            validate_calls: AtomicUsize::new(0),
+            register_error: Some(ValidatorError::CompilationFailed(
+                "COMPILATION_FAILED".to_string(),
+            )),
+            validate_error: None,
+        });
+        let f = xsd_file();
+        let uri = format!("validator:{}", f.path().display());
+        // Endpoint creation now always succeeds for XSD (registration is deferred).
+        let ep = ValidatorComponent::with_xsd_bridge(backend)
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .expect("endpoint creation should succeed");
+        // The error surfaces when the first message is processed (register is called).
+        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let exchange = Exchange::new(Message::new(camel_component_api::Body::Xml(
+            "<order/>".to_string(),
+        )));
+        let err = producer
+            .oneshot(exchange)
+            .await
+            .expect_err("expected validate to fail due to registration error");
+        assert!(err.to_string().contains("COMPILATION_FAILED"));
     }
 }

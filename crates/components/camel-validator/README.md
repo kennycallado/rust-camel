@@ -14,4 +14,4 @@ Schema is compiled and cached when the validator endpoint is created.
 
 ## Build requirement
 
-Requires the `libxml2` C library for XSD validation, distributed via musl static linking.
+XSD validation is delegated to `xml-bridge` (gRPC backend) and no longer depends on `libxml2` in this crate.

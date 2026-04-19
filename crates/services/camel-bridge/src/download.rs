@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::process::BridgeError;
+use crate::spec::{BridgeSpec, JMS_BRIDGE};
 
 /// Walk up from `CARGO_MANIFEST_DIR` looking for the workspace root.
 /// The root is identified by a `Cargo.toml` containing `[workspace]`
-/// AND a `bridges/jms/` directory as sentinel.
+/// AND a `bridges/` directory as sentinel.
 ///
 /// Returns `None` if not in the rust-camel workspace (production installs,
 /// external dependencies) — the binary resolution silently falls through to
@@ -22,7 +23,7 @@ pub(crate) fn find_workspace_root_from_path(start: &Path) -> Option<PathBuf> {
             && std::fs::read_to_string(&cargo_toml)
                 .map(|contents| contents.contains("[workspace]"))
                 .unwrap_or(false)
-            && current.join("bridges").join("jms").exists()
+            && current.join("bridges").exists()
         {
             return Some(current);
         }
@@ -50,29 +51,41 @@ pub(crate) fn find_workspace_root_from_path(start: &Path) -> Option<PathBuf> {
 ///
 /// **Override:** Set `CAMEL_JMS_BRIDGE_BINARY_PATH` to skip all detection.
 pub async fn ensure_binary(version: &str, cache_dir: &Path) -> Result<PathBuf, BridgeError> {
+    ensure_binary_for_spec(&JMS_BRIDGE, version, cache_dir).await
+}
+
+/// Locate or download a bridge binary for the provided spec.
+pub async fn ensure_binary_for_spec(
+    spec: &BridgeSpec,
+    version: &str,
+    cache_dir: &Path,
+) -> Result<PathBuf, BridgeError> {
     // Development override: use a local binary directly, skip download + verification.
-    if let Ok(local_path) = std::env::var("CAMEL_JMS_BRIDGE_BINARY_PATH") {
+    if let Ok(local_path) = std::env::var(spec.env_binary_path) {
         let path = PathBuf::from(&local_path);
         if path.is_file() {
             tracing::info!(
-                "CAMEL_JMS_BRIDGE_BINARY_PATH set — using local bridge binary: {}",
+                "{} set — using local bridge binary: {}",
+                spec.env_binary_path,
                 path.display()
             );
             return Ok(path);
         }
         return Err(BridgeError::Download(format!(
-            "CAMEL_JMS_BRIDGE_BINARY_PATH points to a non-existent file: {local_path}"
+            "{} points to a non-existent file: {local_path}",
+            spec.env_binary_path,
         )));
     }
 
     // Step 2: auto-detect local build from `cargo xtask build-jms-bridge`
     if let Some(workspace_root) = find_workspace_root() {
+        let bridge_dir = bridge_dir_name(spec);
         let local_path = workspace_root
             .join("bridges")
-            .join("jms")
+            .join(bridge_dir)
             .join("build")
             .join("native")
-            .join("jms-bridge");
+            .join(spec.name);
         if local_path.is_file() {
             tracing::debug!(
                 "Found local xtask build at {} — skipping download",
@@ -87,7 +100,7 @@ pub async fn ensure_binary(version: &str, cache_dir: &Path) -> Result<PathBuf, B
         }
     }
 
-    let tarball_name = tarball_filename(version)?;
+    let tarball_name = tarball_filename(spec, version)?;
     // The tarball extracts to a directory named after the tarball (without .tar.gz)
     // e.g. jms-bridge-0.1.0-linux-x86_64/bin/jms-bridge
     let tarball_dir = tarball_name.trim_end_matches(".tar.gz");
@@ -95,7 +108,7 @@ pub async fn ensure_binary(version: &str, cache_dir: &Path) -> Result<PathBuf, B
         .join(version)
         .join(tarball_dir)
         .join("bin")
-        .join("jms-bridge");
+        .join(spec.name);
     let hash_path = cache_dir.join(version).join(".binary.sha256");
     if bin_path.exists()
         && hash_path.exists()
@@ -107,17 +120,18 @@ pub async fn ensure_binary(version: &str, cache_dir: &Path) -> Result<PathBuf, B
         let actual_hash = sha256_hex(&bin_bytes);
         if stored_hash.trim() == actual_hash {
             tracing::debug!(
-                "jms-bridge binary found in verified cache: {}",
+                "{} binary found in verified cache: {}",
+                spec.name,
                 bin_path.display()
             );
             return Ok(bin_path);
         }
-        tracing::warn!("jms-bridge cache checksum mismatch — re-downloading");
+        tracing::warn!("{} cache checksum mismatch — re-downloading", spec.name);
     }
 
-    let base_url = release_base_url(version)?;
+    let base_url = release_base_url(spec, version)?;
 
-    let checksums = fetch_sha256sums(&base_url, version).await?;
+    let checksums = fetch_sha256sums(spec, &base_url, version).await?;
 
     let tarball_bytes = fetch_bytes(&format!("{base_url}/{tarball_name}")).await?;
 
@@ -174,19 +188,21 @@ pub async fn ensure_binary(version: &str, cache_dir: &Path) -> Result<PathBuf, B
     Ok(bin_path)
 }
 
-fn release_base_url(version: &str) -> Result<String, BridgeError> {
-    let override_url = std::env::var("CAMEL_JMS_BRIDGE_RELEASE_URL").ok();
-    resolve_release_base_url(override_url.as_deref(), version)
+fn release_base_url(spec: &BridgeSpec, version: &str) -> Result<String, BridgeError> {
+    let override_url = std::env::var(spec.env_release_url).ok();
+    resolve_release_base_url(spec, override_url.as_deref(), version)
 }
 
 fn resolve_release_base_url(
+    spec: &BridgeSpec,
     override_url: Option<&str>,
     version: &str,
 ) -> Result<String, BridgeError> {
     let url = match override_url {
         Some(u) => u.to_string(),
         None => format!(
-            "https://github.com/kennycallado/rust-camel/releases/download/jms-bridge-v{version}"
+            "https://github.com/kennycallado/rust-camel/releases/download/{}{version}",
+            spec.release_tag_prefix
         ),
     };
     match url::Url::parse(&url) {
@@ -203,19 +219,25 @@ fn resolve_release_base_url(
     Ok(url)
 }
 
-fn tarball_filename(version: &str) -> Result<String, BridgeError> {
+fn tarball_filename(spec: &BridgeSpec, version: &str) -> Result<String, BridgeError> {
     let os = match std::env::consts::OS {
         "linux" => "linux",
         "macos" => {
-            return Err(BridgeError::Download(
-                "Pre-built camel-jms bridge binaries are not available for macOS. \
-                 Build the bridge manually with `cargo xtask build-jms-bridge` (requires Docker with Rosetta/Linux support) \
-                 and set CAMEL_JMS_BRIDGE_BINARY_PATH to the resulting binary path.".to_string()
-            ));
+            if spec.macos_supported {
+                "macos"
+            } else {
+                return Err(BridgeError::Download(format!(
+                    "Pre-built {} binaries are not available for macOS. Build the bridge manually with `cargo xtask build-{}-bridge` and set {} to the resulting binary path.",
+                    spec.name,
+                    bridge_dir_name(spec),
+                    spec.env_binary_path,
+                )));
+            }
         }
         other => {
             return Err(BridgeError::Download(format!(
-                "camel-jms bridge is not supported on OS: {other}"
+                "{} is not supported on OS: {other}",
+                spec.name
             )));
         }
     };
@@ -224,11 +246,12 @@ fn tarball_filename(version: &str) -> Result<String, BridgeError> {
         "aarch64" => "aarch64",
         other => {
             return Err(BridgeError::Download(format!(
-                "camel-jms bridge is not supported on arch: {other}"
+                "{} is not supported on arch: {other}",
+                spec.name
             )));
         }
     };
-    Ok(format!("jms-bridge-{version}-{os}-{arch}.tar.gz"))
+    Ok(format!("{}-{version}-{os}-{arch}.tar.gz", spec.name))
 }
 
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>, BridgeError> {
@@ -243,8 +266,12 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, BridgeError> {
     Ok(bytes.to_vec())
 }
 
-async fn fetch_sha256sums(base_url: &str, version: &str) -> Result<String, BridgeError> {
-    let sums_url = format!("{base_url}/jms-bridge-{version}-SHA256SUMS");
+async fn fetch_sha256sums(
+    spec: &BridgeSpec,
+    base_url: &str,
+    version: &str,
+) -> Result<String, BridgeError> {
+    let sums_url = format!("{base_url}/{}-{version}-SHA256SUMS", spec.name);
     let bytes = fetch_bytes(&sums_url).await?;
     String::from_utf8(bytes)
         .map_err(|e| BridgeError::Download(format!("SHA256SUMS UTF-8 error: {e}")))
@@ -282,10 +309,18 @@ fn unpack_tarball(data: &[u8], dest: &Path) -> Result<(), BridgeError> {
 
 /// Default cache dir: `~/.cache/rust-camel/jms-bridge`
 pub fn default_cache_dir() -> PathBuf {
+    default_cache_dir_for_spec(&JMS_BRIDGE)
+}
+
+pub fn default_cache_dir_for_spec(spec: &BridgeSpec) -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("rust-camel")
-        .join("jms-bridge")
+        .join(spec.cache_subdir)
+}
+
+fn bridge_dir_name(spec: &BridgeSpec) -> &str {
+    spec.name.strip_suffix("-bridge").unwrap_or(spec.name)
 }
 
 #[cfg(test)]
@@ -294,7 +329,7 @@ mod tests {
 
     #[test]
     fn resolve_release_base_url_default_contains_github() {
-        let url = resolve_release_base_url(None, "0.1.0").unwrap();
+        let url = resolve_release_base_url(&JMS_BRIDGE, None, "0.1.0").unwrap();
         assert!(url.starts_with("https://github.com/"));
         assert!(url.contains("jms-bridge-v0.1.0"));
     }
@@ -302,6 +337,7 @@ mod tests {
     #[test]
     fn resolve_release_base_url_override_allowed() {
         let url = resolve_release_base_url(
+            &JMS_BRIDGE,
             Some("https://github.com/myorg/myrepo/releases/download/jms-bridge-0.1.0"),
             "0.1.0",
         )
@@ -311,24 +347,34 @@ mod tests {
 
     #[test]
     fn resolve_release_base_url_override_not_allowed() {
-        let err =
-            resolve_release_base_url(Some("https://evil.com/malware.tar.gz"), "0.1.0").unwrap_err();
+        let err = resolve_release_base_url(
+            &JMS_BRIDGE,
+            Some("https://evil.com/malware.tar.gz"),
+            "0.1.0",
+        )
+        .unwrap_err();
         assert!(matches!(err, BridgeError::UrlNotAllowed(_)));
     }
 
     #[test]
     fn resolve_release_base_url_override_subdomain_not_allowed() {
-        let err =
-            resolve_release_base_url(Some("https://github.com.evil.com/malware.tar.gz"), "0.1.0")
-                .unwrap_err();
+        let err = resolve_release_base_url(
+            &JMS_BRIDGE,
+            Some("https://github.com.evil.com/malware.tar.gz"),
+            "0.1.0",
+        )
+        .unwrap_err();
         assert!(matches!(err, BridgeError::UrlNotAllowed(_)));
     }
 
     #[test]
     fn resolve_release_base_url_override_http_not_allowed() {
-        let err =
-            resolve_release_base_url(Some("http://github.com/rust-camel/rust-camel"), "0.1.0")
-                .unwrap_err();
+        let err = resolve_release_base_url(
+            &JMS_BRIDGE,
+            Some("http://github.com/rust-camel/rust-camel"),
+            "0.1.0",
+        )
+        .unwrap_err();
         assert!(matches!(err, BridgeError::UrlNotAllowed(_)));
     }
 
@@ -343,7 +389,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn tarball_filename_contains_version() {
-        let name = tarball_filename("0.1.0").unwrap();
+        let name = tarball_filename(&JMS_BRIDGE, "0.1.0").unwrap();
         assert!(name.starts_with("jms-bridge-0.1.0-"));
         assert!(name.ends_with(".tar.gz"));
     }
@@ -390,7 +436,7 @@ mod tests {
         // The actual URL is built inside fetch_sha256sums:
         //   format!("{base_url}/jms-bridge-{version}-SHA256SUMS")
         // where base_url comes from resolve_release_base_url.
-        let resolved_base = resolve_release_base_url(None, version).unwrap();
+        let resolved_base = resolve_release_base_url(&JMS_BRIDGE, None, version).unwrap();
         let actual = format!("{resolved_base}/jms-bridge-{version}-SHA256SUMS");
 
         assert_eq!(

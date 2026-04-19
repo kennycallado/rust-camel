@@ -1,0 +1,28 @@
+[package]
+name = "camel-xslt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "XSLT Component for rust-camel (via xml-bridge)"
+
+[dependencies]
+camel-api = { workspace = true }
+camel-component-api = { workspace = true }
+camel-bridge = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt"] }
+async-trait = { workspace = true }
+dashmap = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+tower = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

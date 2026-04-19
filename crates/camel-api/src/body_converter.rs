@@ -1,6 +1,8 @@
 use crate::body::Body;
 use crate::error::CamelError;
 use bytes::Bytes;
+use sxd_document::{Package, parser};
+use thiserror::Error;
 
 /// Target type for body conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,35 +14,25 @@ pub enum BodyType {
     Empty,
 }
 
-/// Validate that a string is well-formed XML.
+#[derive(Debug, Clone, Error)]
+pub enum BodyConverterError {
+    #[error("invalid UTF-8 input: {0}")]
+    InvalidUtf8(String),
+    #[error("XML parse error: {0}")]
+    Parse(String),
+}
+
+/// Parse XML bytes into a document package.
 ///
-/// Requirements:
-/// - Must not be empty or whitespace-only.
-/// - Must contain at least one root element (not just a prolog/declaration).
-/// - Must not contain multiple root elements.
-/// - Must be parseable by libxml without errors.
-fn validate_xml(s: &str) -> Result<(), CamelError> {
-    if s.trim().is_empty() {
-        return Err(CamelError::TypeConversionFailed(
-            "invalid XML: document is empty".to_string(),
-        ));
-    }
-    let parser = libxml::parser::Parser::default();
-    let options = libxml::parser::ParserOptions {
-        recover: false,
-        ..Default::default()
-    };
-    let doc = parser
-        .parse_string_with_options(s.as_bytes(), options)
-        .map_err(|e| CamelError::TypeConversionFailed(format!("invalid XML: {e}")))?;
+/// XSD validation moved to `camel-validator` component (xsd mode via xml-bridge) in v0.7.0.
+pub fn parse_xml(input: &[u8]) -> Result<Package, BodyConverterError> {
+    let s =
+        std::str::from_utf8(input).map_err(|e| BodyConverterError::InvalidUtf8(e.to_string()))?;
+    parser::parse(s).map_err(|e| BodyConverterError::Parse(e.to_string()))
+}
 
-    if doc.get_root_element().is_none() {
-        return Err(CamelError::TypeConversionFailed(
-            "invalid XML: missing root element".to_string(),
-        ));
-    }
-
-    Ok(())
+pub fn is_well_formed_xml(input: &[u8]) -> bool {
+    parse_xml(input).is_ok()
 }
 
 /// Convert a `Body` to the target `BodyType`.
@@ -65,7 +57,8 @@ pub fn convert(body: Body, target: BodyType) -> Result<Body, CamelError> {
         }
         (Body::Text(s), BodyType::Bytes) => Ok(Body::Bytes(Bytes::from(s.into_bytes()))),
         (Body::Text(s), BodyType::Xml) => {
-            validate_xml(&s)?;
+            parse_xml(s.as_bytes())
+                .map_err(|e| CamelError::TypeConversionFailed(format!("invalid XML: {e}")))?;
             Ok(Body::Xml(s))
         }
         (Body::Text(_), BodyType::Empty) => Err(CamelError::TypeConversionFailed(
@@ -114,7 +107,8 @@ pub fn convert(body: Body, target: BodyType) -> Result<Body, CamelError> {
                     "cannot convert Body::Bytes to Xml (UTF-8 error): {e}"
                 ))
             })?;
-            validate_xml(&s)?;
+            parse_xml(s.as_bytes())
+                .map_err(|e| CamelError::TypeConversionFailed(format!("invalid XML: {e}")))?;
             Ok(Body::Xml(s))
         }
         (Body::Bytes(_), BodyType::Empty) => Err(CamelError::TypeConversionFailed(
@@ -156,6 +150,45 @@ pub fn convert(body: Body, target: BodyType) -> Result<Body, CamelError> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Instant;
+
+    #[test]
+    fn parse_xml_valid_returns_ok() {
+        let xml = b"<root><child/></root>";
+        let parsed = parse_xml(xml);
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn parse_xml_malformed_returns_error() {
+        let xml = b"<root><child></root>";
+        let parsed = parse_xml(xml);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn parse_xml_xxe_entity_not_expanded() {
+        let xml = b"<!DOCTYPE x [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><x>&e;</x>";
+        let parsed = parse_xml(xml);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn parse_xml_large_1mib_ok() {
+        let content = "a".repeat(1024 * 1024);
+        let xml = format!("<root>{content}</root>");
+
+        let start = Instant::now();
+        let parsed = parse_xml(xml.as_bytes());
+        let elapsed = start.elapsed();
+
+        assert!(parsed.is_ok());
+        assert!(
+            elapsed.as_millis() < 500,
+            "expected parse to complete in <500ms, got {:?}",
+            elapsed
+        );
+    }
 
     #[test]
     fn text_to_json_valid() {

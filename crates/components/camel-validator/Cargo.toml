@@ -13,15 +13,25 @@ categories.workspace = true
 
 [dependencies]
 camel-component-api.workspace = true
-libxml = { workspace = true }
+camel-bridge = { workspace = true }
+dashmap = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
 jsonschema = { workspace = true }
 serde_yml = { workspace = true }
 serde_json.workspace = true
 tower.workspace = true
 tracing.workspace = true
 
+[build-dependencies]
+tonic-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
 tempfile = "3"
 camel-core.workspace = true
 camel-dsl.workspace = true

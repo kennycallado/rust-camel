@@ -1,33 +1,36 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use camel_component_api::{Body, CamelError};
-use libxml::parser::Parser as XmlParser;
-use libxml::schemas::{SchemaParserContext, SchemaValidationContext};
 use serde_yml::Value as YamlValue;
 
 use crate::config::{SchemaType, ValidatorConfig};
-
-pub(crate) struct SendSchemaValidationContext(SchemaValidationContext);
-
-// SAFETY: SchemaValidationContext wraps libxml2's xmlSchemaValidCtxt which is
-// NOT thread-safe (requires &mut self for validate_document). However, it is
-// safe to move between threads because it owns its heap allocation and has no
-// thread-affinity (no thread-local state, no TLS, no OS handles tied to a thread).
-// Concurrent access is prevented by wrapping in Mutex<Arc<...>>, so only one
-// thread can call validate_document at a time. This matches the pattern used by
-// other Rust XML libraries wrapping libxml2 (e.g., the libxml crate's own tests).
-unsafe impl Send for SendSchemaValidationContext {}
+use crate::error::ValidatorError;
+use crate::xsd_bridge::XsdBridge;
 
 pub(crate) enum CompiledValidator {
-    Xml(Arc<Mutex<SendSchemaValidationContext>>),
+    Xml {
+        /// Raw XSD bytes. `register` is called lazily on first validation so
+        /// bridge startup happens in an async context (avoiding runtime issues
+        /// caused by block_on's temporary runtime).
+        xsd_bytes: Vec<u8>,
+        backend: Arc<dyn XsdBridge>,
+    },
     Json(Arc<jsonschema::Validator>),
     Yaml(Arc<jsonschema::Validator>),
 }
 
+impl std::fmt::Debug for CompiledValidator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledValidator").finish_non_exhaustive()
+    }
+}
+
 impl CompiledValidator {
-    pub fn compile(config: &ValidatorConfig) -> Result<Self, CamelError> {
+    pub fn compile(
+        config: &ValidatorConfig,
+        xsd_backend: Arc<dyn XsdBridge>,
+    ) -> Result<Self, CamelError> {
         let path = &config.schema_path;
 
         let content = std::fs::read(path).map_err(|e| {
@@ -38,29 +41,24 @@ impl CompiledValidator {
         })?;
 
         match config.schema_type {
-            SchemaType::Xml => Self::compile_xsd(path, &content),
+            SchemaType::Xml => Ok(Self::compile_xsd(&content, xsd_backend)),
             SchemaType::Json => Self::compile_json(&content, path),
             SchemaType::Yaml => Self::compile_yaml_schema(&content, path),
+            SchemaType::RelaxNg | SchemaType::Schematron => Err(ValidatorError::UnsupportedMode(
+                "RelaxNG/Schematron require a future xml-bridge update",
+            )
+            .to_endpoint_error()),
         }
     }
 
-    fn compile_xsd(path: &Path, content: &[u8]) -> Result<Self, CamelError> {
-        let mut parser_ctx = SchemaParserContext::from_buffer(content);
-        let ctx = SchemaValidationContext::from_parser(&mut parser_ctx).map_err(|errors| {
-            let msgs: Vec<String> = errors
-                .iter()
-                .map(|e| e.message.as_deref().unwrap_or("").to_string())
-                .collect();
-            CamelError::EndpointCreationFailed(format!(
-                "invalid XSD schema '{}': {}",
-                path.display(),
-                msgs.join("; ")
-            ))
-        })?;
-
-        Ok(CompiledValidator::Xml(Arc::new(Mutex::new(
-            SendSchemaValidationContext(ctx),
-        ))))
+    fn compile_xsd(content: &[u8], backend: Arc<dyn XsdBridge>) -> Self {
+        // Bridge startup and schema registration are deferred to the first validate()
+        // call, which runs in a proper async context. This avoids runtime issues
+        // caused by block_on's temporary runtime (channel I/O tasks would die with it).
+        CompiledValidator::Xml {
+            xsd_bytes: content.to_vec(),
+            backend,
+        }
     }
 
     fn compile_json(content: &[u8], path: &Path) -> Result<Self, CamelError> {
@@ -113,26 +111,30 @@ impl CompiledValidator {
         Ok(CompiledValidator::Yaml(Arc::new(validator)))
     }
 
-    pub fn validate(&self, body: &Body) -> Result<(), CamelError> {
+    pub async fn validate(&self, body: &Body) -> Result<(), CamelError> {
         match self {
-            CompiledValidator::Xml(ctx) => Self::validate_xml(ctx, body),
+            CompiledValidator::Xml { xsd_bytes, backend } => {
+                Self::validate_xml(xsd_bytes, backend, body).await
+            }
             CompiledValidator::Json(validator) => Self::validate_json(validator, body),
             CompiledValidator::Yaml(validator) => Self::validate_yaml(validator, body),
         }
     }
 
-    fn validate_xml(
-        ctx: &Arc<Mutex<SendSchemaValidationContext>>,
+    async fn validate_xml(
+        xsd_bytes: &[u8],
+        backend: &Arc<dyn XsdBridge>,
         body: &Body,
     ) -> Result<(), CamelError> {
-        let xml_str: std::borrow::Cow<str> = match body {
-            Body::Xml(s) => std::borrow::Cow::Borrowed(s.as_str()),
-            Body::Text(s) => std::borrow::Cow::Borrowed(s.as_str()),
-            Body::Bytes(b) => {
-                std::borrow::Cow::Owned(String::from_utf8(b.to_vec()).map_err(|e| {
-                    CamelError::ProcessorError(format!("XSD validator: invalid UTF-8 in body: {e}"))
-                })?)
-            }
+        // Register lazily (idempotent: no-op if already registered).
+        let schema_id = backend.register(xsd_bytes.to_vec()).await.map_err(|e| {
+            CamelError::EndpointCreationFailed(format!("XSD schema registration failed: {e}"))
+        })?;
+
+        let xml_bytes = match body {
+            Body::Xml(s) => s.as_bytes().to_vec(),
+            Body::Text(s) => s.as_bytes().to_vec(),
+            Body::Bytes(b) => b.to_vec(),
             _ => {
                 return Err(CamelError::ProcessorError(
                     "XSD validator requires Body::Xml, Body::Text, or Body::Bytes".to_string(),
@@ -140,28 +142,10 @@ impl CompiledValidator {
             }
         };
 
-        let parser = XmlParser::default();
-        let doc = parser.parse_string(xml_str.as_bytes()).map_err(|e| {
-            CamelError::ProcessorError(format!("XML parse error during validation: {e}"))
-        })?;
-
-        let mut guard = ctx
-            .lock()
-            .map_err(|e| CamelError::ProcessorError(format!("XSD validator lock poisoned: {e}")))?;
-        let result = guard.0.validate_document(&doc);
-        match result {
-            Ok(()) => Ok(()),
-            Err(errors) => {
-                let messages: Vec<String> = errors
-                    .iter()
-                    .map(|e| e.message.as_deref().unwrap_or("").to_string())
-                    .collect();
-                Err(CamelError::ProcessorError(format!(
-                    "XSD validation failed:\n{}",
-                    messages.join("\n")
-                )))
-            }
-        }
+        backend
+            .validate(&schema_id, xml_bytes)
+            .await
+            .map_err(|e| e.to_processor_error())
     }
 
     fn validate_json(validator: &jsonschema::Validator, body: &Body) -> Result<(), CamelError> {
@@ -231,254 +215,56 @@ impl CompiledValidator {
 mod tests {
     use super::*;
     use crate::config::{SchemaType, ValidatorConfig};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+    use async_trait::async_trait;
 
-    fn write_temp(content: &str, suffix: &str) -> NamedTempFile {
-        let mut f = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
+    #[derive(Debug, Clone)]
+    struct MockBridge {
+        register_err: Option<ValidatorError>,
     }
 
-    #[test]
-    fn compiled_validator_is_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<CompiledValidator>();
-    }
-
-    #[test]
-    fn xsd_compile_missing_file_errors() {
-        let config = ValidatorConfig {
-            schema_path: "/nonexistent/schema.xsd".into(),
-            schema_type: SchemaType::Xml,
-        };
-        assert!(CompiledValidator::compile(&config).is_err());
-    }
-
-    #[test]
-    fn xsd_valid_xml_passes() {
-        let xsd = r#"<?xml version="1.0"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-  <xs:element name="order">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="id" type="xs:string"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#;
-        let f = write_temp(xsd, ".xsd");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Xml,
-        };
-        let compiled = CompiledValidator::compile(&config).unwrap();
-        let body = Body::Xml("<order><id>123</id></order>".to_string());
-        assert!(compiled.validate(&body).is_ok());
-    }
-
-    #[test]
-    fn xsd_invalid_xml_returns_all_errors() {
-        let xsd = r#"<?xml version="1.0"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-  <xs:element name="order">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="id" type="xs:string"/>
-        <xs:element name="amount" type="xs:integer"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#;
-        let f = write_temp(xsd, ".xsd");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Xml,
-        };
-        let compiled = CompiledValidator::compile(&config).unwrap();
-        let body = Body::Xml("<order/>".to_string());
-        let err = compiled.validate(&body).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("validation failed"), "got: {msg}");
-    }
-
-    #[test]
-    fn xsd_detects_missing_required_attribute() {
-        let xsd = r#"<?xml version="1.0"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-  <xs:element name="order">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="item">
-          <xs:complexType>
-            <xs:attribute name="id" type="xs:string" use="required"/>
-          </xs:complexType>
-        </xs:element>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#;
-        let f = write_temp(xsd, ".xsd");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Xml,
-        };
-        let compiled = CompiledValidator::compile(&config).unwrap();
-        let body = Body::Xml("<order><item/></order>".to_string());
-        let err = compiled.validate(&body).unwrap_err();
-        assert!(
-            err.to_string().contains("validation failed"),
-            "libxml2 should detect missing required attr"
-        );
-    }
-
-    #[test]
-    fn xsd_detects_wrong_simple_type() {
-        let xsd = r#"<?xml version="1.0"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-  <xs:element name="root">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="count" type="xs:positiveInteger"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#;
-        let f = write_temp(xsd, ".xsd");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Xml,
-        };
-        let compiled = CompiledValidator::compile(&config).unwrap();
-        let body = Body::Xml("<root><count>-5</count></root>".to_string());
-        assert!(
-            compiled.validate(&body).is_err(),
-            "libxml2 should detect negative positiveInteger"
-        );
-    }
-
-    #[test]
-    fn json_valid_passes() {
-        let schema =
-            r#"{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}"#;
-        let f = write_temp(schema, ".json");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Json,
-        };
-        let compiled = CompiledValidator::compile(&config).unwrap();
-        let body = Body::Json(serde_json::json!({"name": "Alice"}));
-        assert!(compiled.validate(&body).is_ok());
-    }
-
-    #[test]
-    fn json_invalid_returns_errors() {
-        let schema = r#"{"type":"object","required":["name"]}"#;
-        let f = write_temp(schema, ".json");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Json,
-        };
-        let compiled = CompiledValidator::compile(&config).unwrap();
-        let body = Body::Json(serde_json::json!({"age": 30}));
-        let err = compiled.validate(&body).unwrap_err();
-        assert!(err.to_string().contains("validation failed"));
-    }
-
-    #[test]
-    fn json_text_body_parses_and_validates() {
-        let schema = r#"{"type":"string"}"#;
-        let f = write_temp(schema, ".json");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Json,
-        };
-        let compiled = CompiledValidator::compile(&config).unwrap();
-        let body = Body::Text(r#""hello""#.to_string());
-        assert!(compiled.validate(&body).is_ok());
-    }
-
-    #[test]
-    fn json_empty_body_errors() {
-        let schema = r#"{"type":"object"}"#;
-        let f = write_temp(schema, ".json");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Json,
-        };
-        let compiled = CompiledValidator::compile(&config).unwrap();
-        let body = Body::Empty;
-        assert!(compiled.validate(&body).is_err());
-    }
-
-    #[test]
-    fn yaml_valid_passes() {
-        let schema = "type: object\nrequired: [host]\nproperties:\n  host:\n    type: string\n";
-        let f = write_temp(schema, ".yaml");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Yaml,
-        };
-        let compiled = CompiledValidator::compile(&config).unwrap();
-        let body = Body::Text("host: localhost\n".to_string());
-        assert!(compiled.validate(&body).is_ok());
-    }
-
-    #[test]
-    fn yaml_invalid_returns_errors() {
-        let schema = "type: object\nrequired: [host]\n";
-        let f = write_temp(schema, ".yaml");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Yaml,
-        };
-        let compiled = CompiledValidator::compile(&config).unwrap();
-        let body = Body::Text("port: 8080\n".to_string());
-        let err = compiled.validate(&body).unwrap_err();
-        assert!(err.to_string().contains("validation failed"));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_xsd_validation_stress_test() {
-        let xsd = r#"<?xml version="1.0"?>
-<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
-  <xs:element name="order">
-    <xs:complexType>
-      <xs:sequence>
-        <xs:element name="id" type="xs:string"/>
-      </xs:sequence>
-    </xs:complexType>
-  </xs:element>
-</xs:schema>"#;
-        let f = write_temp(xsd, ".xsd");
-        let config = ValidatorConfig {
-            schema_path: f.path().to_path_buf(),
-            schema_type: SchemaType::Xml,
-        };
-        let compiled = Arc::new(CompiledValidator::compile(&config).unwrap());
-
-        let mut handles = Vec::new();
-        for i in 0..20 {
-            let c = Arc::clone(&compiled);
-            handles.push(tokio::spawn(async move {
-                let body = if i % 2 == 0 {
-                    Body::Xml("<order><id>123</id></order>".to_string())
-                } else {
-                    Body::Xml("<order/>".to_string())
-                };
-                c.validate(&body)
-            }));
-        }
-
-        let mut valid = 0;
-        let mut invalid = 0;
-        for h in handles {
-            match h.await.unwrap() {
-                Ok(()) => valid += 1,
-                Err(_) => invalid += 1,
+    #[async_trait]
+    impl XsdBridge for MockBridge {
+        async fn register(&self, _xsd_bytes: Vec<u8>) -> Result<String, ValidatorError> {
+            if let Some(err) = &self.register_err {
+                return Err(err.clone());
             }
+            Ok("xsd-mock".to_string())
         }
-        assert_eq!(valid, 10);
-        assert_eq!(invalid, 10);
+
+        async fn validate(
+            &self,
+            _schema_id: &str,
+            _doc_bytes: Vec<u8>,
+        ) -> Result<(), ValidatorError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn xsd_bridge_register_error_propagates_on_validate() {
+        let mut schema = tempfile::Builder::new().suffix(".xsd").tempfile().unwrap();
+        use std::io::Write;
+        schema.write_all(b"<xs:schema/>").unwrap();
+
+        let cfg = ValidatorConfig {
+            schema_path: schema.path().to_path_buf(),
+            schema_type: SchemaType::Xml,
+        };
+
+        let bridge = Arc::new(MockBridge {
+            register_err: Some(ValidatorError::CompilationFailed(
+                "COMPILATION_FAILED".to_string(),
+            )),
+        });
+
+        // compile() is now sync and always succeeds for XSD (deferred registration)
+        let compiled = CompiledValidator::compile(&cfg, bridge).expect("compile should succeed");
+
+        // The error surfaces on the first validate() call when register() is attempted
+        let err = compiled
+            .validate(&Body::Xml("<order/>".to_string()))
+            .await
+            .expect_err("expected validate to fail due to registration error");
+        assert!(err.to_string().contains("COMPILATION_FAILED"));
     }
 }

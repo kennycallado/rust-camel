@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::ComponentBundle;
 use camel_component_log::LogComponent;
 use camel_component_mock::MockComponent;

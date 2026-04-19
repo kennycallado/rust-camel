@@ -1,0 +1,56 @@
+[
+  {
+    "name": "org.apache.xerces.jaxp.validation.XMLSchemaFactory",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.apache.xerces.jaxp.SAXParserFactoryImpl",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.apache.xerces.parsers.SAXParser",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "net.sf.saxon.TransformerFactoryImpl",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "net.sf.saxon.Configuration",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.xmlresolver.loaders.XmlLoader",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true,
+    "allDeclaredMethods": true,
+    "methods": [
+      {"name": "<init>", "parameterTypes": ["org.xmlresolver.ResolverConfiguration"]}
+    ]
+  },
+  {
+    "name": "org.xmlresolver.CatalogLoader",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.xmlresolver.XMLResolverConfiguration",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.xmlresolver.Resolver",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.xmlresolver.CatalogManager",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  }
+]

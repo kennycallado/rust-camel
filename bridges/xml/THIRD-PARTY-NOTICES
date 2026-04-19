@@ -1,0 +1,39 @@
+THIRD-PARTY-NOTICES
+===================
+
+This product bundles or depends on the following third-party components:
+
+- Name: Quarkus gRPC
+  Version: 3.20.0
+  License: Apache-2.0
+  Upstream URL: https://github.com/quarkusio/quarkus
+
+- Name: Quarkus Arc
+  Version: 3.20.0
+  License: Apache-2.0
+  Upstream URL: https://github.com/quarkusio/quarkus
+
+- Name: Xerces-J
+  Version: 2.12.2
+  License: Apache-2.0
+  Upstream URL: https://xerces.apache.org/xerces2-j/
+
+- Name: XML APIs
+  Version: 1.4.01
+  License: Apache-2.0 and W3C Software License
+  Upstream URL: https://xerces.apache.org/xml-commons/components/external/
+
+- Name: Saxon-HE
+  Version: 12.5
+  License: MPL-2.0
+  Upstream URL: https://www.saxonica.com/products/products.xml
+
+- Name: gRPC-Java
+  Version: Transitive via io.quarkus:quarkus-grpc (Quarkus 3.20.0 BOM-managed)
+  License: Apache-2.0
+  Upstream URL: https://github.com/grpc/grpc-java
+
+- Name: Protocol Buffers (Java)
+  Version: Transitive via io.quarkus:quarkus-grpc (Quarkus 3.20.0 BOM-managed)
+  License: BSD-3-Clause
+  Upstream URL: https://github.com/protocolbuffers/protobuf

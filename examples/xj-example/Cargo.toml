@@ -1,0 +1,17 @@
+[package]
+name = "xj-example"
+description = "XJ component example for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-xj.workspace = true
+camel-component-direct.workspace = true
+camel-component-log.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber.workspace = true
+tower.workspace = true

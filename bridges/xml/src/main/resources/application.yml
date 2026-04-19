@@ -1,0 +1,17 @@
+quarkus:
+  grpc:
+    server:
+      port: 9090
+      max-inbound-message-size: 16777216
+  http:
+    port: -1
+  native:
+    additional-build-args:
+      - "-H:+AllowVMInspection"
+      - "-Djdk.xml.entityExpansionLimit=64"
+      - "-Djdk.xml.totalEntitySizeLimit=5000000"
+      - "-Djdk.xml.maxGeneralEntitySizeLimit=100000"
+      - "-Djdk.xml.elementAttributeLimit=10000"
+      - "--initialize-at-run-time=net.sf.saxon.functions.hof.RandomNumberGenerator"
+      - "--initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl"
+      - "--initialize-at-run-time=org.xmlresolver"

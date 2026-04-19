@@ -427,14 +427,14 @@ impl JmsBridgePool {
                 CamelError::ProcessorError(format!("JMS bridge binary unavailable: {e}"))
             })?;
 
-        let process_config = BridgeProcessConfig {
+        let process_config = BridgeProcessConfig::jms(
             binary_path,
-            broker_url: broker_url.to_string(),
-            broker_type: broker_type.clone(),
-            username: credentials.as_ref().map(|(u, _)| u.clone()),
-            password: credentials.as_ref().map(|(_, p)| p.clone()),
+            broker_url.to_string(),
+            broker_type.clone(),
+            credentials.as_ref().map(|(u, _)| u.clone()),
+            credentials.as_ref().map(|(_, p)| p.clone()),
             start_timeout_ms,
-        };
+        );
 
         let total_timeout = Duration::from_millis(start_timeout_ms);
         let result = tokio::time::timeout(total_timeout, async {

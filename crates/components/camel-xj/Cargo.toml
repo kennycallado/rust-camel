@@ -1,0 +1,22 @@
+[package]
+name = "camel-xj"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "XJ (XML <-> JSON) Data Format for Rust Camel (via xml-bridge)"
+
+[dependencies]
+camel-api = { workspace = true }
+camel-component-api = { workspace = true }
+camel-bridge = { workspace = true }
+camel-xslt = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+tower = { workspace = true }
+tonic = { workspace = true }
+
+[dev-dependencies]
+tonic = { workspace = true }
+async-trait = { workspace = true }

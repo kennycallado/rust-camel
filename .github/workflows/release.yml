@@ -57,23 +57,7 @@ jobs:
 
       - name: Install build deps (Linux native)
         if: matrix.install-librdkafka == true
-        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev pkg-config libxml2-dev
-
-      - name: Install libxml2 (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install libxml2
-          echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig" >> $GITHUB_ENV
-
-      - name: Install native deps (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          vcpkg install libxml2:x64-windows zlib:x64-windows
-          echo "VCPKGRS_DYNAMIC=1" >> $GITHUB_ENV
-          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> $GITHUB_ENV
-          echo "VCPKG_TARGET_TRIPLET=x64-windows" >> $GITHUB_ENV
-          echo "CMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
-        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y cmake libcurl4-openssl-dev libssl-dev libsasl2-dev
 
       - name: Install target
         if: matrix.use-cross == false

@@ -226,6 +226,8 @@ async fn run(
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
     ctx.register_component(camel_component_validator::ValidatorComponent::new());
+    ctx.register_component(camel_xslt::XsltComponent::default());
+    ctx.register_component(camel_xj::XjComponent::default());
 
     // Register HTTP, WS, File, Container (always-on in camel-cli, no feature flag)
     register_bundle!(ctx, camel_config, camel_component_http::HttpBundle);

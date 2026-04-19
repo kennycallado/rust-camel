@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 
 const MANDREL_IMAGE: &str = "quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21";
 const EXPECTED_BINARY: &str = "build/native/jms-bridge";
+const EXPECTED_BINARY_XML: &str = "build/native/xml-bridge";
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "rust-camel build tasks")]
@@ -24,6 +25,15 @@ enum Commands {
         #[arg(long)]
         no_cache: bool,
     },
+    /// Build the XML bridge native binary using Docker (Mandrel)
+    BuildXmlBridge {
+        /// Version tag to pass to build-native.sh (e.g. 0.2.0)
+        #[arg(long)]
+        version: Option<String>,
+        /// Clear Gradle cache before building
+        #[arg(long)]
+        no_cache: bool,
+    },
 }
 
 fn main() {
@@ -31,6 +41,12 @@ fn main() {
     match cli.command {
         Commands::BuildJmsBridge { version, no_cache } => {
             if let Err(e) = build_jms_bridge(version, no_cache) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::BuildXmlBridge { version, no_cache } => {
+            if let Err(e) = build_xml_bridge(version, no_cache) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -49,6 +65,20 @@ fn validate_version(v: &str) -> Result<(), String> {
 }
 
 fn build_jms_bridge(version: Option<String>, no_cache: bool) -> Result<(), String> {
+    build_bridge("JMS", "jms", EXPECTED_BINARY, version, no_cache)
+}
+
+fn build_xml_bridge(version: Option<String>, no_cache: bool) -> Result<(), String> {
+    build_bridge("XML", "xml", EXPECTED_BINARY_XML, version, no_cache)
+}
+
+fn build_bridge(
+    bridge_name: &str,
+    bridge_dir_name: &str,
+    expected_binary: &str,
+    version: Option<String>,
+    no_cache: bool,
+) -> Result<(), String> {
     // Validate version early to prevent path traversal or malformed filenames
     if let Some(ref v) = version {
         validate_version(v)?;
@@ -58,10 +88,10 @@ fn build_jms_bridge(version: Option<String>, no_cache: bool) -> Result<(), Strin
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = find_workspace_root_from(&manifest_dir)
         .ok_or_else(|| {
-            "Cannot locate workspace root with bridges/jms/ — are you running from the rust-camel workspace?".to_string()
+            "Cannot locate workspace root with bridges/ — are you running from the rust-camel workspace?".to_string()
         })?;
 
-    let bridges_jms = workspace_root.join("bridges").join("jms");
+    let bridge_dir = workspace_root.join("bridges").join(bridge_dir_name);
 
     // 2. Check Docker
     let docker_ok = Command::new("docker")
@@ -77,7 +107,7 @@ fn build_jms_bridge(version: Option<String>, no_cache: bool) -> Result<(), Strin
 
     // 3. Optional: clear Gradle cache
     if no_cache {
-        let cache_dir = bridges_jms.join(".gradle-docker-cache");
+        let cache_dir = bridge_dir.join(".gradle-docker-cache");
         if cache_dir.exists() {
             std::fs::remove_dir_all(&cache_dir)
                 .map_err(|e| format!("Failed to clear Gradle cache: {e}"))?;
@@ -87,7 +117,7 @@ fn build_jms_bridge(version: Option<String>, no_cache: bool) -> Result<(), Strin
 
     // 4. Ensure the Gradle cache dir exists and is world-writable so the container
     //    user (quarkus/1001) can write to it regardless of the host user's uid.
-    let cache_dir = bridges_jms.join(".gradle-docker-cache");
+    let cache_dir = bridge_dir.join(".gradle-docker-cache");
     if !cache_dir.exists() {
         std::fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("Failed to create Gradle cache dir: {e}"))?;
@@ -97,12 +127,12 @@ fn build_jms_bridge(version: Option<String>, no_cache: bool) -> Result<(), Strin
     // .gradle-docker-cache/, but NOT to the entire source tree.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let build_dir = bridges_jms.join("build");
+        let build_dir = bridge_dir.join("build");
         if !build_dir.exists() {
             std::fs::create_dir_all(&build_dir)
                 .map_err(|e| format!("Failed to create build dir: {e}"))?;
         }
+        use std::os::unix::fs::PermissionsExt;
         for dir in &[&build_dir, &cache_dir] {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777))
                 .map_err(|e| format!("Failed to chmod {}: {e}", dir.display()))?;
@@ -115,7 +145,7 @@ fn build_jms_bridge(version: Option<String>, no_cache: bool) -> Result<(), Strin
     let mut args = vec![
         "run".to_string(),
         "--rm".to_string(),
-        format!("--volume={}:/project:z", bridges_jms.display()),
+        format!("--volume={}:/project:z", bridge_dir.display()),
         "--workdir=/project".to_string(),
         "--env=GRADLE_USER_HOME=/project/.gradle-docker-cache".to_string(),
         "--entrypoint".to_string(),
@@ -138,9 +168,9 @@ fn build_jms_bridge(version: Option<String>, no_cache: bool) -> Result<(), Strin
         args.push(v.clone());
     }
 
-    println!("Building JMS bridge native image...");
+    println!("Building {bridge_name} bridge native image...");
     println!("  Image:     {MANDREL_IMAGE}");
-    println!("  Source:    {}", bridges_jms.display());
+    println!("  Source:    {}", bridge_dir.display());
     if let Some(ref v) = version {
         println!("  Version:   {v}");
     }
@@ -159,7 +189,7 @@ fn build_jms_bridge(version: Option<String>, no_cache: bool) -> Result<(), Strin
     }
 
     // 5. Verify binary exists
-    let binary_path = bridges_jms.join(EXPECTED_BINARY);
+    let binary_path = bridge_dir.join(expected_binary);
     if !binary_path.exists() {
         return Err(format!(
             "Build succeeded but binary not found at expected path: {}",
@@ -303,7 +333,7 @@ fn patchelf_for_nixos(binary: &Path) -> Result<(), String> {
 }
 
 /// Walk up from `start` looking for a `Cargo.toml` containing `[workspace]`
-/// with a `bridges/jms/` directory as sentinel. Returns the workspace root.
+/// with a `bridges/` directory as sentinel. Returns the workspace root.
 pub fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     for _ in 0..10 {
@@ -312,7 +342,7 @@ pub fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
             && std::fs::read_to_string(&cargo_toml)
                 .map(|contents| contents.contains("[workspace]"))
                 .unwrap_or(false)
-            && current.join("bridges").join("jms").exists()
+            && current.join("bridges").exists()
         {
             return Some(current);
         }
@@ -369,8 +399,8 @@ mod tests {
     #[test]
     fn find_workspace_root_finds_sentinel() {
         let dir = std::env::temp_dir().join("xtask-test-ws");
-        let bridges_jms = dir.join("bridges").join("jms");
-        fs::create_dir_all(&bridges_jms).unwrap();
+        let bridges = dir.join("bridges");
+        fs::create_dir_all(&bridges).unwrap();
         fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
 
         let result = find_workspace_root_from(&dir.join("sub").join("deep"));
@@ -385,7 +415,7 @@ mod tests {
         let sub = dir.join("a").join("b");
         fs::create_dir_all(&sub).unwrap();
         fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
-        // No bridges/jms/ directory
+        // No bridges/ directory
 
         let result = find_workspace_root_from(&sub);
         assert_eq!(result, None);

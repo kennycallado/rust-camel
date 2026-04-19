@@ -4,7 +4,6 @@ use camel_api::body::Body;
 use camel_api::{Exchange, Message, Value};
 use camel_core::LanguageRegistryError;
 use camel_dsl::parse_yaml;
-use camel_language_api::LanguageError;
 use camel_language_xpath::XPathLanguage;
 use camel_test::CamelTestContext;
 use tower::ServiceExt;

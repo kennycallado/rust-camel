@@ -1,0 +1,73 @@
+syntax = "proto3";
+package xml_bridge;
+
+option java_multiple_files = true;
+
+service XsdValidator {
+  rpc RegisterSchema(RegisterSchemaRequest) returns (RegisterSchemaResponse);
+  rpc ValidateWith(ValidateWithRequest) returns (ValidateResponse);
+  rpc UnregisterSchema(UnregisterSchemaRequest) returns (UnregisterSchemaResponse);
+  rpc Validate(ValidateRequest) returns (ValidateResponse);
+}
+
+service XsltTransformer {
+  rpc CompileStylesheet(CompileStylesheetRequest) returns (CompileStylesheetResponse);
+  rpc Transform(TransformRequest) returns (TransformResponse);
+  rpc ReleaseStylesheet(ReleaseStylesheetRequest) returns (ReleaseStylesheetResponse);
+}
+
+service Health {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message BridgeError {
+  enum Kind {
+    UNKNOWN = 0;
+    INVALID_INPUT = 1;
+    COMPILATION_FAILED = 2;
+    VALIDATION_FAILED = 3;
+    TRANSFORM_FAILED = 4;
+    RESOURCE_NOT_FOUND = 5;
+    SECURITY_VIOLATION = 6;
+    INTERNAL = 7;
+  }
+  Kind kind = 1;
+  string message = 2;
+  int32 line = 3;
+  int32 column = 4;
+  string detail = 5;
+}
+
+message RegisterSchemaRequest    { string schema_id = 1; bytes schema = 2; }
+message RegisterSchemaResponse   { string schema_id = 1; optional BridgeError error = 2; }
+message ValidateWithRequest      { string schema_id = 1; bytes document = 2; }
+message UnregisterSchemaRequest  { string schema_id = 1; }
+message UnregisterSchemaResponse { bool released = 1; }
+
+message ValidateRequest { bytes document = 1; bytes schema = 2; }
+message ValidateResponse {
+  bool valid = 1;
+  repeated ValidationError errors = 2;
+  optional BridgeError error = 3;
+}
+message ValidationError {
+  string message = 1;
+  int32 line = 2;
+  int32 column = 3;
+  string severity = 4;
+}
+
+message CompileStylesheetRequest  { string stylesheet_id = 1; bytes stylesheet = 2; }
+message CompileStylesheetResponse { string stylesheet_id = 1; optional BridgeError error = 2; }
+message TransformRequest {
+  string stylesheet_id = 1;
+  bytes document = 2;
+  map<string, string> parameters = 3;
+  string output_method = 4; // "xml" | "html" | "text" (v0.7.0). "json" reserved.
+}
+message TransformResponse { bytes result = 1; optional BridgeError error = 2; }
+message ReleaseStylesheetRequest { string stylesheet_id = 1; }
+message ReleaseStylesheetResponse {}
+
+message HealthCheckRequest  {}
+message HealthCheckResponse { string status = 1; } // "SERVING" | "NOT_SERVING"

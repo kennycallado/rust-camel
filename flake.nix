@@ -133,6 +133,12 @@
               export CAMEL_JMS_BRIDGE_BINARY_PATH="$BRIDGE_BIN"
             fi
 
+            # XML bridge: auto-detect native binary
+            XML_BRIDGE_BIN="$PWD/bridges/xml/build/native/xml-bridge"
+            if [ -x "$XML_BRIDGE_BIN" ]; then
+              export CAMEL_XML_BRIDGE_BINARY_PATH="$XML_BRIDGE_BIN"
+            fi
+
             echo ""
             echo "  rust-camel dev shell"
             echo ""
@@ -141,6 +147,12 @@
             else
               echo "  JMS bridge: not built"
               echo "    run: cargo xtask build-jms-bridge"
+            fi
+            if [ -x "$XML_BRIDGE_BIN" ]; then
+              echo "  XML bridge: ready"
+            else
+              echo "  XML bridge: not built"
+              echo "    run: cargo xtask build-xml-bridge"
             fi
             echo ""
           '';

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+use crate::spec::{BridgeSpec, JMS_BRIDGE, XML_BRIDGE};
+
 #[derive(Debug, Error)]
 pub enum BridgeError {
     #[error("IO error: {0}")]
@@ -53,12 +55,64 @@ impl std::str::FromStr for BrokerType {
 }
 
 pub struct BridgeProcessConfig {
+    pub spec: &'static BridgeSpec,
     pub binary_path: PathBuf,
     pub broker_url: String,
     pub broker_type: BrokerType,
     pub username: Option<String>,
     pub password: Option<String>,
     pub start_timeout_ms: u64,
+    pub env_vars: Vec<(String, String)>,
+}
+
+impl BridgeProcessConfig {
+    /// Constructor for the JMS bridge.
+    pub fn jms(
+        binary_path: PathBuf,
+        broker_url: String,
+        broker_type: BrokerType,
+        username: Option<String>,
+        password: Option<String>,
+        start_timeout_ms: u64,
+    ) -> Self {
+        let mut env_vars = vec![
+            ("BRIDGE_BROKER_URL".to_string(), broker_url.clone()),
+            (
+                "BRIDGE_BROKER_TYPE".to_string(),
+                broker_type.as_env_str().to_string(),
+            ),
+        ];
+        if let Some(u) = &username {
+            env_vars.push(("BRIDGE_USERNAME".to_string(), u.clone()));
+        }
+        if let Some(p) = &password {
+            env_vars.push(("BRIDGE_PASSWORD".to_string(), p.clone()));
+        }
+        Self {
+            spec: &JMS_BRIDGE,
+            binary_path,
+            broker_url,
+            broker_type,
+            username,
+            password,
+            start_timeout_ms,
+            env_vars,
+        }
+    }
+
+    /// Constructor for the XML bridge.
+    pub fn xml(binary_path: PathBuf, start_timeout_ms: u64) -> Self {
+        Self {
+            spec: &XML_BRIDGE,
+            binary_path,
+            broker_url: String::new(),
+            broker_type: BrokerType::Generic,
+            username: None,
+            password: None,
+            start_timeout_ms,
+            env_vars: vec![],
+        }
+    }
 }
 
 pub struct BridgeProcess {
@@ -88,13 +142,16 @@ impl BridgeProcess {
         };
 
         // If CAMEL_BRIDGE_LOG_STDERR is set, redirect stderr to a file for debugging.
-        // The file path is: /tmp/jms-bridge-<pid>.log
         let stderr_stdio: std::process::Stdio =
             if let Ok(log_dir) = std::env::var("CAMEL_BRIDGE_LOG_STDERR") {
+                let log_filename = config
+                    .spec
+                    .log_file_template
+                    .replace("{pid}", &std::process::id().to_string());
                 let log_path = if log_dir.is_empty() {
-                    format!("/tmp/jms-bridge-{}.log", std::process::id())
+                    format!("/tmp/{log_filename}")
                 } else {
-                    format!("{}/jms-bridge-{}.log", log_dir, std::process::id())
+                    format!("{log_dir}/{log_filename}")
                 };
                 match std::fs::File::create(&log_path) {
                     Ok(f) => {
@@ -113,18 +170,21 @@ impl BridgeProcess {
                 std::process::Stdio::inherit()
             };
 
-        let mut child = Command::new(&config.binary_path)
-            .env("BRIDGE_BROKER_URL", &config.broker_url)
-            .env("BRIDGE_BROKER_TYPE", config.broker_type.as_env_str())
+        let mut command = Command::new(&config.binary_path);
+        command
             .env("QUARKUS_GRPC_SERVER_PORT", free_port.to_string())
             // Let the OS pick a random HTTP port — we only use gRPC.
             // Without this, Quarkus binds HTTP on 8080 and fails if occupied.
             .env("QUARKUS_HTTP_PORT", "0")
-            .env_opt("BRIDGE_USERNAME", &config.username)
-            .env_opt("BRIDGE_PASSWORD", &config.password)
             .stdout(std::process::Stdio::piped())
-            .stderr(stderr_stdio)
-            .spawn()?;
+            .stderr(stderr_stdio);
+
+        // Inject bridge-specific env vars (e.g. JMS broker URL/credentials via ::jms()).
+        for (key, value) in &config.env_vars {
+            command.env(key, value);
+        }
+
+        let mut child = command.spawn()?;
 
         let stdout = child.stdout.take().ok_or(BridgeError::StdoutClosed)?;
         let mut reader = tokio::io::BufReader::new(stdout).lines();
@@ -145,15 +205,14 @@ impl BridgeProcess {
         .await
         .map_err(|_| {
             BridgeError::Timeout(format!(
-                "JMS bridge failed to start: health check timeout after {}ms",
-                config.start_timeout_ms
+                "{} failed to start: health check timeout after {}ms",
+                config.spec.name, config.start_timeout_ms
             ))
         })??;
 
         // Keep draining the bridge's stdout in the background so the pipe
-        // buffer never fills up.  If the pipe blocks, the bridge's JMS
-        // MessageListener thread blocks on its next log write and silently
-        // stops delivering messages after the first one.
+        // buffer never fills up.  If the pipe blocks, the bridge process
+        // blocks on its next stdout write and silently stops responding.
         tokio::spawn(async move {
             while let Ok(Some(line)) = reader.next_line().await {
                 tracing::debug!(target: "camel_bridge::child", "{}", line);
@@ -207,19 +266,6 @@ impl Drop for BridgeProcess {
     }
 }
 
-// Helper trait for optional env vars
-trait CommandExt {
-    fn env_opt(&mut self, key: &str, val: &Option<String>) -> &mut Self;
-}
-impl CommandExt for tokio::process::Command {
-    fn env_opt(&mut self, key: &str, val: &Option<String>) -> &mut Self {
-        if let Some(v) = val {
-            self.env(key, v);
-        }
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +300,24 @@ mod tests {
         assert_eq!(BrokerType::ActiveMq.as_env_str(), "activemq");
         assert_eq!(BrokerType::Artemis.as_env_str(), "artemis");
         assert_eq!(BrokerType::Generic.as_env_str(), "generic");
+    }
+
+    #[test]
+    fn jms_constructor_uses_jms_spec() {
+        let cfg = BridgeProcessConfig::jms(
+            PathBuf::from("/tmp/jms-bridge"),
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            Some("user".to_string()),
+            Some("pass".to_string()),
+            1000,
+        );
+        assert_eq!(cfg.spec.name, "jms-bridge");
+    }
+
+    #[test]
+    fn xml_constructor_uses_xml_spec() {
+        let cfg = BridgeProcessConfig::xml(PathBuf::from("/tmp/xml-bridge"), 1000);
+        assert_eq!(cfg.spec.name, "xml-bridge");
     }
 }
