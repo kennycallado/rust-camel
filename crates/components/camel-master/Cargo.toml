@@ -4,15 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Master crate for Rust Camel, re-exporting all public APIs of the workspace"
 
 [dependencies]
+camel-api.workspace = true
+camel-component-api.workspace = true
+camel-language-api.workspace = true
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-camel-api = { path = "../../camel-api" }
-camel-component-api = { path = "../camel-component-api" }
-camel-language-api = { path = "../../languages/camel-language-api" }
 toml = { workspace = true }
 
 [dev-dependencies]
