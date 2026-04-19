@@ -188,6 +188,7 @@ async fn connected_runtime_retry_recovers_after_post_effect_persistence_failure(
     let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
         Arc::clone(&registry),
         simple_languages(),
+        Arc::new(camel_api::NoopLeaderElector),
     ));
 
     let repo = Arc::new(FailFirstSaveIfVersionRepository::default());
@@ -272,6 +273,7 @@ async fn connected_runtime_lifecycle_requires_registered_aggregate() {
     let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
         Arc::clone(&registry),
         simple_languages(),
+        Arc::new(camel_api::NoopLeaderElector),
     ));
 
     let runtime = Arc::new(
@@ -322,8 +324,11 @@ async fn connected_runtime_start_tolerates_suspended_controller_drift() {
         .expect("registry lock poisoned")
         .register(std::sync::Arc::new(TimerComponent::new()));
 
-    let controller_impl =
-        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
+    let controller_impl = DefaultRouteController::with_languages(
+        Arc::clone(&registry),
+        simple_languages(),
+        Arc::new(camel_api::NoopLeaderElector),
+    );
     let (controller, _actor_join) = spawn_controller_actor(controller_impl);
 
     let runtime = Arc::new(
@@ -384,8 +389,11 @@ async fn connected_runtime_suspend_tolerates_already_suspended_controller_drift(
         .expect("registry lock poisoned")
         .register(std::sync::Arc::new(TimerComponent::new()));
 
-    let controller_impl =
-        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
+    let controller_impl = DefaultRouteController::with_languages(
+        Arc::clone(&registry),
+        simple_languages(),
+        Arc::new(camel_api::NoopLeaderElector),
+    );
     let (controller, _actor_join) = spawn_controller_actor(controller_impl);
 
     let runtime = Arc::new(
@@ -453,8 +461,11 @@ async fn connected_runtime_resume_tolerates_already_started_controller_drift() {
         .expect("registry lock poisoned")
         .register(std::sync::Arc::new(TimerComponent::new()));
 
-    let controller_impl =
-        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
+    let controller_impl = DefaultRouteController::with_languages(
+        Arc::clone(&registry),
+        simple_languages(),
+        Arc::new(camel_api::NoopLeaderElector),
+    );
     let (controller, _actor_join) = spawn_controller_actor(controller_impl);
 
     let runtime = Arc::new(
@@ -573,6 +584,7 @@ async fn connected_runtime_reload_requires_registered_aggregate() {
     let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
         Arc::clone(&registry),
         simple_languages(),
+        Arc::new(camel_api::NoopLeaderElector),
     ));
 
     let runtime = Arc::new(
@@ -623,8 +635,11 @@ async fn connected_runtime_remove_tolerates_started_controller_drift() {
         .expect("registry lock poisoned")
         .register(std::sync::Arc::new(TimerComponent::new()));
 
-    let controller_impl =
-        DefaultRouteController::with_languages(Arc::clone(&registry), simple_languages());
+    let controller_impl = DefaultRouteController::with_languages(
+        Arc::clone(&registry),
+        simple_languages(),
+        Arc::new(camel_api::NoopLeaderElector),
+    );
     let (controller, _actor_join) = spawn_controller_actor(controller_impl);
 
     let runtime = Arc::new(
@@ -691,6 +706,7 @@ async fn register_route_accepts_advanced_canonical_steps() {
     let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
         Arc::clone(&registry),
         simple_languages(),
+        Arc::new(camel_api::NoopLeaderElector),
     ));
     let runtime = Arc::new(
         RuntimeBus::new(

@@ -22,14 +22,14 @@ pub(crate) fn create_route_consumer(
     component_ctx: &dyn ComponentContext,
 ) -> Result<(Box<dyn Consumer>, ConcurrencyModel), CamelError> {
     let parsed = parse_uri(from_uri)?;
-    let consumer = {
-        let registry = registry
+    let component = {
+        let guard = registry
             .lock()
             .expect("mutex poisoned: another thread panicked while holding this lock");
-        let component = registry.get_or_err(&parsed.scheme)?;
-        let endpoint = component.create_endpoint(from_uri, component_ctx)?;
-        endpoint.create_consumer()?
+        guard.get_or_err(&parsed.scheme)?.clone()
     };
+    let endpoint = component.create_endpoint(from_uri, component_ctx)?;
+    let consumer = endpoint.create_consumer()?;
     let concurrency = consumer.concurrency_model();
     Ok((consumer, concurrency))
 }
@@ -203,6 +203,7 @@ mod tests {
                 Arc::clone(&registry),
                 Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 Arc::new(camel_api::NoOpMetrics),
+                Arc::new(camel_api::NoopLeaderElector),
             ),
         ) {
             Ok(_) => panic!("unknown scheme should fail consumer creation"),

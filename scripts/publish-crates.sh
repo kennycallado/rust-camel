@@ -138,6 +138,7 @@ publish_crate "camel-component-validator" "crates/components/camel-validator"
 publish_crate "camel-component-ws" "crates/components/camel-ws"
 publish_crate "camel-bridge" "crates/services/camel-bridge"
 publish_crate "camel-component-jms" "crates/components/camel-jms"
+publish_crate "camel-master" "crates/components/camel-master"
 
 # camel-config depends on camel-otel, camel-prometheus and many component crates
 publish_crate "camel-config" "crates/camel-config"

@@ -602,6 +602,10 @@ impl ComponentContext for CamelContext {
     fn metrics(&self) -> Arc<dyn MetricsCollector> {
         Arc::clone(&self.metrics)
     }
+
+    fn leader_elector(&self) -> Arc<dyn LeaderElector> {
+        Arc::clone(&self.leader_elector)
+    }
 }
 
 impl CamelContextBuilder {
@@ -694,6 +698,7 @@ impl CamelContextBuilder {
                 let mut controller_impl = DefaultRouteController::with_languages(
                     Arc::clone(&registry),
                     Arc::clone(&languages),
+                    Arc::clone(&leader_elector),
                 );
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
@@ -708,6 +713,7 @@ impl CamelContextBuilder {
                 let controller_impl = DefaultRouteController::with_languages(
                     Arc::clone(&registry),
                     Arc::clone(&languages),
+                    Arc::clone(&leader_elector),
                 );
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)

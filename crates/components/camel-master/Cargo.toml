@@ -1,0 +1,20 @@
+[package]
+name = "camel-master"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+camel-api = { path = "../../camel-api" }
+camel-component-api = { path = "../camel-component-api" }
+camel-language-api = { path = "../../languages/camel-language-api" }
+toml = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+tower = { workspace = true }

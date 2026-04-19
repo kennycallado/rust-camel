@@ -73,6 +73,7 @@ async fn controller_success_plus_projection_failure_triggers_reconciliation() {
     let (controller, _actor_join) = spawn_controller_actor(DefaultRouteController::with_languages(
         Arc::clone(&registry),
         empty_languages(),
+        Arc::new(camel_api::NoopLeaderElector),
     ));
 
     let repo = Arc::new(InMemoryRouteRepository::default());

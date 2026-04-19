@@ -32,6 +32,7 @@ members = [
     "crates/components/camel-sql",
     "crates/components/camel-controlbus",
     "crates/components/camel-validator",
+    "crates/components/camel-master",
     "crates/languages/camel-language-api",
     "crates/languages/camel-language-js",
     "crates/languages/camel-language-rhai",
@@ -82,6 +83,8 @@ members = [
     "examples/config-basic",
     "examples/config-profiles",
     "examples/auto-restart",
+    "examples/master-leader",
+    "examples/master-leader-yaml",
     "examples/tracer-demo",
     "examples/convert-body-to",
     "examples/marshal-unmarshal",
@@ -154,6 +157,7 @@ camel-component-jms = { path = "crates/components/camel-jms", version = "=0.6.3"
 camel-component-sql = { path = "crates/components/camel-sql", version = "=0.6.3" }
 camel-component-controlbus = { path = "crates/components/camel-controlbus", version = "=0.6.3" }
 camel-component-validator = { path = "crates/components/camel-validator", version = "=0.6.3" }
+camel-master = { path = "crates/components/camel-master", version = "=0.6.3" }
 camel-component-prometheus = { path = "crates/services/camel-prometheus", version = "=0.6.3" }
 camel-component-otel = { path = "crates/services/camel-otel", version = "=0.6.3" }
 camel-otel = { path = "crates/services/camel-otel", version = "=0.6.3" }

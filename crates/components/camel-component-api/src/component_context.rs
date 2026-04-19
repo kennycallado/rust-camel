@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use camel_api::MetricsCollector;
+use camel_api::{LeaderElector, MetricsCollector};
 use camel_language_api::Language;
 
 use crate::Component;
@@ -15,6 +15,9 @@ pub trait ComponentContext: Send + Sync {
 
     /// Access the active metrics collector.
     fn metrics(&self) -> Arc<dyn MetricsCollector>;
+
+    /// Access the active leader elector.
+    fn leader_elector(&self) -> Arc<dyn LeaderElector>;
 }
 
 /// Default no-op component context for tests/examples.
@@ -31,5 +34,9 @@ impl ComponentContext for NoOpComponentContext {
 
     fn metrics(&self) -> Arc<dyn MetricsCollector> {
         Arc::new(camel_api::NoOpMetrics)
+    }
+
+    fn leader_elector(&self) -> Arc<dyn LeaderElector> {
+        Arc::new(camel_api::NoopLeaderElector)
     }
 }

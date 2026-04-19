@@ -21,7 +21,8 @@ async fn test_swap_pipeline_is_picked_up_by_new_requests() {
     // because spawning a full consumer requires component registration.
 
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-    let mut controller = DefaultRouteController::new(registry);
+    let mut controller =
+        DefaultRouteController::new(registry, Arc::new(camel_api::NoopLeaderElector));
 
     let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("hot-test");
     controller.add_route(def).unwrap();
@@ -43,7 +44,8 @@ async fn test_hot_reload_in_flight_requests_use_old_pipeline() {
 
     // Setup controller
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-    let mut controller = DefaultRouteController::new(registry);
+    let mut controller =
+        DefaultRouteController::new(registry, Arc::new(camel_api::NoopLeaderElector));
 
     // Create route
     let def = RouteDefinition::new("direct:test", vec![]).with_route_id("hot-reload-test");
@@ -123,7 +125,8 @@ async fn test_hot_reload_multiple_swaps_preserve_correctness() {
     // Verify that multiple rapid swaps don't corrupt state
 
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-    let mut controller = DefaultRouteController::new(registry);
+    let mut controller =
+        DefaultRouteController::new(registry, Arc::new(camel_api::NoopLeaderElector));
 
     let def = RouteDefinition::new("direct:multi-swap", vec![]).with_route_id("multi-swap-test");
     controller.add_route(def).unwrap();
@@ -161,7 +164,8 @@ async fn test_hot_reload_concurrent_access_no_panic() {
     // Verify that concurrent reads during swap don't cause panics
 
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-    let mut controller = DefaultRouteController::new(registry);
+    let mut controller =
+        DefaultRouteController::new(registry, Arc::new(camel_api::NoopLeaderElector));
 
     let def = RouteDefinition::new("direct:concurrent", vec![]).with_route_id("concurrent-test");
     controller.add_route(def).unwrap();
@@ -205,7 +209,7 @@ async fn test_hot_reload_concurrent_access_no_panic() {
 
 fn make_controller() -> DefaultRouteController {
     let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-    DefaultRouteController::new(registry)
+    DefaultRouteController::new(registry, Arc::new(camel_api::NoopLeaderElector))
 }
 
 #[tokio::test]
@@ -242,7 +246,10 @@ async fn test_remove_route_rejects_running_route() {
     registry.lock().unwrap().register(std::sync::Arc::new(
         camel_component_timer::TimerComponent::new(),
     ));
-    let mut controller = DefaultRouteController::new(Arc::clone(&registry));
+    let mut controller = DefaultRouteController::new(
+        Arc::clone(&registry),
+        Arc::new(camel_api::NoopLeaderElector),
+    );
 
     let def =
         RouteDefinition::new("timer:tick?period=100", vec![]).with_route_id("running-remove-test");

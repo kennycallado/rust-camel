@@ -18,8 +18,8 @@ use camel_api::aggregator::AggregatorConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
-    BoxProcessor, CamelError, Exchange, IdentityProcessor, NoOpMetrics, ProducerContext,
-    RouteController, RuntimeCommand, RuntimeHandle,
+    BoxProcessor, CamelError, Exchange, IdentityProcessor, LeaderElector, NoOpMetrics,
+    NoopLeaderElector, ProducerContext, RouteController, RuntimeCommand, RuntimeHandle,
 };
 use camel_component_api::{
     ComponentContext, ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope,
@@ -139,6 +139,7 @@ pub(crate) struct ControllerComponentContext {
     registry: Arc<std::sync::Mutex<Registry>>,
     languages: SharedLanguageRegistry,
     metrics: Arc<dyn MetricsCollector>,
+    leader_elector: Arc<dyn LeaderElector>,
 }
 
 impl ControllerComponentContext {
@@ -146,11 +147,13 @@ impl ControllerComponentContext {
         registry: Arc<std::sync::Mutex<Registry>>,
         languages: SharedLanguageRegistry,
         metrics: Arc<dyn MetricsCollector>,
+        leader_elector: Arc<dyn LeaderElector>,
     ) -> Self {
         Self {
             registry,
             languages,
             metrics,
+            leader_elector,
         }
     }
 }
@@ -166,6 +169,10 @@ impl ComponentContext for ControllerComponentContext {
 
     fn metrics(&self) -> Arc<dyn MetricsCollector> {
         Arc::clone(&self.metrics)
+    }
+
+    fn leader_elector(&self) -> Arc<dyn LeaderElector> {
+        Arc::clone(&self.leader_elector)
     }
 }
 
@@ -267,14 +274,19 @@ pub struct DefaultRouteController {
     tracer_detail_level: DetailLevel,
     /// Metrics collector for tracing processor.
     tracer_metrics: Option<Arc<dyn MetricsCollector>>,
+    leader_elector: Arc<dyn LeaderElector>,
 }
 
 impl DefaultRouteController {
     /// Create a new `DefaultRouteController` with the given registry.
-    pub fn new(registry: Arc<std::sync::Mutex<Registry>>) -> Self {
-        Self::with_beans(
+    pub fn new(
+        registry: Arc<std::sync::Mutex<Registry>>,
+        leader_elector: Arc<dyn LeaderElector>,
+    ) -> Self {
+        Self::with_beans_and_leader(
             registry,
             Arc::new(std::sync::Mutex::new(BeanRegistry::new())),
+            leader_elector,
         )
     }
 
@@ -282,6 +294,14 @@ impl DefaultRouteController {
     pub fn with_beans(
         registry: Arc<std::sync::Mutex<Registry>>,
         beans: Arc<std::sync::Mutex<BeanRegistry>>,
+    ) -> Self {
+        Self::with_beans_and_leader(registry, beans, Arc::new(NoopLeaderElector))
+    }
+
+    fn with_beans_and_leader(
+        registry: Arc<std::sync::Mutex<Registry>>,
+        beans: Arc<std::sync::Mutex<BeanRegistry>>,
+        leader_elector: Arc<dyn LeaderElector>,
     ) -> Self {
         Self {
             routes: HashMap::new(),
@@ -294,6 +314,7 @@ impl DefaultRouteController {
             tracing_enabled: false,
             tracer_detail_level: DetailLevel::Minimal,
             tracer_metrics: None,
+            leader_elector,
         }
     }
 
@@ -301,6 +322,7 @@ impl DefaultRouteController {
     pub fn with_languages(
         registry: Arc<std::sync::Mutex<Registry>>,
         languages: SharedLanguageRegistry,
+        leader_elector: Arc<dyn LeaderElector>,
     ) -> Self {
         Self {
             routes: HashMap::new(),
@@ -313,6 +335,7 @@ impl DefaultRouteController {
             tracing_enabled: false,
             tracer_detail_level: DetailLevel::Minimal,
             tracer_metrics: None,
+            leader_elector,
         }
     }
 
@@ -428,6 +451,7 @@ impl DefaultRouteController {
             self.tracer_metrics
                 .clone()
                 .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+            Arc::clone(&self.leader_elector),
         ));
 
         super::step_resolution::resolve_steps(
@@ -537,6 +561,7 @@ impl DefaultRouteController {
                 self.tracer_metrics
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(&self.leader_elector),
             );
             let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
@@ -550,6 +575,7 @@ impl DefaultRouteController {
                 self.tracer_metrics
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(&self.leader_elector),
             );
             let (uow_layer, counter) =
                 self.resolve_uow_layer(uow_config, &producer_ctx, &component_ctx, None)?;
@@ -618,6 +644,7 @@ impl DefaultRouteController {
                 self.tracer_metrics
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(&self.leader_elector),
             );
             let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
@@ -636,6 +663,7 @@ impl DefaultRouteController {
                 self.tracer_metrics
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(&self.leader_elector),
             );
 
             let (uow_layer, _counter) = self.resolve_uow_layer(
@@ -840,6 +868,7 @@ impl RouteController for DefaultRouteController {
                 self.tracer_metrics
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(&self.leader_elector),
             ),
         )?;
 
@@ -1206,6 +1235,7 @@ impl RouteController for DefaultRouteController {
                 self.tracer_metrics
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(&self.leader_elector),
             ),
         )?;
 

@@ -652,13 +652,18 @@ mod tests {
                 camel_component_mock::MockComponent::new(),
             ));
         }
-        let controller = DefaultRouteController::new(Arc::clone(&registry));
+        let controller = DefaultRouteController::new(
+            Arc::clone(&registry),
+            Arc::new(camel_api::NoopLeaderElector),
+        );
         spawn_controller_actor(controller)
     }
 
     fn build_empty_actor() -> (RouteControllerHandle, tokio::task::JoinHandle<()>) {
-        let controller =
-            DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new())));
+        let controller = DefaultRouteController::new(
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            Arc::new(camel_api::NoopLeaderElector),
+        );
         spawn_controller_actor(controller)
     }
 
@@ -723,8 +728,10 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_controller_actor_processes_commands_and_shutdown() {
-        let controller =
-            DefaultRouteController::new(Arc::new(std::sync::Mutex::new(Registry::new())));
+        let controller = DefaultRouteController::new(
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            Arc::new(camel_api::NoopLeaderElector),
+        );
         let (handle, join_handle) = spawn_controller_actor(controller);
 
         assert_eq!(handle.route_count().await.expect("route_count"), 0);

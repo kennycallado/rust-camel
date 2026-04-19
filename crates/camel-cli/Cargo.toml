@@ -44,6 +44,7 @@ camel-component-jms.workspace = true
 camel-component-kafka = { workspace = true, optional = true }
 camel-component-log.workspace = true
 camel-component-mock.workspace = true
+camel-master = { workspace = true }
 camel-component-redis.workspace = true
 camel-component-sql.workspace = true
 camel-component-timer.workspace = true

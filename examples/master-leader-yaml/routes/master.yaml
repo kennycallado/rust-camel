@@ -1,0 +1,11 @@
+routes:
+  - id: "master-route"
+    from: "master:mylock:timer:tick?period=1000"
+    steps:
+      - to: "log:info"
+
+  - id: "status-route"
+    from: "timer:status?period=5000"
+    steps:
+      - to: "controlbus:route?routeId=master-route&action=status"
+      - to: "log:info"

@@ -863,6 +863,7 @@ dependencies = [
  "camel-language-jsonpath",
  "camel-language-rhai",
  "camel-language-xpath",
+ "camel-master",
  "chrono",
  "clap",
  "config",
@@ -1321,6 +1322,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-master"
+version = "0.6.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "camel-api",
+ "camel-component-api",
+ "camel-language-api",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "camel-otel"
 version = "0.6.3"
 dependencies = [
@@ -1448,6 +1465,7 @@ dependencies = [
  "camel-language-jsonpath",
  "camel-language-rhai",
  "camel-language-xpath",
+ "camel-master",
  "camel-platform-kubernetes",
  "camel-processor",
  "k8s-openapi",
@@ -1462,6 +1480,7 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "tokio-util",
+ "toml",
  "tower 0.5.3",
  "tracing-subscriber",
  "wiremock",
@@ -2390,6 +2409,45 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
+]
+
+[[package]]
+name = "example-master-leader"
+version = "0.6.3"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-builder",
+ "camel-component-api",
+ "camel-component-controlbus",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-master",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "example-master-leader-yaml"
+version = "0.6.3"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component-api",
+ "camel-component-controlbus",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-config",
+ "camel-core",
+ "camel-master",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
