@@ -121,13 +121,23 @@ pub struct NoopLeaderElector;
 impl LeaderElector for NoopLeaderElector {
     async fn start(&self, _identity: PlatformIdentity) -> Result<LeadershipHandle, PlatformError> {
         let (tx, rx) = watch::channel(Some(LeadershipEvent::StartedLeading));
-        let (_term_tx, term_rx) = tokio::sync::oneshot::channel::<()>();
-        // Drop tx immediately — channel stays at StartedLeading, never changes.
-        drop(tx);
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let (term_tx, term_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Keep tx alive until cancel fires so that watch::Receiver::changed() does not
+        // return Err (closed channel) while we are still leading.  Dropping tx before
+        // cancellation causes MasterConsumer to interpret a closed sender as a shutdown
+        // signal and tear down the delegate consumer prematurely.
+        tokio::spawn(async move {
+            cancel_clone.cancelled().await;
+            drop(tx);
+            let _ = term_tx.send(());
+        });
         Ok(LeadershipHandle::new(
             rx,
             Arc::new(AtomicBool::new(true)),
-            CancellationToken::new(),
+            cancel,
             term_rx,
         ))
     }
@@ -183,12 +193,14 @@ mod tests {
             .start(PlatformIdentity::local("test"))
             .await
             .unwrap();
-        // step_down() should not hang — term_rx resolves when _term_tx is dropped
+
+        // step_down() should complete successfully — the background task sends on term_tx
+        // after the cancel token fires, so the oneshot receiver resolves without error.
         let result = handle.step_down().await;
-        // _term_tx was dropped in start(), so Receiver returns Err(RecvError) → StepDownFailed
         assert!(
-            result.is_err(),
-            "NoopLeaderElector step_down should return StepDownFailed because _term_tx is dropped"
+            result.is_ok(),
+            "NoopLeaderElector step_down should succeed: {:?}",
+            result
         );
     }
 
