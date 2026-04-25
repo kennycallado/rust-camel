@@ -117,7 +117,7 @@ members = [
 name = "rust-camel"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/kennycallado/rust-camel"
@@ -132,51 +132,51 @@ categories = ["network-programming", "asynchronous", "development-tools"]
 # below to match using: sed -i 's/version = "=OLD"/version = "=NEW"/g' Cargo.toml
 # Exact pinning (=) ensures cargo publish verifies against the exact version
 # being released, not an older one already on crates.io.
-camel-api = { path = "crates/camel-api", version = "=0.7.0" }
-camel-bean = { path = "crates/camel-bean", version = "=0.7.0" }
-camel-bean-macros = { path = "crates/camel-bean-macros", version = "=0.7.0" }
-camel-cli = { path = "crates/camel-cli", version = "=0.7.0" }
-camel-core = { path = "crates/camel-core", version = "=0.7.0" }
-camel-util = { path = "crates/camel-util", version = "=0.7.0" }
-camel-support = { path = "crates/camel-support", version = "=0.7.0" }
-camel-processor = { path = "crates/camel-processor", version = "=0.7.0" }
-camel-health = { path = "crates/camel-health", version = "=0.7.0" }
-camel-bridge = { path = "crates/services/camel-bridge", version = "=0.7.0" }
-camel-dsl = { path = "crates/camel-dsl", version = "=0.7.0" }
-camel-builder = { path = "crates/camel-builder", version = "=0.7.0" }
-camel-component-api = { path = "crates/components/camel-component-api", version = "=0.7.0" }
-camel-endpoint = { path = "crates/camel-endpoint", version = "=0.7.0" }
-camel-endpoint-macros = { path = "crates/camel-endpoint-macros", version = "=0.7.0" }
-camel-test = { path = "crates/camel-test", version = "=0.7.0" }
-camel-component-timer = { path = "crates/components/camel-timer", version = "=0.7.0" }
-camel-component-log = { path = "crates/components/camel-log", version = "=0.7.0" }
-camel-component-file = { path = "crates/components/camel-file", version = "=0.7.0" }
-camel-component-direct = { path = "crates/components/camel-direct", version = "=0.7.0" }
-camel-component-mock = { path = "crates/components/camel-mock", version = "=0.7.0" }
-camel-component-http = { path = "crates/components/camel-http", version = "=0.7.0" }
-camel-component-ws = { path = "crates/components/camel-ws", version = "=0.7.0" }
-camel-component-redis = { path = "crates/components/camel-redis", version = "=0.7.0" }
-camel-component-kafka = { path = "crates/components/camel-kafka", version = "=0.7.0" }
-camel-component-jms = { path = "crates/components/camel-jms", version = "=0.7.0" }
-camel-component-sql = { path = "crates/components/camel-sql", version = "=0.7.0" }
-camel-component-controlbus = { path = "crates/components/camel-controlbus", version = "=0.7.0" }
-camel-component-validator = { path = "crates/components/camel-validator", version = "=0.7.0" }
-camel-xslt = { path = "crates/components/camel-xslt", version = "=0.7.0" }
-camel-xj = { path = "crates/components/camel-xj", version = "=0.7.0" }
-camel-master = { path = "crates/components/camel-master", version = "=0.7.0" }
-camel-component-prometheus = { path = "crates/services/camel-prometheus", version = "=0.7.0" }
-camel-component-otel = { path = "crates/services/camel-otel", version = "=0.7.0" }
-camel-otel = { path = "crates/services/camel-otel", version = "=0.7.0" }
-camel-prometheus = { path = "crates/services/camel-prometheus", version = "=0.7.0" }
-camel-component-container = { path = "crates/components/camel-container", version = "=0.7.0" }
-camel-language-api = { path = "crates/languages/camel-language-api", version = "=0.7.0" }
-camel-language-js = { path = "crates/languages/camel-language-js", version = "=0.7.0" }
-camel-language-rhai = { path = "crates/languages/camel-language-rhai", version = "=0.7.0" }
-camel-language-simple = { path = "crates/languages/camel-language-simple", version = "=0.7.0" }
-camel-language-jsonpath = { path = "crates/languages/camel-language-jsonpath", version = "=0.7.0" }
-camel-language-xpath = { path = "crates/languages/camel-language-xpath", version = "=0.7.0" }
-camel-config = { path = "crates/camel-config", version = "=0.7.0" }
-camel-platform-kubernetes = { path = "crates/platforms/camel-platform-kubernetes", version = "=0.7.0" }
+camel-api = { path = "crates/camel-api", version = "=0.7.1" }
+camel-bean = { path = "crates/camel-bean", version = "=0.7.1" }
+camel-bean-macros = { path = "crates/camel-bean-macros", version = "=0.7.1" }
+camel-cli = { path = "crates/camel-cli", version = "=0.7.1" }
+camel-core = { path = "crates/camel-core", version = "=0.7.1" }
+camel-util = { path = "crates/camel-util", version = "=0.7.1" }
+camel-support = { path = "crates/camel-support", version = "=0.7.1" }
+camel-processor = { path = "crates/camel-processor", version = "=0.7.1" }
+camel-health = { path = "crates/camel-health", version = "=0.7.1" }
+camel-bridge = { path = "crates/services/camel-bridge", version = "=0.7.1" }
+camel-dsl = { path = "crates/camel-dsl", version = "=0.7.1" }
+camel-builder = { path = "crates/camel-builder", version = "=0.7.1" }
+camel-component-api = { path = "crates/components/camel-component-api", version = "=0.7.1" }
+camel-endpoint = { path = "crates/camel-endpoint", version = "=0.7.1" }
+camel-endpoint-macros = { path = "crates/camel-endpoint-macros", version = "=0.7.1" }
+camel-test = { path = "crates/camel-test", version = "=0.7.1" }
+camel-component-timer = { path = "crates/components/camel-timer", version = "=0.7.1" }
+camel-component-log = { path = "crates/components/camel-log", version = "=0.7.1" }
+camel-component-file = { path = "crates/components/camel-file", version = "=0.7.1" }
+camel-component-direct = { path = "crates/components/camel-direct", version = "=0.7.1" }
+camel-component-mock = { path = "crates/components/camel-mock", version = "=0.7.1" }
+camel-component-http = { path = "crates/components/camel-http", version = "=0.7.1" }
+camel-component-ws = { path = "crates/components/camel-ws", version = "=0.7.1" }
+camel-component-redis = { path = "crates/components/camel-redis", version = "=0.7.1" }
+camel-component-kafka = { path = "crates/components/camel-kafka", version = "=0.7.1" }
+camel-component-jms = { path = "crates/components/camel-jms", version = "=0.7.1" }
+camel-component-sql = { path = "crates/components/camel-sql", version = "=0.7.1" }
+camel-component-controlbus = { path = "crates/components/camel-controlbus", version = "=0.7.1" }
+camel-component-validator = { path = "crates/components/camel-validator", version = "=0.7.1" }
+camel-xslt = { path = "crates/components/camel-xslt", version = "=0.7.1" }
+camel-xj = { path = "crates/components/camel-xj", version = "=0.7.1" }
+camel-master = { path = "crates/components/camel-master", version = "=0.7.1" }
+camel-component-prometheus = { path = "crates/services/camel-prometheus", version = "=0.7.1" }
+camel-component-otel = { path = "crates/services/camel-otel", version = "=0.7.1" }
+camel-otel = { path = "crates/services/camel-otel", version = "=0.7.1" }
+camel-prometheus = { path = "crates/services/camel-prometheus", version = "=0.7.1" }
+camel-component-container = { path = "crates/components/camel-container", version = "=0.7.1" }
+camel-language-api = { path = "crates/languages/camel-language-api", version = "=0.7.1" }
+camel-language-js = { path = "crates/languages/camel-language-js", version = "=0.7.1" }
+camel-language-rhai = { path = "crates/languages/camel-language-rhai", version = "=0.7.1" }
+camel-language-simple = { path = "crates/languages/camel-language-simple", version = "=0.7.1" }
+camel-language-jsonpath = { path = "crates/languages/camel-language-jsonpath", version = "=0.7.1" }
+camel-language-xpath = { path = "crates/languages/camel-language-xpath", version = "=0.7.1" }
+camel-config = { path = "crates/camel-config", version = "=0.7.1" }
+camel-platform-kubernetes = { path = "crates/platforms/camel-platform-kubernetes", version = "=0.7.1" }
 
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.12" }
