@@ -57,22 +57,20 @@ impl Service<Exchange> for XsltProducer {
 
         Box::pin(async move {
             // Lazy: start bridge and compile stylesheet on first call
-            let stylesheet_id = compiled
-                .get_or_try_init(|| async {
-                    runtime
-                        .ensure_bridge_started(client.as_ref())
-                        .await
-                        .map_err(|e: crate::error::XsltError| {
-                            CamelError::ProcessorError(e.to_string())
-                        })?;
-                    client
-                        .compile(stylesheet_bytes)
-                        .await
-                        .map_err(|e: crate::error::XsltError| {
-                            CamelError::ProcessorError(e.to_string())
-                        })
-                })
-                .await?;
+            let stylesheet_id =
+                compiled
+                    .get_or_try_init(|| async {
+                        runtime
+                            .ensure_bridge_started(client.as_ref())
+                            .await
+                            .map_err(|e: crate::error::XsltError| {
+                                CamelError::ProcessorError(e.to_string())
+                            })?;
+                        client.compile(stylesheet_bytes).await.map_err(
+                            |e: crate::error::XsltError| CamelError::ProcessorError(e.to_string()),
+                        )
+                    })
+                    .await?;
 
             let input_body = std::mem::take(&mut exchange.input.body);
             let document = input_body

@@ -159,7 +159,9 @@ routes:
 
     h.start().await;
 
-    let exchange = Exchange::new(Message::new(Body::Xml("<order><id>1</id></order>".to_string())));
+    let exchange = Exchange::new(Message::new(Body::Xml(
+        "<order><id>1</id></order>".to_string(),
+    )));
     let err = send_to_direct(&h, "direct:start", exchange)
         .await
         .expect_err("invalid XSLT should fail on transform");

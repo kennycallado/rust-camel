@@ -22,7 +22,11 @@ fn body_to_string(body: &Body) -> String {
     }
 }
 
-async fn send_to_direct(ctx: &CamelContext, uri: &str, payload: &str) -> Result<Exchange, CamelError> {
+async fn send_to_direct(
+    ctx: &CamelContext,
+    uri: &str,
+    payload: &str,
+) -> Result<Exchange, CamelError> {
     let component = {
         let registry = ctx.registry();
         registry.get_or_err("direct")?
@@ -30,9 +34,7 @@ async fn send_to_direct(ctx: &CamelContext, uri: &str, payload: &str) -> Result<
 
     let endpoint = component.create_endpoint(uri, ctx)?;
     let producer = endpoint.create_producer(&ctx.producer_context())?;
-    producer
-        .oneshot(Exchange::new(Message::new(payload)))
-        .await
+    producer.oneshot(Exchange::new(Message::new(payload))).await
 }
 
 #[tokio::main]
@@ -82,7 +84,10 @@ async fn main() -> Result<(), CamelError> {
 
     println!("=== Flow 2: JSON → XML (Apache Camel XJ format) ===");
     println!("  Input:  {json_input}");
-    println!("  Output: {}", body_to_string(&json_to_xml_result.input.body));
+    println!(
+        "  Output: {}",
+        body_to_string(&json_to_xml_result.input.body)
+    );
     println!();
 
     println!("=== Flow 3: Round-trip JSON → XML → JSON ===");

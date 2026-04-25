@@ -27,7 +27,11 @@ fn stylesheet_path() -> String {
         .into_owned()
 }
 
-async fn send_to_direct(ctx: &CamelContext, uri: &str, payload: &str) -> Result<Exchange, CamelError> {
+async fn send_to_direct(
+    ctx: &CamelContext,
+    uri: &str,
+    payload: &str,
+) -> Result<Exchange, CamelError> {
     let component = {
         let registry = ctx.registry();
         registry.get_or_err("direct")?
@@ -35,9 +39,7 @@ async fn send_to_direct(ctx: &CamelContext, uri: &str, payload: &str) -> Result<
 
     let endpoint = component.create_endpoint(uri, ctx)?;
     let producer = endpoint.create_producer(&ctx.producer_context())?;
-    producer
-        .oneshot(Exchange::new(Message::new(payload)))
-        .await
+    producer.oneshot(Exchange::new(Message::new(payload))).await
 }
 
 #[tokio::main]
