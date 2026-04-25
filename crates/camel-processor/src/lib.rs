@@ -22,6 +22,7 @@ pub mod set_body;
 pub mod set_header;
 pub mod splitter;
 pub mod stop;
+pub mod stream_cache;
 pub mod throttler;
 pub mod wire_tap;
 
@@ -48,6 +49,7 @@ pub use script_mutator::ScriptMutator;
 pub use set_body::{SetBody, SetBodyLayer};
 pub use set_header::{SetHeader, SetHeaderLayer};
 pub use splitter::SplitterService;
+pub use stream_cache::StreamCacheService;
 pub use stop::StopService;
 pub use throttler::ThrottlerService;
 pub use wire_tap::{WireTapLayer, WireTapService};

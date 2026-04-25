@@ -297,6 +297,11 @@ pub struct LoopStepDef {
     pub steps: Vec<DeclarativeStep>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamCacheStepDef {
+    pub threshold: Option<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclarativeStep {
     To(ToStepDef),
@@ -317,6 +322,7 @@ pub enum DeclarativeStep {
     Stop,
     Throttle(ThrottleStepDef),
     Script(ScriptStepDef),
+    StreamCache(StreamCacheStepDef),
     Marshal(DataFormatDef),
     Unmarshal(DataFormatDef),
     Bean(BeanStepDef),

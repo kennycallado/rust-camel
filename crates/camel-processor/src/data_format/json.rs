@@ -21,7 +21,7 @@ impl DataFormat for JsonDataFormat {
             }
             Body::Text(_) => Ok(body),
             Body::Stream(_) => Err(CamelError::TypeConversionFailed(
-                "cannot marshal Body::Stream — materialize with into_bytes() first".to_string(),
+                "cannot marshal Body::Stream — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
             )),
             Body::Empty | Body::Xml(_) => Err(CamelError::TypeConversionFailed(
                 "JsonDataFormat::marshal only supports Body::Json, Body::Text, and Body::Bytes"
@@ -62,7 +62,8 @@ impl DataFormat for JsonDataFormat {
                 Ok(Body::Json(v))
             }
             Body::Stream(_) => Err(CamelError::TypeConversionFailed(
-                "cannot unmarshal Body::Stream — materialize with into_bytes() first".to_string(),
+                "cannot unmarshal Body::Stream directly — use UnmarshalService which auto-materializes"
+                    .to_string(),
             )),
             Body::Empty | Body::Xml(_) => Err(CamelError::TypeConversionFailed(
                 "JsonDataFormat::unmarshal only supports Body::Json, Body::Text, and Body::Bytes"

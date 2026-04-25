@@ -5,19 +5,17 @@ use std::path::Path;
 use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
-use crate::yaml_ast::{LoopData, LoopStep, LoopWhileExpr};
-use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical};
+use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical, compile_declarative_route_with_stream_cache_threshold};
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
     DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep,
     DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
-    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
-    RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef,
-    LoopStepDef,
-    SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef,
-    ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
+    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
+    SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef,
+    ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
@@ -25,12 +23,13 @@ pub use crate::yaml_ast::{
     LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep,
     PredicateBlock, RecipientListData, RecipientListStep, RoutingSlipData, RoutingSlipStep,
     ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep,
-    SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, ThrottleData,
-    ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep, YamlRoute,
-    YamlRoutes, YamlStep,
+    SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody,
+    StreamCacheConfig, StreamCacheStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
+    UnmarshalStep, ValidateStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
 };
+use crate::yaml_ast::{LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 21] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 22] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -43,6 +42,7 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 21] = [
     DeclarativeStepKind::Multicast,
     DeclarativeStepKind::Stop,
     DeclarativeStepKind::Script,
+    DeclarativeStepKind::StreamCache,
     DeclarativeStepKind::ConvertBodyTo,
     DeclarativeStepKind::Marshal,
     DeclarativeStepKind::Unmarshal,
@@ -71,6 +71,16 @@ pub fn parse_yaml(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
     parse_yaml_to_declarative(yaml)?
         .into_iter()
         .map(compile_declarative_route)
+        .collect()
+}
+
+pub fn parse_yaml_with_threshold(
+    yaml: &str,
+    stream_cache_threshold: usize,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_yaml_to_declarative(yaml)?
+        .into_iter()
+        .map(|route| compile_declarative_route_with_stream_cache_threshold(route, stream_cache_threshold))
         .collect()
 }
 
@@ -180,6 +190,21 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     "'stop: false' is invalid; remove the step or use 'stop: true'".into(),
                 ))
             }
+        }
+        YamlStep::StreamCache(step) => {
+            let threshold = match step.stream_cache {
+                StreamCacheBody::Enabled(true) => None,
+                StreamCacheBody::Enabled(false) => {
+                    return Err(CamelError::RouteError(
+                        "'stream_cache: false' is invalid; remove the step or use 'stream_cache: true'"
+                            .into(),
+                    ));
+                }
+                StreamCacheBody::Config(config) => config.threshold,
+            };
+            Ok(DeclarativeStep::StreamCache(StreamCacheStepDef {
+                threshold,
+            }))
         }
         YamlStep::Log(LogStep { log }) => {
             let (message_data, level) = match log {
@@ -1667,5 +1692,58 @@ routes:
         let routes = parse_yaml_to_declarative(yaml).unwrap();
         assert!(matches!(routes[0].steps[0], DeclarativeStep::To(_)));
         assert!(matches!(routes[0].steps[1], DeclarativeStep::To(_)));
+    }
+
+    #[test]
+    fn test_parse_stream_cache_shorthand() {
+        let yaml = r#"
+routes:
+  - id: "sc-short"
+    from: "direct:start"
+    steps:
+      - stream_cache: true
+      - to: "log:out"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert!(
+            matches!(&routes[0].steps[0], DeclarativeStep::StreamCache(def) if def.threshold.is_none())
+        );
+    }
+
+    #[test]
+    fn test_parse_stream_cache_with_threshold() {
+        let yaml = r#"
+routes:
+  - id: "sc-thresh"
+    from: "direct:start"
+    steps:
+      - stream_cache: { threshold: 65536 }
+      - to: "log:out"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        match &routes[0].steps[0] {
+            DeclarativeStep::StreamCache(def) => assert_eq!(def.threshold, Some(65536)),
+            other => panic!("expected StreamCache, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_cache_false_rejected() {
+        let yaml = r#"
+routes:
+  - id: "sc-false"
+    from: "direct:start"
+    steps:
+      - stream_cache: false
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stream_cache: false"),
+            "expected rejection message, got: {msg}"
+        );
     }
 }

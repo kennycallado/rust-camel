@@ -1,7 +1,7 @@
 use crate::config::{
     CamelConfig, KubernetesPlatformCamelConfig, OtelProtocol, OtelSampler, PlatformCamelConfig,
 };
-use crate::discovery::discover_routes;
+use crate::discovery::discover_routes_with_threshold;
 use camel_api::{CamelError, PlatformService as PlatformServiceTrait};
 use camel_core::CamelContext;
 use camel_core::OutputFormat;
@@ -35,7 +35,8 @@ impl CamelConfig {
             return Ok(Vec::new());
         }
 
-        discover_routes(&config.routes).map_err(|e| CamelError::Config(e.to_string()))
+        discover_routes_with_threshold(&config.routes, config.stream_caching.threshold)
+            .map_err(|e| CamelError::Config(e.to_string()))
     }
 
     /// Create a CamelContext configured from this CamelConfig.

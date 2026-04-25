@@ -15,7 +15,7 @@ impl DataFormat for XmlDataFormat {
             Body::Xml(_) => convert(body, BodyType::Text),
             Body::Text(_) => Ok(body),
             Body::Stream(_) => Err(CamelError::TypeConversionFailed(
-                "cannot marshal Body::Stream — materialize with into_bytes() first".to_string(),
+                "cannot marshal Body::Stream — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
             )),
             Body::Empty | Body::Bytes(_) | Body::Json(_) => Err(CamelError::TypeConversionFailed(
                 "XmlDataFormat::marshal only supports Body::Xml and Body::Text".to_string(),
@@ -28,7 +28,8 @@ impl DataFormat for XmlDataFormat {
             Body::Xml(_) => Ok(body),
             Body::Text(_) | Body::Bytes(_) => convert(body, BodyType::Xml),
             Body::Stream(_) => Err(CamelError::TypeConversionFailed(
-                "cannot unmarshal Body::Stream — materialize with into_bytes() first".to_string(),
+                "cannot unmarshal Body::Stream directly — use UnmarshalService which auto-materializes"
+                    .to_string(),
             )),
             Body::Empty | Body::Json(_) => Err(CamelError::TypeConversionFailed(
                 "XmlDataFormat::unmarshal only supports Body::Xml, Body::Text, and Body::Bytes"

@@ -5,7 +5,7 @@ use glob::glob;
 use std::fs;
 use std::io;
 
-use crate::yaml::parse_yaml;
+use crate::yaml::parse_yaml_with_threshold;
 
 /// Errors that can occur during route discovery.
 #[derive(Debug, thiserror::Error)]
@@ -40,10 +40,16 @@ pub enum DiscoveryError {
 /// let routes = discover_routes(&["routes/*.yaml".to_string(), "extra/**/*.yaml".to_string()])?;
 /// ```
 pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, DiscoveryError> {
+    discover_routes_with_threshold(patterns, camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD)
+}
+
+pub fn discover_routes_with_threshold(
+    patterns: &[String],
+    stream_cache_threshold: usize,
+) -> Result<Vec<RouteDefinition>, DiscoveryError> {
     let mut routes = Vec::new();
 
     for pattern in patterns {
-        // glob returns an iterator over matching paths
         let entries = glob(pattern)?;
 
         for entry in entries {
@@ -53,17 +59,18 @@ pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, Disc
             })?;
             let path_str = path.to_string_lossy().to_string();
 
-            // Read file content
             let yaml_content = fs::read_to_string(&path).map_err(|e| DiscoveryError::Io {
                 path: path_str.clone(),
                 source: e,
             })?;
 
-            // Parse YAML into route definitions
-            let file_routes = parse_yaml(&yaml_content).map_err(|e| DiscoveryError::Yaml {
-                path: path_str,
-                error: e.to_string(),
-            })?;
+            let file_routes =
+                parse_yaml_with_threshold(&yaml_content, stream_cache_threshold).map_err(
+                    |e| DiscoveryError::Yaml {
+                        path: path_str,
+                        error: e.to_string(),
+                    },
+                )?;
 
             routes.extend(file_routes);
         }

@@ -26,9 +26,10 @@ pub enum DeclarativeStepKind {
     MapBody,
     SetBodyFn,
     SetHeaderFn,
+    StreamCache,
 }
 
-pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 21] = [
+pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 22] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -41,6 +42,7 @@ pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 21] = [
     DeclarativeStepKind::Multicast,
     DeclarativeStepKind::Stop,
     DeclarativeStepKind::Script,
+    DeclarativeStepKind::StreamCache,
     DeclarativeStepKind::ConvertBodyTo,
     DeclarativeStepKind::Marshal,
     DeclarativeStepKind::Unmarshal,

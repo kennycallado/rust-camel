@@ -4200,7 +4200,7 @@ dependencies = [
 
 [[package]]
 name = "loop-example"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "camel-api",
  "camel-builder",

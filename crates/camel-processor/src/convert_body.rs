@@ -10,7 +10,8 @@ use camel_api::{CamelError, Exchange};
 /// A processor that converts the message body to a target type.
 ///
 /// Supported conversions: Text ↔ Json ↔ Bytes.
-/// `Body::Stream` always returns `TypeConversionFailed` — materialize first.
+/// `Body::Stream` always returns `TypeConversionFailed` — wrap with
+/// [`StreamCacheService`](crate::StreamCacheService) to auto-materialize first.
 /// Same-type conversions are noops.
 #[derive(Clone)]
 pub struct ConvertBodyTo<P> {

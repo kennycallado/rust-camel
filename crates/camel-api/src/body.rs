@@ -1,4 +1,10 @@
 use crate::error::CamelError;
+/// General-purpose default limit for [`Body::materialize()`] (10 MB).
+///
+/// This is separate from [`stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD`] (128 KB),
+/// which is the OOM-protection limit used by `StreamCacheService`.
+pub const DEFAULT_MATERIALIZE_LIMIT: usize = 10 * 1024 * 1024;
+
 use bytes::{Bytes, BytesMut};
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
@@ -9,8 +15,6 @@ use std::task::{Context as TaskContext, Poll};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::Mutex;
 use tokio_util::io::StreamReader;
-
-const DEFAULT_MATERIALIZE_LIMIT: usize = 10 * 1024 * 1024;
 
 /// A boxed [`AsyncRead`] for reading body content without materializing it into memory.
 ///
@@ -253,10 +257,12 @@ impl Body {
         }
     }
 
-    /// Materialize stream with sensible default limit (10MB).
+    /// Materialize stream with sensible default limit (10 MB).
     ///
     /// Convenience method for common cases where you need the stream content
-    /// but don't want to specify a custom limit.
+    /// but don't want to specify a custom limit. For the tighter stream-cache
+    /// threshold (128 KB), use [`stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD`]
+    /// with [`Body::into_bytes()`] instead.
     ///
     /// # Example
     /// ```ignore
@@ -508,8 +514,8 @@ mod tests {
     async fn test_materialize_exceeds_default_limit() {
         use futures::stream;
 
-        // 15MB stream - should fail with default 10MB limit
-        let large_data = vec![0u8; 15 * 1024 * 1024];
+        // 11MB stream - should fail with default 10MB limit
+        let large_data = vec![0u8; 11 * 1024 * 1024];
         let chunks = vec![Ok(Bytes::from(large_data))];
         let stream = stream::iter(chunks);
         let body = Body::Stream(StreamBody {

@@ -27,6 +27,7 @@ pub mod route_controller;
 pub mod routing_slip;
 pub mod runtime;
 pub mod splitter;
+pub mod stream_cache;
 pub mod supervision;
 pub mod throttler;
 pub mod unit_of_work;

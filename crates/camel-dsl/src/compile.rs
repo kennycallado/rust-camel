@@ -21,21 +21,32 @@ use camel_api::{
 use camel_component_api::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{
-    ConvertBodyTo, LogLevel, MarshalService, StopService, UnmarshalService, builtin_data_format,
+    ConvertBodyTo, LogLevel, MarshalService, StopService, StreamCacheService, UnmarshalService,
+    builtin_data_format,
 };
 
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
     DeclarativeStep, DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
-    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef, MulticastStepDef,
-    RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef,
-    SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef,
-    ToStepDef, ValueSourceDef, WireTapStepDef,
+    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
+    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
+    SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef,
+    ThrottleStrategyDef, ToStepDef, ValueSourceDef, WireTapStepDef,
 };
 
 pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinition, CamelError> {
-    let steps = compile_declarative_steps(route.steps)?;
+    compile_declarative_route_with_stream_cache_threshold(
+        route,
+        camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD,
+    )
+}
+
+pub fn compile_declarative_route_with_stream_cache_threshold(
+    route: DeclarativeRoute,
+    stream_cache_threshold: usize,
+) -> Result<RouteDefinition, CamelError> {
+    let steps = compile_declarative_steps(route.steps, stream_cache_threshold)?;
 
     let mut definition = RouteDefinition::new(route.from, steps)
         .with_route_id(route.route_id)
@@ -217,11 +228,27 @@ fn compile_circuit_breaker(def: DeclarativeCircuitBreaker) -> CircuitBreakerConf
         .open_duration(Duration::from_millis(def.open_duration_ms))
 }
 
-fn compile_declarative_steps(steps: Vec<DeclarativeStep>) -> Result<Vec<BuilderStep>, CamelError> {
-    steps.into_iter().map(compile_declarative_step).collect()
+fn compile_declarative_steps(
+    steps: Vec<DeclarativeStep>,
+    stream_cache_threshold: usize,
+) -> Result<Vec<BuilderStep>, CamelError> {
+    steps
+        .into_iter()
+        .map(|step| compile_declarative_step_with_threshold(step, stream_cache_threshold))
+        .collect()
 }
 
 pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, CamelError> {
+    compile_declarative_step_with_threshold(
+        step,
+        camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD,
+    )
+}
+
+fn compile_declarative_step_with_threshold(
+    step: DeclarativeStep,
+    stream_cache_threshold: usize,
+) -> Result<BuilderStep, CamelError> {
     match step {
         DeclarativeStep::To(ToStepDef { uri }) => Ok(BuilderStep::To(uri)),
         DeclarativeStep::WireTap(WireTapStepDef { uri }) => Ok(BuilderStep::WireTap { uri }),
@@ -250,20 +277,28 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
         DeclarativeStep::Script(ScriptStepDef { expression }) => {
             Ok(BuilderStep::DeclarativeScript { expression })
         }
+        DeclarativeStep::StreamCache(def) => {
+            let config = stream_cache_config(def.threshold, stream_cache_threshold);
+            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
+                StreamCacheService::new(camel_api::IdentityProcessor, config),
+            )))
+        }
         DeclarativeStep::Stop => Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
             StopService,
         ))),
-        DeclarativeStep::Filter(def) => compile_filter_step(def.predicate, def.steps),
+        DeclarativeStep::Filter(def) => {
+            compile_filter_step(def.predicate, def.steps, stream_cache_threshold)
+        }
         DeclarativeStep::Choice(ChoiceStepDef { whens, otherwise }) => {
             let mut compiled_whens = Vec::with_capacity(whens.len());
             for when in whens {
                 let predicate = when.predicate;
-                let steps = compile_declarative_steps(when.steps)?;
+                let steps = compile_declarative_steps(when.steps, stream_cache_threshold)?;
                 compiled_whens.push(DeclarativeWhenStep { predicate, steps });
             }
 
             let compiled_otherwise = match otherwise {
-                Some(steps) => Some(compile_declarative_steps(steps)?),
+                Some(steps) => Some(compile_declarative_steps(steps, stream_cache_threshold)?),
                 None => None,
             };
 
@@ -272,7 +307,7 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
                 otherwise: compiled_otherwise,
             })
         }
-        DeclarativeStep::Split(def) => compile_split_step(def),
+        DeclarativeStep::Split(def) => compile_split_step(def, stream_cache_threshold),
         DeclarativeStep::Aggregate(def) => compile_aggregate_step(def),
         DeclarativeStep::Throttle(ThrottleStepDef {
             max_requests,
@@ -287,7 +322,7 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
             };
             let config = ThrottlerConfig::new(max_requests, Duration::from_millis(period_ms))
                 .strategy(strategy);
-            let compiled_steps = compile_declarative_steps(steps)?;
+            let compiled_steps = compile_declarative_steps(steps, stream_cache_threshold)?;
             Ok(BuilderStep::Throttle {
                 config,
                 steps: compiled_steps,
@@ -298,7 +333,7 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
             parallel,
             steps,
         }) => {
-            let compiled_steps = compile_declarative_steps(steps)?;
+            let compiled_steps = compile_declarative_steps(steps, stream_cache_threshold)?;
             let strategy = match strategy {
                 LoadBalanceStrategyDef::RoundRobin => LoadBalanceStrategy::RoundRobin,
                 LoadBalanceStrategyDef::Random => LoadBalanceStrategy::Random,
@@ -334,7 +369,7 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
                 steps: compiled_steps,
             })
         }
-        DeclarativeStep::Multicast(def) => compile_multicast_step(def),
+        DeclarativeStep::Multicast(def) => compile_multicast_step(def, stream_cache_threshold),
         DeclarativeStep::DynamicRouter(DynamicRouterStepDef {
             expression,
             uri_delimiter,
@@ -390,7 +425,10 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
                 BodyTypeDef::Empty => BodyType::Empty,
             };
             Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
-                ConvertBodyTo::new(IdentityProcessor, target),
+                StreamCacheService::new(
+                    ConvertBodyTo::new(IdentityProcessor, target),
+                    camel_api::stream_cache::StreamCacheConfig::new(stream_cache_threshold),
+                ),
             )))
         }
         DeclarativeStep::Bean(BeanStepDef { name, method }) => {
@@ -415,7 +453,10 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
                 ))
             })?;
             Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
-                UnmarshalService::new(camel_api::IdentityProcessor, df),
+                StreamCacheService::new(
+                    UnmarshalService::new(camel_api::IdentityProcessor, df),
+                    camel_api::stream_cache::StreamCacheConfig::new(stream_cache_threshold),
+                ),
             )))
         }
         DeclarativeStep::Delay(DelayStepDef {
@@ -429,12 +470,24 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
             };
             Ok(BuilderStep::Delay { config })
         }
-        DeclarativeStep::Loop(def) => compile_loop_step(def),
+        DeclarativeStep::Loop(def) => compile_loop_step(def, stream_cache_threshold),
     }
 }
 
-fn compile_loop_step(def: LoopStepDef) -> Result<BuilderStep, CamelError> {
-    let sub_steps = compile_declarative_steps(def.steps)?;
+fn stream_cache_config(
+    step_threshold: Option<usize>,
+    stream_cache_threshold: usize,
+) -> camel_api::stream_cache::StreamCacheConfig {
+    camel_api::stream_cache::StreamCacheConfig::new(
+        step_threshold.unwrap_or(stream_cache_threshold),
+    )
+}
+
+fn compile_loop_step(
+    def: LoopStepDef,
+    stream_cache_threshold: usize,
+) -> Result<BuilderStep, CamelError> {
+    let sub_steps = compile_declarative_steps(def.steps, stream_cache_threshold)?;
     Ok(BuilderStep::DeclarativeLoop {
         count: def.count,
         while_predicate: def.while_predicate,
@@ -597,6 +650,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Stop => "stop",
         DeclarativeStep::Throttle(_) => "throttle",
         DeclarativeStep::Script(_) => "script",
+        DeclarativeStep::StreamCache(_) => "stream_cache",
         DeclarativeStep::ConvertBodyTo(_) => "convert_body_to",
         DeclarativeStep::Bean(_) => "bean",
         DeclarativeStep::Marshal(_) => "marshal",
@@ -606,7 +660,10 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
     }
 }
 
-fn compile_split_step(def: SplitStepDef) -> Result<BuilderStep, CamelError> {
+fn compile_split_step(
+    def: SplitStepDef,
+    stream_cache_threshold: usize,
+) -> Result<BuilderStep, CamelError> {
     let aggregation = match def.aggregation {
         SplitAggregationDef::LastWins => SplitAggregation::LastWins,
         SplitAggregationDef::CollectAll => SplitAggregation::CollectAll,
@@ -626,7 +683,7 @@ fn compile_split_step(def: SplitStepDef) -> Result<BuilderStep, CamelError> {
             };
             Ok(BuilderStep::Split {
                 config,
-                steps: compile_declarative_steps(def.steps)?,
+                steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
             })
         }
         SplitExpressionDef::BodyJsonArray => {
@@ -641,7 +698,7 @@ fn compile_split_step(def: SplitStepDef) -> Result<BuilderStep, CamelError> {
             };
             Ok(BuilderStep::Split {
                 config,
-                steps: compile_declarative_steps(def.steps)?,
+                steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
             })
         }
         SplitExpressionDef::Language(expression) => Ok(BuilderStep::DeclarativeSplit {
@@ -650,7 +707,7 @@ fn compile_split_step(def: SplitStepDef) -> Result<BuilderStep, CamelError> {
             parallel: def.parallel,
             parallel_limit: def.parallel_limit,
             stop_on_exception: def.stop_on_exception,
-            steps: compile_declarative_steps(def.steps)?,
+            steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
         }),
     }
 }
@@ -702,7 +759,10 @@ fn compile_aggregate_step(def: AggregateStepDef) -> Result<BuilderStep, CamelErr
     })
 }
 
-fn compile_multicast_step(def: MulticastStepDef) -> Result<BuilderStep, CamelError> {
+fn compile_multicast_step(
+    def: MulticastStepDef,
+    stream_cache_threshold: usize,
+) -> Result<BuilderStep, CamelError> {
     let aggregation = match def.aggregation {
         MulticastAggregationDef::LastWins => MulticastStrategy::LastWins,
         MulticastAggregationDef::CollectAll => MulticastStrategy::CollectAll,
@@ -721,7 +781,7 @@ fn compile_multicast_step(def: MulticastStepDef) -> Result<BuilderStep, CamelErr
     }
 
     Ok(BuilderStep::Multicast {
-        steps: compile_declarative_steps(def.steps)?,
+        steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
         config,
     })
 }
@@ -729,10 +789,11 @@ fn compile_multicast_step(def: MulticastStepDef) -> Result<BuilderStep, CamelErr
 fn compile_filter_step(
     predicate: LanguageExpressionDef,
     steps: Vec<DeclarativeStep>,
+    stream_cache_threshold: usize,
 ) -> Result<BuilderStep, CamelError> {
     Ok(BuilderStep::DeclarativeFilter {
         predicate,
-        steps: compile_declarative_steps(steps)?,
+        steps: compile_declarative_steps(steps, stream_cache_threshold)?,
     })
 }
 
@@ -757,7 +818,7 @@ fn compile_log_level(level: LogLevelDef) -> LogLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DeclarativeOnException, DeclarativeRedeliveryPolicy};
+    use crate::model::{DeclarativeOnException, DeclarativeRedeliveryPolicy, StreamCacheStepDef};
 
     #[test]
     fn test_compile_error_handler_on_exceptions_order_preserved() {
@@ -1089,5 +1150,45 @@ mod tests {
             format: "xml".to_string(),
         });
         assert_eq!(declarative_step_name(&step), "unmarshal");
+    }
+
+    #[test]
+    fn compile_stream_cache_default() {
+        let step = DeclarativeStep::StreamCache(StreamCacheStepDef { threshold: None });
+        let result = compile_declarative_step(step);
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), BuilderStep::Processor(_)));
+        assert_eq!(
+            stream_cache_config(
+                None,
+                camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD
+            )
+            .threshold,
+            camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn compile_stream_cache_with_threshold() {
+        let threshold = 65536;
+        let step = DeclarativeStep::StreamCache(StreamCacheStepDef {
+            threshold: Some(threshold),
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_ok());
+        assert_eq!(
+            stream_cache_config(
+                Some(threshold),
+                camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD
+            )
+            .threshold,
+            threshold
+        );
+    }
+
+    #[test]
+    fn declarative_step_name_stream_cache() {
+        let step = DeclarativeStep::StreamCache(StreamCacheStepDef { threshold: None });
+        assert_eq!(declarative_step_name(&step), "stream_cache");
     }
 }

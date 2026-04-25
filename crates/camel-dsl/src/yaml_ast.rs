@@ -188,6 +188,7 @@ pub enum YamlStep {
     RoutingSlip(RoutingSlipStep),
     RecipientList(RecipientListStep),
     Stop(StopStep),
+    StreamCache(StreamCacheStep),
     Throttle(ThrottleStep),
     Transform(TransformStep),
     Script(ScriptStep),
@@ -474,6 +475,25 @@ fn default_multicast_aggregation() -> String {
 #[derive(Deserialize, Debug)]
 pub struct StopStep {
     pub stop: bool,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct StreamCacheStep {
+    pub stream_cache: StreamCacheBody,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub enum StreamCacheBody {
+    Enabled(bool),
+    Config(StreamCacheConfig),
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct StreamCacheConfig {
+    #[serde(default)]
+    pub threshold: Option<usize>,
 }
 
 #[derive(Deserialize, Debug)]

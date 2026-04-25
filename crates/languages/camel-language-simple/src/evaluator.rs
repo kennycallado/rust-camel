@@ -12,7 +12,11 @@ pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError
                 Body::Json(v) => v.to_string(),
                 Body::Xml(s) => s.clone(),
                 Body::Empty => String::new(),
-                Body::Stream(_) => String::new(),
+                Body::Stream(_) => {
+                    return Err(LanguageError::EvalError(
+                        "Body::Stream cannot be evaluated — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
+                    ));
+                }
             };
             Ok(Value::String(s))
         }

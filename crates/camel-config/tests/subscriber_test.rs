@@ -2,6 +2,7 @@
 
 use camel_config::config::{
     CamelConfig, ComponentsConfig, ObservabilityConfig, OtelCamelConfig, PlatformCamelConfig,
+    StreamCachingConfig,
 };
 use camel_core::{DetailLevel, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs};
 
@@ -44,6 +45,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
         },
         supervision: None,
         platform: PlatformCamelConfig::Noop,
+        stream_caching: StreamCachingConfig::default(),
     }
 }
 

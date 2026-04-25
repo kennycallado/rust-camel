@@ -1,6 +1,7 @@
 use camel_api::{CanonicalRouteSpec, RuntimeCommand};
 use camel_config::config::{
     CamelConfig, JournalConfig, ObservabilityConfig, OtelCamelConfig, PlatformCamelConfig,
+    StreamCachingConfig,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -93,6 +94,7 @@ async fn test_configure_context_with_supervision() {
             max_delay_ms: 60000,
         }),
         platform: PlatformCamelConfig::Noop,
+        stream_caching: StreamCachingConfig::default(),
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -116,6 +118,7 @@ async fn test_configure_context_sets_shutdown_timeout() {
         observability: Default::default(),
         supervision: None,
         platform: PlatformCamelConfig::Noop,
+        stream_caching: StreamCachingConfig::default(),
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -143,6 +146,7 @@ async fn test_configure_context_with_valid_log_level() {
         observability: Default::default(),
         supervision: None,
         platform: PlatformCamelConfig::Noop,
+        stream_caching: StreamCachingConfig::default(),
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -166,6 +170,7 @@ async fn test_configure_context_with_invalid_log_level() {
         observability: Default::default(),
         supervision: None,
         platform: PlatformCamelConfig::Noop,
+        stream_caching: StreamCachingConfig::default(),
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -198,6 +203,7 @@ async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
         },
         supervision: None,
         platform: PlatformCamelConfig::Noop,
+        stream_caching: StreamCachingConfig::default(),
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -227,6 +233,7 @@ async fn test_configure_context_without_otel_no_lifecycle() {
         observability: Default::default(),
         supervision: None,
         platform: PlatformCamelConfig::Noop,
+        stream_caching: StreamCachingConfig::default(),
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -262,6 +269,7 @@ async fn test_configure_context_uses_runtime_journal_from_config() {
         observability: Default::default(),
         supervision: None,
         platform: PlatformCamelConfig::Noop,
+        stream_caching: StreamCachingConfig::default(),
     };
 
     let mut ctx = CamelConfig::configure_context(&config)

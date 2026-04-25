@@ -35,19 +35,23 @@ pub(crate) fn validate_to_parse_error(
 }
 
 /// Build a [`JsExchange`] snapshot from an [`Exchange`] reference.
-fn snapshot_exchange(exchange: &Exchange) -> JsExchange {
+fn snapshot_exchange(exchange: &Exchange) -> Result<JsExchange, LanguageError> {
     let body = match &exchange.input.body {
         Body::Json(v) => v.clone(),
         Body::Text(s) | Body::Xml(s) => Value::String(s.clone()),
-        // Empty, Bytes, and Stream have no meaningful JS representation — map to null.
-        Body::Empty | Body::Bytes(_) | Body::Stream(_) => Value::Null,
+        Body::Empty | Body::Bytes(_) => Value::Null,
+        Body::Stream(_) => {
+            return Err(LanguageError::EvalError(
+                "Body::Stream cannot be used in JS — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
+            ));
+        }
     };
 
-    JsExchange::from_headers_body_properties(
+    Ok(JsExchange::from_headers_body_properties(
         exchange.input.headers.clone(),
         body,
         exchange.properties.clone(),
-    )
+    ))
 }
 
 /// Apply [`JsEvalResult`] mutations back onto a mutable [`Exchange`].
@@ -88,7 +92,7 @@ impl JsExpression {
 
 impl Expression for JsExpression {
     fn evaluate(&self, exchange: &Exchange) -> Result<Value, LanguageError> {
-        let js_exchange = snapshot_exchange(exchange);
+        let js_exchange = snapshot_exchange(exchange)?;
         let result = self
             .engine
             .eval(&self.script, js_exchange)
@@ -114,11 +118,10 @@ impl JsMutatingExpression {
 
 impl MutatingExpression for JsMutatingExpression {
     fn evaluate(&self, exchange: &mut Exchange) -> Result<Value, LanguageError> {
+        let js_exchange = snapshot_exchange(exchange)?;
         let original_headers = exchange.input.headers.clone();
         let original_properties = exchange.properties.clone();
         let original_body = exchange.input.body.clone();
-
-        let js_exchange = snapshot_exchange(exchange);
 
         match self.engine.eval(&self.script, js_exchange) {
             Ok(result) => {
@@ -151,7 +154,7 @@ impl JsPredicate {
 
 impl Predicate for JsPredicate {
     fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
-        let js_exchange = snapshot_exchange(exchange);
+        let js_exchange = snapshot_exchange(exchange)?;
         let result = self
             .engine
             .eval(&self.script, js_exchange)
@@ -285,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mutating_expression_preserves_stream_body() {
+    fn test_mutating_expression_rejects_stream_body() {
         let expr =
             JsMutatingExpression::new("camel.headers.set('x', '1'); 'done'".to_string(), engine());
         let mut ex = Exchange::new(Message::default());
@@ -294,12 +297,8 @@ mod tests {
             metadata: camel_api::StreamMetadata::default(),
         });
 
-        let _ = expr.evaluate(&mut ex).unwrap();
-
-        assert!(
-            matches!(ex.input.body, Body::Stream(_)),
-            "Stream body should be preserved when JS does not set camel.body"
-        );
+        let result = expr.evaluate(&mut ex);
+        assert!(result.is_err(), "JS should reject Body::Stream with error");
     }
 
     #[test]

@@ -27,7 +27,7 @@ use camel_component_api::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition, WhenStep};
 use camel_processor::{
     ConvertBodyTo, DynamicSetHeader, LogLevel, MapBody, MarshalService, SetBody, SetHeader,
-    UnmarshalService, builtin_data_format,
+    StreamCacheService, UnmarshalService, builtin_data_format,
 };
 
 /// Shared step-accumulation methods for all builder types.
@@ -178,6 +178,21 @@ pub trait StepAccumulator: Sized {
         self.steps_mut()
             .push(BuilderStep::Processor(BoxProcessor::new(svc)));
         self
+    }
+
+    fn stream_cache(mut self, threshold: usize) -> Self {
+        let config = camel_api::stream_cache::StreamCacheConfig::new(threshold);
+        let svc = StreamCacheService::new(IdentityProcessor, config);
+        self.steps_mut()
+            .push(BuilderStep::Processor(BoxProcessor::new(svc)));
+        self
+    }
+
+    /// Materialize `Body::Stream` into `Body::Bytes` using the default threshold (128 KB).
+    ///
+    /// Equivalent to `.stream_cache(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD)`.
+    fn stream_cache_default(self) -> Self {
+        self.stream_cache(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD)
     }
 
     /// Marshal the message body using the specified data format.
@@ -2681,6 +2696,16 @@ mod tests {
         let definition = RouteBuilder::from("timer:tick")
             .route_id("test-route")
             .unmarshal("json")
+            .build()
+            .unwrap();
+        assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn test_builder_stream_cache_adds_processor_step() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .stream_cache(1024)
             .build()
             .unwrap();
         assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
