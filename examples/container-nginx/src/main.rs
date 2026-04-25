@@ -1,7 +1,7 @@
-//! # Container Nginx Example — Web Server with Logs Streaming
+//! # Container Nginx Example — Web Server with Exec Health Check
 //!
-//! Demonstrates running a web server (nginx) with host networking
-//! and streaming its logs through the route.
+//! Demonstrates running a web server (nginx) with host networking,
+//! streaming its logs, and using exec to health-check the container.
 //!
 //! ## Running the example
 //!
@@ -27,7 +27,7 @@ async fn main() -> Result<(), CamelError> {
         .init();
 
     println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║          Container Nginx — Web Server with Port Mapping        ║");
+    println!("║      Container Nginx — Web Server with Exec Health Check       ║");
     println!("╚════════════════════════════════════════════════════════════════╝");
     println!();
 
@@ -66,7 +66,7 @@ async fn main() -> Result<(), CamelError> {
     println!();
 
     println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║  Nginx will start in 3 seconds...                              ║");
+    println!("║  Nginx starts in 3s... health-check every 10s via exec         ║");
     println!("║  Using network=host - accessible at http://localhost:80        ║");
     println!("║  Press Ctrl+C to stop.                                         ║");
     println!("╚════════════════════════════════════════════════════════════════╝");

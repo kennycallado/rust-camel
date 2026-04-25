@@ -111,6 +111,21 @@ pub const HEADER_CONTAINER_NAME: &str = "CamelContainerName";
 /// Header key for the result status of a container operation (e.g., "success").
 pub const HEADER_ACTION_RESULT: &str = "CamelContainerActionResult";
 
+/// Header key for specifying the command to execute in a container.
+pub const HEADER_CMD: &str = "CamelContainerCmd";
+
+/// Header key for specifying the network name for network operations.
+pub const HEADER_NETWORK: &str = "CamelContainerNetwork";
+
+/// Header key for the exit code of an exec operation.
+pub const HEADER_EXIT_CODE: &str = "CamelContainerExitCode";
+
+/// Header key for specifying volume mounts.
+pub const HEADER_VOLUMES: &str = "CamelContainerVolumes";
+
+/// Header key for the exec instance ID.
+pub const HEADER_EXEC_ID: &str = "CamelContainerExecId";
+
 // ---------------------------------------------------------------------------
 // ContainerGlobalConfig
 // ---------------------------------------------------------------------------
@@ -182,6 +197,18 @@ pub struct ContainerConfig {
     pub auto_pull: bool,
     /// Automatically remove the container when it exits (default: true).
     pub auto_remove: bool,
+    /// Volume mounts in format "host:container:ro" (e.g., "./html:/usr/share/nginx/html:ro").
+    pub volumes: Option<String>,
+    /// User to run the container or exec command as (e.g., "root").
+    pub user: Option<String>,
+    /// Working directory inside the container.
+    pub workdir: Option<String>,
+    /// Whether to detach from the exec process (default: false).
+    pub detach: bool,
+    /// Network driver for network-create (e.g., "bridge", "overlay").
+    pub driver: Option<String>,
+    /// Whether to force the operation (default: false).
+    pub force: bool,
 }
 
 impl ContainerConfig {
@@ -231,6 +258,20 @@ impl ContainerConfig {
             .unwrap_or(true);
         // host is only set from URI param; global config defaults are applied later
         let host = parts.params.get("host").cloned();
+        let volumes = parts.params.get("volumes").cloned();
+        let user = parts.params.get("user").cloned();
+        let workdir = parts.params.get("workdir").cloned();
+        let detach = parts
+            .params
+            .get("detach")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let driver = parts.params.get("driver").cloned();
+        let force = parts
+            .params
+            .get("force")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         Ok(Self {
             operation: parts.path,
@@ -247,6 +288,12 @@ impl ContainerConfig {
             tail,
             auto_pull,
             auto_remove,
+            volumes,
+            user,
+            workdir,
+            detach,
+            driver,
+            force,
         })
     }
 
@@ -369,6 +416,62 @@ impl ContainerConfig {
             Some(env_vars)
         }
     }
+
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    fn parse_volumes(&self) -> Option<(Vec<String>, HashMap<String, HashMap<(), ()>>)> {
+        self.volumes.as_deref().and_then(parse_volume_str)
+    }
+}
+
+/// Parses a volume specification string into bind mounts and anonymous volumes.
+///
+/// Format: `host:container:ro|rw` for bind mounts, `path` for anonymous volumes,
+/// `path:ro|rw` for anonymous volumes with mode, or `name:container` for named volumes.
+#[allow(clippy::type_complexity)]
+fn parse_volume_str(volumes_str: &str) -> Option<(Vec<String>, HashMap<String, HashMap<(), ()>>)> {
+    let mut binds: Vec<String> = Vec::new();
+    let mut anonymous_volumes: HashMap<String, HashMap<(), ()>> = HashMap::new();
+
+    for entry in volumes_str.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+
+        let segments: Vec<&str> = entry.split(':').collect();
+
+        match segments.len() {
+            3 => {
+                let source = segments[0];
+                let target = segments[1];
+                let mode = segments[2];
+                if mode != "ro" && mode != "rw" {
+                    continue;
+                }
+                binds.push(format!("{}:{}:{}", source, target, mode));
+            }
+            2 => {
+                let a = segments[0];
+                let b = segments[1];
+                if b == "ro" || b == "rw" {
+                    anonymous_volumes.insert(a.to_string(), HashMap::new());
+                } else {
+                    binds.push(format!("{}:{}", a, b));
+                }
+            }
+            1 => {
+                anonymous_volumes.insert(segments[0].to_string(), HashMap::new());
+            }
+            _ => continue,
+        }
+    }
+
+    if binds.is_empty() && anonymous_volumes.is_empty() {
+        None
+    } else {
+        Some((binds, anonymous_volumes))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,6 +481,12 @@ enum ProducerOperation {
     Start,
     Stop,
     Remove,
+    Exec,
+    NetworkCreate,
+    NetworkConnect,
+    NetworkDisconnect,
+    NetworkRemove,
+    NetworkList,
 }
 
 fn parse_producer_operation(operation: &str) -> Result<ProducerOperation, CamelError> {
@@ -387,6 +496,12 @@ fn parse_producer_operation(operation: &str) -> Result<ProducerOperation, CamelE
         "start" => Ok(ProducerOperation::Start),
         "stop" => Ok(ProducerOperation::Stop),
         "remove" => Ok(ProducerOperation::Remove),
+        "exec" => Ok(ProducerOperation::Exec),
+        "network-create" => Ok(ProducerOperation::NetworkCreate),
+        "network-connect" => Ok(ProducerOperation::NetworkConnect),
+        "network-disconnect" => Ok(ProducerOperation::NetworkDisconnect),
+        "network-remove" => Ok(ProducerOperation::NetworkRemove),
+        "network-list" => Ok(ProducerOperation::NetworkList),
         _ => Err(CamelError::ProcessorError(format!(
             "Unknown container operation: {}",
             operation
@@ -574,6 +689,585 @@ where
     Ok(container_id)
 }
 
+async fn handle_list(
+    docker: Docker,
+    _config: ContainerConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    let containers = docker.list_containers::<String>(None).await.map_err(|e| {
+        CamelError::ProcessorError(format!("Failed to list containers: {}", e))
+    })?;
+
+    let json_value = serde_json::to_value(&containers).map_err(|e| {
+        CamelError::ProcessorError(format!("Failed to serialize containers: {}", e))
+    })?;
+
+    exchange.input.body = Body::Json(json_value);
+    exchange.input.set_header(
+        HEADER_ACTION_RESULT,
+        serde_json::Value::String("success".to_string()),
+    );
+    Ok(())
+}
+
+async fn handle_run(
+    docker: Docker,
+    config: ContainerConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    let image = exchange
+        .input
+        .header(HEADER_IMAGE)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or(config.image.clone())
+        .ok_or_else(|| {
+            CamelError::ProcessorError(
+                "missing image for run operation. Specify in URI (image=alpine) or header (CamelContainerImage)".to_string(),
+            )
+        })?;
+
+    let pull_timeout = 300;
+    ensure_image_available(&docker, &image, config.auto_pull, pull_timeout)
+        .await
+        .map_err(|e| {
+            CamelError::ProcessorError(format!(
+                "Image '{}' not available: {}",
+                image, e
+            ))
+        })?;
+
+    let container_name = resolve_container_name(exchange, &config);
+    let container_name_ref = container_name.as_deref().unwrap_or("");
+    let cmd_parts: Option<Vec<String>> = config
+        .cmd
+        .as_ref()
+        .map(|c| c.split_whitespace().map(|s| s.to_string()).collect());
+    let auto_remove = config.auto_remove;
+    let (exposed_ports, port_bindings) = config.parse_ports().unwrap_or_default();
+    let env_vars = config.parse_env();
+    let network_mode = config.network.clone();
+
+    let volumes_str = exchange
+        .input
+        .header(HEADER_VOLUMES)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or(config.volumes.clone());
+    let (binds, anon_volumes) = volumes_str
+        .as_deref()
+        .and_then(parse_volume_str)
+        .unwrap_or_default();
+
+    let docker_create = docker.clone();
+    let docker_start = docker.clone();
+    let docker_remove = docker.clone();
+
+    let container_id = run_container_with_cleanup(
+        move || async move {
+            let create_options = bollard::container::CreateContainerOptions {
+                name: container_name_ref,
+                ..Default::default()
+            };
+            let container_config = bollard::container::Config::<String> {
+                image: Some(image.clone()),
+                cmd: cmd_parts,
+                env: env_vars,
+                exposed_ports: if exposed_ports.is_empty() { None } else { Some(exposed_ports) },
+                volumes: if anon_volumes.is_empty() { None } else { Some(anon_volumes) },
+                host_config: Some(HostConfig {
+                    auto_remove: Some(auto_remove),
+                    port_bindings: if port_bindings.is_empty() { None } else { Some(port_bindings) },
+                    network_mode,
+                    binds: if binds.is_empty() { None } else { Some(binds) },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            let create_response = docker_create
+                .create_container(Some(create_options), container_config)
+                .await
+                .map_err(|e| {
+                    let err_str = e.to_string().to_lowercase();
+                    if err_str.contains("409") || err_str.contains("conflict") {
+                        CamelError::ProcessorError(format!(
+                            "Container name '{}' already exists. Use a unique name or remove the existing container first",
+                            container_name_ref
+                        ))
+                    } else {
+                        CamelError::ProcessorError(format!(
+                            "Failed to create container: {}",
+                            e
+                        ))
+                    }
+                })?;
+
+            Ok(create_response.id)
+        },
+        move |container_id| async move {
+            docker_start
+                .start_container::<String>(&container_id, None)
+                .await
+                .map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "Failed to start container: {}",
+                        e
+                    ))
+                })
+        },
+        move |container_id| async move {
+            docker_remove
+                .remove_container(&container_id, None)
+                .await
+                .map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "Failed to remove container after start failure: {}",
+                        e
+                    ))
+                })
+        },
+    )
+    .await?;
+
+    track_container(container_id.clone());
+
+    exchange
+        .input
+        .set_header(HEADER_CONTAINER_ID, serde_json::Value::String(container_id));
+    exchange.input.set_header(
+        HEADER_ACTION_RESULT,
+        serde_json::Value::String("success".to_string()),
+    );
+    Ok(())
+}
+
+async fn handle_lifecycle(
+    docker: Docker,
+    _config: ContainerConfig,
+    exchange: &mut Exchange,
+    operation: ProducerOperation,
+    operation_name: &str,
+) -> Result<(), CamelError> {
+    let container_id = exchange
+        .input
+        .header(HEADER_CONTAINER_ID)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .ok_or_else(|| {
+            CamelError::ProcessorError(format!(
+                "{} header is required for {} operation",
+                HEADER_CONTAINER_ID, operation_name
+            ))
+        })?;
+
+    match operation {
+        ProducerOperation::Start => {
+            docker
+                .start_container::<String>(&container_id, None)
+                .await
+                .map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "Failed to start container: {}",
+                        e
+                    ))
+                })?;
+        }
+        ProducerOperation::Stop => {
+            docker
+                .stop_container(&container_id, None)
+                .await
+                .map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "Failed to stop container: {}",
+                        e
+                    ))
+                })?;
+        }
+        ProducerOperation::Remove => {
+            docker
+                .remove_container(&container_id, None)
+                .await
+                .map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "Failed to remove container: {}",
+                        e
+                    ))
+                })?;
+            untrack_container(&container_id);
+        }
+        _ => {}
+    }
+
+    exchange.input.set_header(
+        HEADER_ACTION_RESULT,
+        serde_json::Value::String("success".to_string()),
+    );
+    Ok(())
+}
+
+async fn handle_exec(
+    docker: Docker,
+    config: ContainerConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    let container_id = exchange
+        .input
+        .header(HEADER_CONTAINER_ID)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or(config.container_id.clone())
+        .ok_or_else(|| {
+            CamelError::ProcessorError(format!(
+                "{} header or containerId param is required for exec operation",
+                HEADER_CONTAINER_ID
+            ))
+        })?;
+
+    let cmd = exchange
+        .input
+        .header(HEADER_CMD)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or(config.cmd.clone())
+        .ok_or_else(|| {
+            CamelError::ProcessorError(
+                "CamelContainerCmd header or cmd param is required for exec operation".to_string(),
+            )
+        })?;
+
+    let cmd_parts: Vec<String> = cmd.split_whitespace().map(|s| s.to_string()).collect();
+    let env_vars = config.parse_env();
+
+    let exec_config = bollard::exec::CreateExecOptions {
+        cmd: Some(cmd_parts),
+        env: env_vars,
+        user: config.user.clone(),
+        working_dir: config.workdir.clone(),
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        ..Default::default()
+    };
+
+    let create_result = docker
+        .create_exec(&container_id, exec_config)
+        .await
+        .map_err(|e| {
+            let err_str = e.to_string().to_lowercase();
+            if err_str.contains("404") || err_str.contains("no such") {
+                CamelError::ProcessorError(format!(
+                    "Container '{}' not found for exec",
+                    container_id
+                ))
+            } else {
+                CamelError::ProcessorError(format!("Failed to create exec: {}", e))
+            }
+        })?;
+
+    let exec_id = create_result.id;
+
+    if config.detach {
+        docker
+            .start_exec(
+                &exec_id,
+                Some(bollard::exec::StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| {
+                CamelError::ProcessorError(format!("Failed to start exec (detached): {}", e))
+            })?;
+
+        exchange.input.set_header(
+            HEADER_EXEC_ID,
+            serde_json::Value::String(exec_id),
+        );
+        exchange.input.set_header(
+            HEADER_CONTAINER_ID,
+            serde_json::Value::String(container_id),
+        );
+    } else {
+        let start_result = docker
+            .start_exec(&exec_id, None)
+            .await
+            .map_err(|e| {
+                CamelError::ProcessorError(format!("Failed to start exec: {}", e))
+            })?;
+
+        let mut output = String::new();
+
+        match start_result {
+            bollard::exec::StartExecResults::Attached { output: mut stream, .. } => {
+                use futures::StreamExt;
+                while let Some(msg) = stream.next().await {
+                    match msg {
+                        Ok(bollard::container::LogOutput::StdOut { message }) => {
+                            output.push_str(&String::from_utf8_lossy(&message));
+                        }
+                        Ok(bollard::container::LogOutput::StdErr { message }) => {
+                            output.push_str(&String::from_utf8_lossy(&message));
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            output.push_str(&format!("[error reading stream: {}]", e));
+                        }
+                    }
+                }
+            }
+            bollard::exec::StartExecResults::Detached => {}
+        }
+
+        let inspect = docker.inspect_exec(&exec_id).await.map_err(|e| {
+            CamelError::ProcessorError(format!("Failed to inspect exec: {}", e))
+        })?;
+
+        let exit_code: i64 = inspect.exit_code.unwrap_or(0);
+
+        let output = output.trim_end().to_string();
+        exchange.input.body = Body::Text(output);
+        exchange.input.set_header(
+            HEADER_EXIT_CODE,
+            serde_json::Value::Number(exit_code.into()),
+        );
+        exchange.input.set_header(
+            HEADER_CONTAINER_ID,
+            serde_json::Value::String(container_id),
+        );
+    }
+
+    exchange.input.set_header(
+        HEADER_ACTION_RESULT,
+        serde_json::Value::String("success".to_string()),
+    );
+    Ok(())
+}
+
+async fn handle_network_create(
+    docker: Docker,
+    config: ContainerConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    let network_name = exchange
+        .input
+        .header(HEADER_CONTAINER_NAME)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or(config.name.clone())
+        .ok_or_else(|| {
+            CamelError::ProcessorError(
+                "CamelContainerName header or name param is required for network-create".to_string(),
+            )
+        })?;
+
+    let driver = config.driver.as_deref().unwrap_or("bridge");
+
+    let options = bollard::network::CreateNetworkOptions {
+        name: network_name.clone(),
+        driver: driver.to_string(),
+        ..Default::default()
+    };
+
+    let result = docker.create_network(options).await.map_err(|e| {
+        let err_str = e.to_string().to_lowercase();
+        if err_str.contains("409") || err_str.contains("already exists") {
+            CamelError::ProcessorError(format!(
+                "Network '{}' already exists",
+                network_name
+            ))
+        } else {
+            CamelError::ProcessorError(format!("Failed to create network: {}", e))
+        }
+    })?;
+
+    let network_id = result.id.clone();
+    let json_value = serde_json::to_value(&result).map_err(|e| {
+        CamelError::ProcessorError(format!("Failed to serialize network response: {}", e))
+    })?;
+
+    exchange.input.body = Body::Json(json_value);
+    exchange.input.set_header(
+        HEADER_NETWORK,
+        serde_json::Value::String(network_id),
+    );
+    exchange.input.set_header(
+        HEADER_ACTION_RESULT,
+        serde_json::Value::String("success".to_string()),
+    );
+    Ok(())
+}
+
+async fn handle_network_connect(
+    docker: Docker,
+    config: ContainerConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    let network = exchange
+        .input
+        .header(HEADER_NETWORK)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or(config.network.clone())
+        .ok_or_else(|| {
+            CamelError::ProcessorError(
+                "CamelContainerNetwork header or network param is required for network-connect"
+                    .to_string(),
+            )
+        })?;
+
+    let container = exchange
+        .input
+        .header(HEADER_CONTAINER_ID)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or(config.container_id.clone())
+        .ok_or_else(|| {
+            CamelError::ProcessorError(
+                "CamelContainerId header or container param is required for network-connect"
+                    .to_string(),
+            )
+        })?;
+
+    docker
+        .connect_network(
+            &network,
+            bollard::network::ConnectNetworkOptions {
+                container,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| {
+            let err_str = e.to_string().to_lowercase();
+            if err_str.contains("404") || err_str.contains("not found") {
+                CamelError::ProcessorError(format!(
+                    "Network '{}' or container not found",
+                    network
+                ))
+            } else {
+                CamelError::ProcessorError(format!("Failed to connect to network: {}", e))
+            }
+        })?;
+
+    exchange.input.set_header(
+        HEADER_ACTION_RESULT,
+        serde_json::Value::String("success".to_string()),
+    );
+    Ok(())
+}
+
+async fn handle_network_disconnect(
+    docker: Docker,
+    config: ContainerConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    let network = exchange
+        .input
+        .header(HEADER_NETWORK)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or(config.network.clone())
+        .ok_or_else(|| {
+            CamelError::ProcessorError(
+                "CamelContainerNetwork header or network param is required for network-disconnect"
+                    .to_string(),
+            )
+        })?;
+
+    let container = exchange
+        .input
+        .header(HEADER_CONTAINER_ID)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or(config.container_id.clone())
+        .ok_or_else(|| {
+            CamelError::ProcessorError(
+                "CamelContainerId header or container param is required for network-disconnect"
+                    .to_string(),
+            )
+        })?;
+
+    docker
+        .disconnect_network(
+            &network,
+            bollard::network::DisconnectNetworkOptions {
+                container,
+                force: config.force,
+            },
+        )
+        .await
+        .map_err(|e| {
+            let err_str = e.to_string().to_lowercase();
+            if err_str.contains("404") || err_str.contains("not found") {
+                CamelError::ProcessorError(format!(
+                    "Network '{}' or container not found",
+                    network
+                ))
+            } else {
+                CamelError::ProcessorError(format!("Failed to disconnect from network: {}", e))
+            }
+        })?;
+
+    exchange.input.set_header(
+        HEADER_ACTION_RESULT,
+        serde_json::Value::String("success".to_string()),
+    );
+    Ok(())
+}
+
+async fn handle_network_remove(
+    docker: Docker,
+    config: ContainerConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    let network = exchange
+        .input
+        .header(HEADER_NETWORK)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .or(config.network.clone())
+        .ok_or_else(|| {
+            CamelError::ProcessorError(
+                "CamelContainerNetwork header or network param is required for network-remove"
+                    .to_string(),
+            )
+        })?;
+
+    docker
+        .remove_network(&network)
+        .await
+        .map_err(|e| {
+            let err_str = e.to_string().to_lowercase();
+            if err_str.contains("404") || err_str.contains("not found") {
+                CamelError::ProcessorError(format!("Network '{}' not found", network))
+            } else if err_str.contains("409") || err_str.contains("in use") {
+                CamelError::ProcessorError(format!(
+                    "Network '{}' is in use and cannot be removed",
+                    network
+                ))
+            } else {
+                CamelError::ProcessorError(format!("Failed to remove network: {}", e))
+            }
+        })?;
+
+    exchange.input.set_header(
+        HEADER_ACTION_RESULT,
+        serde_json::Value::String("success".to_string()),
+    );
+    Ok(())
+}
+
+async fn handle_network_list(
+    docker: Docker,
+    _config: ContainerConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    let networks = docker.list_networks::<String>(None).await.map_err(|e| {
+        CamelError::ProcessorError(format!("Failed to list networks: {}", e))
+    })?;
+
+    let json_value = serde_json::to_value(&networks).map_err(|e| {
+        CamelError::ProcessorError(format!("Failed to serialize networks: {}", e))
+    })?;
+
+    exchange.input.body = Body::Json(json_value);
+    exchange.input.set_header(
+        HEADER_ACTION_RESULT,
+        serde_json::Value::String("success".to_string()),
+    );
+    Ok(())
+}
+
 /// Producer for executing container operations.
 ///
 /// This producer handles synchronous container operations like listing,
@@ -597,7 +1291,6 @@ impl Service<Exchange> for ContainerProducer {
         let config = self.config.clone();
         let docker = self.docker.clone();
         Box::pin(async move {
-            // Extract operation from header or use config
             let operation_name = exchange
                 .input
                 .header(HEADER_ACTION)
@@ -606,193 +1299,42 @@ impl Service<Exchange> for ContainerProducer {
 
             let operation = parse_producer_operation(&operation_name)?;
 
-            // Execute operation
             match operation {
                 ProducerOperation::List => {
-                    let containers = docker.list_containers::<String>(None).await.map_err(|e| {
-                        CamelError::ProcessorError(format!("Failed to list containers: {}", e))
-                    })?;
-
-                    let json_value = serde_json::to_value(&containers).map_err(|e| {
-                        CamelError::ProcessorError(format!("Failed to serialize containers: {}", e))
-                    })?;
-
-                    exchange.input.body = Body::Json(json_value);
-                    exchange.input.set_header(
-                        HEADER_ACTION_RESULT,
-                        serde_json::Value::String("success".to_string()),
-                    );
+                    handle_list(docker, config, &mut exchange).await?;
                 }
                 ProducerOperation::Run => {
-                    // Run operation: create and start a container from an image
-                    let image = exchange
-                        .input
-                        .header(HEADER_IMAGE)
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .or(config.image.clone())
-                        .ok_or_else(|| {
-                            CamelError::ProcessorError(
-                                "missing image for run operation. Specify in URI (image=alpine) or header (CamelContainerImage)".to_string(),
-                            )
-                        })?;
-
-                    // Ensure image is available (auto-pull if needed)
-                    let pull_timeout = 300; // 5 minutes default
-                    ensure_image_available(&docker, &image, config.auto_pull, pull_timeout)
-                        .await
-                        .map_err(|e| {
-                            CamelError::ProcessorError(format!(
-                                "Image '{}' not available: {}",
-                                image, e
-                            ))
-                        })?;
-
-                    let container_name = resolve_container_name(&exchange, &config);
-                    let container_name_ref = container_name.as_deref().unwrap_or("");
-                    let cmd_parts: Option<Vec<String>> = config
-                        .cmd
-                        .as_ref()
-                        .map(|c| c.split_whitespace().map(|s| s.to_string()).collect());
-                    let auto_remove = config.auto_remove;
-                    let (exposed_ports, port_bindings) = config.parse_ports().unwrap_or_default();
-                    let env_vars = config.parse_env();
-                    let network_mode = config.network.clone();
-
-                    let docker_create = docker.clone();
-                    let docker_start = docker.clone();
-                    let docker_remove = docker.clone();
-
-                    let container_id = run_container_with_cleanup(
-                        move || async move {
-                            let create_options = bollard::container::CreateContainerOptions {
-                                name: container_name_ref,
-                                ..Default::default()
-                            };
-                            let container_config = bollard::container::Config::<String> {
-                                image: Some(image.clone()),
-                                cmd: cmd_parts,
-                                env: env_vars,
-                                exposed_ports: if exposed_ports.is_empty() { None } else { Some(exposed_ports) },
-                                host_config: Some(HostConfig {
-                                    auto_remove: Some(auto_remove),
-                                    port_bindings: if port_bindings.is_empty() { None } else { Some(port_bindings) },
-                                    network_mode,
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            };
-
-                            let create_response = docker_create
-                                .create_container(Some(create_options), container_config)
-                                .await
-                                .map_err(|e| {
-                                    let err_str = e.to_string().to_lowercase();
-                                    if err_str.contains("409") || err_str.contains("conflict") {
-                                        CamelError::ProcessorError(format!(
-                                            "Container name '{}' already exists. Use a unique name or remove the existing container first",
-                                            container_name_ref
-                                        ))
-                                    } else {
-                                        CamelError::ProcessorError(format!(
-                                            "Failed to create container: {}",
-                                            e
-                                        ))
-                                    }
-                                })?;
-
-                            Ok(create_response.id)
-                        },
-                        move |container_id| async move {
-                            docker_start
-                                .start_container::<String>(&container_id, None)
-                                .await
-                                .map_err(|e| {
-                                    CamelError::ProcessorError(format!(
-                                        "Failed to start container: {}",
-                                        e
-                                    ))
-                                })
-                        },
-                        move |container_id| async move {
-                            docker_remove
-                                .remove_container(&container_id, None)
-                                .await
-                                .map_err(|e| {
-                                    CamelError::ProcessorError(format!(
-                                        "Failed to remove container after start failure: {}",
-                                        e
-                                    ))
-                                })
-                        },
-                    )
-                    .await?;
-
-                    track_container(container_id.clone());
-
-                    exchange
-                        .input
-                        .set_header(HEADER_CONTAINER_ID, serde_json::Value::String(container_id));
-                    exchange.input.set_header(
-                        HEADER_ACTION_RESULT,
-                        serde_json::Value::String("success".to_string()),
-                    );
+                    handle_run(docker, config, &mut exchange).await?;
                 }
-                ProducerOperation::Start | ProducerOperation::Stop | ProducerOperation::Remove => {
-                    // Lifecycle operations require a container ID
-                    let container_id = exchange
-                        .input
-                        .header(HEADER_CONTAINER_ID)
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .ok_or_else(|| {
-                            CamelError::ProcessorError(format!(
-                                "{} header is required for {} operation",
-                                HEADER_CONTAINER_ID, operation_name
-                            ))
-                        })?;
-
-                    match operation {
-                        ProducerOperation::Start => {
-                            docker
-                                .start_container::<String>(&container_id, None)
-                                .await
-                                .map_err(|e| {
-                                    CamelError::ProcessorError(format!(
-                                        "Failed to start container: {}",
-                                        e
-                                    ))
-                                })?;
-                        }
-                        ProducerOperation::Stop => {
-                            docker
-                                .stop_container(&container_id, None)
-                                .await
-                                .map_err(|e| {
-                                    CamelError::ProcessorError(format!(
-                                        "Failed to stop container: {}",
-                                        e
-                                    ))
-                                })?;
-                        }
-                        ProducerOperation::Remove => {
-                            docker
-                                .remove_container(&container_id, None)
-                                .await
-                                .map_err(|e| {
-                                    CamelError::ProcessorError(format!(
-                                        "Failed to remove container: {}",
-                                        e
-                                    ))
-                                })?;
-                            untrack_container(&container_id);
-                        }
-                        _ => {}
-                    }
-
-                    // Set success result
-                    exchange.input.set_header(
-                        HEADER_ACTION_RESULT,
-                        serde_json::Value::String("success".to_string()),
-                    );
+                ProducerOperation::Start => {
+                    handle_lifecycle(docker, config, &mut exchange, operation, &operation_name)
+                        .await?;
+                }
+                ProducerOperation::Stop => {
+                    handle_lifecycle(docker, config, &mut exchange, operation, &operation_name)
+                        .await?;
+                }
+                ProducerOperation::Remove => {
+                    handle_lifecycle(docker, config, &mut exchange, operation, &operation_name)
+                        .await?;
+                }
+                ProducerOperation::Exec => {
+                    handle_exec(docker, config, &mut exchange).await?;
+                }
+                ProducerOperation::NetworkCreate => {
+                    handle_network_create(docker, config, &mut exchange).await?;
+                }
+                ProducerOperation::NetworkConnect => {
+                    handle_network_connect(docker, config, &mut exchange).await?;
+                }
+                ProducerOperation::NetworkDisconnect => {
+                    handle_network_disconnect(docker, config, &mut exchange).await?;
+                }
+                ProducerOperation::NetworkRemove => {
+                    handle_network_remove(docker, config, &mut exchange).await?;
+                }
+                ProducerOperation::NetworkList => {
+                    handle_network_list(docker, config, &mut exchange).await?;
                 }
             }
 
@@ -1240,6 +1782,34 @@ mod tests {
             }
             _ => panic!("Expected ProcessorError for unknown operation"),
         }
+    }
+
+    #[test]
+    fn test_parse_producer_operation_new_variants() {
+        assert_eq!(
+            parse_producer_operation("exec").unwrap(),
+            ProducerOperation::Exec
+        );
+        assert_eq!(
+            parse_producer_operation("network-create").unwrap(),
+            ProducerOperation::NetworkCreate
+        );
+        assert_eq!(
+            parse_producer_operation("network-connect").unwrap(),
+            ProducerOperation::NetworkConnect
+        );
+        assert_eq!(
+            parse_producer_operation("network-disconnect").unwrap(),
+            ProducerOperation::NetworkDisconnect
+        );
+        assert_eq!(
+            parse_producer_operation("network-remove").unwrap(),
+            ProducerOperation::NetworkRemove
+        );
+        assert_eq!(
+            parse_producer_operation("network-list").unwrap(),
+            ProducerOperation::NetworkList
+        );
     }
 
     #[test]
@@ -2005,5 +2575,399 @@ mod tests {
             }
             other => panic!("Expected Body::Json with array, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_container_config_parses_volumes() {
+        let config = ContainerConfig::from_uri(
+            "container:run?image=nginx&volumes=./html:/usr/share/nginx/html:ro",
+        )
+        .unwrap();
+        assert_eq!(
+            config.volumes.as_deref(),
+            Some("./html:/usr/share/nginx/html:ro")
+        );
+    }
+
+    #[test]
+    fn test_container_config_parses_exec_params() {
+        let config = ContainerConfig::from_uri(
+            "container:exec?containerId=my-app&cmd=ls /app&user=root&workdir=/tmp&detach=true",
+        )
+        .unwrap();
+        assert_eq!(config.operation, "exec");
+        assert_eq!(config.container_id.as_deref(), Some("my-app"));
+        assert_eq!(config.cmd.as_deref(), Some("ls /app"));
+        assert_eq!(config.user.as_deref(), Some("root"));
+        assert_eq!(config.workdir.as_deref(), Some("/tmp"));
+        assert!(config.detach);
+    }
+
+    #[test]
+    fn test_container_config_parses_network_create_params() {
+        let config =
+            ContainerConfig::from_uri("container:network-create?name=my-net&driver=bridge").unwrap();
+        assert_eq!(config.operation, "network-create");
+        assert_eq!(config.name.as_deref(), Some("my-net"));
+        assert_eq!(config.driver.as_deref(), Some("bridge"));
+    }
+
+    #[test]
+    fn test_container_config_defaults_new_fields() {
+        let config = ContainerConfig::from_uri("container:list").unwrap();
+        assert!(config.volumes.is_none());
+        assert!(config.user.is_none());
+        assert!(config.workdir.is_none());
+        assert!(!config.detach);
+        assert!(config.driver.is_none());
+        assert!(!config.force);
+    }
+
+    #[test]
+    fn test_parse_volumes_bind_mount() {
+        let config = ContainerConfig::from_uri(
+            "container:run?image=nginx&volumes=./html:/usr/share/nginx/html:ro",
+        )
+        .unwrap();
+        let (binds, anon) = config.parse_volumes().unwrap();
+        assert_eq!(binds, vec!["./html:/usr/share/nginx/html:ro"]);
+        assert!(anon.is_empty());
+    }
+
+    #[test]
+    fn test_parse_volumes_named_volume() {
+        let config =
+            ContainerConfig::from_uri("container:run?image=postgres&volumes=data:/var/lib/data")
+                .unwrap();
+        let (binds, anon) = config.parse_volumes().unwrap();
+        assert_eq!(binds, vec!["data:/var/lib/data"]);
+        assert!(anon.is_empty());
+    }
+
+    #[test]
+    fn test_parse_volumes_anonymous() {
+        let config =
+            ContainerConfig::from_uri("container:run?image=alpine&volumes=/tmp/app-data").unwrap();
+        let (binds, anon) = config.parse_volumes().unwrap();
+        assert!(binds.is_empty());
+        assert!(anon.contains_key("/tmp/app-data"));
+    }
+
+    #[test]
+    fn test_parse_volumes_anonymous_with_mode() {
+        let config =
+            ContainerConfig::from_uri("container:run?image=alpine&volumes=/tmp/app-data:ro")
+                .unwrap();
+        let (binds, anon) = config.parse_volumes().unwrap();
+        assert!(binds.is_empty());
+        assert!(anon.contains_key("/tmp/app-data"));
+    }
+
+    #[test]
+    fn test_parse_volumes_multiple() {
+        let config = ContainerConfig::from_uri(
+            "container:run?image=nginx&volumes=./html:/usr/share/nginx/html:ro,data:/var/log/app",
+        )
+        .unwrap();
+        let (binds, anon) = config.parse_volumes().unwrap();
+        assert_eq!(binds.len(), 2);
+        assert!(binds.contains(&"./html:/usr/share/nginx/html:ro".to_string()));
+        assert!(binds.contains(&"data:/var/log/app".to_string()));
+        assert!(anon.is_empty());
+    }
+
+    #[test]
+    fn test_parse_volumes_mixed() {
+        let config = ContainerConfig::from_uri(
+            "container:run?image=nginx&volumes=./html:/usr/share/nginx/html:ro,/tmp/cache",
+        )
+        .unwrap();
+        let (binds, anon) = config.parse_volumes().unwrap();
+        assert_eq!(binds.len(), 1);
+        assert!(anon.contains_key("/tmp/cache"));
+    }
+
+    #[test]
+    fn test_parse_volumes_none() {
+        let config = ContainerConfig::from_uri("container:run?image=nginx").unwrap();
+        assert!(config.parse_volumes().is_none());
+    }
+
+    #[test]
+    fn test_parse_volumes_empty_entry_skipped() {
+        let config = ContainerConfig::from_uri("container:run?image=nginx&volumes=,,").unwrap();
+        assert!(config.parse_volumes().is_none());
+    }
+
+    #[test]
+    fn test_parse_volumes_rw_mode() {
+        let config = ContainerConfig::from_uri(
+            "container:run?image=nginx&volumes=./data:/app/data:rw",
+        )
+        .unwrap();
+        let (binds, _) = config.parse_volumes().unwrap();
+        assert_eq!(binds, vec!["./data:/app/data:rw"]);
+    }
+
+    #[tokio::test]
+    async fn test_container_producer_run_with_volumes() {
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("Skipping test: Could not connect to Docker daemon");
+                return;
+            }
+        };
+        if docker.ping().await.is_err() {
+            eprintln!("Skipping test: Docker daemon not responding to ping");
+            return;
+        }
+
+        let cargo_toml = std::fs::canonicalize("./Cargo.toml")
+            .expect("Cargo.toml should exist");
+        let volume_path = cargo_toml.to_str().unwrap();
+
+        let component = ContainerComponent::new();
+        let ctx = NoOpComponentContext;
+        let uri = format!(
+            "container:run?image=alpine&cmd=cat /mnt/test.txt&volumes={}:/mnt/test.txt:ro&autoRemove=true",
+            volume_path
+        );
+        let endpoint = component.create_endpoint(&uri, &ctx).unwrap();
+        let ctx = ProducerContext::new();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new(""));
+        exchange
+            .input
+            .set_header(HEADER_ACTION, serde_json::Value::String("run".into()));
+
+        use tower::ServiceExt;
+        let result = producer
+            .ready()
+            .await
+            .unwrap()
+            .call(exchange)
+            .await
+            .expect("Run with volumes should succeed");
+
+        let container_id = result
+            .input
+            .header(HEADER_CONTAINER_ID)
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .expect("Should have container ID");
+
+        let _ = docker
+            .remove_container(
+                &container_id,
+                Some(bollard::container::RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_container_producer_exec() {
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("Skipping test: Could not connect to Docker daemon");
+                return;
+            }
+        };
+        if docker.ping().await.is_err() {
+            eprintln!("Skipping test: Docker daemon not responding to ping");
+            return;
+        }
+
+        let component = ContainerComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint("container:run?image=alpine&cmd=sleep 30&autoRemove=true", &ctx)
+            .unwrap();
+        let ctx = ProducerContext::new();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new(""));
+        exchange
+            .input
+            .set_header(HEADER_ACTION, serde_json::Value::String("run".into()));
+
+        use tower::ServiceExt;
+        let result = producer
+            .ready()
+            .await
+            .unwrap()
+            .call(exchange)
+            .await
+            .expect("Run should succeed");
+
+        let container_id = result
+            .input
+            .header(HEADER_CONTAINER_ID)
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .expect("Should have container ID");
+
+        let mut exec_exchange = Exchange::new(Message::new(""));
+        exec_exchange.input.set_header(
+            HEADER_ACTION,
+            serde_json::Value::String("exec".into()),
+        );
+        exec_exchange.input.set_header(
+            HEADER_CONTAINER_ID,
+            serde_json::Value::String(container_id.clone()),
+        );
+        exec_exchange.input.set_header(
+            HEADER_CMD,
+            serde_json::Value::String("echo hello".into()),
+        );
+
+        let exec_result = producer
+            .ready()
+            .await
+            .unwrap()
+            .call(exec_exchange)
+            .await
+            .expect("Exec should succeed");
+
+        match &exec_result.input.body {
+            Body::Text(text) => {
+                assert!(text.contains("hello"), "Exec output should contain 'hello', got: {}", text);
+            }
+            other => panic!("Expected Body::Text, got: {:?}", other),
+        }
+
+        let exit_code = exec_result
+            .input
+            .header(HEADER_EXIT_CODE)
+            .and_then(|v| v.as_i64());
+        assert_eq!(exit_code, Some(0));
+
+        let action_result = exec_result
+            .input
+            .header(HEADER_ACTION_RESULT)
+            .and_then(|v| v.as_str());
+        assert_eq!(action_result, Some("success"));
+
+        let _ = docker
+            .remove_container(
+                &container_id,
+                Some(bollard::container::RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_container_producer_network_lifecycle() {
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("Skipping test: Could not connect to Docker daemon");
+                return;
+            }
+        };
+        if docker.ping().await.is_err() {
+            eprintln!("Skipping test: Docker daemon not responding to ping");
+            return;
+        }
+
+        let network_name = format!("camel-test-{}", std::process::id());
+
+        let component = ContainerComponent::new();
+        let component_ctx = NoOpComponentContext;
+
+        // Create network
+        let endpoint = component
+            .create_endpoint(
+                &format!("container:network-create?name={}", network_name),
+                &component_ctx,
+            )
+            .unwrap();
+        let ctx = ProducerContext::new();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new(""));
+        exchange.input.set_header(
+            HEADER_ACTION,
+            serde_json::Value::String("network-create".into()),
+        );
+
+        use tower::ServiceExt;
+        let result = producer
+            .ready()
+            .await
+            .unwrap()
+            .call(exchange)
+            .await
+            .expect("Network create should succeed");
+
+        let network_id = result
+            .input
+            .header(HEADER_NETWORK)
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .expect("Should have network ID");
+
+        assert!(!network_id.is_empty());
+
+        // List networks
+        let endpoint = component
+            .create_endpoint("container:network-list", &component_ctx)
+            .unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new(""));
+        exchange.input.set_header(
+            HEADER_ACTION,
+            serde_json::Value::String("network-list".into()),
+        );
+
+        let list_result = producer
+            .ready()
+            .await
+            .unwrap()
+            .call(exchange)
+            .await
+            .expect("Network list should succeed");
+
+        match &list_result.input.body {
+            Body::Json(json_value) => {
+                assert!(json_value.is_array(), "Expected JSON array");
+            }
+            other => panic!("Expected Body::Json, got: {:?}", other),
+        }
+
+        // Remove network
+        let endpoint = component
+            .create_endpoint(
+                &format!("container:network-remove?network={}", network_name),
+                &component_ctx,
+            )
+            .unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new(""));
+        exchange.input.set_header(
+            HEADER_ACTION,
+            serde_json::Value::String("network-remove".into()),
+        );
+
+        let remove_result = producer
+            .ready()
+            .await
+            .unwrap()
+            .call(exchange)
+            .await
+            .expect("Network remove should succeed");
+
+        let action_result = remove_result
+            .input
+            .header(HEADER_ACTION_RESULT)
+            .and_then(|v| v.as_str());
+        assert_eq!(action_result, Some("success"));
     }
 }

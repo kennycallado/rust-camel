@@ -160,7 +160,7 @@ cargo run -p hello-world
 | `camel-jms`               | JMS producer and consumer via native-image bridge (ActiveMQ Classic, Artemis)                                                                                                     |
 | `camel-xslt`              | XSLT 3.0 transformation via xml-bridge (`xslt:<stylesheet>`) — [example](examples/xslt-example/README.md)                                                                        |
 | `camel-xj`                | XML↔JSON conversion via xml-bridge (`xj:<stylesheet>?direction=xml2json\|json2xml`) — [example](examples/xj-example/README.md)                                                  |
-| `camel-container`         | Docker container producer/consumer via `bollard`                                                                                                                                  |
+| `camel-container`         | Docker container producer/consumer via `bollard`. Container lifecycle, volume mounts, exec, network operations                                                                   |
 | `camel-language-api`      | Language trait API: `Language`, `Expression`, `Predicate`                                                                                                                         |
 | `camel-language-simple`   | Simple Language: `${header.x}`, `${body}`, operators                                                                                                                              |
 | `camel-language-js`       | JavaScript scripting language for expressions and side effects                                                                                                                    |

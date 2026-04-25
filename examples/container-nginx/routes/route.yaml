@@ -14,3 +14,18 @@ routes:
     steps:
       - to: "container:run?image=nginx:alpine&name=nginx-demo&network=host&autoRemove=true"
       - log: "message=🌐 Nginx running at http://localhost:80 (ID: ${header.CamelContainerId})"
+
+  - id: "nginx-health"
+    from: "timer:health?period=10000"
+    steps:
+      - set-header:
+          name: "CamelContainerAction"
+          expression: "exec"
+      - set-header:
+          name: "CamelContainerId"
+          expression: "nginx-demo"
+      - set-header:
+          name: "CamelContainerCmd"
+          expression: "nginx -v"
+      - to: "container:exec"
+      - log: "message=Nginx version: ${body} (exit: ${header.CamelContainerExitCode})"

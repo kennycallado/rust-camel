@@ -4,12 +4,15 @@
 
 ## Overview
 
-The Container component provides Docker container lifecycle management for rust-camel routes. It supports both **producer** operations (list, run, start, stop, remove containers) and **consumer** mode (subscribe to Docker events).
+The Container component provides Docker container lifecycle management for rust-camel routes. It supports **producer** operations (list, run, start, stop, remove, exec, network management) and **consumer** mode (subscribe to Docker events).
 
 ## Features
 
 - **Batteries Included**: Auto-pull images, auto-remove containers, sensible defaults
 - **Container Lifecycle**: Create, start, stop, and remove containers
+- **Volume Mounts**: Bind-mount host paths into containers
+- **Command Exec**: Execute commands inside running containers
+- **Network Management**: Create, connect, disconnect, list, and remove Docker networks
 - **Event Streaming**: Subscribe to Docker daemon events (formatted for readability)
 - **Container Tracking**: Track created containers for cleanup on shutdown (hot-reload safe)
 - **Header-based Control**: Override operations and parameters via exchange headers
@@ -34,15 +37,21 @@ container:<operation>[?options]
 
 ## Operations
 
-| Operation | Mode     | Description                                |
-| --------- | -------- | ------------------------------------------ |
-| `list`    | Producer | List all containers                        |
-| `run`     | Producer | Create and start a container from an image |
-| `start`   | Producer | Start an existing container                |
-| `stop`    | Producer | Stop a running container                   |
-| `remove`  | Producer | Remove a container                         |
-| `events`  | Consumer | Subscribe to Docker daemon events          |
-| `logs`    | Consumer | Stream logs from a container               |
+| Operation            | Mode     | Description                                |
+| -------------------- | -------- | ------------------------------------------ |
+| `list`               | Producer | List all containers                        |
+| `run`                | Producer | Create and start a container from an image |
+| `start`              | Producer | Start an existing container                |
+| `stop`               | Producer | Stop a running container                   |
+| `remove`             | Producer | Remove a container                         |
+| `exec`               | Producer | Execute a command inside a running container |
+| `network-create`     | Producer | Create a Docker network                    |
+| `network-connect`    | Producer | Connect a container to a network           |
+| `network-disconnect` | Producer | Disconnect a container from a network      |
+| `network-remove`     | Producer | Remove a Docker network                    |
+| `network-list`       | Producer | List Docker networks                       |
+| `events`             | Consumer | Subscribe to Docker daemon events          |
+| `logs`               | Consumer | Stream logs from a container               |
 
 ## URI Options
 
@@ -54,6 +63,12 @@ container:<operation>[?options]
 | `ports`       | -                             | Port mappings in format `hostPort:containerPort` (e.g., `8080:80,8443:443`)                                   |
 | `env`         | -                             | Environment variables in format `KEY=value` (e.g., `FOO=bar,BAZ=qux`)                                         |
 | `network`     | -                             | Network mode (`bridge`, `host`, `none`, or custom network name). When unset, Docker uses `bridge` by default. |
+| `volumes`     | -                             | Volume mounts in format `source:target[:ro\|rw]` separated by `,`                                             |
+| `user`        | -                             | User for exec operation                                                                                       |
+| `workdir`     | -                             | Working directory for exec operation                                                                          |
+| `detach`      | `false`                       | Run exec in background                                                                                        |
+| `driver`      | `bridge`                      | Network driver for `network-create`                                                                           |
+| `force`       | `false`                       | Force network-disconnect                                                                                      |
 | `containerId` | -                             | Container ID or name for `logs` consumer                                                                      |
 | `follow`      | `true`                        | Follow log output (logs consumer only)                                                                        |
 | `timestamps`  | `false`                       | Include timestamps in logs (logs consumer only)                                                               |
@@ -66,12 +81,15 @@ container:<operation>[?options]
 
 ### Input Headers (for operations)
 
-| Header                 | Description                                                   |
-| ---------------------- | ------------------------------------------------------------- |
-| `CamelContainerAction` | Override operation (`list`, `run`, `start`, `stop`, `remove`) |
-| `CamelContainerImage`  | Container image (required for `run`)                          |
-| `CamelContainerId`     | Container ID (required for `start`, `stop`, `remove`)         |
-| `CamelContainerName`   | Container name (optional for `run`)                           |
+| Header                   | Description                                                                       |
+| ------------------------ | --------------------------------------------------------------------------------- |
+| `CamelContainerAction`   | Override operation (`list`, `run`, `start`, `stop`, `remove`, `exec`, `network-create`, etc.) |
+| `CamelContainerImage`    | Container image (required for `run`)                                              |
+| `CamelContainerId`       | Container ID (required for `start`, `stop`, `remove`)                             |
+| `CamelContainerName`     | Container name (optional for `run`)                                               |
+| `CamelContainerCmd`      | Override exec command                                                             |
+| `CamelContainerNetwork`  | Network name/ID (network operations)                                              |
+| `CamelContainerVolumes`  | Override volume mounts (`run` operation)                                          |
 
 ### Output Headers (from responses)
 
@@ -79,6 +97,9 @@ container:<operation>[?options]
 | ---------------------------- | ------------------------------------------------------------------- |
 | `CamelContainerActionResult` | Operation result (`success`)                                        |
 | `CamelContainerId`           | Created container ID (from `run`), or container ID for logs         |
+| `CamelContainerExecId`       | Exec instance ID (detached exec)                                    |
+| `CamelContainerExitCode`     | Command exit code (`exec` operation)                                |
+| `CamelContainerNetwork`      | Created network ID (`network-create`)                               |
 | `CamelContainerLogStream`    | Log stream type: `stdout`, `stderr`, `console` (logs consumer only) |
 | `CamelContainerLogTimestamp` | Log timestamp when `timestamps=true` (logs consumer only)           |
 
@@ -225,6 +246,96 @@ routes:
       - log: "[${header.CamelContainerLogStream}] ${body}"
 ```
 
+### Running a Container with Volumes
+
+```rust
+let route = RouteBuilder::from("timer:start?delay=5000&repeatCount=1")
+    .to("container:run?image=nginx:latest&volumes=/host/html:/usr/share/nginx/html:ro&ports=8080:80&autoRemove=false")
+    .to("log:info?message=nginx serving from /host/html")
+    .build()?;
+```
+
+Multiple volumes are comma-separated:
+
+```rust
+.to("container:run?image=postgres:15&volumes=/data/pg:/var/lib/postgresql/data,/data/backup:/backup&autoRemove=false")
+```
+
+### Executing Commands in Containers
+
+Attached (waits for output):
+
+```rust
+let route = RouteBuilder::from("direct:exec")
+    .set_header("CamelContainerId", Value::String("my-container".into()))
+    .set_header("CamelContainerCmd", Value::String("uname -a".into()))
+    .to("container:exec")
+    .to("log:info?showBody=true")
+    .build()?;
+```
+
+Detached (runs in background):
+
+```rust
+let route = RouteBuilder::from("direct:exec-bg")
+    .set_header("CamelContainerId", Value::String("my-container".into()))
+    .to("container:exec?cmd=sleep 60&detach=true")
+    .to("log:info?showHeaders=true")
+    .build()?;
+```
+
+With user and working directory:
+
+```rust
+let route = RouteBuilder::from("direct:exec-user")
+    .set_header("CamelContainerId", Value::String("my-container".into()))
+    .to("container:exec?cmd=ls -la&user=root&workdir=/app")
+    .to("log:info?showBody=true")
+    .build()?;
+```
+
+### Network Operations
+
+```rust
+let route = RouteBuilder::new()
+    .route_id("network-demo")
+    .from("direct:net-create")
+    .to("container:network-create?driver=bridge")
+    .set_header("CamelContainerNetwork", Value::String("my-net".into()))
+    .to("log:info?showHeaders=true")
+    .build()?;
+
+let route = RouteBuilder::new()
+    .route_id("network-connect")
+    .from("direct:net-connect")
+    .set_header("CamelContainerId", Value::String("my-container".into()))
+    .set_header("CamelContainerNetwork", Value::String("my-net".into()))
+    .to("container:network-connect")
+    .build()?;
+
+let route = RouteBuilder::new()
+    .route_id("network-list")
+    .from("timer:tick?period=60000")
+    .to("container:network-list")
+    .to("log:info?showBody=true")
+    .build()?;
+
+let route = RouteBuilder::new()
+    .route_id("network-disconnect")
+    .from("direct:net-disconnect")
+    .set_header("CamelContainerId", Value::String("my-container".into()))
+    .set_header("CamelContainerNetwork", Value::String("my-net".into()))
+    .to("container:network-disconnect?force=true")
+    .build()?;
+
+let route = RouteBuilder::new()
+    .route_id("network-remove")
+    .from("direct:net-remove")
+    .set_header("CamelContainerNetwork", Value::String("my-net".into()))
+    .to("container:network-remove")
+    .build()?;
+```
+
 ## Error Handling
 
 The component provides clear, actionable error messages:
@@ -239,9 +350,8 @@ The component provides clear, actionable error messages:
 
 - **Unix socket only**: TCP/TLS Docker hosts are not supported
 - **No event filtering**: The `events` consumer receives all Docker events
-- **Limited `run` options**: Volumes and advanced networking options are not configurable
+- **No SELinux labels**: Volume mount options `:z` and `:Z` are not supported
 - **No image operations**: `pull`, `build`, `push`, `tag` are not implemented (use `autoPull=true` instead)
-- **No `exec`**: Running commands inside containers is not supported
 
 ## Example: Full Lifecycle
 
