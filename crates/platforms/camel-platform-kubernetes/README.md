@@ -24,6 +24,7 @@ lease_name_prefix = "camel-"
 lease_duration_secs = 15
 renew_deadline_secs = 10
 retry_period_secs = 2
+jitter_factor = 0.2
 ```
 
 This wires automatically through `CamelConfig::configure_context()` when the `kubernetes` feature is enabled in `camel-config`.
@@ -46,6 +47,7 @@ let config = KubernetesPlatformConfig {
     lease_duration: Duration::from_secs(15),
     renew_deadline: Duration::from_secs(10),
     retry_period: Duration::from_secs(2),
+    jitter_factor: 0.2,
 };
 
 let platform = Arc::new(KubernetesPlatformService::try_default(config).await?);

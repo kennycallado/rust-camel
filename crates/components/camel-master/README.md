@@ -45,6 +45,7 @@ The master component has no URI query parameters of its own. Any query parameter
 | Section | Key | Default | Description |
 |--------|-----|---------|-------------|
 | `[components.master]` | `drain_timeout_ms` | `5000` | Max time to wait for delegate consumer shutdown on leadership loss |
+| `[components.master]` | `delegate_retry_max_attempts` | `30` | Max attempts to start the delegate consumer while leading. `0` = unlimited |
 
 ## Usage
 
