@@ -8,6 +8,7 @@ use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::dynamic_router::{DynamicRouterConfig, RouterExpression};
 use camel_api::error_handler::{ErrorHandlerConfig, RedeliveryPolicy};
 use camel_api::load_balancer::LoadBalancerConfig;
+use camel_api::loop_eip::{LoopConfig, LoopMode};
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::recipient_list::{RecipientListConfig, RecipientListExpression};
 use camel_api::routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
@@ -501,6 +502,31 @@ impl RouteBuilder {
         }
     }
 
+    /// Begin a Loop sub-pipeline that iterates a fixed number of times.
+    pub fn loop_count(self, count: usize) -> LoopBuilder {
+        LoopBuilder {
+            parent: self,
+            config: LoopConfig {
+                mode: LoopMode::Count(count),
+            },
+            steps: vec![],
+        }
+    }
+
+    /// Begin a Loop sub-pipeline that iterates while a predicate is true.
+    pub fn loop_while<F>(self, predicate: F) -> LoopBuilder
+    where
+        F: Fn(&Exchange) -> bool + Send + Sync + 'static,
+    {
+        LoopBuilder {
+            parent: self,
+            config: LoopConfig {
+                mode: LoopMode::While(std::sync::Arc::new(predicate)),
+            },
+            steps: vec![],
+        }
+    }
+
     /// Begin a LoadBalance sub-pipeline. Distributes exchanges across multiple
     /// endpoints using a configurable strategy (round-robin, random, weighted, failover).
     ///
@@ -912,6 +938,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::DeclarativeScript { .. } => "script",
         BuilderStep::DeclarativeSplit { .. } => "split",
         BuilderStep::Split { .. } => "split",
+        BuilderStep::Loop { .. } | BuilderStep::DeclarativeLoop { .. } => "loop",
         BuilderStep::Aggregate { .. } => "aggregate",
         BuilderStep::Filter { .. } => "filter",
         BuilderStep::Choice { .. } => "choice",
@@ -1225,6 +1252,76 @@ impl StepAccumulator for ThrottleBuilder {
     }
 }
 
+/// Builder for the sub-pipeline within a `.loop_count()` / `.loop_while()` ... `.end_loop()` block.
+pub struct LoopBuilder {
+    parent: RouteBuilder,
+    config: LoopConfig,
+    steps: Vec<BuilderStep>,
+}
+
+impl LoopBuilder {
+    pub fn loop_count(self, count: usize) -> LoopInLoopBuilder {
+        LoopInLoopBuilder {
+            parent: self,
+            config: LoopConfig {
+                mode: LoopMode::Count(count),
+            },
+            steps: vec![],
+        }
+    }
+
+    pub fn loop_while<F>(self, predicate: F) -> LoopInLoopBuilder
+    where
+        F: Fn(&Exchange) -> bool + Send + Sync + 'static,
+    {
+        LoopInLoopBuilder {
+            parent: self,
+            config: LoopConfig {
+                mode: LoopMode::While(std::sync::Arc::new(predicate)),
+            },
+            steps: vec![],
+        }
+    }
+
+    pub fn end_loop(mut self) -> RouteBuilder {
+        let step = BuilderStep::Loop {
+            config: self.config,
+            steps: self.steps,
+        };
+        self.parent.steps.push(step);
+        self.parent
+    }
+}
+
+impl StepAccumulator for LoopBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
+    }
+}
+
+pub struct LoopInLoopBuilder {
+    parent: LoopBuilder,
+    config: LoopConfig,
+    steps: Vec<BuilderStep>,
+}
+
+impl LoopInLoopBuilder {
+    pub fn end_loop(mut self) -> LoopBuilder {
+        let step = BuilderStep::Loop {
+            config: self.config,
+            steps: self.steps,
+        };
+        self.parent.steps.push(step);
+        self.parent
+    }
+}
+
+impl StepAccumulator for LoopInLoopBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
+    }
+}
+
 /// Builder for the sub-pipeline within a `.load_balance()` ... `.end_load_balance()` block.
 ///
 /// Exposes the same step methods as `RouteBuilder` (to, process, filter, etc.)
@@ -1401,6 +1498,87 @@ mod tests {
         assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_))); // set_header
         assert!(matches!(&definition.steps()[1], BuilderStep::Filter { .. })); // filter
         assert!(matches!(&definition.steps()[2], BuilderStep::To(uri) if uri == "mock:result"));
+    }
+
+    #[test]
+    fn test_loop_count_builder() {
+        use camel_api::loop_eip::LoopMode;
+
+        let def = RouteBuilder::from("direct:start")
+            .route_id("loop-test")
+            .loop_count(3)
+            .to("mock:inside")
+            .end_loop()
+            .to("mock:after")
+            .build()
+            .unwrap();
+
+        assert_eq!(def.steps().len(), 2);
+        match &def.steps()[0] {
+            BuilderStep::Loop { config, steps } => {
+                assert!(matches!(config.mode, LoopMode::Count(3)));
+                assert_eq!(steps.len(), 1);
+            }
+            other => panic!("Expected Loop, got {:?}", other),
+        }
+        assert!(matches!(def.steps()[1], BuilderStep::To(_)));
+    }
+
+    #[test]
+    fn test_loop_while_builder() {
+        use camel_api::loop_eip::LoopMode;
+
+        let def = RouteBuilder::from("direct:start")
+            .route_id("loop-while-test")
+            .loop_while(|_ex| true)
+            .to("mock:retry")
+            .end_loop()
+            .build()
+            .unwrap();
+
+        assert_eq!(def.steps().len(), 1);
+        match &def.steps()[0] {
+            BuilderStep::Loop { config, steps } => {
+                assert!(matches!(config.mode, LoopMode::While(_)));
+                assert_eq!(steps.len(), 1);
+            }
+            other => panic!("Expected Loop, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_nested_loop_builder() {
+        use camel_api::loop_eip::LoopMode;
+
+        let def = RouteBuilder::from("direct:start")
+            .route_id("nested-loop-test")
+            .loop_count(2)
+            .to("mock:outer")
+            .loop_count(3)
+            .to("mock:inner")
+            .end_loop()
+            .end_loop()
+            .to("mock:after")
+            .build()
+            .unwrap();
+
+        assert_eq!(def.steps().len(), 2);
+        match &def.steps()[0] {
+            BuilderStep::Loop { steps, .. } => {
+                assert_eq!(steps.len(), 2);
+                match &steps[1] {
+                    BuilderStep::Loop {
+                        config,
+                        steps: inner_steps,
+                    } => {
+                        assert!(matches!(config.mode, LoopMode::Count(3)));
+                        assert_eq!(inner_steps.len(), 1);
+                    }
+                    other => panic!("Expected nested Loop, got {:?}", other),
+                }
+            }
+            other => panic!("Expected outer Loop, got {:?}", other),
+        }
     }
 
     // -----------------------------------------------------------------------

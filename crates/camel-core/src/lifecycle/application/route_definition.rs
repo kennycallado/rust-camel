@@ -4,6 +4,7 @@
 use camel_api::UnitOfWorkConfig;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::loop_eip::LoopConfig;
 use camel_api::{AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, SplitterConfig};
 use camel_component_api::ConcurrencyModel;
 
@@ -156,6 +157,17 @@ pub enum BuilderStep {
     Delay {
         config: camel_api::DelayConfig,
     },
+    /// Runtime loop with closure-based predicate (programmatic DSL).
+    Loop {
+        config: LoopConfig,
+        steps: Vec<BuilderStep>,
+    },
+    /// Declarative loop with optional language-based while predicate (YAML DSL).
+    DeclarativeLoop {
+        count: Option<usize>,
+        while_predicate: Option<LanguageExpressionDef>,
+        steps: Vec<BuilderStep>,
+    },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -269,6 +281,22 @@ impl std::fmt::Debug for BuilderStep {
             ),
             BuilderStep::Delay { config } => {
                 write!(f, "BuilderStep::Delay {{ config: {:?} }}", config)
+            }
+            BuilderStep::Loop { config, steps } => {
+                write!(f, "BuilderStep::Loop {{ config: {:?}, steps: {} }}", config.mode_name(), steps.len())
+            }
+            BuilderStep::DeclarativeLoop {
+                count,
+                while_predicate,
+                steps,
+            } => {
+                write!(
+                    f,
+                    "BuilderStep::DeclarativeLoop {{ count: {:?}, while: {}, steps: {} }}",
+                    count,
+                    while_predicate.is_some(),
+                    steps.len()
+                )
             }
         }
     }

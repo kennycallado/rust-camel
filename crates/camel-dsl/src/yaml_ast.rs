@@ -125,6 +125,51 @@ pub struct DelayFullConfig {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct LoopStep {
+    #[serde(rename = "loop")]
+    pub loop_data: LoopData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub enum LoopData {
+    /// Shorthand: `loop: 3`
+    Count(usize),
+    /// Full form with config block.
+    Full(LoopFullConfig),
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LoopFullConfig {
+    /// Fixed iteration count. Mutually exclusive with `while`.
+    pub count: Option<usize>,
+    /// While condition — expression-only (no nested steps).
+    #[serde(rename = "while")]
+    pub while_expr: Option<LoopWhileExpr>,
+    #[serde(default)]
+    pub steps: Vec<YamlStep>,
+}
+
+/// Expression-only predicate for loop while condition.
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct LoopWhileExpr {
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub simple: Option<String>,
+    #[serde(default)]
+    pub rhai: Option<String>,
+    #[serde(default)]
+    pub jsonpath: Option<String>,
+    #[serde(default)]
+    pub xpath: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum YamlStep {
     To(ToStep),
@@ -150,6 +195,7 @@ pub enum YamlStep {
     Marshal(MarshalStep),
     Unmarshal(UnmarshalStep),
     Delay(DelayStep),
+    Loop(LoopStep),
     Validate(ValidateStep),
 }
 

@@ -7,6 +7,7 @@ use tracing::warn;
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProducerContext, Value,
     body::Body,
+    loop_eip::{LoopConfig, LoopMode},
 };
 use camel_bean::BeanRegistry;
 use camel_component_api::ComponentContext;
@@ -123,6 +124,58 @@ pub(crate) fn resolve_steps(
             }
             BuilderStep::Delay { config } => {
                 let svc = camel_processor::delayer::DelayerService::new(config);
+                processors.push((BoxProcessor::new(svc), None));
+            }
+            BuilderStep::Loop { config, steps } => {
+                let sub_pairs = resolve_steps(
+                    steps,
+                    producer_ctx,
+                    registry,
+                    languages,
+                    beans,
+                    Arc::clone(&component_ctx),
+                )?;
+                let sub_processors: Vec<BoxProcessor> =
+                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_pipeline = compose_pipeline(sub_processors);
+                let svc = camel_processor::loop_eip::LoopService::new(config, sub_pipeline);
+                processors.push((BoxProcessor::new(svc), None));
+            }
+            BuilderStep::DeclarativeLoop {
+                count,
+                while_predicate,
+                steps,
+            } => {
+                let mode = match (count, while_predicate) {
+                    (Some(n), None) => LoopMode::Count(n),
+                    (None, Some(pred)) => {
+                        let predicate = compile_filter_predicate(languages, &pred)?;
+                        LoopMode::While(predicate)
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(CamelError::RouteError(
+                            "loop: cannot specify both 'count' and 'while'".into(),
+                        ));
+                    }
+                    (None, None) => {
+                        return Err(CamelError::RouteError(
+                            "loop: must specify either 'count' or 'while'".into(),
+                        ));
+                    }
+                };
+                let sub_pairs = resolve_steps(
+                    steps,
+                    producer_ctx,
+                    registry,
+                    languages,
+                    beans,
+                    Arc::clone(&component_ctx),
+                )?;
+                let sub_processors: Vec<BoxProcessor> =
+                    sub_pairs.into_iter().map(|(p, _)| p).collect();
+                let sub_pipeline = compose_pipeline(sub_processors);
+                let config = LoopConfig { mode };
+                let svc = camel_processor::loop_eip::LoopService::new(config, sub_pipeline);
                 processors.push((BoxProcessor::new(svc), None));
             }
             BuilderStep::Log { level, message } => {

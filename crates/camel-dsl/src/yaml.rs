@@ -5,6 +5,7 @@ use std::path::Path;
 use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
+use crate::yaml_ast::{LoopData, LoopStep, LoopWhileExpr};
 use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical};
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
@@ -14,6 +15,7 @@ use crate::model::{
     DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
     LoadBalanceStrategyDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
     RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef,
+    LoopStepDef,
     SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef,
     ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
@@ -645,6 +647,28 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 dynamic_header,
             }))
         }
+        YamlStep::Loop(LoopStep { loop_data }) => {
+            let (count, while_predicate, steps) = match loop_data {
+                LoopData::Count(n) => (Some(n), None, vec![]),
+                LoopData::Full(cfg) => {
+                    let predicate = match &cfg.while_expr {
+                        Some(expr) => Some(parse_loop_while_expr(expr, "loop.while")?),
+                        None => None,
+                    };
+                    let sub_steps = cfg
+                        .steps
+                        .into_iter()
+                        .map(yaml_step_to_declarative_step)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (cfg.count, predicate, sub_steps)
+                }
+            };
+            Ok(DeclarativeStep::Loop(LoopStepDef {
+                count,
+                while_predicate,
+                steps,
+            }))
+        }
         YamlStep::Validate(ValidateStep { validate }) => {
             let uri = if validate.starts_with("validator:") {
                 validate
@@ -680,6 +704,43 @@ fn parse_predicate_block(
         selected.push(("jsonpath".to_string(), source.clone()));
     }
     if let Some(source) = block.xpath.as_ref() {
+        selected.push(("xpath".to_string(), source.clone()));
+    }
+
+    if selected.len() != 1 {
+        return Err(CamelError::RouteError(format!(
+            "{context} must define exactly one predicate source: `language+source`, `simple`, `rhai`, `jsonpath`, or `xpath`"
+        )));
+    }
+
+    let (language, source) = selected.remove(0);
+    Ok(LanguageExpressionDef { language, source })
+}
+
+fn parse_loop_while_expr(
+    expr: &LoopWhileExpr,
+    context: &str,
+) -> Result<LanguageExpressionDef, CamelError> {
+    let mut selected = Vec::new();
+
+    if let (Some(language), Some(source)) = (expr.language.as_ref(), expr.source.as_ref()) {
+        selected.push((language.clone(), source.clone()));
+    } else if expr.language.is_some() || expr.source.is_some() {
+        return Err(CamelError::RouteError(format!(
+            "{context}: `language` and `source` must be set together"
+        )));
+    }
+
+    if let Some(source) = expr.simple.as_ref() {
+        selected.push(("simple".to_string(), source.clone()));
+    }
+    if let Some(source) = expr.rhai.as_ref() {
+        selected.push(("rhai".to_string(), source.clone()));
+    }
+    if let Some(source) = expr.jsonpath.as_ref() {
+        selected.push(("jsonpath".to_string(), source.clone()));
+    }
+    if let Some(source) = expr.xpath.as_ref() {
         selected.push(("xpath".to_string(), source.clone()));
     }
 
@@ -1230,6 +1291,71 @@ routes:
             format!("{:?}", routes_t[0].steps[0]),
             format!("{:?}", routes_s[0].steps[0])
         );
+    }
+
+    #[test]
+    fn test_parse_loop_shorthand() {
+        let yaml = r#"
+routes:
+  - id: "loop-short"
+    from: "direct:start"
+    steps:
+      - loop: 3
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_loop_count_with_steps() {
+        let yaml = r#"
+routes:
+  - id: "loop-count"
+    from: "direct:start"
+    steps:
+      - loop:
+          count: 3
+          steps:
+            - to: "mock:result"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_loop_while_simple() {
+        let yaml = r#"
+routes:
+  - id: "loop-while"
+    from: "direct:start"
+    steps:
+      - loop:
+          while:
+            simple: "${body} contains 'retry'"
+          steps:
+            - to: "mock:retry"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_loop_both_count_and_while_ok_at_yaml_level() {
+        let yaml = r#"
+routes:
+  - id: "loop-both"
+    from: "direct:start"
+    steps:
+      - loop:
+          count: 3
+          while:
+            simple: "${body}"
+          steps:
+            - to: "mock:result"
+"#;
+        // Both fields can coexist in YAML AST — validation happens in step_resolution
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_ok());
     }
 
     #[test]

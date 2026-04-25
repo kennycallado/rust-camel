@@ -1,0 +1,13 @@
+[package]
+name = "loop-example"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-builder.workspace = true
+camel-core.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber.workspace = true

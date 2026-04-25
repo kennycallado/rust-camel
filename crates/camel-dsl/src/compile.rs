@@ -28,7 +28,7 @@ use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
     DeclarativeStep, DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
-    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
+    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef, MulticastStepDef,
     RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef,
     SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef,
     ToStepDef, ValueSourceDef, WireTapStepDef,
@@ -429,7 +429,17 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
             };
             Ok(BuilderStep::Delay { config })
         }
+        DeclarativeStep::Loop(def) => compile_loop_step(def),
     }
+}
+
+fn compile_loop_step(def: LoopStepDef) -> Result<BuilderStep, CamelError> {
+    let sub_steps = compile_declarative_steps(def.steps)?;
+    Ok(BuilderStep::DeclarativeLoop {
+        count: def.count,
+        while_predicate: def.while_predicate,
+        steps: sub_steps,
+    })
 }
 
 fn compile_declarative_step_to_canonical(
@@ -475,6 +485,13 @@ fn compile_declarative_step_to_canonical(
             delay_ms,
             dynamic_header,
         }),
+        DeclarativeStep::Loop(_) => {
+            let detail = canonical_contract_rejection_reason("loop")
+                .unwrap_or("not included in canonical v1");
+            Err(CamelError::RouteError(format!(
+                "canonical v1 does not support step `loop`: {detail}"
+            )))
+        }
         other => {
             let step_name = declarative_step_name(&other);
             let detail = canonical_contract_rejection_reason(step_name)
@@ -585,6 +602,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Marshal(_) => "marshal",
         DeclarativeStep::Unmarshal(_) => "unmarshal",
         DeclarativeStep::Delay(_) => "delay",
+        DeclarativeStep::Loop(_) => "loop",
     }
 }
 

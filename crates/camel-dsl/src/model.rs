@@ -291,6 +291,13 @@ pub struct DelayStepDef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct LoopStepDef {
+    pub count: Option<usize>,
+    pub while_predicate: Option<LanguageExpressionDef>,
+    pub steps: Vec<DeclarativeStep>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum DeclarativeStep {
     To(ToStepDef),
     SetHeader(SetHeaderStepDef),
@@ -314,4 +321,5 @@ pub enum DeclarativeStep {
     Unmarshal(DataFormatDef),
     Bean(BeanStepDef),
     Delay(DelayStepDef),
+    Loop(LoopStepDef),
 }

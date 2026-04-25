@@ -15,6 +15,7 @@ pub mod from_body;
 pub mod health;
 pub mod lifecycle;
 pub mod load_balancer;
+pub mod loop_eip;
 pub mod message;
 pub mod metrics;
 pub mod multicast;

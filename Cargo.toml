@@ -106,6 +106,7 @@ members = [
     "examples/load-balancer",
     "examples/throttler",
     "examples/delayer",
+    "examples/loop",
     "examples/custom-component-bundle",
     "crates/components/camel-container",
     "crates/services/camel-prometheus",

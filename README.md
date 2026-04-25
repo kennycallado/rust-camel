@@ -199,6 +199,7 @@ Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (cu
 | Routing Slip         | `.routing_slip(expr)`               | Route through a sequence of endpoints determined at runtime                                                    |
 | Filter               | `.filter(predicate)`                | Forward exchange only when predicate is true                                                                   |
 | Load Balancer        | `.load_balance()`                   | Distribute across endpoints with RoundRobin/Random/Weighted/Failover                                           |
+| Loop                 | `.loop_count(n)` / `loop:`          | Iterate a sub-pipeline N times or while a predicate holds true                                                |
 | Marshal / Unmarshal  | `.marshal(fmt)` / `.unmarshal(fmt)` | Serialize/deserialize bodies using pluggable data formats (JSON, XML)                                          |
 | Multicast            | `.multicast()`                      | Send the same exchange to multiple endpoints                                                                   |
 | RecipientList        | `.recipient_list(config)`           | Dynamically resolve endpoint URIs from an expression at runtime                                                |
@@ -233,6 +234,7 @@ Run an example:
  cargo run -p language-simple
  cargo run -p lazy-route
  cargo run -p load-balancer
+ cargo run -p loop-example
  cargo run -p log-eip
  cargo run -p marshal-unmarshal
  cargo run -p metrics-demo
