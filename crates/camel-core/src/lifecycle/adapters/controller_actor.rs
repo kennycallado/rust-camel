@@ -654,7 +654,7 @@ mod tests {
         }
         let controller = DefaultRouteController::new(
             Arc::clone(&registry),
-            Arc::new(camel_api::NoopLeaderElector),
+            Arc::new(camel_api::NoopPlatformService::default()),
         );
         spawn_controller_actor(controller)
     }
@@ -662,7 +662,7 @@ mod tests {
     fn build_empty_actor() -> (RouteControllerHandle, tokio::task::JoinHandle<()>) {
         let controller = DefaultRouteController::new(
             Arc::new(std::sync::Mutex::new(Registry::new())),
-            Arc::new(camel_api::NoopLeaderElector),
+            Arc::new(camel_api::NoopPlatformService::default()),
         );
         spawn_controller_actor(controller)
     }
@@ -730,7 +730,7 @@ mod tests {
     async fn spawn_controller_actor_processes_commands_and_shutdown() {
         let controller = DefaultRouteController::new(
             Arc::new(std::sync::Mutex::new(Registry::new())),
-            Arc::new(camel_api::NoopLeaderElector),
+            Arc::new(camel_api::NoopPlatformService::default()),
         );
         let (handle, join_handle) = spawn_controller_actor(controller);
 

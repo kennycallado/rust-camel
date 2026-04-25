@@ -80,14 +80,18 @@ If leadership is gained again, the delegate consumer is started again with the s
 
 ## Backends
 
-- `NoopLeaderElector` (default): single-node behavior, always leader
-- `KubernetesLeaderElector`: distributed leader election backed by Kubernetes Leases
+- `NoopPlatformService` (default): single-node behavior, always leader
+- `KubernetesPlatformService`: distributed leader election backed by Kubernetes Leases, configured via `[platform]` in `Camel.toml`
 
 ## Example Camel.toml
 
 ```toml
 [components.master]
 drain_timeout_ms = 5000
+
+[platform]
+type = "kubernetes"
+namespace = "default"
 ```
 
 ## License

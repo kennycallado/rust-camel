@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use camel_api::{
-    CamelError, Exchange, LeaderElector, LeadershipEvent, LeadershipHandle, Message, NoOpMetrics,
-    NoopLeaderElector, PlatformError, PlatformIdentity,
+    CamelError, Exchange, LeadershipEvent, LeadershipHandle, LeadershipService, Message,
+    MetricsCollector, NoOpMetrics, NoopPlatformService, NoopReadinessGate, PlatformError,
+    PlatformIdentity, PlatformService, ReadinessGate,
 };
 use camel_component_api::{
     BoxProcessor, Component, ComponentContext, Consumer, ConsumerContext, Endpoint, ProducerContext,
@@ -18,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 struct TestComponentContext {
     delegate: Arc<dyn Component>,
-    elector: Arc<dyn LeaderElector>,
+    platform_service: Arc<dyn PlatformService>,
 }
 
 impl ComponentContext for TestComponentContext {
@@ -34,12 +35,12 @@ impl ComponentContext for TestComponentContext {
         None
     }
 
-    fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+    fn metrics(&self) -> Arc<dyn MetricsCollector> {
         Arc::new(NoOpMetrics)
     }
 
-    fn leader_elector(&self) -> Arc<dyn LeaderElector> {
-        Arc::clone(&self.elector)
+    fn platform_service(&self) -> Arc<dyn PlatformService> {
+        Arc::clone(&self.platform_service)
     }
 }
 
@@ -96,52 +97,132 @@ impl Consumer for TestDelegateConsumer {
     }
 }
 
-struct FakeLeaderElector {
-    seen_node_id: Arc<Mutex<Option<String>>>,
+struct FakeLeadershipService {
+    seen_lock_name: Arc<Mutex<Option<String>>>,
+    tx: Arc<Mutex<Option<watch::Sender<Option<LeadershipEvent>>>>>,
 }
 
-impl FakeLeaderElector {
+impl FakeLeadershipService {
     fn new() -> Self {
         Self {
-            seen_node_id: Arc::new(Mutex::new(None)),
+            seen_lock_name: Arc::new(Mutex::new(None)),
+            tx: Arc::new(Mutex::new(None)),
         }
     }
 
-    fn seen_node_id(&self) -> Option<String> {
-        self.seen_node_id
+    fn seen_lock_name(&self) -> Option<String> {
+        self.seen_lock_name
             .lock()
-            .expect("fake elector mutex poisoned")
+            .expect("fake leadership mutex poisoned")
             .clone()
     }
 }
 
 #[async_trait]
-impl LeaderElector for FakeLeaderElector {
-    async fn start(&self, identity: PlatformIdentity) -> Result<LeadershipHandle, PlatformError> {
+impl LeadershipService for FakeLeadershipService {
+    async fn start(&self, lock_name: &str) -> Result<LeadershipHandle, PlatformError> {
         *self
-            .seen_node_id
+            .seen_lock_name
             .lock()
-            .expect("fake elector mutex poisoned") = Some(identity.node_id);
+            .expect("fake leadership mutex poisoned") = Some(lock_name.to_string());
 
         let (tx, rx) = watch::channel(Some(LeadershipEvent::StartedLeading));
-        drop(tx);
-        let (_term_tx, term_rx) = oneshot::channel();
+        *self.tx.lock().expect("fake leadership tx mutex poisoned") = Some(tx.clone());
+
+        let cancel = CancellationToken::new();
+        let cancel_wait = cancel.clone();
+        let tx_for_task = tx;
+        let tx_store = Arc::clone(&self.tx);
+        let (term_tx, term_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            cancel_wait.cancelled().await;
+            let _ = tx_for_task.send(Some(LeadershipEvent::StoppedLeading));
+            if let Ok(mut guard) = tx_store.lock() {
+                let _ = guard.take();
+            }
+            let _ = term_tx.send(());
+        });
 
         Ok(LeadershipHandle::new(
             rx,
             Arc::new(AtomicBool::new(true)),
-            CancellationToken::new(),
+            cancel,
             term_rx,
         ))
     }
 }
 
+struct FlakyDelegateComponent {
+    failures_remaining: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Component for FlakyDelegateComponent {
+    fn scheme(&self) -> &str {
+        "test"
+    }
+
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        let prev = self
+            .failures_remaining
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |v| v.checked_sub(1),
+            )
+            .unwrap_or(0);
+
+        if prev > 0 {
+            return Err(CamelError::EndpointCreationFailed(
+                "transient delegate endpoint error".to_string(),
+            ));
+        }
+
+        Ok(Box::new(TestDelegateEndpoint {
+            uri: uri.to_string(),
+        }))
+    }
+}
+
+struct FakePlatformService {
+    identity: PlatformIdentity,
+    readiness_gate: Arc<dyn ReadinessGate>,
+    leadership: Arc<dyn LeadershipService>,
+}
+
+impl FakePlatformService {
+    fn new(leadership: Arc<dyn LeadershipService>) -> Self {
+        Self {
+            identity: PlatformIdentity::local("test-node"),
+            readiness_gate: Arc::new(NoopReadinessGate),
+            leadership,
+        }
+    }
+}
+
+impl PlatformService for FakePlatformService {
+    fn identity(&self) -> PlatformIdentity {
+        self.identity.clone()
+    }
+
+    fn readiness_gate(&self) -> Arc<dyn ReadinessGate> {
+        Arc::clone(&self.readiness_gate)
+    }
+
+    fn leadership(&self) -> Arc<dyn LeadershipService> {
+        Arc::clone(&self.leadership)
+    }
+}
+
 #[tokio::test]
-async fn works_with_noop_leader_elector() {
+async fn works_with_noop_platform_service() {
     let delegate = Arc::new(TestDelegateComponent);
     let ctx = TestComponentContext {
         delegate,
-        elector: Arc::new(NoopLeaderElector),
+        platform_service: Arc::new(NoopPlatformService::default()),
     };
 
     let component = MasterComponent::default();
@@ -167,12 +248,12 @@ async fn works_with_noop_leader_elector() {
 }
 
 #[tokio::test]
-async fn lock_name_maps_to_lease_name() {
+async fn lock_name_is_forwarded_to_leadership_service() {
     let delegate = Arc::new(TestDelegateComponent);
-    let fake = Arc::new(FakeLeaderElector::new());
+    let fake = Arc::new(FakeLeadershipService::new());
     let ctx = TestComponentContext {
         delegate,
-        elector: fake.clone(),
+        platform_service: Arc::new(FakePlatformService::new(fake.clone())),
     };
 
     let component = MasterComponent::default();
@@ -187,7 +268,40 @@ async fn lock_name_maps_to_lease_name() {
 
     consumer.start(consumer_ctx).await.unwrap();
 
-    assert_eq!(fake.seen_node_id().as_deref(), Some("lease-name"));
+    assert_eq!(fake.seen_lock_name().as_deref(), Some("lease-name"));
+
+    cancel.cancel();
+    consumer.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn retries_delegate_start_while_leadership_stays_started() {
+    let delegate = Arc::new(FlakyDelegateComponent {
+        failures_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+    });
+    let fake = Arc::new(FakeLeadershipService::new());
+    let ctx = TestComponentContext {
+        delegate,
+        platform_service: Arc::new(FakePlatformService::new(fake)),
+    };
+
+    let component = MasterComponent::default();
+    let endpoint = component
+        .create_endpoint("master:retry-lock:test:delegate", &ctx)
+        .unwrap();
+    let mut consumer = endpoint.create_consumer().unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let cancel = CancellationToken::new();
+    let consumer_ctx = ConsumerContext::new(tx, cancel.clone());
+
+    consumer.start(consumer_ctx).await.unwrap();
+
+    let first = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("delegate should eventually recover while leadership is sustained")
+        .expect("channel should contain delegate message");
+    assert_eq!(first.exchange.input.body.as_text(), Some("delegate-ok"));
 
     cancel.cancel();
     consumer.stop().await.unwrap();

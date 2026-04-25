@@ -1,6 +1,8 @@
 //! Tests for the unified tracing subscriber behavior.
 
-use camel_config::{CamelConfig, ComponentsConfig, ObservabilityConfig, OtelCamelConfig};
+use camel_config::config::{
+    CamelConfig, ComponentsConfig, ObservabilityConfig, OtelCamelConfig, PlatformCamelConfig,
+};
 use camel_core::{DetailLevel, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs};
 
 fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> CamelConfig {
@@ -41,6 +43,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
             health: None,
         },
         supervision: None,
+        platform: PlatformCamelConfig::Noop,
     }
 }
 

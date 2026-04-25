@@ -59,8 +59,9 @@ pub use message::Message;
 pub use metrics::{MetricsCollector, NoOpMetrics};
 pub use multicast::{MulticastAggregationFn, MulticastConfig, MulticastStrategy};
 pub use platform::{
-    LeaderElector, LeadershipEvent, LeadershipHandle, NoopLeaderElector, NoopReadinessGate,
-    PlatformError, PlatformIdentity, ReadinessGate,
+    LeadershipEvent, LeadershipHandle, LeadershipService, NoopLeadershipService,
+    NoopPlatformService, NoopReadinessGate, PlatformError, PlatformIdentity, PlatformService,
+    ReadinessGate,
 };
 pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn};
 pub use producer::ProducerContext;

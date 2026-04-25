@@ -37,8 +37,8 @@ pub enum LeadershipEvent {
 /// Platform errors.
 #[derive(Debug, Error)]
 pub enum PlatformError {
-    #[error("leader elector already started")]
-    AlreadyStarted,
+    #[error("leadership lock already active: {lock_name}")]
+    LockAlreadyActive { lock_name: String },
     #[error("step_down failed: elector loop terminated unexpectedly")]
     StepDownFailed,
     #[error("platform not available: {0}")]
@@ -47,8 +47,7 @@ pub enum PlatformError {
     Config(String),
 }
 
-/// Handle returned by `LeaderElector::start()`.
-/// One-shot per `LeaderElector` instance — create a new instance to restart.
+/// Handle returned by `LeadershipService::start()`.
 pub struct LeadershipHandle {
     /// Subscribe to leadership state changes.
     pub events: watch::Receiver<Option<LeadershipEvent>>,
@@ -57,7 +56,7 @@ pub struct LeadershipHandle {
     /// Internal — used by `step_down()` to cancel the elector loop.
     cancel: CancellationToken,
     /// Await full loop termination after `step_down()`.
-    terminated: tokio::sync::oneshot::Receiver<()>,
+    terminated: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl LeadershipHandle {
@@ -73,7 +72,7 @@ impl LeadershipHandle {
             events,
             is_leader,
             cancel,
-            terminated,
+            terminated: Some(terminated),
         }
     }
 
@@ -83,20 +82,33 @@ impl LeadershipHandle {
 
     /// Signal step-down AND await full teardown:
     /// lease release + loop termination + `StoppedLeading` delivered.
-    pub async fn step_down(self) -> Result<(), PlatformError> {
+    pub async fn step_down(mut self) -> Result<(), PlatformError> {
         self.cancel.cancel();
         self.terminated
+            .take()
+            .ok_or(PlatformError::StepDownFailed)?
             .await
             .map_err(|_| PlatformError::StepDownFailed)
     }
 }
 
-/// Leader election abstraction.
-/// The elector owns the renew loop — callers do not manage timers.
-/// One-shot: `start()` may only be called once per instance.
+impl Drop for LeadershipHandle {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+/// Leadership abstraction.
 #[async_trait]
-pub trait LeaderElector: Send + Sync {
-    async fn start(&self, identity: PlatformIdentity) -> Result<LeadershipHandle, PlatformError>;
+pub trait LeadershipService: Send + Sync {
+    async fn start(&self, lock_name: &str) -> Result<LeadershipHandle, PlatformError>;
+}
+
+/// Platform service abstraction.
+pub trait PlatformService: Send + Sync {
+    fn identity(&self) -> PlatformIdentity;
+    fn readiness_gate(&self) -> Arc<dyn ReadinessGate>;
+    fn leadership(&self) -> Arc<dyn LeadershipService>;
 }
 
 /// Readiness gate — local override that forces readiness state regardless of `HealthSource`.
@@ -113,33 +125,83 @@ pub trait ReadinessGate: Send + Sync {
     async fn notify_starting(&self);
 }
 
-/// No-op leader elector — always wins leadership immediately.
+/// No-op leadership service.
 /// Correct for single-node deployments and tests that do not need real K8s.
-pub struct NoopLeaderElector;
+///
+/// Allows multiple `start()` calls for the same lock name — each returns an
+/// independent `LeadershipHandle`. This matches the `master:` semantics where
+/// multiple routes can compete for the same lock.
+pub struct NoopLeadershipService;
+
+impl NoopLeadershipService {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NoopLeadershipService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
-impl LeaderElector for NoopLeaderElector {
-    async fn start(&self, _identity: PlatformIdentity) -> Result<LeadershipHandle, PlatformError> {
+impl LeadershipService for NoopLeadershipService {
+    async fn start(&self, lock_name: &str) -> Result<LeadershipHandle, PlatformError> {
         let (tx, rx) = watch::channel(Some(LeadershipEvent::StartedLeading));
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
         let (term_tx, term_rx) = tokio::sync::oneshot::channel::<()>();
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        let is_leader = Arc::new(AtomicBool::new(true));
+        let is_leader_for_task = Arc::clone(&is_leader);
+        let lock_name = lock_name.to_string();
 
-        // Keep tx alive until cancel fires so that watch::Receiver::changed() does not
-        // return Err (closed channel) while we are still leading.  Dropping tx before
-        // cancellation causes MasterConsumer to interpret a closed sender as a shutdown
-        // signal and tear down the delegate consumer prematurely.
         tokio::spawn(async move {
-            cancel_clone.cancelled().await;
-            drop(tx);
+            cancel_for_task.cancelled().await;
+            is_leader_for_task.store(false, Ordering::Release);
+            let _ = tx.send(Some(LeadershipEvent::StoppedLeading));
+            drop(lock_name);
             let _ = term_tx.send(());
         });
-        Ok(LeadershipHandle::new(
-            rx,
-            Arc::new(AtomicBool::new(true)),
-            cancel,
-            term_rx,
-        ))
+
+        Ok(LeadershipHandle::new(rx, is_leader, cancel, term_rx))
+    }
+}
+
+/// No-op platform service.
+pub struct NoopPlatformService {
+    identity: PlatformIdentity,
+    readiness_gate: Arc<dyn ReadinessGate>,
+    leadership: Arc<dyn LeadershipService>,
+}
+
+impl NoopPlatformService {
+    pub fn new(identity: PlatformIdentity) -> Self {
+        Self {
+            identity,
+            readiness_gate: Arc::new(NoopReadinessGate),
+            leadership: Arc::new(NoopLeadershipService::new()),
+        }
+    }
+}
+
+impl Default for NoopPlatformService {
+    fn default() -> Self {
+        Self::new(PlatformIdentity::local("noop"))
+    }
+}
+
+impl PlatformService for NoopPlatformService {
+    fn identity(&self) -> PlatformIdentity {
+        self.identity.clone()
+    }
+
+    fn readiness_gate(&self) -> Arc<dyn ReadinessGate> {
+        Arc::clone(&self.readiness_gate)
+    }
+
+    fn leadership(&self) -> Arc<dyn LeadershipService> {
+        Arc::clone(&self.leadership)
     }
 }
 
@@ -166,42 +228,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_noop_leader_elector_is_leader() {
-        let elector = NoopLeaderElector;
-        let handle = elector
-            .start(PlatformIdentity::local("test"))
-            .await
-            .unwrap();
+    async fn test_noop_leadership_service_is_leader() {
+        let leadership = NoopLeadershipService::new();
+        let handle = leadership.start("lock-a").await.unwrap();
         assert!(handle.is_leader());
     }
 
     #[tokio::test]
-    async fn test_noop_leader_elector_event_started_leading() {
-        let elector = NoopLeaderElector;
-        let handle = elector
-            .start(PlatformIdentity::local("test"))
-            .await
-            .unwrap();
-        let event = handle.events.borrow().clone();
-        assert_eq!(event, Some(LeadershipEvent::StartedLeading));
+    async fn test_noop_leadership_service_allows_multiple_distinct_locks() {
+        let leadership = NoopLeadershipService::new();
+        let lock_a = leadership.start("lock-a").await.unwrap();
+        let lock_b = leadership.start("lock-b").await.unwrap();
+
+        assert!(lock_a.is_leader());
+        assert!(lock_b.is_leader());
+
+        lock_a.step_down().await.unwrap();
+        lock_b.step_down().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_noop_leader_elector_step_down() {
-        let elector = NoopLeaderElector;
-        let handle = elector
-            .start(PlatformIdentity::local("test"))
-            .await
-            .unwrap();
+    async fn test_noop_leadership_service_same_lock_allows_multiple() {
+        let leadership = NoopLeadershipService::new();
+        let first = leadership.start("lock-a").await.unwrap();
+        let second = leadership.start("lock-a").await.unwrap();
 
-        // step_down() should complete successfully — the background task sends on term_tx
-        // after the cancel token fires, so the oneshot receiver resolves without error.
-        let result = handle.step_down().await;
-        assert!(
-            result.is_ok(),
-            "NoopLeaderElector step_down should succeed: {:?}",
-            result
-        );
+        assert!(first.is_leader());
+        assert!(second.is_leader());
+
+        first.step_down().await.unwrap();
+        second.step_down().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_noop_leadership_handle_semantics_and_reacquire() {
+        let leadership = NoopLeadershipService::new();
+        let handle = leadership.start("lock-a").await.unwrap();
+        let mut events = handle.events.clone();
+        let is_leader = Arc::clone(&handle.is_leader);
+
+        let event = handle.events.borrow().clone();
+        assert_eq!(event, Some(LeadershipEvent::StartedLeading));
+
+        handle.step_down().await.unwrap();
+        events.changed().await.unwrap();
+        assert_eq!(*events.borrow(), Some(LeadershipEvent::StoppedLeading));
+        assert!(!is_leader.load(Ordering::Acquire));
+
+        let reacquired = leadership.start("lock-a").await;
+        assert!(reacquired.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_noop_leadership_drop_cleans_up() {
+        let leadership = NoopLeadershipService::new();
+        let handle = leadership.start("lock-drop").await.unwrap();
+        assert!(handle.is_leader());
+        drop(handle);
+
+        let handle2 = leadership.start("lock-drop").await.unwrap();
+        assert!(handle2.is_leader());
+        handle2.step_down().await.unwrap();
     }
 
     #[tokio::test]
@@ -210,7 +297,6 @@ mod tests {
         gate.notify_starting().await;
         gate.notify_not_ready("test").await;
         gate.notify_ready().await;
-        // All methods must complete without panicking
     }
 
     #[test]
@@ -227,8 +313,10 @@ mod tests {
 
     #[test]
     fn test_platform_error_display() {
-        let e = PlatformError::AlreadyStarted;
-        assert!(e.to_string().contains("already started"));
+        let e = PlatformError::LockAlreadyActive {
+            lock_name: "alpha".into(),
+        };
+        assert!(e.to_string().contains("alpha"));
         let e2 = PlatformError::NotAvailable("no k8s".into());
         assert!(e2.to_string().contains("no k8s"));
     }

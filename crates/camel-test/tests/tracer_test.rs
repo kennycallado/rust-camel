@@ -58,7 +58,9 @@ async fn tracer_disabled_zero_overhead() {
 
 #[tokio::test]
 async fn tracer_file_output_invalid_path_returns_error() {
-    use camel_config::config::{CamelConfig, ComponentsConfig, ObservabilityConfig};
+    use camel_config::config::{
+        CamelConfig, ComponentsConfig, ObservabilityConfig, PlatformCamelConfig,
+    };
     use camel_core::{
         DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
     };
@@ -95,6 +97,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
             health: None,
         },
         supervision: None,
+        platform: PlatformCamelConfig::Noop,
     };
 
     // configure_context should propagate the file-open error

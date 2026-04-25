@@ -131,26 +131,48 @@ use camel_api::PlatformIdentity;
 let identity = PlatformIdentity::local("dev-node");
 ```
 
-### `LeaderElector`
+### `PlatformService`
 
-Use `LeaderElector` to run singleton workloads safely across replicas.
+`PlatformService` is the unified entry point for platform capabilities: identity, readiness, and leadership.
 
 ```rust
-use camel_api::{LeaderElector, PlatformError, PlatformIdentity};
+use camel_api::{PlatformService, LeadershipService, PlatformIdentity};
+use std::sync::Arc;
+
+// Get the leadership service for per-lock leader election
+let leadership = platform.leadership();
+let handle = leadership.start("orders").await?;
+assert!(handle.is_leader());
+```
+
+### `LeadershipService`
+
+Per-lock leader election. Each call to `start(lock_name)` returns a `LeadershipHandle` for a specific lock.
+
+```rust
+use camel_api::{LeadershipService, LeadershipHandle, PlatformError};
 use async_trait::async_trait;
 
-struct MyElector;
+struct MyLeadershipService;
 
 #[async_trait]
-impl LeaderElector for MyElector {
-    async fn start(
-        &self,
-        identity: PlatformIdentity,
-    ) -> Result<camel_api::LeadershipHandle, PlatformError> {
-        let _ = identity;
-        todo!("start election loop")
+impl LeadershipService for MyLeadershipService {
+    async fn start(&self, lock_name: &str) -> Result<LeadershipHandle, PlatformError> {
+        let _ = lock_name;
+        todo!("start election loop for this lock")
     }
 }
+```
+
+### `LeadershipHandle`
+
+Tracks leadership state for a single lock. Use `is_leader()` to check, `step_down()` to release.
+
+```rust
+if handle.is_leader() {
+    // running as leader for this lock
+}
+handle.step_down().await?; // releases lock, waits for cleanup
 ```
 
 ### `ReadinessGate`
@@ -177,7 +199,7 @@ impl ReadinessGate for MyReadinessGate {
 
 ### Local and test defaults
 
-`NoopLeaderElector` and `NoopReadinessGate` are provided for local development and tests.
+`NoopPlatformService`, `NoopLeadershipService`, and `NoopReadinessGate` are provided for local development and tests.
 
 ## Installation
 

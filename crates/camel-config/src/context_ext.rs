@@ -1,6 +1,8 @@
-use crate::config::{CamelConfig, OtelProtocol, OtelSampler};
+use crate::config::{
+    CamelConfig, KubernetesPlatformCamelConfig, OtelProtocol, OtelSampler, PlatformCamelConfig,
+};
 use crate::discovery::discover_routes;
-use camel_api::CamelError;
+use camel_api::{CamelError, PlatformService as PlatformServiceTrait};
 use camel_core::CamelContext;
 use camel_core::OutputFormat;
 use camel_core::TracerConfig;
@@ -11,6 +13,8 @@ use camel_otel::{
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU8;
+#[cfg(feature = "kubernetes")]
+use std::time::Duration;
 use tracing::Level;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
@@ -60,6 +64,11 @@ impl CamelConfig {
             let store = camel_core::InMemoryRuntimeStore::default().with_journal(Arc::new(journal));
             builder = builder.runtime_store(store);
         }
+
+        // Platform service wiring
+        let platform_service: Arc<dyn PlatformServiceTrait> =
+            Self::build_platform_service(&config.platform).await?;
+        builder = builder.platform_service(platform_service);
 
         let mut ctx = builder.build().await?;
 
@@ -178,6 +187,50 @@ impl CamelConfig {
 
         ctx.set_tracer_config(tracer_config).await;
         Ok(ctx)
+    }
+
+    async fn build_platform_service(
+        config: &PlatformCamelConfig,
+    ) -> Result<Arc<dyn PlatformServiceTrait>, CamelError> {
+        match config {
+            PlatformCamelConfig::Noop => Ok(Arc::new(camel_api::NoopPlatformService::default())),
+            PlatformCamelConfig::Kubernetes(k8s) => Self::build_kubernetes_platform(k8s).await,
+        }
+    }
+
+    #[cfg(feature = "kubernetes")]
+    async fn build_kubernetes_platform(
+        k8s: &KubernetesPlatformCamelConfig,
+    ) -> Result<Arc<dyn PlatformServiceTrait>, CamelError> {
+        let namespace = k8s
+            .namespace
+            .clone()
+            .or_else(|| std::env::var("POD_NAMESPACE").ok())
+            .unwrap_or_else(|| "default".to_string());
+
+        let config = camel_platform_kubernetes::KubernetesPlatformConfig {
+            namespace,
+            lease_name_prefix: k8s.lease_name_prefix.clone(),
+            lease_duration: Duration::from_secs(k8s.lease_duration_secs),
+            renew_deadline: Duration::from_secs(k8s.renew_deadline_secs),
+            retry_period: Duration::from_secs(k8s.retry_period_secs),
+            jitter_factor: k8s.jitter_factor,
+        };
+
+        let service = camel_platform_kubernetes::KubernetesPlatformService::try_default(config)
+            .await
+            .map_err(|e| CamelError::Config(e.to_string()))?;
+
+        Ok(Arc::new(service))
+    }
+
+    #[cfg(not(feature = "kubernetes"))]
+    async fn build_kubernetes_platform(
+        _k8s: &KubernetesPlatformCamelConfig,
+    ) -> Result<Arc<dyn PlatformServiceTrait>, CamelError> {
+        Err(CamelError::Config(
+            "platform.type = \"kubernetes\" requires camel-config feature `kubernetes`".into(),
+        ))
     }
 
     fn init_tracing_subscriber(
@@ -482,5 +535,46 @@ routes = ["["]
             .err()
             .expect("invalid glob should error");
         assert!(matches!(err, CamelError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn configure_context_with_noop_platform_succeeds() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str("", FileFormat::Toml))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[cfg(not(feature = "kubernetes"))]
+    #[tokio::test]
+    async fn configure_context_rejects_kubernetes_without_feature() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[platform]
+type = "kubernetes"
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let err = CamelConfig::configure_context(&cfg).await.err();
+        assert!(
+            err.is_some(),
+            "kubernetes platform without feature should fail"
+        );
+        let msg = err.unwrap().to_string();
+        assert!(
+            msg.contains("kubernetes"),
+            "error should mention kubernetes feature: {msg}"
+        );
     }
 }

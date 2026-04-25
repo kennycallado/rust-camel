@@ -1,57 +1,79 @@
 # camel-platform-kubernetes
 
-Kubernetes-native implementations of the rust-camel Platform SPI (`camel-api`) for distributed runtime coordination. This crate provides pod identity discovery from Downward API environment variables, Lease-based leader election, and pod readiness-gate updates via the Kubernetes API.
+Kubernetes-native implementations of the rust-camel Platform SPI (`camel-api`) for distributed runtime coordination. This crate provides pod identity discovery from Downward API environment variables, per-lock Lease-based leader election, and pod readiness-gate updates via the Kubernetes API.
 
 ## Installation
 
 ```toml
 [dependencies]
-camel-core = "0.6"
-camel-platform-kubernetes = "0.6"
+camel-platform-kubernetes = "0.7"
 kube = "0.99"
 ```
 
 ## Usage
 
-### `KubernetesPlatformIdentity`
+### `KubernetesPlatformService` (recommended)
+
+The easiest way to use the Kubernetes platform is via `Camel.toml`:
+
+```toml
+[platform]
+type = "kubernetes"
+namespace = "default"
+lease_name_prefix = "camel-"
+lease_duration_secs = 15
+renew_deadline_secs = 10
+retry_period_secs = 2
+```
+
+This wires automatically through `CamelConfig::configure_context()` when the `kubernetes` feature is enabled in `camel-config`.
+
+### Manual wiring
 
 ```rust
-use camel_core::context::CamelContextBuilder;
-use camel_platform_kubernetes::KubernetesPlatformIdentity;
+use std::sync::Arc;
+use std::time::Duration;
 
-let identity = KubernetesPlatformIdentity::from_env().into_platform_identity();
+use camel_api::PlatformIdentity;
+use camel_core::context::CamelContextBuilder;
+use camel_platform_kubernetes::{
+    KubernetesLeadershipService, KubernetesPlatformConfig, KubernetesPlatformService,
+};
+
+let config = KubernetesPlatformConfig {
+    namespace: "default".to_string(),
+    lease_name_prefix: "camel-".to_string(),
+    lease_duration: Duration::from_secs(15),
+    renew_deadline: Duration::from_secs(10),
+    retry_period: Duration::from_secs(2),
+};
+
+let platform = Arc::new(KubernetesPlatformService::try_default(config).await?);
 
 let ctx = CamelContextBuilder::new()
-    .platform_identity(identity)
+    .platform_service(platform)
     .build()
     .await?;
 ```
 
-### `KubernetesLeaderElector`
+### Per-lock leadership
+
+Each `master:<lockname>:<delegate-uri>` route requests leadership for its specific lock:
 
 ```rust
-use std::{sync::Arc, time::Duration};
+// In camel-master internally:
+let handle = platform_service.leadership().start("orders").await?;
+if handle.is_leader() {
+    // start delegate consumer
+}
+```
 
-use camel_core::context::CamelContextBuilder;
-use camel_platform_kubernetes::{KubernetesLeaderElector, LeaderElectorConfig};
+### `KubernetesPlatformIdentity`
 
-let client = kube::Client::try_default().await?;
+```rust
+use camel_platform_kubernetes::KubernetesPlatformIdentity;
 
-let elector = Arc::new(KubernetesLeaderElector::new(
-    client,
-    LeaderElectorConfig {
-        lease_name: "camel-leader".to_string(),
-        namespace: "default".to_string(),
-        lease_duration: Duration::from_secs(15),
-        renew_deadline: Duration::from_secs(10),
-        retry_period: Duration::from_secs(2),
-    },
-));
-
-let ctx = CamelContextBuilder::new()
-    .leader_elector(elector)
-    .build()
-    .await?;
+let identity = KubernetesPlatformIdentity::from_env();
 ```
 
 ### `KubernetesReadinessGate`
@@ -59,7 +81,6 @@ let ctx = CamelContextBuilder::new()
 ```rust
 use std::sync::Arc;
 
-use camel_core::context::CamelContextBuilder;
 use camel_platform_kubernetes::KubernetesReadinessGate;
 
 let client = kube::Client::try_default().await?;
@@ -67,11 +88,6 @@ let pod_name = std::env::var("POD_NAME")?;
 let namespace = std::env::var("POD_NAMESPACE")?;
 
 let readiness_gate = Arc::new(KubernetesReadinessGate::new(client, &namespace, pod_name));
-
-let ctx = CamelContextBuilder::new()
-    .readiness_gate(readiness_gate)
-    .build()
-    .await?;
 ```
 
 ## Required Downward API environment variables

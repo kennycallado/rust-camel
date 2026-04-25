@@ -203,7 +203,7 @@ mod tests {
                 Arc::clone(&registry),
                 Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 Arc::new(camel_api::NoOpMetrics),
-                Arc::new(camel_api::NoopLeaderElector),
+                Arc::new(camel_api::NoopPlatformService::default()),
             ),
         ) {
             Ok(_) => panic!("unknown scheme should fail consumer creation"),

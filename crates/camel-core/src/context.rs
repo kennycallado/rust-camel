@@ -7,9 +7,9 @@ use tracing::{info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    CamelError, HealthReport, HealthStatus, LeaderElector, Lifecycle, MetricsCollector,
-    NoOpMetrics, NoopLeaderElector, NoopReadinessGate, PlatformIdentity, ReadinessGate,
-    RuntimeCommandBus, RuntimeQueryBus, ServiceHealth, ServiceStatus, SupervisionConfig,
+    CamelError, HealthReport, HealthStatus, Lifecycle, MetricsCollector, NoOpMetrics,
+    NoopPlatformService, PlatformIdentity, PlatformService, ReadinessGate, RuntimeCommandBus,
+    RuntimeQueryBus, ServiceHealth, ServiceStatus, SupervisionConfig,
 };
 use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;
@@ -34,9 +34,7 @@ pub struct CamelContextBuilder {
     languages: Option<SharedLanguageRegistry>,
     metrics: Option<Arc<dyn MetricsCollector>>,
     // Platform ports
-    leader_elector: Option<Arc<dyn LeaderElector>>,
-    readiness_gate: Option<Arc<dyn ReadinessGate>>,
-    platform_identity: Option<PlatformIdentity>,
+    platform_service: Option<Arc<dyn PlatformService>>,
     supervision_config: Option<SupervisionConfig>,
     runtime_store: Option<crate::lifecycle::adapters::InMemoryRuntimeStore>,
     shutdown_timeout: std::time::Duration,
@@ -58,9 +56,7 @@ pub struct CamelContext {
     cancel_token: CancellationToken,
     metrics: Arc<dyn MetricsCollector>,
     // Platform ports
-    leader_elector: Arc<dyn LeaderElector>,
-    readiness_gate: Arc<dyn ReadinessGate>,
-    platform_identity: PlatformIdentity,
+    platform_service: Arc<dyn PlatformService>,
     languages: SharedLanguageRegistry,
     shutdown_timeout: std::time::Duration,
     services: Vec<Box<dyn Lifecycle>>,
@@ -363,19 +359,24 @@ impl CamelContext {
         Arc::clone(&self.metrics)
     }
 
-    /// Get the leader elector port.
-    pub fn leader_elector(&self) -> Arc<dyn LeaderElector> {
-        Arc::clone(&self.leader_elector)
+    /// Get the platform service.
+    pub fn platform_service(&self) -> Arc<dyn PlatformService> {
+        Arc::clone(&self.platform_service)
     }
 
     /// Get the readiness gate port.
     pub fn readiness_gate(&self) -> Arc<dyn ReadinessGate> {
-        Arc::clone(&self.readiness_gate)
+        self.platform_service.readiness_gate()
     }
 
     /// Get the platform identity.
-    pub fn platform_identity(&self) -> &PlatformIdentity {
-        &self.platform_identity
+    pub fn platform_identity(&self) -> PlatformIdentity {
+        self.platform_service.identity()
+    }
+
+    /// Get the leadership service port.
+    pub fn leadership(&self) -> Arc<dyn camel_api::LeadershipService> {
+        self.platform_service.leadership()
     }
 
     /// Get runtime command/query bus handle.
@@ -603,8 +604,8 @@ impl ComponentContext for CamelContext {
         Arc::clone(&self.metrics)
     }
 
-    fn leader_elector(&self) -> Arc<dyn LeaderElector> {
-        Arc::clone(&self.leader_elector)
+    fn platform_service(&self) -> Arc<dyn PlatformService> {
+        Arc::clone(&self.platform_service)
     }
 }
 
@@ -614,9 +615,7 @@ impl CamelContextBuilder {
             registry: None,
             languages: None,
             metrics: None,
-            leader_elector: None,
-            readiness_gate: None,
-            platform_identity: None,
+            platform_service: None,
             supervision_config: None,
             runtime_store: None,
             shutdown_timeout: std::time::Duration::from_secs(30),
@@ -638,21 +637,9 @@ impl CamelContextBuilder {
         self
     }
 
-    /// Set a custom leader elector port.
-    pub fn leader_elector(mut self, elector: Arc<dyn LeaderElector>) -> Self {
-        self.leader_elector = Some(elector);
-        self
-    }
-
-    /// Set a custom readiness gate port.
-    pub fn readiness_gate(mut self, gate: Arc<dyn ReadinessGate>) -> Self {
-        self.readiness_gate = Some(gate);
-        self
-    }
-
-    /// Set a custom platform identity.
-    pub fn platform_identity(mut self, identity: PlatformIdentity) -> Self {
-        self.platform_identity = Some(identity);
+    /// Set a custom platform service.
+    pub fn platform_service(mut self, platform_service: Arc<dyn PlatformService>) -> Self {
+        self.platform_service = Some(platform_service);
         self
     }
 
@@ -682,15 +669,9 @@ impl CamelContextBuilder {
             .languages
             .unwrap_or_else(CamelContext::built_in_languages);
         let metrics = self.metrics.unwrap_or_else(|| Arc::new(NoOpMetrics));
-        let leader_elector = self
-            .leader_elector
-            .unwrap_or_else(|| Arc::new(NoopLeaderElector));
-        let readiness_gate = self
-            .readiness_gate
-            .unwrap_or_else(|| Arc::new(NoopReadinessGate));
-        let platform_identity = self
-            .platform_identity
-            .unwrap_or_else(|| PlatformIdentity::local("local"));
+        let platform_service = self
+            .platform_service
+            .unwrap_or_else(|| Arc::new(NoopPlatformService::default()));
 
         let (controller, actor_join, supervision_join) =
             if let Some(config) = self.supervision_config {
@@ -698,7 +679,7 @@ impl CamelContextBuilder {
                 let mut controller_impl = DefaultRouteController::with_languages(
                     Arc::clone(&registry),
                     Arc::clone(&languages),
-                    Arc::clone(&leader_elector),
+                    Arc::clone(&platform_service),
                 );
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
@@ -713,7 +694,7 @@ impl CamelContextBuilder {
                 let controller_impl = DefaultRouteController::with_languages(
                     Arc::clone(&registry),
                     Arc::clone(&languages),
-                    Arc::clone(&leader_elector),
+                    Arc::clone(&platform_service),
                 );
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)
@@ -734,9 +715,7 @@ impl CamelContextBuilder {
             runtime,
             cancel_token: CancellationToken::new(),
             metrics,
-            leader_elector,
-            readiness_gate,
-            platform_identity,
+            platform_service,
             languages,
             shutdown_timeout: self.shutdown_timeout,
             services: Vec::new(),

@@ -33,6 +33,7 @@ async fn main() -> Result<(), CamelError> {
             ..Default::default()
         },
         supervision: None,
+        platform: Default::default(),
     };
 
     let mut ctx = CamelConfig::configure_context(&config).await?;

@@ -33,7 +33,7 @@ tracing.workspace = true
 camel-api.workspace = true
 camel-dsl.workspace = true
 camel-core.workspace = true
-camel-config = { workspace = true, features = ["otel"] }
+camel-config = { workspace = true, features = ["otel", "kubernetes"] }
 camel-component-api.workspace = true
 camel-component-container.workspace = true
 camel-component-controlbus.workspace = true

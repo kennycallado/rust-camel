@@ -1,3 +1,6 @@
 [default]
 routes = ["routes/**/*.yaml"]
 log_level = "INFO"
+
+[default.platform]
+type = "noop"

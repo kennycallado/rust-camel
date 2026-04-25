@@ -6,7 +6,7 @@ use camel_api::{Value, ValueSourceDef};
 fn build_controller() -> DefaultRouteController {
     DefaultRouteController::new(
         Arc::new(std::sync::Mutex::new(Registry::new())),
-        Arc::new(camel_api::NoopLeaderElector),
+        Arc::new(camel_api::NoopPlatformService::default()),
     )
 }
 
@@ -22,7 +22,10 @@ fn build_controller_with_components() -> DefaultRouteController {
         ));
         guard.register(std::sync::Arc::new(camel_component_log::LogComponent::new()));
     }
-    DefaultRouteController::new(registry, Arc::new(camel_api::NoopLeaderElector))
+    DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    )
 }
 
 fn register_simple_language(controller: &mut DefaultRouteController) {

@@ -1,8 +1,8 @@
 use std::error::Error;
 use std::time::Duration;
 
-use camel_api::platform::{LeaderElector, LeadershipHandle, PlatformIdentity};
-use camel_platform_kubernetes::{KubernetesLeaderElector, LeaderElectorConfig};
+use camel_api::platform::{LeadershipHandle, LeadershipService, PlatformIdentity};
+use camel_platform_kubernetes::{KubernetesLeadershipService, KubernetesPlatformConfig};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::k3s::K3s;
 
@@ -30,32 +30,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (_container, client) = start_k3s().await;
     println!("      K3s API is ready");
 
-    let config = LeaderElectorConfig {
-        lease_name: "demo-leader".to_string(),
+    let config = KubernetesPlatformConfig {
         namespace: "default".to_string(),
+        lease_name_prefix: "demo-".to_string(),
         lease_duration: Duration::from_secs(10),
         renew_deadline: Duration::from_secs(8),
         retry_period: Duration::from_secs(1),
+        jitter_factor: 0.2,
     };
 
-    println!(
-        "[2/6] Creating two electors for lease '{}'",
-        config.lease_name
-    );
-    let elector_alpha = KubernetesLeaderElector::new(client.clone(), config.clone());
-    let elector_beta = KubernetesLeaderElector::new(client.clone(), config.clone());
+    println!("[2/6] Creating two leadership services for lock 'demo-leader'");
+    let leadership_alpha = KubernetesLeadershipService::new(
+        client.clone(),
+        PlatformIdentity::local(Pod::Alpha.name()),
+        config.clone(),
+    )?;
+    let leadership_beta = KubernetesLeadershipService::new(
+        client.clone(),
+        PlatformIdentity::local(Pod::Beta.name()),
+        config.clone(),
+    )?;
 
     println!("[3/6] Starting pod-alpha and pod-beta");
-    let mut handle_alpha = Some(
-        elector_alpha
-            .start(PlatformIdentity::local(Pod::Alpha.name()))
-            .await?,
-    );
-    let mut handle_beta = Some(
-        elector_beta
-            .start(PlatformIdentity::local(Pod::Beta.name()))
-            .await?,
-    );
+    let mut handle_alpha = Some(leadership_alpha.start("leader").await?);
+    let mut handle_beta = Some(leadership_beta.start("leader").await?);
 
     println!("[4/6] Waiting up to 30s for first leader...");
     let first_leader =
@@ -173,8 +171,6 @@ async fn start_k3s() -> (ContainerAsync<K3s>, kube::Client) {
     let client = kube::Client::try_from(config).expect("should create client");
 
     // Wait until both the core API and the Coordination/Leases API are ready.
-    // `apiserver_version()` can succeed before Leases are available, so we poll
-    // an actual Lease list to confirm the coordination API group is healthy.
     let timeout = std::time::Duration::from_secs(90);
     let start = std::time::Instant::now();
     let leases: kube::Api<k8s_openapi::api::coordination::v1::Lease> =

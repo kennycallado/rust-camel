@@ -1,5 +1,7 @@
 use camel_api::{CanonicalRouteSpec, RuntimeCommand};
-use camel_config::{CamelConfig, JournalConfig, ObservabilityConfig, OtelCamelConfig};
+use camel_config::config::{
+    CamelConfig, JournalConfig, ObservabilityConfig, OtelCamelConfig, PlatformCamelConfig,
+};
 use std::fs;
 use tempfile::tempdir;
 
@@ -90,6 +92,7 @@ async fn test_configure_context_with_supervision() {
             backoff_multiplier: 2.0,
             max_delay_ms: 60000,
         }),
+        platform: PlatformCamelConfig::Noop,
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -112,6 +115,7 @@ async fn test_configure_context_sets_shutdown_timeout() {
         components: Default::default(),
         observability: Default::default(),
         supervision: None,
+        platform: PlatformCamelConfig::Noop,
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -138,6 +142,7 @@ async fn test_configure_context_with_valid_log_level() {
         components: Default::default(),
         observability: Default::default(),
         supervision: None,
+        platform: PlatformCamelConfig::Noop,
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -160,6 +165,7 @@ async fn test_configure_context_with_invalid_log_level() {
         components: Default::default(),
         observability: Default::default(),
         supervision: None,
+        platform: PlatformCamelConfig::Noop,
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -191,6 +197,7 @@ async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
             ..Default::default()
         },
         supervision: None,
+        platform: PlatformCamelConfig::Noop,
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -219,6 +226,7 @@ async fn test_configure_context_without_otel_no_lifecycle() {
         components: Default::default(),
         observability: Default::default(),
         supervision: None,
+        platform: PlatformCamelConfig::Noop,
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -253,6 +261,7 @@ async fn test_configure_context_uses_runtime_journal_from_config() {
         components: Default::default(),
         observability: Default::default(),
         supervision: None,
+        platform: PlatformCamelConfig::Noop,
     };
 
     let mut ctx = CamelConfig::configure_context(&config)

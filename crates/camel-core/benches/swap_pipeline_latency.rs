@@ -21,7 +21,7 @@ fn bench_swap_pipeline_latency(c: &mut Criterion) {
     let (handle, actor_join) = rt.block_on(async {
         let controller = DefaultRouteController::new(
             Arc::clone(&registry),
-            Arc::new(camel_api::NoopLeaderElector),
+            Arc::new(camel_api::NoopPlatformService::default()),
         );
         spawn_controller_actor(controller)
     });

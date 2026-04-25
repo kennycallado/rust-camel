@@ -438,7 +438,10 @@ mod tests {
 
     fn make_controller() -> DefaultRouteController {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
-        DefaultRouteController::new(registry, Arc::new(camel_api::NoopLeaderElector))
+        DefaultRouteController::new(
+            registry,
+            Arc::new(camel_api::NoopPlatformService::default()),
+        )
     }
 
     #[test]

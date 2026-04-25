@@ -7,27 +7,31 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use camel_api::{CamelError, LeaderElector, MetricsCollector};
+use camel_api::{CamelError, MetricsCollector, PlatformService};
 use camel_component_api::{
     BoxProcessor, Component, ComponentContext, Consumer, ConsumerContext, Endpoint,
     ExchangeEnvelope, ProducerContext, parse_uri,
 };
 use camel_language_api::Language;
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{interval, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::config::{MasterComponentConfig, MasterUriConfig};
 
+const DELEGATE_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+
 pub struct MasterComponent {
     drain_timeout_ms: u64,
+    delegate_retry_max_attempts: Option<u32>,
 }
 
 impl MasterComponent {
     pub fn new(config: MasterComponentConfig) -> Self {
         Self {
             drain_timeout_ms: config.drain_timeout_ms,
+            delegate_retry_max_attempts: config.delegate_retry_max_attempts,
         }
     }
 }
@@ -61,8 +65,9 @@ impl Component for MasterComponent {
             delegate_uri: parsed.delegate_uri,
             delegate_component,
             metrics: ctx.metrics(),
-            leader_elector: ctx.leader_elector(),
+            platform_service: ctx.platform_service(),
             drain_timeout: Duration::from_millis(self.drain_timeout_ms),
+            delegate_retry_max_attempts: self.delegate_retry_max_attempts,
         }))
     }
 }
@@ -73,8 +78,9 @@ struct MasterEndpoint {
     delegate_uri: String,
     delegate_component: Arc<dyn Component>,
     metrics: Arc<dyn MetricsCollector>,
-    leader_elector: Arc<dyn LeaderElector>,
+    platform_service: Arc<dyn PlatformService>,
     drain_timeout: Duration,
+    delegate_retry_max_attempts: Option<u32>,
 }
 
 impl Endpoint for MasterEndpoint {
@@ -88,8 +94,9 @@ impl Endpoint for MasterEndpoint {
             self.delegate_uri.clone(),
             Arc::clone(&self.delegate_component),
             Arc::clone(&self.metrics),
-            Arc::clone(&self.leader_elector),
+            Arc::clone(&self.platform_service),
             self.drain_timeout,
+            self.delegate_retry_max_attempts,
         )))
     }
 
@@ -97,7 +104,7 @@ impl Endpoint for MasterEndpoint {
         let delegate_ctx = MasterDelegateContext {
             delegate_component: Arc::clone(&self.delegate_component),
             metrics: Arc::clone(&self.metrics),
-            leader_elector: Arc::clone(&self.leader_elector),
+            platform_service: Arc::clone(&self.platform_service),
         };
 
         self.delegate_component
@@ -109,7 +116,7 @@ impl Endpoint for MasterEndpoint {
 struct MasterDelegateContext {
     delegate_component: Arc<dyn Component>,
     metrics: Arc<dyn MetricsCollector>,
-    leader_elector: Arc<dyn LeaderElector>,
+    platform_service: Arc<dyn PlatformService>,
 }
 
 impl ComponentContext for MasterDelegateContext {
@@ -129,8 +136,8 @@ impl ComponentContext for MasterDelegateContext {
         Arc::clone(&self.metrics)
     }
 
-    fn leader_elector(&self) -> Arc<dyn LeaderElector> {
-        Arc::clone(&self.leader_elector)
+    fn platform_service(&self) -> Arc<dyn PlatformService> {
+        Arc::clone(&self.platform_service)
     }
 }
 
@@ -139,8 +146,9 @@ struct MasterConsumer {
     delegate_uri: String,
     delegate_component: Arc<dyn Component>,
     metrics: Arc<dyn MetricsCollector>,
-    leader_elector: Arc<dyn LeaderElector>,
+    platform_service: Arc<dyn PlatformService>,
     drain_timeout: Duration,
+    delegate_retry_max_attempts: Option<u32>,
     leadership_handle: Option<camel_api::LeadershipHandle>,
     leadership_task: Option<JoinHandle<()>>,
     stop_token: Option<CancellationToken>,
@@ -152,16 +160,18 @@ impl MasterConsumer {
         delegate_uri: String,
         delegate_component: Arc<dyn Component>,
         metrics: Arc<dyn MetricsCollector>,
-        leader_elector: Arc<dyn LeaderElector>,
+        platform_service: Arc<dyn PlatformService>,
         drain_timeout: Duration,
+        delegate_retry_max_attempts: Option<u32>,
     ) -> Self {
         Self {
             lock_name,
             delegate_uri,
             delegate_component,
             metrics,
-            leader_elector,
+            platform_service,
             drain_timeout,
+            delegate_retry_max_attempts,
             leadership_handle: None,
             leadership_task: None,
             stop_token: None,
@@ -204,7 +214,7 @@ async fn reconcile_event(
     parent_cancel: &CancellationToken,
     drain_timeout: Duration,
     metrics: &Arc<dyn MetricsCollector>,
-    leader_elector: &Arc<dyn LeaderElector>,
+    platform_service: &Arc<dyn PlatformService>,
 ) {
     match event {
         camel_api::LeadershipEvent::StartedLeading => {
@@ -214,7 +224,7 @@ async fn reconcile_event(
             let delegate_ctx = MasterDelegateContext {
                 delegate_component: Arc::clone(delegate_component),
                 metrics: Arc::clone(metrics),
-                leader_elector: Arc::clone(leader_elector),
+                platform_service: Arc::clone(platform_service),
             };
 
             let endpoint = match delegate_component.create_endpoint(delegate_uri, &delegate_ctx) {
@@ -257,8 +267,9 @@ impl Consumer for MasterConsumer {
         }
 
         let handle = self
-            .leader_elector
-            .start(camel_api::PlatformIdentity::local(&self.lock_name))
+            .platform_service
+            .leadership()
+            .start(&self.lock_name)
             .await
             .map_err(|e| {
                 CamelError::EndpointCreationFailed(format!("failed to start leader election: {e}"))
@@ -268,10 +279,11 @@ impl Consumer for MasterConsumer {
         let delegate_uri = self.delegate_uri.clone();
         let delegate_component = Arc::clone(&self.delegate_component);
         let metrics = Arc::clone(&self.metrics);
-        let leader_elector = Arc::clone(&self.leader_elector);
+        let platform_service = Arc::clone(&self.platform_service);
         let sender = context.sender();
         let parent_cancel = context.cancel_token();
         let drain_timeout = self.drain_timeout;
+        let delegate_retry_max_attempts = self.delegate_retry_max_attempts;
         let mut events = handle.events.clone();
 
         let stop_token = CancellationToken::new();
@@ -279,9 +291,16 @@ impl Consumer for MasterConsumer {
 
         let task = tokio::spawn(async move {
             let mut state = DelegateState::Inactive;
+            let mut is_leading = false;
+            let mut delegate_attempts = 0u32;
+            let mut retry_tick = interval(DELEGATE_RETRY_INTERVAL);
 
             let initial_event = { events.borrow().clone() };
             if let Some(initial_event) = initial_event {
+                is_leading = matches!(&initial_event, camel_api::LeadershipEvent::StartedLeading);
+                if is_leading {
+                    delegate_attempts = 0;
+                }
                 reconcile_event(
                     initial_event,
                     &mut state,
@@ -292,7 +311,7 @@ impl Consumer for MasterConsumer {
                     &parent_cancel,
                     drain_timeout,
                     &metrics,
-                    &leader_elector,
+                    &platform_service,
                 )
                 .await;
             }
@@ -311,6 +330,11 @@ impl Consumer for MasterConsumer {
                         }
                         let event = { events.borrow().clone() };
                         if let Some(event) = event {
+                            let was_leading = is_leading;
+                            is_leading = matches!(&event, camel_api::LeadershipEvent::StartedLeading);
+                            if !was_leading && is_leading {
+                                delegate_attempts = 0;
+                            }
                             reconcile_event(
                                 event,
                                 &mut state,
@@ -321,7 +345,35 @@ impl Consumer for MasterConsumer {
                                 &parent_cancel,
                                 drain_timeout,
                                 &metrics,
-                                &leader_elector,
+                                &platform_service,
+                            )
+                            .await;
+                        }
+                    }
+                    _ = retry_tick.tick() => {
+                        if is_leading && matches!(state, DelegateState::Inactive) {
+                            if let Some(max) = delegate_retry_max_attempts {
+                                delegate_attempts = delegate_attempts.saturating_add(1);
+                                if delegate_attempts > max {
+                                    warn!(
+                                        lock = %lock_name,
+                                        attempts = max,
+                                        "delegate start exceeded max attempts, stopping consumer"
+                                    );
+                                    break;
+                                }
+                            }
+                            reconcile_event(
+                                camel_api::LeadershipEvent::StartedLeading,
+                                &mut state,
+                                &lock_name,
+                                &delegate_component,
+                                &delegate_uri,
+                                &sender,
+                                &parent_cancel,
+                                drain_timeout,
+                                &metrics,
+                                &platform_service,
                             )
                             .await;
                         }
@@ -365,8 +417,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use camel_api::{
-        BoxProcessorExt, Exchange, LeadershipEvent, LeadershipHandle, Message, NoOpMetrics,
-        NoopLeaderElector, PlatformError, PlatformIdentity,
+        BoxProcessorExt, Exchange, LeadershipEvent, LeadershipHandle, LeadershipService, Message,
+        NoOpMetrics, NoopPlatformService, NoopReadinessGate, PlatformError, PlatformIdentity,
+        PlatformService, ReadinessGate,
     };
     use camel_component_api::NoOpComponentContext;
     use tokio::sync::{oneshot, watch};
@@ -430,8 +483,8 @@ mod tests {
                 Arc::new(NoOpMetrics)
             }
 
-            fn leader_elector(&self) -> Arc<dyn LeaderElector> {
-                Arc::new(NoopLeaderElector)
+            fn platform_service(&self) -> Arc<dyn PlatformService> {
+                Arc::new(NoopPlatformService::default())
             }
         }
 
@@ -503,8 +556,8 @@ mod tests {
             Arc::new(NoOpMetrics)
         }
 
-        fn leader_elector(&self) -> Arc<dyn LeaderElector> {
-            Arc::new(NoopLeaderElector)
+        fn platform_service(&self) -> Arc<dyn PlatformService> {
+            Arc::new(NoopPlatformService::default())
         }
     }
 
@@ -616,13 +669,13 @@ mod tests {
         assert_eq!(producer_calls.load(Ordering::SeqCst), 1);
     }
 
-    struct FakeLeaderElector {
+    struct FakeLeadershipService {
         tx: Mutex<Option<watch::Sender<Option<LeadershipEvent>>>>,
         is_leader: Arc<AtomicBool>,
         initial: Option<LeadershipEvent>,
     }
 
-    impl FakeLeaderElector {
+    impl FakeLeadershipService {
         fn new(initial: Option<LeadershipEvent>) -> Self {
             let starts_as_leader = matches!(initial, Some(LeadershipEvent::StartedLeading));
             Self {
@@ -649,11 +702,8 @@ mod tests {
     }
 
     #[async_trait]
-    impl LeaderElector for FakeLeaderElector {
-        async fn start(
-            &self,
-            _identity: PlatformIdentity,
-        ) -> Result<LeadershipHandle, PlatformError> {
+    impl LeadershipService for FakeLeadershipService {
+        async fn start(&self, _lock_name: &str) -> Result<LeadershipHandle, PlatformError> {
             let (tx, rx) = watch::channel(self.initial.clone());
             *self.tx.lock().expect("mutex poisoned: fake elector sender") = Some(tx);
 
@@ -671,6 +721,36 @@ mod tests {
                 cancel,
                 term_rx,
             ))
+        }
+    }
+
+    struct FakePlatformService {
+        identity: PlatformIdentity,
+        readiness_gate: Arc<dyn ReadinessGate>,
+        leadership: Arc<dyn LeadershipService>,
+    }
+
+    impl FakePlatformService {
+        fn new(leadership: Arc<dyn LeadershipService>) -> Self {
+            Self {
+                identity: PlatformIdentity::local("master-tests"),
+                readiness_gate: Arc::new(NoopReadinessGate),
+                leadership,
+            }
+        }
+    }
+
+    impl PlatformService for FakePlatformService {
+        fn identity(&self) -> PlatformIdentity {
+            self.identity.clone()
+        }
+
+        fn readiness_gate(&self) -> Arc<dyn ReadinessGate> {
+            Arc::clone(&self.readiness_gate)
+        }
+
+        fn leadership(&self) -> Arc<dyn LeadershipService> {
+            Arc::clone(&self.leadership)
         }
     }
 
@@ -724,6 +804,27 @@ mod tests {
         start_calls: Arc<AtomicUsize>,
     }
 
+    struct FailingDelegateComponent {
+        create_endpoint_calls: Arc<AtomicUsize>,
+    }
+
+    impl Component for FailingDelegateComponent {
+        fn scheme(&self) -> &str {
+            "failing"
+        }
+
+        fn create_endpoint(
+            &self,
+            _uri: &str,
+            _ctx: &dyn ComponentContext,
+        ) -> Result<Box<dyn Endpoint>, CamelError> {
+            self.create_endpoint_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CamelError::EndpointCreationFailed(
+                "delegate endpoint creation failed".to_string(),
+            ))
+        }
+    }
+
     #[async_trait]
     impl Consumer for FakeDelegateConsumer {
         async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
@@ -754,9 +855,10 @@ mod tests {
     }
 
     fn build_master_consumer(
-        elector: Arc<dyn LeaderElector>,
+        platform_service: Arc<dyn PlatformService>,
         create_consumer_calls: Arc<AtomicUsize>,
         start_calls: Arc<AtomicUsize>,
+        delegate_retry_max_attempts: Option<u32>,
     ) -> MasterConsumer {
         MasterConsumer::new(
             "lock-a".to_string(),
@@ -766,20 +868,23 @@ mod tests {
                 start_calls,
             }),
             Arc::new(NoOpMetrics),
-            elector,
+            platform_service,
             Duration::from_millis(500),
+            delegate_retry_max_attempts,
         )
     }
 
     #[tokio::test]
     async fn starts_delegate_only_after_started_leading() {
-        let elector = Arc::new(FakeLeaderElector::new(None));
+        let leadership = Arc::new(FakeLeadershipService::new(None));
+        let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
         let create_consumer_calls = Arc::new(AtomicUsize::new(0));
         let start_calls = Arc::new(AtomicUsize::new(0));
         let mut master = build_master_consumer(
-            elector.clone(),
+            platform_service,
             Arc::clone(&create_consumer_calls),
             Arc::clone(&start_calls),
+            Some(30),
         );
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
@@ -792,7 +897,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert_eq!(create_consumer_calls.load(Ordering::SeqCst), 0);
 
-        elector.emit(LeadershipEvent::StartedLeading).await;
+        leadership.emit(LeadershipEvent::StartedLeading).await;
 
         let first = timeout(Duration::from_millis(500), rx.recv())
             .await
@@ -808,13 +913,15 @@ mod tests {
 
     #[tokio::test]
     async fn stops_delegate_on_stopped_leading() {
-        let elector = Arc::new(FakeLeaderElector::new(None));
+        let leadership = Arc::new(FakeLeadershipService::new(None));
+        let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
         let create_consumer_calls = Arc::new(AtomicUsize::new(0));
         let start_calls = Arc::new(AtomicUsize::new(0));
         let mut master = build_master_consumer(
-            elector.clone(),
+            platform_service,
             Arc::clone(&create_consumer_calls),
             Arc::clone(&start_calls),
+            Some(30),
         );
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
@@ -822,13 +929,13 @@ mod tests {
         let ctx = ConsumerContext::new(tx, cancel.clone());
 
         master.start(ctx).await.unwrap();
-        elector.emit(LeadershipEvent::StartedLeading).await;
+        leadership.emit(LeadershipEvent::StartedLeading).await;
         let _ = timeout(Duration::from_millis(500), rx.recv())
             .await
             .unwrap()
             .unwrap();
 
-        elector.emit(LeadershipEvent::StoppedLeading).await;
+        leadership.emit(LeadershipEvent::StoppedLeading).await;
         sleep(Duration::from_millis(100)).await;
         while rx.try_recv().is_ok() {}
         assert!(
@@ -843,13 +950,15 @@ mod tests {
 
     #[tokio::test]
     async fn recreates_delegate_on_new_leadership_epoch() {
-        let elector = Arc::new(FakeLeaderElector::new(None));
+        let leadership = Arc::new(FakeLeadershipService::new(None));
+        let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
         let create_consumer_calls = Arc::new(AtomicUsize::new(0));
         let start_calls = Arc::new(AtomicUsize::new(0));
         let mut master = build_master_consumer(
-            elector.clone(),
+            platform_service,
             Arc::clone(&create_consumer_calls),
             Arc::clone(&start_calls),
+            Some(30),
         );
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
@@ -858,17 +967,17 @@ mod tests {
 
         master.start(ctx).await.unwrap();
 
-        elector.emit(LeadershipEvent::StartedLeading).await;
+        leadership.emit(LeadershipEvent::StartedLeading).await;
         let first = timeout(Duration::from_millis(500), rx.recv())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(first.exchange.input.body.as_text(), Some("epoch-1"));
 
-        elector.emit(LeadershipEvent::StoppedLeading).await;
+        leadership.emit(LeadershipEvent::StoppedLeading).await;
         sleep(Duration::from_millis(120)).await;
 
-        elector.emit(LeadershipEvent::StartedLeading).await;
+        leadership.emit(LeadershipEvent::StartedLeading).await;
         let second = timeout(Duration::from_millis(500), rx.recv())
             .await
             .unwrap()
@@ -877,6 +986,39 @@ mod tests {
 
         assert_eq!(create_consumer_calls.load(Ordering::SeqCst), 2);
         assert_eq!(start_calls.load(Ordering::SeqCst), 2);
+
+        cancel.cancel();
+        master.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stops_retrying_delegate_start_after_max_attempts() {
+        let leadership = Arc::new(FakeLeadershipService::new(Some(
+            LeadershipEvent::StartedLeading,
+        )));
+        let platform_service = Arc::new(FakePlatformService::new(leadership));
+        let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut master = MasterConsumer::new(
+            "lock-a".to_string(),
+            "failing:delegate".to_string(),
+            Arc::new(FailingDelegateComponent {
+                create_endpoint_calls: Arc::clone(&create_endpoint_calls),
+            }),
+            Arc::new(NoOpMetrics),
+            platform_service,
+            Duration::from_millis(500),
+            Some(1),
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel.clone());
+
+        master.start(ctx).await.unwrap();
+        sleep(Duration::from_millis(750)).await;
+
+        assert_eq!(create_endpoint_calls.load(Ordering::SeqCst), 2);
 
         cancel.cancel();
         master.stop().await.unwrap();

@@ -41,6 +41,66 @@ pub struct CamelConfig {
 
     #[serde(default)]
     pub supervision: Option<SupervisionCamelConfig>,
+
+    #[serde(default)]
+    pub platform: PlatformCamelConfig,
+}
+
+/// Platform selection for leader election, readiness, and identity.
+///
+/// `[platform]` in Camel.toml. Defaults to noop (always leader, always ready).
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PlatformCamelConfig {
+    #[default]
+    Noop,
+    Kubernetes(KubernetesPlatformCamelConfig),
+}
+
+/// Kubernetes platform configuration for `[platform]` in Camel.toml.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct KubernetesPlatformCamelConfig {
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default = "default_lease_name_prefix")]
+    pub lease_name_prefix: String,
+    #[serde(default = "default_lease_duration_secs")]
+    pub lease_duration_secs: u64,
+    #[serde(default = "default_renew_deadline_secs")]
+    pub renew_deadline_secs: u64,
+    #[serde(default = "default_retry_period_secs")]
+    pub retry_period_secs: u64,
+    #[serde(default = "default_kubernetes_jitter_factor")]
+    pub jitter_factor: f64,
+}
+
+impl Default for KubernetesPlatformCamelConfig {
+    fn default() -> Self {
+        Self {
+            namespace: None,
+            lease_name_prefix: default_lease_name_prefix(),
+            lease_duration_secs: default_lease_duration_secs(),
+            renew_deadline_secs: default_renew_deadline_secs(),
+            retry_period_secs: default_retry_period_secs(),
+            jitter_factor: default_kubernetes_jitter_factor(),
+        }
+    }
+}
+
+fn default_lease_name_prefix() -> String {
+    "camel-".to_string()
+}
+fn default_lease_duration_secs() -> u64 {
+    15
+}
+fn default_renew_deadline_secs() -> u64 {
+    10
+}
+fn default_retry_period_secs() -> u64 {
+    2
+}
+fn default_kubernetes_jitter_factor() -> f64 {
+    0.2
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -565,6 +625,104 @@ port = 9091
         let h = cfg.observability.health.unwrap();
         assert_eq!(h.port, 9091);
         assert_eq!(h.host, "0.0.0.0");
+    }
+}
+
+#[cfg(test)]
+mod platform_config_tests {
+    use super::*;
+
+    fn parse(toml: &str) -> CamelConfig {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(toml, config::FileFormat::Toml))
+            .build()
+            .unwrap();
+        cfg.try_deserialize().unwrap()
+    }
+
+    #[test]
+    fn platform_default_is_noop() {
+        let cfg = parse("");
+        assert!(matches!(cfg.platform, PlatformCamelConfig::Noop));
+    }
+
+    #[test]
+    fn platform_parses_kubernetes_from_toml() {
+        let cfg = parse(
+            r#"
+[platform]
+type = "kubernetes"
+namespace = "team-a"
+lease_name_prefix = "camel-"
+lease_duration_secs = 15
+renew_deadline_secs = 10
+retry_period_secs = 2
+jitter_factor = 0.2
+"#,
+        );
+        match cfg.platform {
+            PlatformCamelConfig::Kubernetes(k8s) => {
+                assert_eq!(k8s.namespace.as_deref(), Some("team-a"));
+                assert_eq!(k8s.lease_name_prefix, "camel-");
+                assert_eq!(k8s.lease_duration_secs, 15);
+                assert_eq!(k8s.renew_deadline_secs, 10);
+                assert_eq!(k8s.retry_period_secs, 2);
+                assert!((k8s.jitter_factor - 0.2).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Kubernetes, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn platform_kubernetes_defaults() {
+        let cfg = parse(
+            r#"
+[platform]
+type = "kubernetes"
+"#,
+        );
+        match cfg.platform {
+            PlatformCamelConfig::Kubernetes(k8s) => {
+                assert!(k8s.namespace.is_none());
+                assert_eq!(k8s.lease_name_prefix, "camel-");
+                assert_eq!(k8s.lease_duration_secs, 15);
+                assert_eq!(k8s.renew_deadline_secs, 10);
+                assert_eq!(k8s.retry_period_secs, 2);
+                assert!((k8s.jitter_factor - 0.2).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Kubernetes, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn platform_parses_kubernetes_from_file_with_profile() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(
+            br#"
+[default]
+[default.platform]
+type = "kubernetes"
+namespace = "production"
+
+[dev]
+[dev.platform]
+type = "noop"
+"#,
+        )
+        .expect("write config");
+
+        let cfg_prod =
+            CamelConfig::from_file_with_profile(f.path().to_str().unwrap(), Some("default"))
+                .expect("prod config");
+        assert!(matches!(
+            cfg_prod.platform,
+            PlatformCamelConfig::Kubernetes(_)
+        ));
+
+        let cfg_dev = CamelConfig::from_file_with_profile(f.path().to_str().unwrap(), Some("dev"))
+            .expect("dev config");
+        assert!(matches!(cfg_dev.platform, PlatformCamelConfig::Noop));
     }
 }
 

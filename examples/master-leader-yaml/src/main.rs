@@ -1,10 +1,10 @@
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use camel_api::{
-    CamelError, LeaderElector, LeadershipEvent, LeadershipHandle, PlatformError, PlatformIdentity,
+    CamelError, LeadershipEvent, LeadershipHandle, LeadershipService, PlatformError,
+    PlatformIdentity, PlatformService, ReadinessGate,
 };
 use camel_component_api::ComponentBundle;
 use camel_component_controlbus::ControlBusComponent;
@@ -13,18 +13,20 @@ use camel_component_timer::TimerComponent;
 use camel_config::{CamelConfig, discover_routes};
 use camel_core::CamelContext;
 use camel_master::MasterBundle;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
-struct ContendedLeaderElector {
-    tx: Mutex<Option<watch::Sender<Option<LeadershipEvent>>>>,
+/// Simulated leadership that broadcasts events to all subscribers.
+/// In a real K8s deployment, this would be replaced by `KubernetesPlatformService`.
+struct SimulatedLeadershipService {
+    senders: Mutex<Vec<watch::Sender<Option<LeadershipEvent>>>>,
     is_leader: Arc<AtomicBool>,
 }
 
-impl ContendedLeaderElector {
+impl SimulatedLeadershipService {
     fn new() -> Self {
         Self {
-            tx: Mutex::new(None),
+            senders: Mutex::new(Vec::new()),
             is_leader: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -36,42 +38,26 @@ impl ContendedLeaderElector {
         );
 
         match event {
-            LeadershipEvent::StartedLeading => eprintln!("[elector] leadership acquired"),
-            LeadershipEvent::StoppedLeading => eprintln!("[elector] leadership lost"),
+            LeadershipEvent::StartedLeading => eprintln!("[platform] leadership acquired"),
+            LeadershipEvent::StoppedLeading => eprintln!("[platform] leadership lost"),
         }
 
-        if let Ok(lock) = self.tx.lock() {
-            if let Some(tx) = lock.as_ref() {
-                let _ = tx.send(Some(event));
-            }
-        }
+        let mut senders = self.senders.lock().await;
+        senders.retain(|tx| tx.send(Some(event.clone())).is_ok());
     }
 }
 
 #[async_trait::async_trait]
-impl LeaderElector for ContendedLeaderElector {
-    async fn start(&self, identity: PlatformIdentity) -> Result<LeadershipHandle, PlatformError> {
-        eprintln!(
-            "[elector] start for node={} (initially follower)",
-            identity.node_id
-        );
-
-        let mut lock = self
-            .tx
-            .lock()
-            .map_err(|_| PlatformError::NotAvailable("elector lock poisoned".to_string()))?;
-
-        if lock.is_some() {
-            return Err(PlatformError::AlreadyStarted);
-        }
+impl LeadershipService for SimulatedLeadershipService {
+    async fn start(&self, lock_name: &str) -> Result<LeadershipHandle, PlatformError> {
+        eprintln!("[platform] start leadership for lock={lock_name}");
 
         let (tx, rx) = watch::channel(None);
-        *lock = Some(tx);
-        drop(lock);
+        self.senders.lock().await.push(tx);
 
         let cancel = CancellationToken::new();
         let cancel_wait = cancel.clone();
-        let (term_tx, term_rx) = oneshot::channel();
+        let (term_tx, term_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             cancel_wait.cancelled().await;
             let _ = term_tx.send(());
@@ -86,6 +72,26 @@ impl LeaderElector for ContendedLeaderElector {
     }
 }
 
+struct SimulatedPlatformService {
+    identity: PlatformIdentity,
+    readiness_gate: Arc<dyn ReadinessGate>,
+    leadership: Arc<SimulatedLeadershipService>,
+}
+
+impl PlatformService for SimulatedPlatformService {
+    fn identity(&self) -> PlatformIdentity {
+        self.identity.clone()
+    }
+
+    fn readiness_gate(&self) -> Arc<dyn ReadinessGate> {
+        Arc::clone(&self.readiness_gate)
+    }
+
+    fn leadership(&self) -> Arc<dyn LeadershipService> {
+        Arc::clone(&self.leadership) as Arc<dyn LeadershipService>
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt()
@@ -96,11 +102,15 @@ async fn main() -> Result<(), CamelError> {
     let config =
         CamelConfig::from_file("Camel.toml").map_err(|e| CamelError::Config(e.to_string()))?;
 
-    let elector = Arc::new(ContendedLeaderElector::new());
+    let leadership = Arc::new(SimulatedLeadershipService::new());
+    let platform = Arc::new(SimulatedPlatformService {
+        identity: PlatformIdentity::local("example-master-node"),
+        readiness_gate: Arc::new(camel_api::NoopReadinessGate),
+        leadership: Arc::clone(&leadership),
+    });
 
     let mut ctx = CamelContext::builder()
-        .leader_elector(elector.clone())
-        .platform_identity(PlatformIdentity::local("example-master-node"))
+        .platform_service(platform.clone())
         .build()
         .await?;
 
@@ -115,15 +125,15 @@ async fn main() -> Result<(), CamelError> {
         ctx.add_route_definition(route).await?;
     }
 
-    let elector_task = {
-        let elector = Arc::clone(&elector);
+    let platform_task = {
+        let leadership = Arc::clone(&leadership);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                elector.emit(LeadershipEvent::StartedLeading).await;
+                leadership.emit(LeadershipEvent::StartedLeading).await;
 
                 tokio::time::sleep(Duration::from_secs(6)).await;
-                elector.emit(LeadershipEvent::StoppedLeading).await;
+                leadership.emit(LeadershipEvent::StoppedLeading).await;
 
                 tokio::time::sleep(Duration::from_secs(4)).await;
             }
@@ -138,7 +148,7 @@ async fn main() -> Result<(), CamelError> {
         .await
         .map_err(|e| CamelError::Io(e.to_string()))?;
 
-    elector_task.abort();
+    platform_task.abort();
     ctx.stop().await?;
     Ok(())
 }

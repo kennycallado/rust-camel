@@ -27,12 +27,14 @@ impl MasterUriConfig {
 #[derive(Debug, Clone)]
 pub struct MasterComponentConfig {
     pub drain_timeout_ms: u64,
+    pub delegate_retry_max_attempts: Option<u32>,
 }
 
 impl Default for MasterComponentConfig {
     fn default() -> Self {
         Self {
             drain_timeout_ms: 5000,
+            delegate_retry_max_attempts: Some(30),
         }
     }
 }
