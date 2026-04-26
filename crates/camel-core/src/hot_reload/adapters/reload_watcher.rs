@@ -103,7 +103,7 @@ where
 
     for dir in &watch_dirs {
         watcher
-            .watch(dir, RecursiveMode::NonRecursive)
+            .watch(dir, RecursiveMode::Recursive)
             .map_err(|e| {
                 CamelError::RouteError(format!("Failed to watch directory {dir:?}: {e}"))
             })?;
