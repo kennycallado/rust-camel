@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use camel_api::platform::{LeadershipEvent, PlatformIdentity};
+use camel_api::platform::{LeadershipEvent, LeadershipService, PlatformIdentity};
 use camel_platform_kubernetes::{KubernetesLeadershipService, KubernetesPlatformConfig};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::k3s::K3s;
@@ -108,7 +108,7 @@ fn test_config() -> KubernetesPlatformConfig {
 }
 
 #[tokio::test]
-async fn test_single_instance_becomes_leader() {
+async fn test_single_instance_becomes_leader() -> Result<(), Box<dyn std::error::Error>> {
     let (_container, client) = start_k3s().await;
 
     let leadership =
@@ -123,10 +123,12 @@ async fn test_single_instance_becomes_leader() {
 
     let event = handle.events.borrow().clone();
     assert_eq!(event, Some(LeadershipEvent::StartedLeading));
+
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_duplicate_lock_reuses_cached_loop() {
+async fn test_duplicate_lock_reuses_cached_loop() -> Result<(), Box<dyn std::error::Error>> {
     let (_container, client) = start_k3s().await;
 
     let leadership =
@@ -144,10 +146,12 @@ async fn test_duplicate_lock_reuses_cached_loop() {
     wait_for_leader(&first, 30).await;
     assert!(first.is_leader());
     assert!(second.is_leader());
+
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_step_down_releases_leadership() {
+async fn test_step_down_releases_leadership() -> Result<(), Box<dyn std::error::Error>> {
     let (_container, client) = start_k3s().await;
 
     let leadership =
@@ -162,10 +166,12 @@ async fn test_step_down_releases_leadership() {
 
     let result = tokio::time::timeout(Duration::from_secs(5), handle.step_down()).await;
     assert!(result.is_ok(), "step_down should not hang");
+
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_two_instances_only_one_leads() {
+async fn test_two_instances_only_one_leads() -> Result<(), Box<dyn std::error::Error>> {
     let (_container, client) = start_k3s().await;
 
     let leadership_a = KubernetesLeadershipService::new(
@@ -184,13 +190,13 @@ async fn test_two_instances_only_one_leads() {
             .start("contention")
             .await
             .expect("start A should succeed"),
-    )?;
+    );
     let mut handle_b = Some(
         leadership_b
             .start("contention")
             .await
             .expect("start B should succeed"),
-    )?;
+    );
 
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -210,7 +216,7 @@ async fn test_two_instances_only_one_leads() {
     assert_ne!(
         a_leads, b_leads,
         "exactly one instance must be leader at a time"
-    )?;
+    );
 
     let stepped_down_a = if a_leads {
         let handle = handle_a
@@ -220,7 +226,7 @@ async fn test_two_instances_only_one_leads() {
         assert!(
             result.is_ok(),
             "step_down for current leader A should not hang"
-        )?;
+        );
         true
     } else {
         let handle = handle_b
@@ -230,7 +236,7 @@ async fn test_two_instances_only_one_leads() {
         assert!(
             result.is_ok(),
             "step_down for current leader B should not hang"
-        )?;
+        );
         false
     };
 
@@ -260,5 +266,7 @@ async fn test_two_instances_only_one_leads() {
     assert_ne!(
         leader_a_after, leader_b_after,
         "exactly one instance must be leader after failover"
-    )?;
+    );
+
+    Ok(())
 }

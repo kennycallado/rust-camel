@@ -17,6 +17,32 @@ echo "============================================="
 WORKSPACE_ROOT=$(pwd)
 WORKSPACE_VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
 
+# Wait until Cargo's registry index can resolve the freshly published version.
+# crates.io's HTTP API can report success before `cargo publish` dependency
+# verification sees the version in the registry index.
+wait_for_crate_index() {
+  local crate=$1
+  local version=$2
+  local attempts=20
+  local delay=15
+
+  echo "⏳ Waiting for $crate@$version to appear in Cargo registry index..."
+  for attempt in $(seq 1 "$attempts"); do
+    if cargo info "${crate}@${version}" >/dev/null 2>&1; then
+      echo "✅ $crate@$version is visible in Cargo registry index"
+      return 0
+    fi
+
+    if [ "$attempt" -lt "$attempts" ]; then
+      echo "   attempt $attempt/$attempts: not visible yet; retrying in ${delay}s..."
+      sleep "$delay"
+    fi
+  done
+
+  echo "❌ Timed out waiting for $crate@$version in Cargo registry index"
+  return 1
+}
+
 # Function to publish a crate
 publish_crate() {
   local crate=$1
@@ -71,8 +97,7 @@ publish_crate() {
 
   cd "$WORKSPACE_ROOT" >/dev/null
   if [ -z "$DRY_RUN" ]; then
-    echo "⏳ Waiting 30s for crates.io to index..."
-    sleep 30
+    wait_for_crate_index "$crate" "$current_version"
   fi
 }
 

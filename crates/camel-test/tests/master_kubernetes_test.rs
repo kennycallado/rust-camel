@@ -14,7 +14,8 @@ use camel_component_api::ComponentBundle;
 use camel_component_log::LogComponent;
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
-use camel_config::{CamelConfig, KubernetesPlatformCamelConfig, PlatformCamelConfig};
+use camel_config::CamelConfig;
+use camel_config::config::{KubernetesPlatformCamelConfig, PlatformCamelConfig};
 use camel_core::CamelContext;
 use camel_master::MasterBundle;
 use camel_platform_kubernetes::{
@@ -200,6 +201,7 @@ async fn master_route_uses_kubernetes_platform_from_config() {
             retry_period_secs: 1,
             jitter_factor: 0.2,
         }),
+        stream_caching: Default::default(),
     };
 
     // Verify config parses correctly
