@@ -2,7 +2,7 @@
 
 A Rust-native, Tower-native integration framework inspired by [Apache Camel](https://camel.apache.org/), built for async pipelines, EIP patterns, and production observability.
 
-> **Status:** Pre-release (`0.7.1`). APIs will change.
+> **Status:** Pre-release (`0.7.2`). APIs will change.
 
 ## Overview
 
@@ -162,7 +162,7 @@ cargo run -p hello-world
 | `camel-xj`                | XML↔JSON conversion via xml-bridge (`xj:<stylesheet>?direction=xml2json\|json2xml`) — [example](examples/xj-example/README.md)                                                  |
 | `camel-container`         | Docker container producer/consumer via `bollard`. Container lifecycle, volume mounts, exec, network operations                                                                   |
 | `camel-language-api`      | Language trait API: `Language`, `Expression`, `Predicate`                                                                                                                         |
-| `camel-language-simple`   | Simple Language: `${header.x}`, `${body}`, operators                                                                                                                              |
+| `camel-language-simple`   | Simple Language: `${header.x}`, `${body}`, operators, `&&`/`||`, boolean literals, null semantics                                                                                                                              |
 | `camel-language-js`       | JavaScript scripting language for expressions and side effects                                                                                                                    |
 | `camel-language-rhai`     | Rhai scripting language for full expression power                                                                                                                                 |
 | `camel-language-jsonpath` | RFC 9535 JSONPath expressions: `$.items[*].price`. Requires `lang-jsonpath` feature.                                                                                              |
