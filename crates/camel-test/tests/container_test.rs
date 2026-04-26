@@ -118,10 +118,9 @@ async fn test_container_producer_exec() {
     exec_exchange
         .input
         .set_header(HEADER_ACTION, Value::String("exec".into()));
-    exec_exchange.input.set_header(
-        HEADER_CONTAINER_ID,
-        Value::String(container_id.clone()),
-    );
+    exec_exchange
+        .input
+        .set_header(HEADER_CONTAINER_ID, Value::String(container_id.clone()));
     exec_exchange
         .input
         .set_header(HEADER_CMD, Value::String("echo hello".into()));
