@@ -694,9 +694,10 @@ async fn handle_list(
     _config: ContainerConfig,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
-    let containers = docker.list_containers::<String>(None).await.map_err(|e| {
-        CamelError::ProcessorError(format!("Failed to list containers: {}", e))
-    })?;
+    let containers = docker
+        .list_containers::<String>(None)
+        .await
+        .map_err(|e| CamelError::ProcessorError(format!("Failed to list containers: {}", e)))?;
 
     let json_value = serde_json::to_value(&containers).map_err(|e| {
         CamelError::ProcessorError(format!("Failed to serialize containers: {}", e))
@@ -730,10 +731,7 @@ async fn handle_run(
     ensure_image_available(&docker, &image, config.auto_pull, pull_timeout)
         .await
         .map_err(|e| {
-            CamelError::ProcessorError(format!(
-                "Image '{}' not available: {}",
-                image, e
-            ))
+            CamelError::ProcessorError(format!("Image '{}' not available: {}", image, e))
         })?;
 
     let container_name = resolve_container_name(exchange, &config);
@@ -864,10 +862,7 @@ async fn handle_lifecycle(
                 .start_container::<String>(&container_id, None)
                 .await
                 .map_err(|e| {
-                    CamelError::ProcessorError(format!(
-                        "Failed to start container: {}",
-                        e
-                    ))
+                    CamelError::ProcessorError(format!("Failed to start container: {}", e))
                 })?;
         }
         ProducerOperation::Stop => {
@@ -875,10 +870,7 @@ async fn handle_lifecycle(
                 .stop_container(&container_id, None)
                 .await
                 .map_err(|e| {
-                    CamelError::ProcessorError(format!(
-                        "Failed to stop container: {}",
-                        e
-                    ))
+                    CamelError::ProcessorError(format!("Failed to stop container: {}", e))
                 })?;
         }
         ProducerOperation::Remove => {
@@ -886,10 +878,7 @@ async fn handle_lifecycle(
                 .remove_container(&container_id, None)
                 .await
                 .map_err(|e| {
-                    CamelError::ProcessorError(format!(
-                        "Failed to remove container: {}",
-                        e
-                    ))
+                    CamelError::ProcessorError(format!("Failed to remove container: {}", e))
                 })?;
             untrack_container(&container_id);
         }
@@ -975,26 +964,24 @@ async fn handle_exec(
                 CamelError::ProcessorError(format!("Failed to start exec (detached): {}", e))
             })?;
 
-        exchange.input.set_header(
-            HEADER_EXEC_ID,
-            serde_json::Value::String(exec_id),
-        );
-        exchange.input.set_header(
-            HEADER_CONTAINER_ID,
-            serde_json::Value::String(container_id),
-        );
+        exchange
+            .input
+            .set_header(HEADER_EXEC_ID, serde_json::Value::String(exec_id));
+        exchange
+            .input
+            .set_header(HEADER_CONTAINER_ID, serde_json::Value::String(container_id));
     } else {
         let start_result = docker
             .start_exec(&exec_id, None)
             .await
-            .map_err(|e| {
-                CamelError::ProcessorError(format!("Failed to start exec: {}", e))
-            })?;
+            .map_err(|e| CamelError::ProcessorError(format!("Failed to start exec: {}", e)))?;
 
         let mut output = String::new();
 
         match start_result {
-            bollard::exec::StartExecResults::Attached { output: mut stream, .. } => {
+            bollard::exec::StartExecResults::Attached {
+                output: mut stream, ..
+            } => {
                 use futures::StreamExt;
                 while let Some(msg) = stream.next().await {
                     match msg {
@@ -1014,9 +1001,10 @@ async fn handle_exec(
             bollard::exec::StartExecResults::Detached => {}
         }
 
-        let inspect = docker.inspect_exec(&exec_id).await.map_err(|e| {
-            CamelError::ProcessorError(format!("Failed to inspect exec: {}", e))
-        })?;
+        let inspect = docker
+            .inspect_exec(&exec_id)
+            .await
+            .map_err(|e| CamelError::ProcessorError(format!("Failed to inspect exec: {}", e)))?;
 
         let exit_code: i64 = inspect.exit_code.unwrap_or(0);
 
@@ -1026,10 +1014,9 @@ async fn handle_exec(
             HEADER_EXIT_CODE,
             serde_json::Value::Number(exit_code.into()),
         );
-        exchange.input.set_header(
-            HEADER_CONTAINER_ID,
-            serde_json::Value::String(container_id),
-        );
+        exchange
+            .input
+            .set_header(HEADER_CONTAINER_ID, serde_json::Value::String(container_id));
     }
 
     exchange.input.set_header(
@@ -1051,7 +1038,8 @@ async fn handle_network_create(
         .or(config.name.clone())
         .ok_or_else(|| {
             CamelError::ProcessorError(
-                "CamelContainerName header or name param is required for network-create".to_string(),
+                "CamelContainerName header or name param is required for network-create"
+                    .to_string(),
             )
         })?;
 
@@ -1066,10 +1054,7 @@ async fn handle_network_create(
     let result = docker.create_network(options).await.map_err(|e| {
         let err_str = e.to_string().to_lowercase();
         if err_str.contains("409") || err_str.contains("already exists") {
-            CamelError::ProcessorError(format!(
-                "Network '{}' already exists",
-                network_name
-            ))
+            CamelError::ProcessorError(format!("Network '{}' already exists", network_name))
         } else {
             CamelError::ProcessorError(format!("Failed to create network: {}", e))
         }
@@ -1081,10 +1066,9 @@ async fn handle_network_create(
     })?;
 
     exchange.input.body = Body::Json(json_value);
-    exchange.input.set_header(
-        HEADER_NETWORK,
-        serde_json::Value::String(network_id),
-    );
+    exchange
+        .input
+        .set_header(HEADER_NETWORK, serde_json::Value::String(network_id));
     exchange.input.set_header(
         HEADER_ACTION_RESULT,
         serde_json::Value::String("success".to_string()),
@@ -1133,10 +1117,7 @@ async fn handle_network_connect(
         .map_err(|e| {
             let err_str = e.to_string().to_lowercase();
             if err_str.contains("404") || err_str.contains("not found") {
-                CamelError::ProcessorError(format!(
-                    "Network '{}' or container not found",
-                    network
-                ))
+                CamelError::ProcessorError(format!("Network '{}' or container not found", network))
             } else {
                 CamelError::ProcessorError(format!("Failed to connect to network: {}", e))
             }
@@ -1190,10 +1171,7 @@ async fn handle_network_disconnect(
         .map_err(|e| {
             let err_str = e.to_string().to_lowercase();
             if err_str.contains("404") || err_str.contains("not found") {
-                CamelError::ProcessorError(format!(
-                    "Network '{}' or container not found",
-                    network
-                ))
+                CamelError::ProcessorError(format!("Network '{}' or container not found", network))
             } else {
                 CamelError::ProcessorError(format!("Failed to disconnect from network: {}", e))
             }
@@ -1223,22 +1201,19 @@ async fn handle_network_remove(
             )
         })?;
 
-    docker
-        .remove_network(&network)
-        .await
-        .map_err(|e| {
-            let err_str = e.to_string().to_lowercase();
-            if err_str.contains("404") || err_str.contains("not found") {
-                CamelError::ProcessorError(format!("Network '{}' not found", network))
-            } else if err_str.contains("409") || err_str.contains("in use") {
-                CamelError::ProcessorError(format!(
-                    "Network '{}' is in use and cannot be removed",
-                    network
-                ))
-            } else {
-                CamelError::ProcessorError(format!("Failed to remove network: {}", e))
-            }
-        })?;
+    docker.remove_network(&network).await.map_err(|e| {
+        let err_str = e.to_string().to_lowercase();
+        if err_str.contains("404") || err_str.contains("not found") {
+            CamelError::ProcessorError(format!("Network '{}' not found", network))
+        } else if err_str.contains("409") || err_str.contains("in use") {
+            CamelError::ProcessorError(format!(
+                "Network '{}' is in use and cannot be removed",
+                network
+            ))
+        } else {
+            CamelError::ProcessorError(format!("Failed to remove network: {}", e))
+        }
+    })?;
 
     exchange.input.set_header(
         HEADER_ACTION_RESULT,
@@ -1252,13 +1227,13 @@ async fn handle_network_list(
     _config: ContainerConfig,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
-    let networks = docker.list_networks::<String>(None).await.map_err(|e| {
-        CamelError::ProcessorError(format!("Failed to list networks: {}", e))
-    })?;
+    let networks = docker
+        .list_networks::<String>(None)
+        .await
+        .map_err(|e| CamelError::ProcessorError(format!("Failed to list networks: {}", e)))?;
 
-    let json_value = serde_json::to_value(&networks).map_err(|e| {
-        CamelError::ProcessorError(format!("Failed to serialize networks: {}", e))
-    })?;
+    let json_value = serde_json::to_value(&networks)
+        .map_err(|e| CamelError::ProcessorError(format!("Failed to serialize networks: {}", e)))?;
 
     exchange.input.body = Body::Json(json_value);
     exchange.input.set_header(
@@ -2606,7 +2581,8 @@ mod tests {
     #[test]
     fn test_container_config_parses_network_create_params() {
         let config =
-            ContainerConfig::from_uri("container:network-create?name=my-net&driver=bridge").unwrap();
+            ContainerConfig::from_uri("container:network-create?name=my-net&driver=bridge")
+                .unwrap();
         assert_eq!(config.operation, "network-create");
         assert_eq!(config.name.as_deref(), Some("my-net"));
         assert_eq!(config.driver.as_deref(), Some("bridge"));
@@ -2701,10 +2677,9 @@ mod tests {
 
     #[test]
     fn test_parse_volumes_rw_mode() {
-        let config = ContainerConfig::from_uri(
-            "container:run?image=nginx&volumes=./data:/app/data:rw",
-        )
-        .unwrap();
+        let config =
+            ContainerConfig::from_uri("container:run?image=nginx&volumes=./data:/app/data:rw")
+                .unwrap();
         let (binds, _) = config.parse_volumes().unwrap();
         assert_eq!(binds, vec!["./data:/app/data:rw"]);
     }
@@ -2723,8 +2698,7 @@ mod tests {
             return;
         }
 
-        let cargo_toml = std::fs::canonicalize("./Cargo.toml")
-            .expect("Cargo.toml should exist");
+        let cargo_toml = std::fs::canonicalize("./Cargo.toml").expect("Cargo.toml should exist");
         let volume_path = cargo_toml.to_str().unwrap();
 
         let component = ContainerComponent::new();
@@ -2785,7 +2759,10 @@ mod tests {
         let component = ContainerComponent::new();
         let ctx = NoOpComponentContext;
         let endpoint = component
-            .create_endpoint("container:run?image=alpine&cmd=sleep 30&autoRemove=true", &ctx)
+            .create_endpoint(
+                "container:run?image=alpine&cmd=sleep 30&autoRemove=true",
+                &ctx,
+            )
             .unwrap();
         let ctx = ProducerContext::new();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
@@ -2811,18 +2788,16 @@ mod tests {
             .expect("Should have container ID");
 
         let mut exec_exchange = Exchange::new(Message::new(""));
-        exec_exchange.input.set_header(
-            HEADER_ACTION,
-            serde_json::Value::String("exec".into()),
-        );
+        exec_exchange
+            .input
+            .set_header(HEADER_ACTION, serde_json::Value::String("exec".into()));
         exec_exchange.input.set_header(
             HEADER_CONTAINER_ID,
             serde_json::Value::String(container_id.clone()),
         );
-        exec_exchange.input.set_header(
-            HEADER_CMD,
-            serde_json::Value::String("echo hello".into()),
-        );
+        exec_exchange
+            .input
+            .set_header(HEADER_CMD, serde_json::Value::String("echo hello".into()));
 
         let exec_result = producer
             .ready()
@@ -2834,7 +2809,11 @@ mod tests {
 
         match &exec_result.input.body {
             Body::Text(text) => {
-                assert!(text.contains("hello"), "Exec output should contain 'hello', got: {}", text);
+                assert!(
+                    text.contains("hello"),
+                    "Exec output should contain 'hello', got: {}",
+                    text
+                );
             }
             other => panic!("Expected Body::Text, got: {:?}", other),
         }

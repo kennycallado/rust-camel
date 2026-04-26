@@ -5,7 +5,10 @@ use std::path::Path;
 use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
-use crate::compile::{compile_declarative_route, compile_declarative_route_to_canonical, compile_declarative_route_with_stream_cache_threshold};
+use crate::compile::{
+    compile_declarative_route, compile_declarative_route_to_canonical,
+    compile_declarative_route_with_stream_cache_threshold,
+};
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
@@ -80,7 +83,9 @@ pub fn parse_yaml_with_threshold(
 ) -> Result<Vec<RouteDefinition>, CamelError> {
     parse_yaml_to_declarative(yaml)?
         .into_iter()
-        .map(|route| compile_declarative_route_with_stream_cache_threshold(route, stream_cache_threshold))
+        .map(|route| {
+            compile_declarative_route_with_stream_cache_threshold(route, stream_cache_threshold)
+        })
         .collect()
 }
 

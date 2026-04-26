@@ -67,8 +67,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn make_stream_body(data: Vec<u8>) -> Body {
-        let chunks: Vec<Result<Bytes, CamelError>> =
-            vec![Ok(Bytes::from(data))];
+        let chunks: Vec<Result<Bytes, CamelError>> = vec![Ok(Bytes::from(data))];
         let stream = stream::iter(chunks);
         Body::Stream(StreamBody {
             stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
@@ -78,10 +77,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_cache_materializes_stream() {
-        let svc = StreamCacheService::new(
-            IdentityProcessor,
-            StreamCacheConfig::default(),
-        );
+        let svc = StreamCacheService::new(IdentityProcessor, StreamCacheConfig::default());
         let exchange = Exchange::new(Message::new(make_stream_body(b"hello".to_vec())));
         let result = svc.oneshot(exchange).await.unwrap();
         assert!(matches!(result.input.body, Body::Bytes(_)));
@@ -93,10 +89,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_cache_passes_through_text() {
-        let svc = StreamCacheService::new(
-            IdentityProcessor,
-            StreamCacheConfig::default(),
-        );
+        let svc = StreamCacheService::new(IdentityProcessor, StreamCacheConfig::default());
         let exchange = Exchange::new(Message::new(Body::Text("unchanged".to_string())));
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body, Body::Text("unchanged".to_string()));
@@ -104,10 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_cache_passes_through_bytes() {
-        let svc = StreamCacheService::new(
-            IdentityProcessor,
-            StreamCacheConfig::default(),
-        );
+        let svc = StreamCacheService::new(IdentityProcessor, StreamCacheConfig::default());
         let exchange = Exchange::new(Message::new(Body::Bytes(Bytes::from_static(b"data"))));
         let result = svc.oneshot(exchange).await.unwrap();
         assert!(matches!(result.input.body, Body::Bytes(_)));
@@ -115,10 +105,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_cache_passes_through_json() {
-        let svc = StreamCacheService::new(
-            IdentityProcessor,
-            StreamCacheConfig::default(),
-        );
+        let svc = StreamCacheService::new(IdentityProcessor, StreamCacheConfig::default());
         let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({"k": 1}))));
         let result = svc.oneshot(exchange).await.unwrap();
         assert!(matches!(result.input.body, Body::Json(_)));
@@ -126,10 +113,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_cache_exceeds_threshold() {
-        let svc = StreamCacheService::new(
-            IdentityProcessor,
-            StreamCacheConfig::new(5),
-        );
+        let svc = StreamCacheService::new(IdentityProcessor, StreamCacheConfig::new(5));
         let exchange = Exchange::new(Message::new(make_stream_body(b"hello world".to_vec())));
         let result = svc.oneshot(exchange).await;
         assert!(matches!(result, Err(CamelError::StreamLimitExceeded(_))));
@@ -138,10 +122,7 @@ mod tests {
     #[tokio::test]
     async fn test_stream_cache_preserves_headers() {
         use camel_api::Value;
-        let svc = StreamCacheService::new(
-            IdentityProcessor,
-            StreamCacheConfig::default(),
-        );
+        let svc = StreamCacheService::new(IdentityProcessor, StreamCacheConfig::default());
         let mut msg = Message::new(make_stream_body(b"data".to_vec()));
         msg.set_header("x-test", Value::String("kept".into()));
         let exchange = Exchange::new(msg);
@@ -172,7 +153,9 @@ mod tests {
         let df = builtin_data_format("json").unwrap();
         let inner = UnmarshalService::new(IdentityProcessor, df);
         let svc = StreamCacheService::new(inner, StreamCacheConfig::default());
-        let exchange = Exchange::new(Message::new(make_stream_body(br#"{"key":"value"}"#.to_vec())));
+        let exchange = Exchange::new(Message::new(make_stream_body(
+            br#"{"key":"value"}"#.to_vec(),
+        )));
         let result = svc.oneshot(exchange).await.unwrap();
         match &result.input.body {
             Body::Json(v) => assert_eq!(v["key"], "value"),

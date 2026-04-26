@@ -618,7 +618,9 @@ mod tests {
     #[test]
     fn test_contains_null_left_is_false() {
         let lang = SimpleLanguage;
-        let pred = lang.create_predicate("${header.missing} contains 'x'").unwrap();
+        let pred = lang
+            .create_predicate("${header.missing} contains 'x'")
+            .unwrap();
         let ex = exchange_with_body("test");
         assert!(!pred.matches(&ex).unwrap());
     }

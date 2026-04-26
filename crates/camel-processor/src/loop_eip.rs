@@ -131,7 +131,10 @@ mod tests {
         let result = service.ready().await.unwrap().call(exchange).await.unwrap();
 
         assert_eq!(*seen_indices.lock().unwrap(), vec![0, 1, 2]);
-        assert_eq!(result.property(CAMEL_LOOP_SIZE).and_then(|v| v.as_u64()), Some(3));
+        assert_eq!(
+            result.property(CAMEL_LOOP_SIZE).and_then(|v| v.as_u64()),
+            Some(3)
+        );
     }
 
     #[tokio::test]
@@ -143,7 +146,10 @@ mod tests {
         let result = service.ready().await.unwrap().call(exchange).await.unwrap();
 
         assert_eq!(result.input.body.as_text(), Some("test"));
-        assert_eq!(result.property(CAMEL_LOOP_SIZE).and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            result.property(CAMEL_LOOP_SIZE).and_then(|v| v.as_u64()),
+            Some(0)
+        );
         assert!(result.property(CAMEL_LOOP_INDEX).is_none());
     }
 
@@ -180,9 +186,18 @@ mod tests {
         let result = service.ready().await.unwrap().call(exchange).await.unwrap();
 
         assert_eq!(counter.load(Ordering::SeqCst), 2);
-        assert_eq!(result.property("iterations").and_then(|v| v.as_u64()), Some(2));
-        assert_eq!(result.property(CAMEL_LOOP_INDEX).and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(result.property(CAMEL_LOOP_SIZE).and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(
+            result.property("iterations").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            result.property(CAMEL_LOOP_INDEX).and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            result.property(CAMEL_LOOP_SIZE).and_then(|v| v.as_u64()),
+            Some(0)
+        );
     }
 
     #[tokio::test]
@@ -233,5 +248,4 @@ mod tests {
 
         assert_eq!(result.input.body.as_text(), Some("startxxx"));
     }
-
 }

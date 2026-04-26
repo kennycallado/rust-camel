@@ -40,7 +40,10 @@ pub enum DiscoveryError {
 /// let routes = discover_routes(&["routes/*.yaml".to_string(), "extra/**/*.yaml".to_string()])?;
 /// ```
 pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, DiscoveryError> {
-    discover_routes_with_threshold(patterns, camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD)
+    discover_routes_with_threshold(
+        patterns,
+        camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD,
+    )
 }
 
 pub fn discover_routes_with_threshold(
@@ -64,13 +67,11 @@ pub fn discover_routes_with_threshold(
                 source: e,
             })?;
 
-            let file_routes =
-                parse_yaml_with_threshold(&yaml_content, stream_cache_threshold).map_err(
-                    |e| DiscoveryError::Yaml {
-                        path: path_str,
-                        error: e.to_string(),
-                    },
-                )?;
+            let file_routes = parse_yaml_with_threshold(&yaml_content, stream_cache_threshold)
+                .map_err(|e| DiscoveryError::Yaml {
+                    path: path_str,
+                    error: e.to_string(),
+                })?;
 
             routes.extend(file_routes);
         }

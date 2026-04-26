@@ -7,8 +7,8 @@ pub mod yaml;
 pub mod yaml_ast;
 
 pub use compile::{
-    compile_declarative_route, compile_declarative_route_to_canonical, compile_declarative_step,
-    compile_declarative_route_with_stream_cache_threshold,
+    compile_declarative_route, compile_declarative_route_to_canonical,
+    compile_declarative_route_with_stream_cache_threshold, compile_declarative_step,
 };
 pub use contract::{DeclarativeStepKind, is_rust_only_kind, mandatory_declarative_step_kinds};
 pub use discovery::{DiscoveryError, discover_routes};

@@ -1,9 +1,6 @@
 use camel_core::route::BuilderStep;
-use camel_dsl::{
-    DeclarativeRoute, DeclarativeStep,
-    yaml::parse_yaml_to_declarative,
-};
 use camel_dsl::compile::compile_declarative_step;
+use camel_dsl::{DeclarativeRoute, DeclarativeStep, yaml::parse_yaml_to_declarative};
 
 fn parse_routes(yaml: &str) -> Vec<DeclarativeRoute> {
     parse_yaml_to_declarative(yaml).expect("YAML should parse")
@@ -21,7 +18,10 @@ routes:
 "#;
     let routes = parse_routes(yaml);
     assert_eq!(routes.len(), 1);
-    assert!(matches!(&routes[0].steps[0], DeclarativeStep::StreamCache(_)));
+    assert!(matches!(
+        &routes[0].steps[0],
+        DeclarativeStep::StreamCache(_)
+    ));
 }
 
 #[test]

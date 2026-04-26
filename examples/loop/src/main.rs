@@ -4,7 +4,6 @@ use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
 
-
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
@@ -19,11 +18,11 @@ async fn main() -> Result<(), CamelError> {
         .route_id("loop-count-demo")
         .set_body("hello")
         .loop_count(3)
-            .process(|mut ex: camel_api::Exchange| async move {
-                let body = ex.input.body.as_text().unwrap_or("").to_string();
-                ex.input.body = camel_api::body::Body::Text(format!("{body}!"));
-                Ok(ex)
-            })
+        .process(|mut ex: camel_api::Exchange| async move {
+            let body = ex.input.body.as_text().unwrap_or("").to_string();
+            ex.input.body = camel_api::body::Body::Text(format!("{body}!"));
+            Ok(ex)
+        })
         .end_loop()
         .to("log:loop-result?level=info&showBody=true")
         .build()?;

@@ -283,7 +283,12 @@ impl std::fmt::Debug for BuilderStep {
                 write!(f, "BuilderStep::Delay {{ config: {:?} }}", config)
             }
             BuilderStep::Loop { config, steps } => {
-                write!(f, "BuilderStep::Loop {{ config: {:?}, steps: {} }}", config.mode_name(), steps.len())
+                write!(
+                    f,
+                    "BuilderStep::Loop {{ config: {:?}, steps: {} }}",
+                    config.mode_name(),
+                    steps.len()
+                )
             }
             BuilderStep::DeclarativeLoop {
                 count,

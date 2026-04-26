@@ -93,14 +93,12 @@ async fn main() -> Result<(), CamelError> {
                 .header("CamelContainerId")
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_default();
-            exchange.input.set_header(
-                "CamelContainerAction",
-                Value::String("exec".to_string()),
-            );
-            exchange.input.set_header(
-                "CamelContainerId",
-                Value::String(container_id),
-            );
+            exchange
+                .input
+                .set_header("CamelContainerAction", Value::String("exec".to_string()));
+            exchange
+                .input
+                .set_header("CamelContainerId", Value::String(container_id));
             exchange.input.set_header(
                 "CamelContainerCmd",
                 Value::String("echo 'Hello from exec!' && uname -a".to_string()),
@@ -120,9 +118,10 @@ async fn main() -> Result<(), CamelError> {
                 .unwrap()
                 .as_millis();
             let name = format!("camel-net-{}", timestamp);
-            exchange
-                .input
-                .set_header("CamelContainerAction", Value::String("network-create".to_string()));
+            exchange.input.set_header(
+                "CamelContainerAction",
+                Value::String("network-create".to_string()),
+            );
             exchange
                 .input
                 .set_header("CamelContainerName", Value::String(name));

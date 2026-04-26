@@ -165,11 +165,12 @@ fn tokenize(input: &str) -> Result<Vec<Token>, LanguageError> {
 
         if let Some(after_quote) = rest.strip_prefix('"') {
             flush_text(&mut tokens, &mut text_buf);
-            let rel_end = find_closing_double_quote(after_quote)
-                .ok_or_else(|| LanguageError::ParseError {
+            let rel_end = find_closing_double_quote(after_quote).ok_or_else(|| {
+                LanguageError::ParseError {
                     expr: input.to_string(),
                     reason: "unclosed double-quoted string".to_string(),
-                })?;
+                }
+            })?;
             let content = &after_quote[..rel_end];
             tokens.push(Token::EscapedString(content.to_string()));
             i += 1 + rel_end + 1;
@@ -254,19 +255,16 @@ fn tokenize(input: &str) -> Result<Vec<Token>, LanguageError> {
             continue;
         }
 
-        if rest
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_digit())
-            && text_buf.trim().is_empty()
-        {
+        if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) && text_buf.trim().is_empty() {
             let num_len = consume_number_len(rest);
             if num_len > 0 {
                 let raw_num = &rest[..num_len];
-                let num = raw_num.parse::<f64>().map_err(|_| LanguageError::ParseError {
-                    expr: input.to_string(),
-                    reason: format!("invalid number literal: {raw_num}"),
-                })?;
+                let num = raw_num
+                    .parse::<f64>()
+                    .map_err(|_| LanguageError::ParseError {
+                        expr: input.to_string(),
+                        reason: format!("invalid number literal: {raw_num}"),
+                    })?;
                 if !num.is_finite() {
                     return Err(LanguageError::ParseError {
                         expr: input.to_string(),
@@ -375,7 +373,9 @@ fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<Expr, LanguageError> {
 
 fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, LanguageError> {
     let left = parse_atom_from_tokens(tokens, pos)?;
-    if *pos < tokens.len() && let Token::Op(op) = &tokens[*pos] {
+    if *pos < tokens.len()
+        && let Token::Op(op) = &tokens[*pos]
+    {
         let op = op.clone();
         *pos += 1;
         let right = parse_atom_from_tokens(tokens, pos)?;
