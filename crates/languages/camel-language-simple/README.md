@@ -16,6 +16,8 @@
 | `${body.nested.field}` | Access nested JSON fields |
 | `${body.array.0}` | Access array element by index |
 | `${exchangeProperty.name}` | Access an exchange property |
+| `true` / `false` | Boolean literals |
+| `null` | Null literal |
 
 > **Note:** Body field access (`${body.field}`) only works on `Body::Json` and returns `Value::Null` for other body types or missing fields.
 
@@ -30,6 +32,41 @@
 | `>=` | `${header.count} >= 5` | Greater than or equal |
 | `<=` | `${header.count} <= 10` | Less than or equal |
 | `contains` | `${body} contains 'hello'` | String contains |
+| `&&` | `${header.type} == 'order' && ${header.priority} == 'high'` | Logical AND (short-circuit) |
+| `\|\|` | `${header.type} == 'order' \|\| ${header.type} == 'invoice'` | Logical OR (short-circuit) |
+
+## Compound Predicates
+
+Combine multiple conditions with `&&` (AND) and `||` (OR):
+
+| Expression | Description |
+|------------|-------------|
+| `${body} != null && ${body} != ''` | Body is present and non-empty |
+| `${header.type} == 'order' \|\| ${header.type} == 'invoice'` | Type is order or invoice |
+| `${body.status} == 'active' && ${body.score} > 50` | Status is active AND score > 50 |
+
+Precedence: `&&` binds tighter than `||`. `${a} \|\| ${b} && ${c}` is parsed as `${a} \|\| (${b} && ${c})`.
+
+## Null Semantics
+
+| Expression | Result | Notes |
+|------------|--------|-------|
+| `${body}` with empty exchange | `Value::Null` | Empty body is null, not empty string |
+| `${header.missing}` | `Value::Null` | Missing headers return null |
+| `${body} != null` | false when body is empty, true when body has content | Use to check if body exists |
+| `null > 5` | false | Null is not comparable for ordering |
+| `null == null` | true | Null equals null |
+| `null contains 'x'` | false | Null is not searchable |
+
+## Boolean Comparisons
+
+Compare JSON boolean fields with `true`/`false` literals:
+
+```yaml
+- filter:
+    language: simple
+    source: "${body.active} == true"
+```
 
 ## Usage
 

@@ -132,7 +132,7 @@ mod tests {
         let expr = lang.create_expression("${body}").unwrap();
         let ex = Exchange::new(Message::default());
         let val = expr.evaluate(&ex).unwrap();
-        assert_eq!(val, Value::String("".to_string()));
+        assert_eq!(val, Value::Null);
     }
 
     #[test]
@@ -381,6 +381,290 @@ mod tests {
             pred.matches(&ex).unwrap(),
             "predicate should match when header equals 'a>=b'"
         );
+    }
+
+    #[test]
+    fn test_body_empty_is_null() {
+        let lang = SimpleLanguage;
+        let expr = lang.create_expression("${body}").unwrap();
+        let ex = Exchange::new(Message::default());
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::Null);
+    }
+
+    #[test]
+    fn test_body_empty_not_null_is_false() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("${body} != null").unwrap();
+        let ex = Exchange::new(Message::default());
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_body_empty_predicate_is_false() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("${body}").unwrap();
+        let ex = Exchange::new(Message::default());
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_logical_and_true_true() {
+        let lang = SimpleLanguage;
+        let pred = lang
+            .create_predicate("${header.a} == '1' && ${header.b} == '2'")
+            .unwrap();
+        let mut msg = Message::default();
+        msg.set_header("a", Value::String("1".to_string()));
+        msg.set_header("b", Value::String("2".to_string()));
+        let ex = Exchange::new(msg);
+        assert!(pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_logical_and_true_false() {
+        let lang = SimpleLanguage;
+        let pred = lang
+            .create_predicate("${header.a} == '1' && ${header.b} == '2'")
+            .unwrap();
+        let mut msg = Message::default();
+        msg.set_header("a", Value::String("1".to_string()));
+        msg.set_header("b", Value::String("99".to_string()));
+        let ex = Exchange::new(msg);
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_logical_or_false_true() {
+        let lang = SimpleLanguage;
+        let pred = lang
+            .create_predicate("${header.a} == '1' || ${header.b} == '2'")
+            .unwrap();
+        let mut msg = Message::default();
+        msg.set_header("a", Value::String("0".to_string()));
+        msg.set_header("b", Value::String("2".to_string()));
+        let ex = Exchange::new(msg);
+        assert!(pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_logical_or_false_false() {
+        let lang = SimpleLanguage;
+        let pred = lang
+            .create_predicate("${header.a} == '1' || ${header.b} == '2'")
+            .unwrap();
+        let mut msg = Message::default();
+        msg.set_header("a", Value::String("0".to_string()));
+        msg.set_header("b", Value::String("0".to_string()));
+        let ex = Exchange::new(msg);
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_logical_and_precedence_over_or() {
+        let lang = SimpleLanguage;
+        let pred = lang
+            .create_predicate("${header.a} == '1' || ${header.b} == '2' && ${header.c} == '3'")
+            .unwrap();
+        let mut msg = Message::default();
+        msg.set_header("a", Value::String("1".to_string()));
+        msg.set_header("b", Value::String("2".to_string()));
+        msg.set_header("c", Value::String("999".to_string()));
+        let ex = Exchange::new(msg);
+        assert!(pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_logical_and_short_circuit() {
+        let lang = SimpleLanguage;
+        let pred = lang
+            .create_predicate("${header.a} == 'x' && ${header.nonexistent} > 999")
+            .unwrap();
+        let mut msg = Message::default();
+        msg.set_header("a", Value::String("not-x".to_string()));
+        let ex = Exchange::new(msg);
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_logical_or_short_circuit() {
+        let lang = SimpleLanguage;
+        let pred = lang
+            .create_predicate("${header.a} == '1' || ${header.nonexistent} > 999")
+            .unwrap();
+        let mut msg = Message::default();
+        msg.set_header("a", Value::String("1".to_string()));
+        let ex = Exchange::new(msg);
+        assert!(pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_compound_filter_body_not_null_and_body_not_empty() {
+        let lang = SimpleLanguage;
+        let pred = lang
+            .create_predicate("${body} != null && ${body} != ''")
+            .unwrap();
+        let ex = exchange_with_body("hello");
+        assert!(pred.matches(&ex).unwrap());
+
+        let ex_empty = Exchange::new(Message::default());
+        assert!(!pred.matches(&ex_empty).unwrap());
+    }
+
+    #[test]
+    fn test_header_with_gt_in_key() {
+        let lang = SimpleLanguage;
+        let mut msg = Message::default();
+        msg.set_header("a>b", Value::String("found".to_string()));
+        let pred = lang.create_predicate("${header.a>b} == 'found'").unwrap();
+        let ex = Exchange::new(msg);
+        assert!(pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_double_quoted_string_with_operator() {
+        let lang = SimpleLanguage;
+        let expr = lang.create_expression("\"a >= b\"").unwrap();
+        let ex = exchange_with_body("test");
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::String("a >= b".to_string()));
+    }
+
+    #[test]
+    fn test_bool_literal_true() {
+        let lang = SimpleLanguage;
+        let expr = lang.create_expression("true").unwrap();
+        let ex = exchange_with_body("test");
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_bool_literal_false() {
+        let lang = SimpleLanguage;
+        let expr = lang.create_expression("false").unwrap();
+        let ex = exchange_with_body("test");
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::Bool(false));
+    }
+
+    #[test]
+    fn test_bool_literal_in_comparison() {
+        use camel_language_api::Body;
+
+        let lang = SimpleLanguage;
+        let mut ex = Exchange::default();
+        ex.input.body = Body::Json(serde_json::json!({"active": true}));
+        let pred = lang.create_predicate("${body.active} == true").unwrap();
+        assert!(pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_null_gt_number_is_false() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("${header.missing} > 5").unwrap();
+        let ex = exchange_with_body("test");
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_null_lt_number_is_false() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("${header.missing} < 10").unwrap();
+        let ex = exchange_with_body("test");
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_null_gte_number_is_false() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("${header.missing} >= 0").unwrap();
+        let ex = exchange_with_body("test");
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_null_lte_number_is_false() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("${header.missing} <= 100").unwrap();
+        let ex = exchange_with_body("test");
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_number_gt_null_is_false() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("5 > ${header.missing}").unwrap();
+        let ex = exchange_with_body("test");
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_true_or_false() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("true || false").unwrap();
+        let ex = exchange_with_body("test");
+        assert!(pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_false_and_true() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("false && true").unwrap();
+        let ex = exchange_with_body("test");
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_contains_null_left_is_false() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("${header.missing} contains 'x'").unwrap();
+        let ex = exchange_with_body("test");
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_contains_null_right_is_false() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("${body} contains null").unwrap();
+        let ex = exchange_with_body("test");
+        assert!(!pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_contains_without_spaces() {
+        let lang = SimpleLanguage;
+        let pred = lang.create_predicate("${body}contains'hello'").unwrap();
+        let ex = exchange_with_body("say hello world");
+        assert!(pred.matches(&ex).unwrap());
+    }
+
+    #[test]
+    fn test_non_finite_number_parse_error() {
+        let lang = SimpleLanguage;
+        // Very long digit string that overflows f64 to infinity
+        let result = lang.create_expression(
+            "9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+        );
+        assert!(result.is_err(), "non-finite number should be a parse error");
+    }
+
+    #[test]
+    fn test_interpolation_with_empty_body_still_produces_text() {
+        let lang = SimpleLanguage;
+        let expr = lang.create_expression("Got ${body}").unwrap();
+        let ex = Exchange::new(Message::default());
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::String("Got ".to_string()));
+    }
+
+    #[test]
+    fn test_interpolation_with_empty_body_and_trailing_text() {
+        let lang = SimpleLanguage;
+        let expr = lang.create_expression("${body} tail").unwrap();
+        let ex = Exchange::new(Message::default());
+        let val = expr.evaluate(&ex).unwrap();
+        assert_eq!(val, Value::String(" tail".to_string()));
     }
 }
 

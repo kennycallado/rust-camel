@@ -22,6 +22,18 @@ pub enum Expr {
     ///   `[Literal("Got "), Expr(Body), Literal(" from "), Expr(Header("source"))]`
     Interpolated(Vec<InterpolatedPart>),
     EscapedString(String),
+    LogicalOp {
+        left: Box<Expr>,
+        op: LogicalOp,
+        right: Box<Expr>,
+    },
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogicalOp {
+    And,
+    Or,
 }
 
 /// One segment inside an `Expr::Interpolated`.
@@ -53,128 +65,365 @@ pub enum Op {
     Contains,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    Expr(String),
+    Text(String),
+    StringLit(String),
+    EscapedString(String),
+    NumberLit(f64),
+    BoolLit(bool),
+    Null,
+    Op(Op),
+    And,
+    Or,
+}
+
 pub fn parse(input: &str) -> Result<Expr, LanguageError> {
     let input = input.trim();
+    if input.is_empty() {
+        return Err(LanguageError::ParseError {
+            expr: input.to_string(),
+            reason: "empty expression".to_string(),
+        });
+    }
 
-    // Try binary expression first (highest priority).
-    // Try operators longest-first to avoid partial matches (>= before >).
-    let ops = [
-        (">=", Op::Gte),
-        ("<=", Op::Lte),
-        ("!=", Op::Ne),
-        ("==", Op::Eq),
-        (">", Op::Gt),
-        ("<", Op::Lt),
-        (" contains ", Op::Contains),
-    ];
+    let tokens = tokenize(input)?;
+    let has_ops = tokens
+        .iter()
+        .any(|t| matches!(t, Token::Op(_) | Token::And | Token::Or));
 
-    for (op_str, op) in &ops {
-        // Find the first occurrence of op_str that is NOT inside a single-quoted
-        // string literal. We count the number of unescaped single quotes before
-        // each candidate position: an odd count means we are inside a string.
-        if let Some(pos) = find_op_outside_quotes(input, op_str) {
-            let left = parse_atom(input[..pos].trim())?;
-            let right = parse_atom(input[pos + op_str.len()..].trim())?;
-            return Ok(Expr::BinOp {
-                left: Box::new(left),
-                op: op.clone(),
-                right: Box::new(right),
+    if has_ops {
+        let mut pos = 0;
+        let expr = parse_or(&tokens, &mut pos)?;
+        if pos != tokens.len() {
+            return Err(LanguageError::ParseError {
+                expr: input.to_string(),
+                reason: format!("unexpected token after position {pos}"),
             });
         }
-    }
-
-    // If input contains `${`:
-    //   - Pure single token (`${...}` with nothing before/after) → parse_atom
-    //     which validates it and returns the proper error on bad keys.
-    //   - Mixed (text + `${...}`) → parse_interpolated.
-    if input.contains("${") {
-        if is_pure_interpolation(input) {
-            return parse_atom(input);
-        } else {
-            return parse_interpolated(input);
-        }
-    }
-
-    // No `${` at all — try known atoms first, then fall back to plain StringLit.
-    // This enables `log: "Hello World"` without requiring single-quote wrapping.
-    if let Ok(expr) = parse_atom(input) {
-        return Ok(expr);
-    }
-    Ok(Expr::StringLit(input.to_string()))
-}
-
-/// Returns `true` when `input` is exactly one `${...}` token — the entire
-/// string starts with `${` and ends with the matching `}`.
-fn is_pure_interpolation(input: &str) -> bool {
-    if !input.starts_with("${") {
-        return false;
-    }
-    // Find the closing `}` and make sure it's at the very end.
-    // NOTE: We use `.find('}')` which locates the *first* `}`, not a properly
-    // matching/nested one. This is intentional — Simple Language does not support
-    // nested `${...}` expressions, so finding the first `}` is correct here.
-    if let Some(end) = input.find('}') {
-        end == input.len() - 1
+        Ok(expr)
+    } else if tokens.len() == 1 {
+        token_to_atom(&tokens[0])
     } else {
-        false
+        build_interpolated(&tokens)
     }
 }
 
-/// Parse a string that contains a mix of literal text and `${...}` tokens.
-fn parse_interpolated(input: &str) -> Result<Expr, LanguageError> {
-    let mut parts: Vec<InterpolatedPart> = Vec::new();
-    let mut remaining = input;
+fn tokenize(input: &str) -> Result<Vec<Token>, LanguageError> {
+    let mut tokens = Vec::new();
+    let mut i = 0usize;
+    let mut text_buf = String::new();
 
-    while !remaining.is_empty() {
-        if let Some(start) = remaining.find("${") {
-            // Text before the `${`
-            if start > 0 {
-                parts.push(InterpolatedPart::Literal(remaining[..start].to_string()));
-            }
-            let after_dollar = &remaining[start..]; // starts with "${"
-            // Find the matching `}`
-            if let Some(end) = after_dollar.find('}') {
-                let token = &after_dollar[..=end]; // e.g. "${header.x}"
-                let expr = parse_atom(token)?;
-                parts.push(InterpolatedPart::Expr(Box::new(expr)));
-                remaining = &after_dollar[end + 1..];
-            } else {
-                // No closing brace — treat the rest as a literal
-                parts.push(InterpolatedPart::Literal(after_dollar.to_string()));
-                remaining = "";
-            }
+    fn flush_text(tokens: &mut Vec<Token>, text_buf: &mut String) {
+        if text_buf.is_empty() {
+            return;
+        }
+        if !text_buf.trim().is_empty() {
+            tokens.push(Token::Text(std::mem::take(text_buf)));
         } else {
-            // No more `${` — rest is literal text
-            parts.push(InterpolatedPart::Literal(remaining.to_string()));
-            remaining = "";
+            text_buf.clear();
         }
     }
 
-    Ok(Expr::Interpolated(parts))
+    while i < input.len() {
+        let rest = &input[i..];
+
+        if rest.starts_with("${") {
+            let start = i + 2;
+            let Some(rel_end) = input[start..].find('}') else {
+                if !text_buf.is_empty() || tokens.iter().any(|t| matches!(t, Token::Text(_))) {
+                    text_buf.push_str("${");
+                    i += 2;
+                    continue;
+                }
+                return Err(LanguageError::ParseError {
+                    expr: input.to_string(),
+                    reason: "unclosed interpolation: missing '}'".to_string(),
+                });
+            };
+            flush_text(&mut tokens, &mut text_buf);
+            let end = start + rel_end;
+            tokens.push(Token::Expr(input[start..end].to_string()));
+            i = end + 1;
+            continue;
+        }
+
+        if let Some(after_quote) = rest.strip_prefix('\'') {
+            flush_text(&mut tokens, &mut text_buf);
+            let rel_end = after_quote
+                .find('\'')
+                .ok_or_else(|| LanguageError::ParseError {
+                    expr: input.to_string(),
+                    reason: "unclosed single-quoted string".to_string(),
+                })?;
+            let content = &after_quote[..rel_end];
+            tokens.push(Token::StringLit(content.to_string()));
+            i += 1 + rel_end + 1;
+            continue;
+        }
+
+        if let Some(after_quote) = rest.strip_prefix('"') {
+            flush_text(&mut tokens, &mut text_buf);
+            let rel_end = find_closing_double_quote(after_quote)
+                .ok_or_else(|| LanguageError::ParseError {
+                    expr: input.to_string(),
+                    reason: "unclosed double-quoted string".to_string(),
+                })?;
+            let content = &after_quote[..rel_end];
+            tokens.push(Token::EscapedString(content.to_string()));
+            i += 1 + rel_end + 1;
+            continue;
+        }
+
+        if rest.starts_with("&&") {
+            flush_text(&mut tokens, &mut text_buf);
+            tokens.push(Token::And);
+            i += 2;
+            continue;
+        }
+
+        if rest.starts_with("||") {
+            flush_text(&mut tokens, &mut text_buf);
+            tokens.push(Token::Or);
+            i += 2;
+            continue;
+        }
+
+        let two_char_op = if rest.starts_with(">=") {
+            Some(Op::Gte)
+        } else if rest.starts_with("<=") {
+            Some(Op::Lte)
+        } else if rest.starts_with("!=") {
+            Some(Op::Ne)
+        } else if rest.starts_with("==") {
+            Some(Op::Eq)
+        } else {
+            None
+        };
+        if let Some(op) = two_char_op {
+            flush_text(&mut tokens, &mut text_buf);
+            tokens.push(Token::Op(op));
+            i += 2;
+            continue;
+        }
+
+        let one_char_op = if rest.starts_with('>') {
+            Some(Op::Gt)
+        } else if rest.starts_with('<') {
+            Some(Op::Lt)
+        } else {
+            None
+        };
+        if let Some(op) = one_char_op {
+            flush_text(&mut tokens, &mut text_buf);
+            tokens.push(Token::Op(op));
+            i += 1;
+            continue;
+        }
+
+        if rest.starts_with("contains")
+            && word_boundary(input, i, "contains")
+            && text_buf.trim().is_empty()
+            && tokens.last().is_some_and(is_value_token)
+        {
+            flush_text(&mut tokens, &mut text_buf);
+            tokens.push(Token::Op(Op::Contains));
+            i += "contains".len();
+            continue;
+        }
+
+        if rest.starts_with("true") && word_boundary(input, i, "true") {
+            flush_text(&mut tokens, &mut text_buf);
+            tokens.push(Token::BoolLit(true));
+            i += "true".len();
+            continue;
+        }
+
+        if rest.starts_with("false") && word_boundary(input, i, "false") {
+            flush_text(&mut tokens, &mut text_buf);
+            tokens.push(Token::BoolLit(false));
+            i += "false".len();
+            continue;
+        }
+
+        if rest.starts_with("null") && word_boundary(input, i, "null") {
+            flush_text(&mut tokens, &mut text_buf);
+            tokens.push(Token::Null);
+            i += "null".len();
+            continue;
+        }
+
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+            && text_buf.trim().is_empty()
+        {
+            let num_len = consume_number_len(rest);
+            if num_len > 0 {
+                let raw_num = &rest[..num_len];
+                let num = raw_num.parse::<f64>().map_err(|_| LanguageError::ParseError {
+                    expr: input.to_string(),
+                    reason: format!("invalid number literal: {raw_num}"),
+                })?;
+                if !num.is_finite() {
+                    return Err(LanguageError::ParseError {
+                        expr: input.to_string(),
+                        reason: format!("non-finite number literal: {raw_num}"),
+                    });
+                }
+                flush_text(&mut tokens, &mut text_buf);
+                tokens.push(Token::NumberLit(num));
+                i += num_len;
+                continue;
+            }
+        }
+
+        let ch = rest.chars().next().unwrap();
+        text_buf.push(ch);
+        i += ch.len_utf8();
+    }
+
+    flush_text(&mut tokens, &mut text_buf);
+    Ok(tokens)
 }
 
-/// Find the byte position of `op` in `input` that is outside single-quoted
-/// string literals. Returns `None` if every occurrence is inside quotes.
-fn find_op_outside_quotes(input: &str, op: &str) -> Option<usize> {
-    for (pos, _) in input.match_indices(op) {
-        // Count single quotes strictly before this position.
-        let quote_count = input[..pos].chars().filter(|&c| c == '\'').count();
-        if quote_count % 2 == 0 {
-            return Some(pos);
+fn word_boundary(input: &str, start: usize, word: &str) -> bool {
+    let before = input[..start].chars().next_back();
+    let after = input[start + word.len()..].chars().next();
+    let before_ok = before.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+    let after_ok = after.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+    before_ok && after_ok
+}
+
+fn consume_number_len(s: &str) -> usize {
+    let mut len = 0usize;
+    let mut seen_dot = false;
+    for (idx, ch) in s.char_indices() {
+        if ch.is_ascii_digit() {
+            len = idx + ch.len_utf8();
+            continue;
+        }
+        if ch == '.' && !seen_dot {
+            seen_dot = true;
+            len = idx + ch.len_utf8();
+            continue;
+        }
+        break;
+    }
+    len
+}
+
+fn find_closing_double_quote(s: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (idx, ch) in s.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            return Some(idx);
         }
     }
     None
 }
 
-fn parse_atom(s: &str) -> Result<Expr, LanguageError> {
-    let s = s.trim();
+fn is_value_token(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Expr(_)
+            | Token::StringLit(_)
+            | Token::EscapedString(_)
+            | Token::NumberLit(_)
+            | Token::BoolLit(_)
+            | Token::Null
+    )
+}
 
-    if s == "null" {
-        return Ok(Expr::Null);
+fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<Expr, LanguageError> {
+    let mut left = parse_and(tokens, pos)?;
+    while *pos < tokens.len() && matches!(tokens[*pos], Token::Or) {
+        *pos += 1;
+        let right = parse_and(tokens, pos)?;
+        left = Expr::LogicalOp {
+            left: Box::new(left),
+            op: LogicalOp::Or,
+            right: Box::new(right),
+        };
+    }
+    Ok(left)
+}
+
+fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<Expr, LanguageError> {
+    let mut left = parse_comparison(tokens, pos)?;
+    while *pos < tokens.len() && matches!(tokens[*pos], Token::And) {
+        *pos += 1;
+        let right = parse_comparison(tokens, pos)?;
+        left = Expr::LogicalOp {
+            left: Box::new(left),
+            op: LogicalOp::And,
+            right: Box::new(right),
+        };
+    }
+    Ok(left)
+}
+
+fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, LanguageError> {
+    let left = parse_atom_from_tokens(tokens, pos)?;
+    if *pos < tokens.len() && let Token::Op(op) = &tokens[*pos] {
+        let op = op.clone();
+        *pos += 1;
+        let right = parse_atom_from_tokens(tokens, pos)?;
+        return Ok(Expr::BinOp {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        });
+    }
+    Ok(left)
+}
+
+fn parse_atom_from_tokens(tokens: &[Token], pos: &mut usize) -> Result<Expr, LanguageError> {
+    let token = tokens.get(*pos).ok_or_else(|| LanguageError::ParseError {
+        expr: String::new(),
+        reason: "expected atom but found end of input".to_string(),
+    })?;
+    *pos += 1;
+    token_to_atom(token)
+}
+
+fn token_to_atom(token: &Token) -> Result<Expr, LanguageError> {
+    match token {
+        Token::Expr(s) => parse_expr_atom(s),
+        Token::StringLit(s) => Ok(Expr::StringLit(s.clone())),
+        Token::EscapedString(s) => Ok(Expr::EscapedString(unescape_double_quoted(s))),
+        Token::NumberLit(n) => Ok(Expr::NumberLit(*n)),
+        Token::BoolLit(b) => Ok(Expr::Bool(*b)),
+        Token::Null => Ok(Expr::Null),
+        Token::Text(s) => Ok(Expr::StringLit(s.clone())),
+        Token::Op(_) | Token::And | Token::Or => Err(LanguageError::ParseError {
+            expr: format!("{token:?}"),
+            reason: "operator cannot appear where an atom is expected".to_string(),
+        }),
+    }
+}
+
+fn parse_expr_atom(s: &str) -> Result<Expr, LanguageError> {
+    if s == "body" {
+        return Ok(Expr::Body);
     }
 
-    if s.starts_with("${header.") && s.ends_with('}') {
-        let key = &s[9..s.len() - 1];
+    if let Some(path_str) = s.strip_prefix("body.") {
+        let segments = parse_body_path(path_str)?;
+        return Ok(Expr::BodyField(segments));
+    }
+
+    if let Some(key) = s.strip_prefix("header.") {
         if key.is_empty() {
             return Err(LanguageError::ParseError {
                 expr: s.to_string(),
@@ -184,18 +433,7 @@ fn parse_atom(s: &str) -> Result<Expr, LanguageError> {
         return Ok(Expr::Header(key.to_string()));
     }
 
-    if s == "${body}" {
-        return Ok(Expr::Body);
-    }
-
-    if s.starts_with("${body.") && s.ends_with('}') {
-        let path_str = &s[7..s.len() - 1]; // strip "${body." prefix and "}" suffix
-        let segments = parse_body_path(path_str)?;
-        return Ok(Expr::BodyField(segments));
-    }
-
-    if s.starts_with("${exchangeProperty.") && s.ends_with('}') {
-        let key = &s[19..s.len() - 1];
+    if let Some(key) = s.strip_prefix("exchangeProperty.") {
         if key.is_empty() {
             return Err(LanguageError::ParseError {
                 expr: s.to_string(),
@@ -205,27 +443,21 @@ fn parse_atom(s: &str) -> Result<Expr, LanguageError> {
         return Ok(Expr::ExchangeProperty(key.to_string()));
     }
 
-    // String literals: single-quoted, no escape sequences supported.
-    // e.g., 'hello world' is valid, but 'it\'s' is NOT — the backslash
-    // is treated as a literal character. This is consistent with Apache
-    // Camel Simple's basic string literals.
-    if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2 {
-        return Ok(Expr::StringLit(s[1..s.len() - 1].to_string()));
-    }
-
-    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        let raw = &s[1..s.len() - 1];
-        return Ok(Expr::EscapedString(unescape_double_quoted(raw)));
-    }
-
-    if let Ok(n) = s.parse::<f64>() {
-        return Ok(Expr::NumberLit(n));
-    }
-
     Err(LanguageError::ParseError {
         expr: s.to_string(),
         reason: "unrecognized token".to_string(),
     })
+}
+
+fn build_interpolated(tokens: &[Token]) -> Result<Expr, LanguageError> {
+    let mut parts = Vec::new();
+    for token in tokens {
+        match token {
+            Token::Text(s) => parts.push(InterpolatedPart::Literal(s.clone())),
+            _ => parts.push(InterpolatedPart::Expr(Box::new(token_to_atom(token)?))),
+        }
+    }
+    Ok(Expr::Interpolated(parts))
 }
 
 fn unescape_double_quoted(raw: &str) -> String {

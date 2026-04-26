@@ -3,11 +3,13 @@
 //! Demonstrates using `camel-language-simple` to evaluate predicates and
 //! expressions inside a rust-camel route.
 //!
-//! The timer fires 8 times (every 800 ms). Each tick is assigned a `type`
-//! header cycling through: `order`, `invoice`, `order`, `shipment`, ...
+//! The timer fires 8 times (every 800 ms). Each tick is assigned rotating
+//! `type` and `priority` headers.
 //!
-//! A Simple Language predicate (`${header.type} == 'order'`) is used as the
-//! filter condition — only exchanges tagged as `order` proceed to the log step.
+//! Filters demonstrate:
+//! - compound predicates with `&&`
+//! - null checks (`${body} != null`)
+//! - boolean comparisons (`${header.approved} == true`)
 //!
 //! A Simple Language expression (`${header.type}`) enriches the body,
 //! showing how expressions integrate with arbitrary processing logic.
@@ -41,6 +43,21 @@ async fn main() -> Result<(), CamelError> {
         .create_predicate("${header.type} == 'order'")
         .expect("valid predicate");
 
+    // Predicate: compound condition using &&
+    let high_priority_order_pred = lang
+        .create_predicate("${header.type} == 'order' && ${header.priority} == 'high'")
+        .expect("valid compound predicate");
+
+    // Predicate: null-safe body existence check
+    let body_present_pred = lang
+        .create_predicate("${body} != null")
+        .expect("valid body presence predicate");
+
+    // Predicate: boolean literal comparison
+    let approved_pred = lang
+        .create_predicate("${header.approved} == true")
+        .expect("valid boolean predicate");
+
     // Expression: evaluate ${header.type} to enrich the body
     let type_expr = lang
         .create_expression("${header.type}")
@@ -48,6 +65,9 @@ async fn main() -> Result<(), CamelError> {
 
     // Wrap in Arc so they can be moved into multiple route closures
     let order_pred = Arc::new(order_pred);
+    let high_priority_order_pred = Arc::new(high_priority_order_pred);
+    let body_present_pred = Arc::new(body_present_pred);
+    let approved_pred = Arc::new(approved_pred);
     let type_expr = Arc::new(type_expr);
 
     // --- Build route ---
@@ -56,23 +76,44 @@ async fn main() -> Result<(), CamelError> {
     let counter_clone = Arc::clone(&counter);
 
     let types = ["order", "invoice", "order", "shipment"];
+    let priorities = ["high", "low", "high", "low"];
 
     let route = RouteBuilder::from("timer:tick?period=800&repeatCount=8")
         .route_id("language-simple-demo")
-        // Step 1: assign a rotating type header and an initial body
+        // Step 1: assign rotating headers and alternate empty/non-empty body
         .process(move |mut exchange: camel_api::Exchange| {
             let c = Arc::clone(&counter_clone);
             Box::pin(async move {
                 let n = c.fetch_add(1, Ordering::SeqCst) as usize;
                 let msg_type = types[n % types.len()];
+                let priority = priorities[n % priorities.len()];
+                let approved = n % 2 == 0;
                 exchange
                     .input
                     .set_header("type", camel_api::Value::String(msg_type.to_string()));
-                exchange.input.body = Body::Text(format!("message #{}", n + 1));
+                exchange
+                    .input
+                    .set_header("priority", camel_api::Value::String(priority.to_string()));
+                exchange
+                    .input
+                    .set_header("approved", camel_api::Value::Bool(approved));
+
+                exchange.input.body = if n % 3 == 0 {
+                    Body::Empty
+                } else {
+                    Body::Text(format!("message #{}", n + 1))
+                };
                 Ok(exchange)
             })
         })
-        // Step 2: use Simple Language expression to append type info to body
+        // Step 2: demonstrate body null check
+        .filter({
+            let pred = Arc::clone(&body_present_pred);
+            move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
+        })
+        .to("log:body-present?showBody=true&showHeaders=true")
+        .end_filter()
+        // Step 3: use Simple Language expression to append type info to body
         .process({
             let type_expr = Arc::clone(&type_expr);
             move |mut exchange: camel_api::Exchange| {
@@ -86,12 +127,26 @@ async fn main() -> Result<(), CamelError> {
                 })
             }
         })
-        // Step 3: filter — only 'order' messages pass
+        // Step 4: filter — only 'order' messages pass
         .filter({
             let pred = Arc::clone(&order_pred);
             move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
         })
         .to("log:orders?showBody=true&showHeaders=true")
+        .end_filter()
+        // Step 5: compound predicate with && for high-priority orders
+        .filter({
+            let pred = Arc::clone(&high_priority_order_pred);
+            move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
+        })
+        .to("log:high-priority-orders?showBody=true&showHeaders=true")
+        .end_filter()
+        // Step 6: boolean comparison against true literal
+        .filter({
+            let pred = Arc::clone(&approved_pred);
+            move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
+        })
+        .to("log:approved-orders?showBody=true&showHeaders=true")
         .end_filter()
         .build()?;
 
@@ -99,8 +154,8 @@ async fn main() -> Result<(), CamelError> {
     ctx.start().await?;
 
     println!("Simple Language example running.");
-    println!("Producing 8 messages with rotating types: order / invoice / order / shipment");
-    println!("Only 'order' messages will appear in the 'orders' log.");
+    println!("Producing 8 messages with rotating type and priority headers.");
+    println!("Filters demonstrate: body != null, order && high priority, and approved == true.");
     println!("Press Ctrl+C to stop early...\n");
 
     tokio::signal::ctrl_c()
