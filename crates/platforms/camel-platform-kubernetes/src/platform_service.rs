@@ -348,10 +348,10 @@ fn resolve_lease_namespace(
         return config.namespace.clone();
     }
 
-    if let Some(namespace) = identity.namespace.as_ref() {
-        if !namespace.is_empty() {
-            return namespace.clone();
-        }
+    if let Some(namespace) = identity.namespace.as_ref()
+        && !namespace.is_empty()
+    {
+        return namespace.clone();
     }
 
     "default".to_string()
@@ -486,12 +486,13 @@ fn delete_params_for_owned_lease(lease: &Lease, holder_identity: &str) -> Option
         return None;
     }
 
-    let mut delete_params = DeleteParams::default();
-    delete_params.preconditions = Some(Preconditions {
-        uid,
-        resource_version,
-    });
-    Some(delete_params)
+    Some(DeleteParams {
+        preconditions: Some(Preconditions {
+            uid,
+            resource_version,
+        }),
+        ..DeleteParams::default()
+    })
 }
 
 fn is_optimistic_conflict(err: &kube::Error) -> bool {
@@ -511,8 +512,10 @@ mod tests {
 
     #[test]
     fn namespace_resolution_uses_explicit_config_namespace_first() {
-        let mut config = KubernetesPlatformConfig::default();
-        config.namespace = "configured-ns".to_string();
+        let config = KubernetesPlatformConfig {
+            namespace: "configured-ns".to_string(),
+            ..KubernetesPlatformConfig::default()
+        };
         let identity = PlatformIdentity {
             node_id: "pod-a".to_string(),
             namespace: Some("pod-ns".to_string()),
@@ -524,8 +527,10 @@ mod tests {
 
     #[test]
     fn namespace_resolution_falls_back_to_identity_namespace() {
-        let mut config = KubernetesPlatformConfig::default();
-        config.namespace = "".to_string();
+        let config = KubernetesPlatformConfig {
+            namespace: "".to_string(),
+            ..KubernetesPlatformConfig::default()
+        };
         let identity = PlatformIdentity {
             node_id: "pod-a".to_string(),
             namespace: Some("pod-ns".to_string()),
@@ -537,8 +542,10 @@ mod tests {
 
     #[test]
     fn namespace_resolution_falls_back_to_default_literal_when_missing() {
-        let mut config = KubernetesPlatformConfig::default();
-        config.namespace = "".to_string();
+        let config = KubernetesPlatformConfig {
+            namespace: "".to_string(),
+            ..KubernetesPlatformConfig::default()
+        };
         let identity = PlatformIdentity {
             node_id: "pod-a".to_string(),
             namespace: None,
@@ -566,11 +573,9 @@ mod tests {
                 holder_identity: Some("pod-a".to_string()),
                 ..LeaseSpec::default()
             }),
-            ..Lease::default()
         };
 
         let delete = delete_params_for_owned_lease(&lease, "pod-a");
-        assert!(delete.is_some());
         let pre = delete
             .unwrap()
             .preconditions
@@ -591,7 +596,6 @@ mod tests {
                 holder_identity: Some("pod-b".to_string()),
                 ..LeaseSpec::default()
             }),
-            ..Lease::default()
         };
 
         assert!(delete_params_for_owned_lease(&lease, "pod-a").is_none());
@@ -605,7 +609,6 @@ mod tests {
                 holder_identity: Some("pod-a".to_string()),
                 ..LeaseSpec::default()
             }),
-            ..Lease::default()
         };
 
         assert!(delete_params_for_owned_lease(&lease, "pod-a").is_none());

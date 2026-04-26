@@ -87,7 +87,7 @@ async fn main() -> Result<(), CamelError> {
                 let n = c.fetch_add(1, Ordering::SeqCst) as usize;
                 let msg_type = types[n % types.len()];
                 let priority = priorities[n % priorities.len()];
-                let approved = n % 2 == 0;
+                let approved = n.is_multiple_of(2);
                 exchange
                     .input
                     .set_header("type", camel_api::Value::String(msg_type.to_string()));
@@ -98,7 +98,7 @@ async fn main() -> Result<(), CamelError> {
                     .input
                     .set_header("approved", camel_api::Value::Bool(approved));
 
-                exchange.input.body = if n % 3 == 0 {
+                exchange.input.body = if n.is_multiple_of(3) {
                     Body::Empty
                 } else {
                     Body::Text(format!("message #{}", n + 1))

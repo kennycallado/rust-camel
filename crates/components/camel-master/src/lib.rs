@@ -204,33 +204,40 @@ async fn stop_delegate(state: &mut DelegateState, drain_timeout: Duration) {
     }
 }
 
+struct ReconcileContext<'a> {
+    lock_name: &'a str,
+    delegate_component: &'a Arc<dyn Component>,
+    delegate_uri: &'a str,
+    sender: &'a tokio::sync::mpsc::Sender<ExchangeEnvelope>,
+    parent_cancel: &'a CancellationToken,
+    drain_timeout: Duration,
+    metrics: &'a Arc<dyn MetricsCollector>,
+    platform_service: &'a Arc<dyn PlatformService>,
+}
+
 async fn reconcile_event(
     event: camel_api::LeadershipEvent,
     state: &mut DelegateState,
-    lock_name: &str,
-    delegate_component: &Arc<dyn Component>,
-    delegate_uri: &str,
-    sender: &tokio::sync::mpsc::Sender<ExchangeEnvelope>,
-    parent_cancel: &CancellationToken,
-    drain_timeout: Duration,
-    metrics: &Arc<dyn MetricsCollector>,
-    platform_service: &Arc<dyn PlatformService>,
+    ctx: &ReconcileContext<'_>,
 ) {
     match event {
         camel_api::LeadershipEvent::StartedLeading => {
-            info!(lock = %lock_name, "master leadership acquired");
-            stop_delegate(state, drain_timeout).await;
+            info!(lock = %ctx.lock_name, "master leadership acquired");
+            stop_delegate(state, ctx.drain_timeout).await;
 
             let delegate_ctx = MasterDelegateContext {
-                delegate_component: Arc::clone(delegate_component),
-                metrics: Arc::clone(metrics),
-                platform_service: Arc::clone(platform_service),
+                delegate_component: Arc::clone(ctx.delegate_component),
+                metrics: Arc::clone(ctx.metrics),
+                platform_service: Arc::clone(ctx.platform_service),
             };
 
-            let endpoint = match delegate_component.create_endpoint(delegate_uri, &delegate_ctx) {
+            let endpoint = match ctx
+                .delegate_component
+                .create_endpoint(ctx.delegate_uri, &delegate_ctx)
+            {
                 Ok(endpoint) => endpoint,
                 Err(err) => {
-                    warn!(lock = %lock_name, "failed to create delegate endpoint: {err}");
+                    warn!(lock = %ctx.lock_name, "failed to create delegate endpoint: {err}");
                     return;
                 }
             };
@@ -238,13 +245,13 @@ async fn reconcile_event(
             let mut consumer = match endpoint.create_consumer() {
                 Ok(consumer) => consumer,
                 Err(err) => {
-                    warn!(lock = %lock_name, "failed to create delegate consumer: {err}");
+                    warn!(lock = %ctx.lock_name, "failed to create delegate consumer: {err}");
                     return;
                 }
             };
 
-            let run_token = parent_cancel.child_token();
-            let delegate_ctx = ConsumerContext::new(sender.clone(), run_token.clone());
+            let run_token = ctx.parent_cancel.child_token();
+            let delegate_ctx = ConsumerContext::new(ctx.sender.clone(), run_token.clone());
             let handle = tokio::spawn(async move {
                 let _ = consumer.start(delegate_ctx).await;
                 let _ = consumer.stop().await;
@@ -253,8 +260,8 @@ async fn reconcile_event(
             *state = DelegateState::Active { run_token, handle };
         }
         camel_api::LeadershipEvent::StoppedLeading => {
-            info!(lock = %lock_name, "master leadership lost");
-            stop_delegate(state, drain_timeout).await;
+            info!(lock = %ctx.lock_name, "master leadership lost");
+            stop_delegate(state, ctx.drain_timeout).await;
         }
     }
 }
@@ -295,25 +302,24 @@ impl Consumer for MasterConsumer {
             let mut delegate_attempts = 0u32;
             let mut retry_tick = interval(DELEGATE_RETRY_INTERVAL);
 
+            let rctx = ReconcileContext {
+                lock_name: &lock_name,
+                delegate_component: &delegate_component,
+                delegate_uri: &delegate_uri,
+                sender: &sender,
+                parent_cancel: &parent_cancel,
+                drain_timeout,
+                metrics: &metrics,
+                platform_service: &platform_service,
+            };
+
             let initial_event = { events.borrow().clone() };
             if let Some(initial_event) = initial_event {
                 is_leading = matches!(&initial_event, camel_api::LeadershipEvent::StartedLeading);
                 if is_leading {
                     delegate_attempts = 0;
                 }
-                reconcile_event(
-                    initial_event,
-                    &mut state,
-                    &lock_name,
-                    &delegate_component,
-                    &delegate_uri,
-                    &sender,
-                    &parent_cancel,
-                    drain_timeout,
-                    &metrics,
-                    &platform_service,
-                )
-                .await;
+                reconcile_event(initial_event, &mut state, &rctx).await;
             }
 
             loop {
@@ -335,19 +341,7 @@ impl Consumer for MasterConsumer {
                             if !was_leading && is_leading {
                                 delegate_attempts = 0;
                             }
-                            reconcile_event(
-                                event,
-                                &mut state,
-                                &lock_name,
-                                &delegate_component,
-                                &delegate_uri,
-                                &sender,
-                                &parent_cancel,
-                                drain_timeout,
-                                &metrics,
-                                &platform_service,
-                            )
-                            .await;
+                            reconcile_event(event, &mut state, &rctx).await;
                         }
                     }
                     _ = retry_tick.tick() => {
@@ -366,14 +360,7 @@ impl Consumer for MasterConsumer {
                             reconcile_event(
                                 camel_api::LeadershipEvent::StartedLeading,
                                 &mut state,
-                                &lock_name,
-                                &delegate_component,
-                                &delegate_uri,
-                                &sender,
-                                &parent_cancel,
-                                drain_timeout,
-                                &metrics,
-                                &platform_service,
+                                &rctx,
                             )
                             .await;
                         }
