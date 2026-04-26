@@ -42,6 +42,8 @@ jobs:
         run: sudo apt-get install -y libclang-dev
       - name: Docker availability
         run: docker info
+      - name: Pull container test images
+        run: docker pull alpine:latest
       - name: Build
         run: cargo build --workspace
       - name: Hexagonal boundaries (camel-core)
@@ -58,6 +60,8 @@ jobs:
         env:
           CAMEL_XML_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/xml/build/native/xml-bridge
         run: cargo test -p camel-test --features integration-tests --test xml_bridge_validator_test --test xml_bridge_xslt_test
+      - name: Container integration tests
+        run: cargo test -p camel-test --features integration-tests --test container_test
       - name: Test (full workspace)
         run: cargo test --workspace
 

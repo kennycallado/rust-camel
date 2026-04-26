@@ -1436,10 +1436,12 @@ dependencies = [
 name = "camel-test"
 version = "0.7.2"
 dependencies = [
+ "bollard",
  "camel-api",
  "camel-bean",
  "camel-builder",
  "camel-component-api",
+ "camel-component-container",
  "camel-component-controlbus",
  "camel-component-direct",
  "camel-component-file",
