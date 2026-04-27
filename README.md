@@ -579,7 +579,7 @@ Each component supports global defaults that apply to all endpoints. URI paramet
 Supported component configurations:
 
 - **`[components.http]`**: `connect_timeout_ms`, `response_timeout_ms`, `max_connections`, `max_body_size`, `max_request_body`, `allow_private_ips`
-- **`[components.kafka]`**: `brokers`, `group_id`, `session_timeout_ms`, `request_timeout_ms`, `auto_offset_reset`, `security_protocol`
+- **`[components.kafka]`**: `brokers`, `group_id`, `session_timeout_ms`, `request_timeout_ms`, `auto_offset_reset`, `security_protocol`, `partition_assignment_strategy`
 - **`[components.redis]`**: `host`, `port`
 - **`[components.sql]`**: `max_connections`, `min_connections`, `idle_timeout_secs`, `max_lifetime_secs`, `ssl_mode`, `ssl_root_cert`, `ssl_cert`, `ssl_key`
 - **`[components.jms]`**: `default_broker`, `max_bridges`, `bridge_cache_dir`, `bridge_start_timeout_ms`, `broker_reconnect_interval_ms`. Brokers are declared as named entries under `[components.jms.brokers.<name>]`, each with `broker_url`, `broker_type` (`activemq`|`artemis`), and optional `username`/`password`. URI schemes `activemq:` and `artemis:` lock the broker type automatically and support shorthand destinations (e.g. `activemq:orders` → queue). Use the `broker=<name>` URI query param to select a specific broker from the pool.

@@ -249,6 +249,11 @@ async fn run_consumer_loop(
         .set("enable.auto.commit", "false")
         .set("fetch.wait.max.ms", config.poll_timeout_ms.to_string());
 
+    client_cfg.set(
+        "partition.assignment.strategy",
+        config.partition_assignment_strategy.to_rdkafka_str(),
+    );
+
     apply_security_config(&config, &mut client_cfg);
 
     let consumer: ReadyStreamConsumer = client_cfg

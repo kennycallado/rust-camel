@@ -27,6 +27,7 @@ kafka:topic[?param=value&...]
 | `saslPassword` | — | SASL password (required when `saslAuthType` is PLAIN/SCRAM) |
 | `sslKeystoreLocation` | — | Path to client keystore (PEM/PKCS12) |
 | `sslTruststoreLocation` | — | Path to CA truststore |
+| `partitionAssignmentStrategy` | `range` | `range`/`roundRobin`/`cooperativeSticky` (consumer only) |
 
 ## Headers
 

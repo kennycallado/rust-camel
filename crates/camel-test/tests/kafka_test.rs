@@ -268,3 +268,56 @@ async fn kafka_consumer_sets_headers() {
     // Note: kafka.manual.commit JSON property removed; use exchange.get_extension::<KafkaManualCommit>("kafka.manual_commit")
     // when allowManualCommit=true is configured.
 }
+
+#[tokio::test]
+async fn kafka_consumer_cooperative_sticky_strategy() {
+    let (_container, brokers) = start_kafka().await;
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(KafkaComponent::new())
+        .build()
+        .await;
+
+    let consumer_route = RouteBuilder::from(&format!(
+        "kafka:test-cooperative?brokers={brokers}&groupId=coop-group&autoOffsetReset=earliest&partitionAssignmentStrategy=cooperativeSticky"
+    ))
+    .to("mock:coop-consumed")
+    .route_id("kafka-cooperative-consumer")
+    .build()
+    .unwrap();
+
+    let producer_route =
+        RouteBuilder::from("timer:coop-produce?period=3000&delay=5000&repeatCount=1")
+            .set_body(camel_api::Value::String("cooperative-payload".to_string()))
+            .to(format!("kafka:test-cooperative?brokers={brokers}&acks=all"))
+            .route_id("kafka-cooperative-producer")
+            .build()
+            .unwrap();
+
+    h.add_route(consumer_route).await.unwrap();
+    h.add_route(producer_route).await.unwrap();
+    h.start().await;
+
+    let endpoint = h.mock().get_endpoint("coop-consumed").unwrap();
+    wait_until(
+        "kafka cooperative consumer receives message",
+        std::time::Duration::from_secs(20),
+        std::time::Duration::from_millis(200),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
+    h.stop().await;
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert!(
+        !exchanges.is_empty(),
+        "Consumer with cooperativeSticky strategy should have received at least one message"
+    );
+}

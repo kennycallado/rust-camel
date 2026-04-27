@@ -23,6 +23,39 @@ pub enum SaslAuthType {
     Ssl,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PartitionAssignmentStrategy {
+    #[default]
+    Range,
+    RoundRobin,
+    CooperativeSticky,
+}
+
+impl std::str::FromStr for PartitionAssignmentStrategy {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "range" => Ok(Self::Range),
+            "roundrobin" => Ok(Self::RoundRobin),
+            "cooperativesticky" => Ok(Self::CooperativeSticky),
+            _ => Err(format!(
+                "Invalid partitionAssignmentStrategy: '{}'. Valid values: range, roundRobin, cooperativeSticky",
+                s
+            )),
+        }
+    }
+}
+
+impl PartitionAssignmentStrategy {
+    pub fn to_rdkafka_str(&self) -> &'static str {
+        match self {
+            Self::Range => "range",
+            Self::RoundRobin => "roundrobin",
+            Self::CooperativeSticky => "cooperative-sticky",
+        }
+    }
+}
+
 impl std::str::FromStr for SecurityProtocol {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -205,6 +238,9 @@ pub struct KafkaEndpointConfig {
 
     /// Allow manual commit. Default: false.
     pub allow_manual_commit: bool,
+
+    /// Partition assignment strategy. Default: Range.
+    pub partition_assignment_strategy: PartitionAssignmentStrategy,
 }
 
 impl KafkaEndpointConfig {
@@ -303,6 +339,14 @@ impl KafkaEndpointConfig {
             .map(|s| s.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        let partition_assignment_strategy = parts
+            .params
+            .get("partitionAssignmentStrategy")
+            .map(|s| s.parse::<PartitionAssignmentStrategy>())
+            .transpose()
+            .map_err(CamelError::InvalidUri)?
+            .unwrap_or_default();
+
         let config = Self {
             topic,
             brokers,
@@ -322,6 +366,7 @@ impl KafkaEndpointConfig {
             ssl_truststore_location,
             ssl_truststore_password,
             allow_manual_commit,
+            partition_assignment_strategy,
         };
 
         config.validate()
@@ -472,6 +517,10 @@ impl std::fmt::Debug for KafkaEndpointConfig {
                     .map(|_| "[REDACTED]"),
             )
             .field("allow_manual_commit", &self.allow_manual_commit)
+            .field(
+                "partition_assignment_strategy",
+                &self.partition_assignment_strategy,
+            )
             .finish()
     }
 }
@@ -742,6 +791,51 @@ mod tests {
             "error should mention saslAuthType: {msg}"
         );
     }
+
+    #[test]
+    fn test_partition_assignment_strategy_default_when_not_set() {
+        let c = KafkaEndpointConfig::from_uri("kafka:orders").unwrap();
+        assert_eq!(
+            c.partition_assignment_strategy,
+            PartitionAssignmentStrategy::Range
+        );
+    }
+
+    #[test]
+    fn test_partition_assignment_strategy_parse_roundrobin() {
+        let c = KafkaEndpointConfig::from_uri(
+            "kafka:orders?partitionAssignmentStrategy=roundRobin",
+        )
+        .unwrap();
+        assert_eq!(
+            c.partition_assignment_strategy,
+            PartitionAssignmentStrategy::RoundRobin
+        );
+    }
+
+    #[test]
+    fn test_partition_assignment_strategy_parse_cooperative_sticky() {
+        let c = KafkaEndpointConfig::from_uri(
+            "kafka:orders?partitionAssignmentStrategy=cooperativeSticky",
+        )
+        .unwrap();
+        assert_eq!(
+            c.partition_assignment_strategy,
+            PartitionAssignmentStrategy::CooperativeSticky
+        );
+    }
+
+    #[test]
+    fn test_partition_assignment_strategy_invalid_uri_fails() {
+        let result =
+            KafkaEndpointConfig::from_uri("kafka:orders?partitionAssignmentStrategy=invalid");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("partitionAssignmentStrategy"),
+            "error should mention partitionAssignmentStrategy: {msg}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -808,6 +902,72 @@ mod security_config_tests {
             "debug should contain [REDACTED]: {debug_str}"
         );
     }
+
+    #[test]
+    fn test_partition_assignment_strategy_default_is_range() {
+        assert_eq!(
+            PartitionAssignmentStrategy::default(),
+            PartitionAssignmentStrategy::Range
+        );
+    }
+
+    #[test]
+    fn test_partition_assignment_strategy_from_str_roundrobin() {
+        let s: Result<PartitionAssignmentStrategy, _> = "roundRobin".parse();
+        assert_eq!(s.unwrap(), PartitionAssignmentStrategy::RoundRobin);
+    }
+
+    #[test]
+    fn test_partition_assignment_strategy_from_str_cooperative_sticky() {
+        let s: Result<PartitionAssignmentStrategy, _> = "cooperativeSticky".parse();
+        assert_eq!(s.unwrap(), PartitionAssignmentStrategy::CooperativeSticky);
+    }
+
+    #[test]
+    fn test_partition_assignment_strategy_from_str_case_insensitive() {
+        assert_eq!(
+            "ROUNDROBIN".parse::<PartitionAssignmentStrategy>().unwrap(),
+            PartitionAssignmentStrategy::RoundRobin
+        );
+        assert_eq!(
+            "Range".parse::<PartitionAssignmentStrategy>().unwrap(),
+            PartitionAssignmentStrategy::Range
+        );
+        assert_eq!(
+            "COOPERATIVESTICKY"
+                .parse::<PartitionAssignmentStrategy>()
+                .unwrap(),
+            PartitionAssignmentStrategy::CooperativeSticky
+        );
+    }
+
+    #[test]
+    fn test_partition_assignment_strategy_from_str_invalid() {
+        let result: Result<PartitionAssignmentStrategy, _> = "bogus".parse();
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("bogus"),
+            "error should mention the invalid value: {msg}"
+        );
+        assert!(
+            msg.contains("range"),
+            "error should list valid options: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_partition_assignment_strategy_to_rdkafka_str() {
+        assert_eq!(PartitionAssignmentStrategy::Range.to_rdkafka_str(), "range");
+        assert_eq!(
+            PartitionAssignmentStrategy::RoundRobin.to_rdkafka_str(),
+            "roundrobin"
+        );
+        assert_eq!(
+            PartitionAssignmentStrategy::CooperativeSticky.to_rdkafka_str(),
+            "cooperative-sticky"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -855,6 +1015,7 @@ mod kafka_config_tests {
             ssl_truststore_location: None,
             ssl_truststore_password: None,
             allow_manual_commit: false,
+            partition_assignment_strategy: PartitionAssignmentStrategy::Range,
         };
 
         let defaults = KafkaConfig::default()
