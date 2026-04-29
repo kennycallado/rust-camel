@@ -803,10 +803,9 @@ mod tests {
 
     #[test]
     fn test_partition_assignment_strategy_parse_roundrobin() {
-        let c = KafkaEndpointConfig::from_uri(
-            "kafka:orders?partitionAssignmentStrategy=roundRobin",
-        )
-        .unwrap();
+        let c =
+            KafkaEndpointConfig::from_uri("kafka:orders?partitionAssignmentStrategy=roundRobin")
+                .unwrap();
         assert_eq!(
             c.partition_assignment_strategy,
             PartitionAssignmentStrategy::RoundRobin

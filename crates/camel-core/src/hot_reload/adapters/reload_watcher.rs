@@ -102,11 +102,9 @@ where
     }
 
     for dir in &watch_dirs {
-        watcher
-            .watch(dir, RecursiveMode::Recursive)
-            .map_err(|e| {
-                CamelError::RouteError(format!("Failed to watch directory {dir:?}: {e}"))
-            })?;
+        watcher.watch(dir, RecursiveMode::Recursive).map_err(|e| {
+            CamelError::RouteError(format!("Failed to watch directory {dir:?}: {e}"))
+        })?;
         tracing::info!("hot-reload: watching {:?}", dir);
     }
 
