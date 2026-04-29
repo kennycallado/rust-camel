@@ -1,4 +1,5 @@
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -100,6 +101,47 @@ impl Consumer for TestDelegateConsumer {
 struct FakeLeadershipService {
     seen_lock_name: Arc<Mutex<Option<String>>>,
     tx: Arc<Mutex<Option<watch::Sender<Option<LeadershipEvent>>>>>,
+}
+
+struct DropSensitiveLeadershipService {
+    canceled: Arc<AtomicBool>,
+}
+
+impl DropSensitiveLeadershipService {
+    fn new() -> Self {
+        Self {
+            canceled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn was_canceled(&self) -> bool {
+        self.canceled.load(Ordering::Acquire)
+    }
+}
+
+#[async_trait]
+impl LeadershipService for DropSensitiveLeadershipService {
+    async fn start(&self, _lock_name: &str) -> Result<LeadershipHandle, PlatformError> {
+        let (tx, rx) = watch::channel(Some(LeadershipEvent::StartedLeading));
+        let cancel = CancellationToken::new();
+        let cancel_wait = cancel.clone();
+        let canceled = Arc::clone(&self.canceled);
+        let (term_tx, term_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            cancel_wait.cancelled().await;
+            canceled.store(true, Ordering::Release);
+            let _ = tx.send(Some(LeadershipEvent::StoppedLeading));
+            let _ = term_tx.send(());
+        });
+
+        Ok(LeadershipHandle::new(
+            rx,
+            Arc::new(AtomicBool::new(true)),
+            cancel,
+            term_rx,
+        ))
+    }
 }
 
 impl FakeLeadershipService {
@@ -305,4 +347,29 @@ async fn retries_delegate_start_while_leadership_stays_started() {
 
     cancel.cancel();
     consumer.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropping_consumer_after_start_does_not_step_down_leadership_immediately() {
+    let delegate = Arc::new(TestDelegateComponent);
+    let leadership = Arc::new(DropSensitiveLeadershipService::new());
+    let ctx = TestComponentContext {
+        delegate,
+        platform_service: Arc::new(FakePlatformService::new(leadership.clone())),
+    };
+
+    let component = MasterComponent::default();
+    let endpoint = component
+        .create_endpoint("master:drop-lock:test:delegate", &ctx)
+        .unwrap();
+    let mut consumer = endpoint.create_consumer().unwrap();
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+    let consumer_ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+    consumer.start(consumer_ctx).await.unwrap();
+    drop(consumer);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!leadership.was_canceled());
 }

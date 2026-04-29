@@ -149,7 +149,6 @@ struct MasterConsumer {
     platform_service: Arc<dyn PlatformService>,
     drain_timeout: Duration,
     delegate_retry_max_attempts: Option<u32>,
-    leadership_handle: Option<camel_api::LeadershipHandle>,
     leadership_task: Option<JoinHandle<()>>,
     stop_token: Option<CancellationToken>,
 }
@@ -172,7 +171,6 @@ impl MasterConsumer {
             platform_service,
             drain_timeout,
             delegate_retry_max_attempts,
-            leadership_handle: None,
             leadership_task: None,
             stop_token: None,
         }
@@ -295,6 +293,7 @@ impl Consumer for MasterConsumer {
 
         let stop_token = CancellationToken::new();
         let stop_token_loop = stop_token.clone();
+        let leadership_handle = handle;
 
         let task = tokio::spawn(async move {
             let mut state = DelegateState::Inactive;
@@ -369,9 +368,9 @@ impl Consumer for MasterConsumer {
             }
 
             stop_delegate(&mut state, drain_timeout).await;
+            let _ = timeout(drain_timeout, leadership_handle.step_down()).await;
         });
 
-        self.leadership_handle = Some(handle);
         self.stop_token = Some(stop_token);
         self.leadership_task = Some(task);
 
@@ -387,10 +386,6 @@ impl Consumer for MasterConsumer {
             && timeout(self.drain_timeout, task).await.is_err()
         {
             warn!("master leadership loop shutdown timed out");
-        }
-
-        if let Some(handle) = self.leadership_handle.take() {
-            let _ = timeout(self.drain_timeout, handle.step_down()).await;
         }
 
         Ok(())
