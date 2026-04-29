@@ -334,6 +334,47 @@ async fn start_stop_route_happy_path_with_timer_and_mock() {
 }
 
 #[tokio::test]
+async fn start_route_spawns_pipeline_before_consumer_for_eager_consumers() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    set_start_route_event_hook(Some({
+        let events = Arc::clone(&events);
+        Arc::new(move |event| {
+            events.lock().expect("events lock").push(event);
+        })
+    }));
+
+    let mut controller = build_controller_with_components();
+    controller
+        .add_route(
+            RouteDefinition::new(
+                "timer:tick?period=10&repeatCount=1",
+                vec![BuilderStep::To("mock:out".into())],
+            )
+            .with_route_id("startup-order"),
+        )
+        .unwrap();
+
+    controller.start_route("startup-order").await.unwrap();
+    set_start_route_event_hook(None);
+    controller.stop_route("startup-order").await.unwrap();
+
+    let events = events.lock().expect("events lock").clone();
+    let pipeline_index = events
+        .iter()
+        .position(|event| *event == "pipeline_spawned")
+        .expect("pipeline spawn event");
+    let consumer_index = events
+        .iter()
+        .position(|event| *event == "consumer_spawned")
+        .expect("consumer spawn event");
+
+    assert!(
+        pipeline_index < consumer_index,
+        "expected pipeline task to spawn before consumer task, got {events:?}"
+    );
+}
+
+#[tokio::test]
 async fn suspend_resume_and_restart_cover_execution_transitions() {
     let mut controller = build_controller_with_components();
 

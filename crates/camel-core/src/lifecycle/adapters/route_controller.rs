@@ -70,6 +70,31 @@ unsafe impl Sync for SyncBoxProcessor {}
 
 type SharedPipeline = Arc<ArcSwap<SyncBoxProcessor>>;
 
+#[cfg(test)]
+type StartRouteEventHook = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
+
+#[cfg(test)]
+static START_ROUTE_EVENT_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<StartRouteEventHook>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+fn set_start_route_event_hook(hook: Option<StartRouteEventHook>) {
+    *START_ROUTE_EVENT_HOOK
+        .lock()
+        .expect("start route event hook lock") = hook;
+}
+
+#[cfg(test)]
+fn emit_start_route_event(event: &'static str) {
+    if let Some(hook) = START_ROUTE_EVENT_HOOK
+        .lock()
+        .expect("start route event hook lock")
+        .as_ref()
+    {
+        hook(event);
+    }
+}
+
 /// Internal state for a managed route.
 pub(super) struct AggregateSplitInfo {
     pub(super) pre_pipeline: SharedPipeline,
@@ -918,16 +943,6 @@ impl RouteController for DefaultRouteController {
             let pre_pipeline = Arc::clone(&split.pre_pipeline);
             let post_pipeline = Arc::clone(&split.post_pipeline);
 
-            // Spawn consumer task (same as normal route)
-            let consumer_handle = super::consumer_management::spawn_consumer_task(
-                route_id.to_string(),
-                consumer,
-                consumer_ctx,
-                crash_notifier,
-                runtime_for_consumer,
-                false,
-            );
-
             // Spawn biased select forward loop
             let pipeline_handle = tokio::spawn(async move {
                 loop {
@@ -1006,6 +1021,21 @@ impl RouteController for DefaultRouteController {
                     }
                 }
             });
+            #[cfg(test)]
+            emit_start_route_event("pipeline_spawned");
+
+            // Start consumer after pipeline loop is spawned to avoid startup races
+            // where consumers emit exchanges before the route pipeline begins polling.
+            let consumer_handle = super::consumer_management::spawn_consumer_task(
+                route_id.to_string(),
+                consumer,
+                consumer_ctx,
+                crash_notifier,
+                runtime_for_consumer,
+                false,
+            );
+            #[cfg(test)]
+            emit_start_route_event("consumer_spawned");
 
             let managed = self
                 .routes
@@ -1019,16 +1049,6 @@ impl RouteController for DefaultRouteController {
             return Ok(());
         }
         // --- End aggregator v2 branch ---
-
-        // Start consumer in background task.
-        let consumer_handle = super::consumer_management::spawn_consumer_task(
-            route_id.to_string(),
-            consumer,
-            consumer_ctx,
-            crash_notifier,
-            runtime_for_consumer,
-            false,
-        );
 
         // Spawn pipeline task with its own cancellation token
         let pipeline_handle = match effective_concurrency {
@@ -1119,6 +1139,21 @@ impl RouteController for DefaultRouteController {
                 })
             }
         };
+        #[cfg(test)]
+        emit_start_route_event("pipeline_spawned");
+
+        // Start consumer after pipeline task is spawned to minimize the chance of
+        // fire-and-forget events being produced before the pipeline loop is active.
+        let consumer_handle = super::consumer_management::spawn_consumer_task(
+            route_id.to_string(),
+            consumer,
+            consumer_ctx,
+            crash_notifier,
+            runtime_for_consumer,
+            false,
+        );
+        #[cfg(test)]
+        emit_start_route_event("consumer_spawned");
 
         // Store handles and update status
         let managed = self
