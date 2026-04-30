@@ -368,9 +368,7 @@ fn create_large_response_route(
         .build()
 }
 
-fn create_slow_route(
-    request_count: Arc<AtomicU64>,
-) -> Result<RouteDefinition, CamelError> {
+fn create_slow_route(request_count: Arc<AtomicU64>) -> Result<RouteDefinition, CamelError> {
     RouteBuilder::from("http://0.0.0.0:8080/api/slow?maxInflightRequests=2")
         .route_id("slow-route")
         .process(move |mut exchange| {

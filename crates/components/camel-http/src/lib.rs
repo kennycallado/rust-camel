@@ -426,34 +426,28 @@ impl ServerRegistry {
         if let Some(existing) = cell.get()
             && existing.max_request_body != max_request_body
         {
-            return Err(CamelError::EndpointCreationFailed(
-                format!(
-                    "incompatible maxRequestBody for shared server (host={host}, port={port}): {} vs {}",
-                    existing.max_request_body, max_request_body
-                ),
-            ));
+            return Err(CamelError::EndpointCreationFailed(format!(
+                "incompatible maxRequestBody for shared server (host={host}, port={port}): {} vs {}",
+                existing.max_request_body, max_request_body
+            )));
         }
 
         if let Some(existing) = cell.get()
             && existing.max_response_body != max_response_body
         {
-            return Err(CamelError::EndpointCreationFailed(
-                format!(
-                    "incompatible maxResponseBody for shared server (host={host}, port={port}): {} vs {}",
-                    existing.max_response_body, max_response_body
-                ),
-            ));
+            return Err(CamelError::EndpointCreationFailed(format!(
+                "incompatible maxResponseBody for shared server (host={host}, port={port}): {} vs {}",
+                existing.max_response_body, max_response_body
+            )));
         }
 
         if let Some(existing) = cell.get()
             && existing.max_inflight_requests != max_inflight_requests
         {
-            return Err(CamelError::EndpointCreationFailed(
-                format!(
-                    "incompatible maxInflightRequests for shared server (host={host}, port={port}): {} vs {}",
-                    existing.max_inflight_requests, max_inflight_requests
-                ),
-            ));
+            return Err(CamelError::EndpointCreationFailed(format!(
+                "incompatible maxInflightRequests for shared server (host={host}, port={port}): {} vs {}",
+                existing.max_inflight_requests, max_inflight_requests
+            )));
         }
 
         let handle = cell
@@ -608,11 +602,15 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
     match reply_rx.await {
         Ok(reply) => {
             let reply = match reply.body {
-                HttpReplyBody::Bytes(b) if exceeds_max_response_body(b.len(), state.max_response_body) => {
+                HttpReplyBody::Bytes(b)
+                    if exceeds_max_response_body(b.len(), state.max_response_body) =>
+                {
                     HttpReply {
                         status: 500,
                         headers: vec![],
-                        body: HttpReplyBody::Bytes(bytes::Bytes::from("Response body exceeds configured limit")),
+                        body: HttpReplyBody::Bytes(bytes::Bytes::from(
+                            "Response body exceeds configured limit",
+                        )),
                     }
                 }
                 _ => reply,
@@ -2212,13 +2210,7 @@ mod tests {
             let results = results.clone();
             handles.push(tokio::spawn(async move {
                 let dispatch = ServerRegistry::global()
-                    .get_or_spawn(
-                        "127.0.0.1",
-                        port,
-                        2 * 1024 * 1024,
-                        10 * 1024 * 1024,
-                        1024,
-                    )
+                    .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
                     .await
                     .unwrap();
                 results.lock().unwrap().push(dispatch);
@@ -2513,7 +2505,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let client = reqwest::Client::new();
-        let send_fut = client.get(format!("http://127.0.0.1:{port}/limit-json")).send();
+        let send_fut = client
+            .get(format!("http://127.0.0.1:{port}/limit-json"))
+            .send();
 
         let (http_result, _) = tokio::join!(send_fut, async {
             if let Some(mut envelope) = rx.recv().await {
@@ -2558,12 +2552,15 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let client = reqwest::Client::new();
-        let send_fut = client.get(format!("http://127.0.0.1:{port}/limit-xml")).send();
+        let send_fut = client
+            .get(format!("http://127.0.0.1:{port}/limit-xml"))
+            .send();
 
         let (http_result, _) = tokio::join!(send_fut, async {
             if let Some(mut envelope) = rx.recv().await {
-                envelope.exchange.input.body =
-                    camel_component_api::Body::Xml("<root><value>way-too-large</value></root>".into());
+                envelope.exchange.input.body = camel_component_api::Body::Xml(
+                    "<root><value>way-too-large</value></root>".into(),
+                );
                 if let Some(reply_tx) = envelope.reply_tx {
                     let _ = reply_tx.send(Ok(envelope.exchange));
                 }
@@ -2579,7 +2576,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_http_consumer_does_not_enforce_max_response_body_for_stream() {
-        use camel_component_api::{CamelError, ConsumerContext, ExchangeEnvelope, StreamBody, StreamMetadata};
+        use camel_component_api::{
+            CamelError, ConsumerContext, ExchangeEnvelope, StreamBody, StreamMetadata,
+        };
         use futures::stream;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
