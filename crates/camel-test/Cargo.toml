@@ -37,6 +37,7 @@ camel-component-container = { workspace = true, optional = true }
 bollard = { version = "0.18.1", optional = true }
 camel-component-validator = { workspace = true, optional = true }
 camel-xslt = { workspace = true, optional = true }
+camel-xj = { workspace = true, optional = true }
 camel-platform-kubernetes = { workspace = true, optional = true }
 camel-master = { workspace = true, optional = true }
 kube = { workspace = true, optional = true }
@@ -76,6 +77,7 @@ integration-tests = [
     "dep:bollard",
     "dep:camel-component-validator",
     "dep:camel-xslt",
+    "dep:camel-xj",
     "dep:camel-platform-kubernetes",
     "dep:kube",
     "dep:k8s-openapi",

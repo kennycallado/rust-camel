@@ -16,7 +16,7 @@ mod error;
 mod identity;
 mod producer;
 
-pub use component::XjComponent;
+pub use component::{XjComponent, XjComponentConfig};
 pub use config::{Direction, XjEndpointConfig};
 pub use error::XjError;
 pub use identity::{JSON_TO_XML_XSLT, XML_TO_JSON_XSLT};

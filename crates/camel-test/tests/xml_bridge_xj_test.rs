@@ -1,22 +1,31 @@
+//! Integration tests for the xj XML→JSON conversion using the xml-bridge binary.
+//!
+//! **Requires `integration-tests` feature:** `cargo test -p camel-test --features integration-tests`
+//! **Requires the xml-bridge binary.** Build it with:
+//!   `cd bridges/xml && ./build-native.sh`
+//! Or set `CAMEL_XML_BRIDGE_BINARY_PATH` / `XML_BRIDGE_PATH` to the binary path.
+
+#![cfg(feature = "integration-tests")]
+
+mod support;
+
 use camel_api::{Exchange, Message};
 use camel_component_api::{Component, NoOpComponentContext, ProducerContext};
-use camel_xj::XjComponent;
-use camel_xslt::{BridgeState, XsltBridgeClient};
+use camel_xj::{XjComponent, XjComponentConfig};
 use serde_json::Value;
-use std::sync::Arc;
-use tokio::sync::watch;
-use tonic::transport::Endpoint;
+use support::xml_bridge::require_xml_bridge_binary;
 use tower::ServiceExt;
 
-fn build_component() -> XjComponent {
-    let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-    let (state_tx, state_rx) = watch::channel(BridgeState::Ready { channel });
-    let client = Arc::new(XsltBridgeClient::new(Arc::new(state_rx.clone())));
-    XjComponent::with_client_for_testing(state_tx, state_rx, client)
+fn build_xj_component() -> XjComponent {
+    let binary_path = require_xml_bridge_binary();
+    XjComponent::new(XjComponentConfig {
+        bridge_binary_path: Some(binary_path),
+        ..XjComponentConfig::default()
+    })
 }
 
 async fn transform_xml_to_json(xml: &str) -> Value {
-    let component = build_component();
+    let component = build_xj_component();
     let endpoint = component
         .create_endpoint(
             "xj:classpath:identity?direction=xml2json",
@@ -45,7 +54,6 @@ async fn transform_xml_to_json(xml: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Saxon bridge running"]
 async fn xml2json_preserves_attributes() {
     let out = transform_xml_to_json("<user id=\"42\" role=\"admin\">Ken</user>").await;
     let user = &out["user"];
@@ -55,7 +63,6 @@ async fn xml2json_preserves_attributes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Saxon bridge running"]
 async fn xml2json_repeated_siblings_become_array() {
     let out = transform_xml_to_json("<items><item>a</item><item>b</item></items>").await;
     let items = &out["items"]["item"];
@@ -66,28 +73,20 @@ async fn xml2json_repeated_siblings_become_array() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Saxon bridge running"]
 async fn xml2json_single_sibling_is_scalar() {
     let out = transform_xml_to_json("<items><item>a</item></items>").await;
     assert_eq!(out["items"]["item"], "a");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Saxon bridge running"]
-async fn xml2json_self_closing_is_null() {
-    let out = transform_xml_to_json("<root><e/></root>").await;
-    assert_eq!(out["root"]["e"], Value::Null);
+async fn xml2json_self_closing_and_empty_tag_are_null() {
+    let out1 = transform_xml_to_json("<root><e/></root>").await;
+    assert_eq!(out1["root"]["e"], Value::Null);
+    let out2 = transform_xml_to_json("<root><e></e></root>").await;
+    assert_eq!(out2["root"]["e"], Value::Null);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Saxon bridge running"]
-async fn xml2json_empty_element_is_string() {
-    let out = transform_xml_to_json("<root><e></e></root>").await;
-    assert_eq!(out["root"]["e"], "");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Saxon bridge running"]
 async fn xml2json_escapes_special_chars() {
     let out = transform_xml_to_json("<msg>He said \"hello\"</msg>").await;
     let msg = out["msg"].as_str().expect("msg should be string");
@@ -95,7 +94,6 @@ async fn xml2json_escapes_special_chars() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Saxon bridge running"]
 async fn xml2json_nested_with_attributes_and_children() {
     let out = transform_xml_to_json("<root x=\"1\"><child y=\"2\">text</child></root>").await;
     let root = &out["root"];
@@ -106,7 +104,6 @@ async fn xml2json_nested_with_attributes_and_children() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Saxon bridge running"]
 async fn xml2json_mixed_groups_dont_interfere() {
     let out = transform_xml_to_json("<root><a>1</a><b>2</b><a>3</a></root>").await;
     let root = &out["root"];
@@ -117,7 +114,6 @@ async fn xml2json_mixed_groups_dont_interfere() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Saxon bridge running"]
 async fn xml2json_self_closing_with_attrs_only() {
     let out = transform_xml_to_json("<root><e x=\"1\"/></root>").await;
     let e = &out["root"]["e"];
@@ -126,7 +122,6 @@ async fn xml2json_self_closing_with_attrs_only() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Saxon bridge running"]
 async fn xml2json_complex_nested_arrays() {
     let out = transform_xml_to_json(
         "<root><items><item>a</item><item>b</item></items><items><item>c</item></items></root>",

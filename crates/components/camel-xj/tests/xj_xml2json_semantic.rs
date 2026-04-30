@@ -53,16 +53,6 @@ fn xslt_escapes_tab() {
 }
 
 #[test]
-fn xslt_escapes_backspace() {
-    assert_template_present(XML_TO_JSON_XSLT, "&#8;");
-}
-
-#[test]
-fn xslt_escapes_form_feed() {
-    assert_template_present(XML_TO_JSON_XSLT, "&#12;");
-}
-
-#[test]
 fn xslt_contains_emit_object_template() {
     assert_template_present(XML_TO_JSON_XSLT, "name=\"emit-object\"");
 }

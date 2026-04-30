@@ -32,9 +32,7 @@ pub const XML_TO_JSON_XSLT: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
     <xsl:variable name="v3" select="replace($v2, '&#13;', '\\r')"/>
     <xsl:variable name="v4" select="replace($v3, '&#10;', '\\n')"/>
     <xsl:variable name="v5" select="replace($v4, '&#9;', '\\t')"/>
-    <xsl:variable name="v6" select="replace($v5, '&#8;', '\\b')"/>
-    <xsl:variable name="v7" select="replace($v6, '&#12;', '\\f')"/>
-    <xsl:value-of select="$v7"/>
+    <xsl:value-of select="$v5"/>
   </xsl:template>
 
   <xsl:template name="emit-json-string">
