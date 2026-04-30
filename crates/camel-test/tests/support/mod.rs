@@ -25,6 +25,7 @@ pub mod jms;
 pub mod xml_bridge;
 
 #[cfg(feature = "integration-tests")]
+#[allow(dead_code)]
 pub fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
     let _ = fmt()
@@ -36,6 +37,7 @@ pub fn init_tracing() {
 }
 
 #[cfg(feature = "integration-tests")]
+#[allow(dead_code)]
 pub async fn send_to_direct(
     h: &CamelTestContext,
     endpoint_uri: &str,

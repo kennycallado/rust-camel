@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
 pub async fn wait_until<F, Fut>(
     label: &str,
     timeout: Duration,
