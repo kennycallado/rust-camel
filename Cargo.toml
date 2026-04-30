@@ -224,6 +224,7 @@ testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["kafka", "postgres", "redis"] }
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 prometheus = "0.14"
+quick-xml = "0.37"
 rand = "0.8"
 sxd-document = "0.3"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
