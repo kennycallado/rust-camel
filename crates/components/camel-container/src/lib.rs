@@ -727,6 +727,12 @@ async fn handle_run(
             )
         })?;
 
+    let image = if !image.contains(':') && !image.contains('@') {
+        format!("{}:latest", image)
+    } else {
+        image
+    };
+
     let pull_timeout = 300;
     ensure_image_available(&docker, &image, config.auto_pull, pull_timeout)
         .await
