@@ -20,3 +20,4 @@ tonic = { workspace = true }
 [dev-dependencies]
 tonic = { workspace = true }
 async-trait = { workspace = true }
+serde_json = { workspace = true }

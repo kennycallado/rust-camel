@@ -1,7 +1,14 @@
 // Converts arbitrary XML to JSON using recursive XSLT 3.0 templates.
 // fn:xml-to-json() is NOT used here because it requires W3C JSON-XML namespace
 // input — this stylesheet handles generic XML structures instead.
-pub const XML_TO_JSON_XSLT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+//
+// JSON mapping convention (compatibility mode, same as Apache Camel Java xj):
+//   - Attributes: "@attrName" keys
+//   - Text content: "#text" key (only when element has attrs or children)
+//   - Repeated siblings: grouped into JSON arrays
+//   - Self-closing with no attrs: null
+//   - Simple leaf (no attrs, no children): plain string
+pub const XML_TO_JSON_XSLT: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 <xsl:stylesheet version="3.0"
   xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
   xmlns:xj="http://camel.apache.org/component/xj">
@@ -20,38 +27,103 @@ pub const XML_TO_JSON_XSLT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   <xsl:template name="json-escape-string">
     <xsl:param name="s"/>
-    <xsl:value-of select="replace(replace(replace($s, '\\', '\\\\'), '&quot;', '\\&quot;'), '&#10;', '\\n')"/>
+    <xsl:variable name="v1" select="replace($s, '\\', '\\\\')"/>
+    <xsl:variable name="v2" select="replace($v1, '&quot;', '\\&quot;')"/>
+    <xsl:variable name="v3" select="replace($v2, '&#13;', '\\r')"/>
+    <xsl:variable name="v4" select="replace($v3, '&#10;', '\\n')"/>
+    <xsl:variable name="v5" select="replace($v4, '&#9;', '\\t')"/>
+    <xsl:variable name="v6" select="replace($v5, '&#8;', '\\b')"/>
+    <xsl:variable name="v7" select="replace($v6, '&#12;', '\\f')"/>
+    <xsl:value-of select="$v7"/>
   </xsl:template>
 
-  <!-- Root element: wraps in outer object -->
+  <xsl:template name="emit-json-string">
+    <xsl:param name="s"/>
+    <xsl:text>"</xsl:text>
+    <xsl:call-template name="json-escape-string">
+      <xsl:with-param name="s" select="$s"/>
+    </xsl:call-template>
+    <xsl:text>"</xsl:text>
+  </xsl:template>
+
   <xsl:template match="/*">
     <xsl:text>{</xsl:text>
     <xsl:call-template name="element-content"/>
     <xsl:text>}</xsl:text>
   </xsl:template>
 
-  <!-- Named template: emit key + value for current element -->
   <xsl:template name="element-content">
-    <xsl:text>"</xsl:text>
-    <xsl:value-of select="local-name()"/>
-    <xsl:text>":</xsl:text>
+    <xsl:call-template name="emit-json-string">
+      <xsl:with-param name="s" select="local-name()"/>
+    </xsl:call-template>
+    <xsl:text>:</xsl:text>
+    <xsl:call-template name="element-value"/>
+  </xsl:template>
+
+  <xsl:template name="element-value">
     <xsl:choose>
-      <!-- Element with child elements: emit nested object -->
-      <xsl:when test="*">
-        <xsl:text>{</xsl:text>
-        <xsl:for-each select="*">
-          <xsl:if test="position() > 1"><xsl:text>,</xsl:text></xsl:if>
-          <xsl:call-template name="element-content"/>
-        </xsl:for-each>
-        <xsl:text>}</xsl:text>
+      <xsl:when test="not(node()) and not(@*)">
+        <xsl:text>null</xsl:text>
       </xsl:when>
-      <!-- Leaf element: emit string value -->
+      <xsl:when test="not(element()) and not(@*)">
+        <xsl:call-template name="emit-json-string">
+          <xsl:with-param name="s" select="string(.)"/>
+        </xsl:call-template>
+      </xsl:when>
       <xsl:otherwise>
-        <xsl:text>"</xsl:text>
-        <xsl:value-of select="normalize-space(.)"/>
-        <xsl:text>"</xsl:text>
+        <xsl:call-template name="emit-object"/>
       </xsl:otherwise>
     </xsl:choose>
+  </xsl:template>
+
+  <xsl:template name="emit-object">
+    <xsl:variable name="hasAttrs" select="exists(@*)"/>
+    <xsl:variable name="hasText" select="exists(text()[normalize-space()])"/>
+    <xsl:variable name="hasChildren" select="exists(element())"/>
+    <xsl:text>{</xsl:text>
+    <xsl:for-each select="@*">
+      <xsl:if test="position() > 1"><xsl:text>,</xsl:text></xsl:if>
+      <xsl:call-template name="emit-json-string">
+        <xsl:with-param name="s" select="concat('@', local-name())"/>
+      </xsl:call-template>
+      <xsl:text>:</xsl:text>
+      <xsl:call-template name="emit-json-string">
+        <xsl:with-param name="s" select="string(.)"/>
+      </xsl:call-template>
+    </xsl:for-each>
+    <xsl:if test="$hasText">
+      <xsl:if test="$hasAttrs"><xsl:text>,</xsl:text></xsl:if>
+      <xsl:text>"#text":</xsl:text>
+      <xsl:call-template name="emit-json-string">
+        <xsl:with-param name="s" select="string-join(text(),'')"/>
+      </xsl:call-template>
+    </xsl:if>
+    <xsl:if test="$hasChildren">
+      <xsl:if test="$hasAttrs or $hasText"><xsl:text>,</xsl:text></xsl:if>
+      <xsl:for-each-group select="*" group-by="local-name()">
+        <xsl:if test="position() > 1"><xsl:text>,</xsl:text></xsl:if>
+        <xsl:call-template name="emit-json-string">
+          <xsl:with-param name="s" select="local-name()"/>
+        </xsl:call-template>
+        <xsl:text>:</xsl:text>
+        <xsl:choose>
+          <xsl:when test="count(current-group()) > 1">
+            <xsl:text>[</xsl:text>
+            <xsl:for-each select="current-group()">
+              <xsl:if test="position() > 1"><xsl:text>,</xsl:text></xsl:if>
+              <xsl:call-template name="element-value"/>
+            </xsl:for-each>
+            <xsl:text>]</xsl:text>
+          </xsl:when>
+          <xsl:otherwise>
+            <xsl:for-each select="current-group()[1]">
+              <xsl:call-template name="element-value"/>
+            </xsl:for-each>
+          </xsl:otherwise>
+        </xsl:choose>
+      </xsl:for-each-group>
+    </xsl:if>
+    <xsl:text>}</xsl:text>
   </xsl:template>
 
   <xsl:template match="*[@xj:type='object']" mode="xj-reverse">
@@ -110,7 +182,7 @@ pub const XML_TO_JSON_XSLT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <xsl:text>null</xsl:text>
   </xsl:template>
 </xsl:stylesheet>
-"#;
+"##;
 
 pub const JSON_TO_XML_XSLT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <xsl:stylesheet version="3.0"

@@ -1,7 +1,8 @@
-//! Demonstrates Apache Camel XJ conversions with three flows:
+//! Demonstrates Apache Camel XJ conversions with four flows:
 //! 1) XML -> JSON (`direct:xml2json`)
 //! 2) JSON -> XML in Camel XJ format (`direct:json2xml`)
 //! 3) Round-trip JSON -> XML -> JSON using both routes
+//! 4) XML -> JSON with attributes and arrays
 
 use camel_api::{Body, CamelError, Exchange, Message};
 use camel_builder::{RouteBuilder, StepAccumulator};
@@ -68,6 +69,9 @@ async fn main() -> Result<(), CamelError> {
     let json_input = r#"{"order":{"id":"42","status":"open"}}"#;
     let json_to_xml_result = send_to_direct(&ctx, "direct:json2xml", json_input).await?;
 
+    let xml_attrs_array = r#"<order id="123"><item>coffee</item><item>tea</item><status active="true">pending</status></order>"#;
+    let xml_attrs_array_result = send_to_direct(&ctx, "direct:xml2json", xml_attrs_array).await?;
+
     // Flow 3: round-trip JSON -> XML -> JSON
     let round_trip_xml = body_to_string(&json_to_xml_result.input.body);
     let round_trip_result = send_to_direct(&ctx, "direct:xml2json", &round_trip_xml).await?;
@@ -95,6 +99,15 @@ async fn main() -> Result<(), CamelError> {
     println!("  After JSON→XML: {round_trip_xml}");
     println!("  After XML→JSON: {round_trip_json}");
     println!("  Round-trip lossless: {round_trip_lossless}");
+    println!();
+
+    println!("=== Flow 4: XML → JSON with attributes and arrays ===");
+    println!("  Input:  {xml_attrs_array}");
+    println!(
+        "  Output: {}",
+        body_to_string(&xml_attrs_array_result.input.body)
+    );
+    println!();
 
     ctx.stop().await?;
     Ok(())
