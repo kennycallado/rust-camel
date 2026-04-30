@@ -32,6 +32,8 @@ async fn main() -> Result<(), CamelError> {
     let get_user_route = get_user_route(Arc::clone(&storage), Arc::clone(&request_count))?;
     let update_user_route = update_user_route(Arc::clone(&storage), Arc::clone(&request_count))?;
     let delete_user_route = delete_user_route(Arc::clone(&storage), Arc::clone(&request_count))?;
+    let large_response_route = create_large_response_route(Arc::clone(&request_count))?;
+    let slow_route_route = create_slow_route(Arc::clone(&request_count))?;
 
     ctx.add_route_definition(health_route).await?;
     ctx.add_route_definition(list_users_route).await?;
@@ -39,6 +41,8 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(get_user_route).await?;
     ctx.add_route_definition(update_user_route).await?;
     ctx.add_route_definition(delete_user_route).await?;
+    ctx.add_route_definition(large_response_route).await?;
+    ctx.add_route_definition(slow_route_route).await?;
 
     ctx.start().await?;
 
@@ -336,6 +340,51 @@ fn delete_user_route(
         .build()
 }
 
+fn create_large_response_route(
+    request_count: Arc<AtomicU64>,
+) -> Result<RouteDefinition, CamelError> {
+    RouteBuilder::from("http://0.0.0.0:8080/api/large-response?maxResponseBody=100")
+        .route_id("large-response")
+        .process(move |mut exchange| {
+            let rc = Arc::clone(&request_count);
+            async move {
+                rc.fetch_add(1, Ordering::Relaxed);
+                let query = exchange
+                    .input
+                    .header("CamelHttpQuery")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let size: usize = query
+                    .split('&')
+                    .find(|p| p.starts_with("size="))
+                    .and_then(|p| p.strip_prefix("size="))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(200);
+                let data = "X".repeat(size.min(1000));
+                exchange.input.body = Body::Text(data);
+                Ok(exchange)
+            }
+        })
+        .build()
+}
+
+fn create_slow_route(
+    request_count: Arc<AtomicU64>,
+) -> Result<RouteDefinition, CamelError> {
+    RouteBuilder::from("http://0.0.0.0:8080/api/slow?maxInflightRequests=2")
+        .route_id("slow-route")
+        .process(move |mut exchange| {
+            let rc = Arc::clone(&request_count);
+            async move {
+                rc.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                exchange.input.body = Body::Text("Slow response done".to_string());
+                Ok(exchange)
+            }
+        })
+        .build()
+}
+
 fn parse_pagination(query: &str) -> (u32, u32) {
     let mut page = 1;
     let mut per_page = 10;
@@ -400,27 +449,22 @@ fn print_banner() {
     println!("  DELETE /api/users/delete?id=1");
     println!("       → Delete user by ID");
     println!();
+    println!("  GET  /api/large-response?size=50&maxResponseBody=100");
+    println!("       → Returns text; exceeds limit → HTTP 500");
+    println!();
+    println!("  GET  /api/slow?maxInflightRequests=2");
+    println!("       → 500ms delay; limited concurrency → 503 if saturated");
+    println!();
     println!("────────────────────────────────────────────────────────────");
-    println!("  Example workflow:");
+    println!("  New hardening features:");
     println!();
-    println!("  # Create a user");
-    println!("  curl -X POST http://localhost:8080/api/users/create \\");
-    println!("       -H 'Content-Type: application/json' \\");
-    println!("       -d '{{\"name\":\"Alice\",\"email\":\"alice@example.com\"}}' | jq");
+    println!("  # Large response (exceeds maxResponseBody=100 → 500):");
+    println!("  curl 'http://localhost:8080/api/large-response?size=200'");
     println!();
-    println!("  # List users");
-    println!("  curl 'http://localhost:8080/api/users?page=1&per_page=10' | jq");
-    println!();
-    println!("  # Get user");
-    println!("  curl 'http://localhost:8080/api/users/id?id=1' | jq");
-    println!();
-    println!("  # Update user");
-    println!("  curl -X PUT 'http://localhost:8080/api/users/update?id=1' \\");
-    println!("       -H 'Content-Type: application/json' \\");
-    println!("       -d '{{\"age\":35}}' | jq");
-    println!();
-    println!("  # Delete user");
-    println!("  curl -X DELETE 'http://localhost:8080/api/users/delete?id=1' | jq");
+    println!("  # Concurrent requests (maxInflightRequests=2):");
+    println!("  curl 'http://localhost:8080/api/slow' &");
+    println!("  curl 'http://localhost:8080/api/slow' &");
+    println!("  curl 'http://localhost:8080/api/slow'  # may get 503");
     println!("────────────────────────────────────────────────────────────");
     println!();
     println!("Press Ctrl+C to stop...");

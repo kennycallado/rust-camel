@@ -42,6 +42,8 @@ https://host:port/path[?options]
 |--------|---------|-------------|
 | Host/path from URI | - | e.g., `http://0.0.0.0:8080/api` |
 | `maxRequestBody` | `2097152` (2 MB) | If request `Content-Length` exceeds this value, responds 413 before opening the stream. Chunked uploads without `Content-Length` are not limited at the consumer level. |
+| `maxInflightRequests` | `1024` | Maximum concurrently in-flight requests per `(host,port)` server. When saturated, the handler returns HTTP 503 immediately (before enqueueing into the consumer channel). |
+| `maxResponseBody` | `16777216` (16MB) | Maximum response body size for materialized replies (Bytes, Text, Xml, Json). Returns HTTP 500 if exceeded. `Body::Stream` is excluded. |
 
 ## Producer Options (Client)
 
@@ -284,6 +286,8 @@ Memory limits apply when materialization is required (default: 10MB).
 **Request Bodies:** Incoming HTTP request bodies arrive as `Body::Stream` in the Exchange, with no RAM materialization by default. The `Content-Length` header (if present) populates `StreamMetadata.size_hint`, and `Content-Type` populates `StreamMetadata.content_type`.
 
 **413 Protection:** If the `Content-Length` header exceeds `maxRequestBody`, the server responds with HTTP 413 before opening the stream. Chunked uploads without a `Content-Length` header are not limited at the consumer level.
+
+**In-flight backpressure (`503`):** The consumer channel has a fixed buffer (`mpsc(64)`) that can absorb short bursts. Saturation protection is enforced at the HTTP handler via a semaphore (`maxInflightRequests`), so HTTP 503 is returned early before queue growth. This avoids consumer-side-only throttling behavior where requests can sit in the channel and fail late.
 
 **Response Bodies:** 
 - `Body::Stream` responses use `Transfer-Encoding: chunked` automatically (no buffering)

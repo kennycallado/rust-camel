@@ -233,6 +233,8 @@ pub struct HttpServerConfig {
     pub max_request_body: usize,
     /// Maximum response body size for materializing streams in bytes.
     pub max_response_body: usize,
+    /// Maximum number of in-flight requests handled concurrently by this server.
+    pub max_inflight_requests: usize,
 }
 
 impl UriConfig for HttpServerConfig {
@@ -303,12 +305,19 @@ impl UriConfig for HttpServerConfig {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(10 * 1024 * 1024); // Default: 10MB
 
+        let max_inflight_requests = parts
+            .params
+            .get("maxInflightRequests")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1024);
+
         Ok(Self {
             host,
             port,
             path,
             max_request_body,
             max_response_body,
+            max_inflight_requests,
         })
     }
 }
@@ -363,16 +372,23 @@ pub(crate) struct HttpReply {
 pub(crate) type DispatchTable =
     Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<RequestEnvelope>>>>;
 
-/// Handle to a running Axum server on one port.
+type ServerKey = (String, u16);
+
+/// Handle to a running Axum server on one interface/port.
+#[allow(dead_code)]
 struct ServerHandle {
     dispatch: DispatchTable,
+    max_request_body: usize,
+    max_response_body: usize,
+    max_inflight_requests: usize,
+    inflight: Arc<tokio::sync::Semaphore>,
     /// Kept alive so the task isn't dropped; not used directly.
     _task: tokio::task::JoinHandle<()>,
 }
 
-/// Process-global registry mapping port → running Axum server handle.
+/// Process-global registry mapping (host, port) → running Axum server handle.
 pub struct ServerRegistry {
-    inner: Mutex<HashMap<u16, Arc<OnceCell<ServerHandle>>>>,
+    inner: Mutex<HashMap<ServerKey, Arc<OnceCell<ServerHandle>>>>,
 }
 
 impl ServerRegistry {
@@ -391,6 +407,8 @@ impl ServerRegistry {
         host: &str,
         port: u16,
         max_request_body: usize,
+        max_response_body: usize,
+        max_inflight_requests: usize,
     ) -> Result<DispatchTable, CamelError> {
         let host_owned = host.to_string();
 
@@ -398,11 +416,45 @@ impl ServerRegistry {
             let mut guard = self.inner.lock().map_err(|_| {
                 CamelError::EndpointCreationFailed("ServerRegistry lock poisoned".into())
             })?;
+            let key = (host.to_string(), port);
             guard
-                .entry(port)
+                .entry(key)
                 .or_insert_with(|| Arc::new(OnceCell::new()))
                 .clone()
         };
+
+        if let Some(existing) = cell.get()
+            && existing.max_request_body != max_request_body
+        {
+            return Err(CamelError::EndpointCreationFailed(
+                format!(
+                    "incompatible maxRequestBody for shared server (host={host}, port={port}): {} vs {}",
+                    existing.max_request_body, max_request_body
+                ),
+            ));
+        }
+
+        if let Some(existing) = cell.get()
+            && existing.max_response_body != max_response_body
+        {
+            return Err(CamelError::EndpointCreationFailed(
+                format!(
+                    "incompatible maxResponseBody for shared server (host={host}, port={port}): {} vs {}",
+                    existing.max_response_body, max_response_body
+                ),
+            ));
+        }
+
+        if let Some(existing) = cell.get()
+            && existing.max_inflight_requests != max_inflight_requests
+        {
+            return Err(CamelError::EndpointCreationFailed(
+                format!(
+                    "incompatible maxInflightRequests for shared server (host={host}, port={port}): {} vs {}",
+                    existing.max_inflight_requests, max_inflight_requests
+                ),
+            ));
+        }
 
         let handle = cell
             .get_or_try_init(|| async {
@@ -411,13 +463,20 @@ impl ServerRegistry {
                     CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
                 })?;
                 let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
+                let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
                 let task = tokio::spawn(run_axum_server(
                     listener,
                     Arc::clone(&dispatch),
                     max_request_body,
+                    max_response_body,
+                    Arc::clone(&inflight),
                 ));
                 Ok::<ServerHandle, CamelError>(ServerHandle {
                     dispatch,
+                    max_request_body,
+                    max_response_body,
+                    max_inflight_requests,
+                    inflight,
                     _task: task,
                 })
             })
@@ -443,16 +502,22 @@ use axum::{
 struct AppState {
     dispatch: DispatchTable,
     max_request_body: usize,
+    max_response_body: usize,
+    inflight: Arc<tokio::sync::Semaphore>,
 }
 
 async fn run_axum_server(
     listener: tokio::net::TcpListener,
     dispatch: DispatchTable,
     max_request_body: usize,
+    max_response_body: usize,
+    inflight: Arc<tokio::sync::Semaphore>,
 ) {
     let state = AppState {
         dispatch,
         max_request_body,
+        max_response_body,
+        inflight,
     };
     let app = Router::new().fallback(dispatch_handler).with_state(state);
 
@@ -481,6 +546,16 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
             .body(AxumBody::from("Request body exceeds configured limit"))
             .expect("infallible");
     }
+
+    let _permit = match Arc::clone(&state.inflight).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(AxumBody::from("Service Unavailable"))
+                .expect("infallible");
+        }
+    };
 
     // Build StreamBody from Axum body WITHOUT materializing
     let content_type = headers
@@ -532,6 +607,17 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
 
     match reply_rx.await {
         Ok(reply) => {
+            let reply = match reply.body {
+                HttpReplyBody::Bytes(b) if exceeds_max_response_body(b.len(), state.max_response_body) => {
+                    HttpReply {
+                        status: 500,
+                        headers: vec![],
+                        body: HttpReplyBody::Bytes(bytes::Bytes::from("Response body exceeds configured limit")),
+                    }
+                }
+                _ => reply,
+            };
+
             let status =
                 StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut builder = Response::builder().status(status);
@@ -562,6 +648,10 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
     }
 }
 
+fn exceeds_max_response_body(len: usize, max: usize) -> bool {
+    len > max
+}
+
 // ---------------------------------------------------------------------------
 // HttpConsumer
 // ---------------------------------------------------------------------------
@@ -586,6 +676,8 @@ impl Consumer for HttpConsumer {
                 &self.config.host,
                 self.config.port,
                 self.config.max_request_body,
+                self.config.max_response_body,
+                self.config.max_inflight_requests,
             )
             .await?;
 
@@ -598,8 +690,6 @@ impl Consumer for HttpConsumer {
 
         let path = self.config.path.clone();
         let cancel_token = ctx.cancel_token();
-        let _max_response_body = self.config.max_response_body;
-
         loop {
             tokio::select! {
                 _ = ctx.cancelled() => {
@@ -2035,6 +2125,7 @@ mod tests {
         assert_eq!(cfg.host, "0.0.0.0");
         assert_eq!(cfg.port, 8080);
         assert_eq!(cfg.path, "/orders");
+        assert_eq!(cfg.max_inflight_requests, 1024);
     }
 
     #[test]
@@ -2049,16 +2140,17 @@ mod tests {
         let components = camel_component_api::UriComponents {
             scheme: "https".to_string(),
             path: "//0.0.0.0:8443/api".to_string(),
-            params: std::collections::HashMap::from([(
-                "maxRequestBody".to_string(),
-                "5242880".to_string(),
-            )]),
+            params: std::collections::HashMap::from([
+                ("maxRequestBody".to_string(), "5242880".to_string()),
+                ("maxInflightRequests".to_string(), "7".to_string()),
+            ]),
         };
         let cfg = HttpServerConfig::from_components(components).unwrap();
         assert_eq!(cfg.host, "0.0.0.0");
         assert_eq!(cfg.port, 8443);
         assert_eq!(cfg.path, "/api");
         assert_eq!(cfg.max_request_body, 5242880);
+        assert_eq!(cfg.max_inflight_requests, 7);
     }
 
     #[test]
@@ -2120,7 +2212,13 @@ mod tests {
             let results = results.clone();
             handles.push(tokio::spawn(async move {
                 let dispatch = ServerRegistry::global()
-                    .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024)
+                    .get_or_spawn(
+                        "127.0.0.1",
+                        port,
+                        2 * 1024 * 1024,
+                        10 * 1024 * 1024,
+                        1024,
+                    )
                     .await
                     .unwrap();
                 results.lock().unwrap().push(dispatch);
@@ -2141,6 +2239,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_server_registry_distinguishes_host_and_port() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let registry = ServerRegistry::global();
+            // Use two distinct host values with same configured port key.
+            // Port 0 is acceptable here because the registry key uses the configured
+            // tuple, not the OS-assigned ephemeral port.
+            let d1 = registry
+                .get_or_spawn("127.0.0.1", 0, 1024 * 1024, 10 * 1024 * 1024, 1024)
+                .await;
+            let d2 = registry
+                .get_or_spawn("0.0.0.0", 0, 1024 * 1024, 10 * 1024 * 1024, 1024)
+                .await;
+            assert!(d1.is_ok());
+            assert!(d2.is_ok());
+            assert!(!Arc::ptr_eq(&d1.unwrap(), &d2.unwrap()));
+        });
+    }
+
+    #[tokio::test]
+    async fn test_shared_server_max_request_body_policy_is_deterministic() {
+        let registry = ServerRegistry::global();
+        // First registration: maxRequestBody = 1 MB
+        let d1 = registry
+            .get_or_spawn("127.0.0.1", 9991, 1024 * 1024, 10 * 1024 * 1024, 1024)
+            .await;
+        assert!(d1.is_ok());
+
+        // Second registration on same (host,port): maxRequestBody = 2 MB
+        // Expected: explicit EndpointCreationFailed about incompatible maxRequestBody
+        let d2 = registry
+            .get_or_spawn("127.0.0.1", 9991, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
+            .await;
+        assert!(d2.is_err());
+        let err = d2.unwrap_err();
+        assert!(
+            err.to_string().contains("maxRequestBody") || err.to_string().contains("incompatible"),
+            "Expected incompatible maxRequestBody error, got: {}",
+            err
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Axum dispatch handler tests
     // -----------------------------------------------------------------------
@@ -2151,7 +2292,13 @@ mod tests {
         // Nothing registered in the dispatch table
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(run_axum_server(listener, dispatch, 2 * 1024 * 1024));
+        tokio::spawn(run_axum_server(
+            listener,
+            dispatch,
+            2 * 1024 * 1024,
+            10 * 1024 * 1024,
+            Arc::new(tokio::sync::Semaphore::new(1024)),
+        ));
 
         // Wait for server to start
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -2181,6 +2328,7 @@ mod tests {
             path: "/ping".to_string(),
             max_request_body: 2 * 1024 * 1024,
             max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: 1024,
         };
         let mut consumer = HttpConsumer::new(consumer_cfg);
 
@@ -2216,6 +2364,272 @@ mod tests {
         let resp = http_result.unwrap();
         assert_eq!(resp.status().as_u16(), 201);
 
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_http_consumer_returns_503_when_inflight_limit_reached() {
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/saturation".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: 1,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let (first_seen_tx, first_seen_rx) = tokio::sync::oneshot::channel::<()>();
+        let (unblock_first_tx, unblock_first_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            let mut first_seen_tx = Some(first_seen_tx);
+            let mut unblock_first_rx = Some(unblock_first_rx);
+
+            while let Some(envelope) = rx.recv().await {
+                if let Some(tx) = first_seen_tx.take() {
+                    let _ = tx.send(());
+                    if let Some(rx_unblock) = unblock_first_rx.take() {
+                        let _ = rx_unblock.await;
+                    }
+                }
+
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let first_req = {
+            let client = client.clone();
+            async move {
+                client
+                    .get(format!("http://127.0.0.1:{port}/saturation"))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let first_handle = tokio::spawn(first_req);
+        first_seen_rx.await.unwrap();
+
+        let second_resp = client
+            .get(format!("http://127.0.0.1:{port}/saturation"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(second_resp.status().as_u16(), 503);
+
+        let _ = unblock_first_tx.send(());
+        let first_resp = first_handle.await.unwrap();
+        assert_eq!(first_resp.status().as_u16(), 200);
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_http_consumer_enforces_max_response_body_for_bytes() {
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/limit-bytes".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 16,
+            max_inflight_requests: 1024,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client
+            .get(format!("http://127.0.0.1:{port}/limit-bytes"))
+            .send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body =
+                    camel_component_api::Body::Bytes(bytes::Bytes::from(vec![b'x'; 32]));
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 500);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "Response body exceeds configured limit");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_http_consumer_enforces_max_response_body_for_json() {
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/limit-json".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 16,
+            max_inflight_requests: 1024,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client.get(format!("http://127.0.0.1:{port}/limit-json")).send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body = camel_component_api::Body::Json(
+                    serde_json::json!({"message":"this response is bigger than sixteen"}),
+                );
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 500);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "Response body exceeds configured limit");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_http_consumer_enforces_max_response_body_for_xml() {
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/limit-xml".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 16,
+            max_inflight_requests: 1024,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client.get(format!("http://127.0.0.1:{port}/limit-xml")).send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body =
+                    camel_component_api::Body::Xml("<root><value>way-too-large</value></root>".into());
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 500);
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "Response body exceeds configured limit");
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_http_consumer_does_not_enforce_max_response_body_for_stream() {
+        use camel_component_api::{CamelError, ConsumerContext, ExchangeEnvelope, StreamBody, StreamMetadata};
+        use futures::stream;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            path: "/limit-stream".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 16,
+            max_inflight_requests: 1024,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client
+            .get(format!("http://127.0.0.1:{port}/limit-stream"))
+            .send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                let chunks: Vec<Result<bytes::Bytes, CamelError>> =
+                    vec![Ok(bytes::Bytes::from(vec![b'x'; 32]))];
+                let stream = Box::pin(stream::iter(chunks));
+                envelope.exchange.input.body = camel_component_api::Body::Stream(StreamBody {
+                    stream: Arc::new(tokio::sync::Mutex::new(Some(stream))),
+                    metadata: StreamMetadata {
+                        size_hint: Some(32),
+                        content_type: Some("application/octet-stream".into()),
+                        origin: None,
+                    },
+                });
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.bytes().await.unwrap();
+        assert_eq!(body.len(), 32);
         token.cancel();
     }
 
@@ -2397,6 +2811,7 @@ mod tests {
             path: "/test".to_string(),
             max_request_body: 2 * 1024 * 1024,
             max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: 1024,
         };
         let consumer = HttpConsumer::new(config);
         assert_eq!(
