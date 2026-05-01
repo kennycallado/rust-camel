@@ -124,8 +124,8 @@ pub fn xml_to_json(input: &str) -> Result<serde_json::Value, CamelError> {
                 }
             }
             Ok(Event::Text(e)) => {
-                let text = e.unescape().map_err(|err| {
-                    CamelError::TypeConversionFailed(format!("cannot unescape XML text: {err}"))
+                let text = String::from_utf8(e.to_vec()).map_err(|err| {
+                    CamelError::TypeConversionFailed(format!("invalid UTF-8 in XML text: {err}"))
                 })?;
                 if let Some(node) = stack.last_mut() {
                     node.text.push_str(&text);

@@ -221,13 +221,13 @@ arc-swap = "1"
 serde_yaml = "0.9"
 config = "0.15"
 glob = "0.3"
-notify = { version = "6", features = ["macos_fsevent"] }
+notify = { version = "8", features = ["macos_fsevent"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka", "postgres", "redis"] }
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 prometheus = "0.14"
-quick-xml = "0.37"
-rand = "0.9"
+quick-xml = "0.39"
+rand = "0.10"
 sxd-document = "0.3"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
 serde_yml = "0.0.12"
