@@ -159,7 +159,7 @@ impl Service<Exchange> for TracingProcessor {
 
         if self.detail_level >= DetailLevel::Full {
             let headers: Vec<_> = exchange.input.headers.iter().take(3).collect();
-            if let Some((k, v)) = headers.get(0) {
+            if let Some((k, v)) = headers.first() {
                 tracing_span.record("header_0", format!("{k}={v:?}"));
             }
             if let Some((k, v)) = headers.get(1) {

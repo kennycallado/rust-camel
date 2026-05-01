@@ -1,12 +1,13 @@
-use crate::config::{
-    CamelConfig, KubernetesPlatformCamelConfig, OtelProtocol, OtelSampler, PlatformCamelConfig,
-};
+use crate::config::{CamelConfig, KubernetesPlatformCamelConfig, PlatformCamelConfig};
+#[cfg(feature = "otel")]
+use crate::config::{OtelProtocol, OtelSampler};
 use crate::discovery::discover_routes_with_threshold;
 use camel_api::{CamelError, PlatformService as PlatformServiceTrait};
 use camel_core::CamelContext;
 use camel_core::OutputFormat;
 use camel_core::TracerConfig;
 use camel_core::route::RouteDefinition;
+#[cfg(feature = "otel")]
 use camel_otel::{
     OtelConfig, OtelProtocol as OtelProtocolOtel, OtelSampler as OtelSamplerOtel, OtelService,
 };
@@ -122,7 +123,7 @@ impl CamelConfig {
             None
         };
         #[cfg(not(feature = "otel"))]
-        let otel_service_opt: Option<()> = if otel_enabled { None } else { None };
+        let _otel_service_opt: Option<()> = None;
 
         // Install subscriber with all layers including OTel log bridge + tracing
         Self::init_tracing_subscriber(

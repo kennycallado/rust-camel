@@ -373,7 +373,8 @@ impl Lifecycle for OtelService {
             }
         }
 
-        if let Some(provider) = self.logger_provider.as_ref() {
+        #[allow(clippy::collapsible_if)]
+        if let Some(provider) = &self.logger_provider {
             if let Err(e) = provider.force_flush() {
                 warn!("Error force-flushing LoggerProvider: {:?}", e);
             }
