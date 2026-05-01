@@ -308,6 +308,8 @@ impl KubernetesPlatformService {
     pub async fn try_default(config: KubernetesPlatformConfig) -> Result<Self, PlatformError> {
         config.validate()?;
 
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let client = Client::try_default().await.map_err(|err| {
             PlatformError::NotAvailable(format!("kubernetes client not available: {err}"))
         })?;
