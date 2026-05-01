@@ -58,6 +58,7 @@ members = [
     "examples/sql-example",
     "examples/sql-streaming",
     "examples/http-client",
+    "examples/grpc-example",
     "examples/aggregator",
     "examples/wiretap",
     "examples/multicast",
@@ -112,6 +113,9 @@ members = [
     "crates/services/camel-prometheus",
     "crates/services/camel-otel",
     "crates/platforms/camel-platform-kubernetes",
+    "crates/services/camel-proto-compiler",
+    "crates/dataformats/camel-dataformat-protobuf",
+    "crates/components/camel-component-grpc",
 ]
 
 [workspace.metadata.crane]
@@ -178,10 +182,14 @@ camel-language-jsonpath = { path = "crates/languages/camel-language-jsonpath", v
 camel-language-xpath = { path = "crates/languages/camel-language-xpath", version = "=0.7.5" }
 camel-config = { path = "crates/camel-config", version = "=0.7.5" }
 camel-platform-kubernetes = { path = "crates/platforms/camel-platform-kubernetes", version = "=0.7.5" }
+camel-proto-compiler = { path = "crates/services/camel-proto-compiler", version = "=0.7.5" }
+camel-dataformat-protobuf = { path = "crates/dataformats/camel-dataformat-protobuf", version = "=0.7.5" }
+camel-component-grpc = { path = "crates/components/camel-component-grpc", version = "=0.7.5" }
 
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14" }
 prost = { version = "0.14" }
+prost-reflect = { version = "0.16", features = ["serde"] }
 tonic-build = { version = "0.14" }
 tonic-prost-build = { version = "0.14" }
 tonic-prost = { version = "0.14" }

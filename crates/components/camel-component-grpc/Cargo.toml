@@ -1,0 +1,39 @@
+[package]
+name = "camel-component-grpc"
+description = "gRPC component for rust-camel (dynamic producer)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+camel-component-api.workspace = true
+camel-api.workspace = true
+camel-proto-compiler.workspace = true
+camel-dataformat-protobuf.workspace = true
+tonic.workspace = true
+prost.workspace = true
+prost-reflect.workspace = true
+tokio.workspace = true
+tower.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+http.workspace = true
+url.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-stream = "0.1"
+tower.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "camel-dataformat-protobuf"
+description = "Protobuf DataFormat for rust-camel (JSON <-> protobuf wire format)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-proto-compiler.workspace = true
+prost.workspace = true
+prost-reflect.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

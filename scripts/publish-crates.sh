@@ -154,6 +154,12 @@ publish_crate "camel-prometheus" "crates/services/camel-prometheus"
 # Component crates (before components)
 publish_crate "camel-bridge" "crates/services/camel-bridge"
 
+# gRPC/protobuf crates (camel-dataformat-protobuf depends on camel-proto-compiler;
+# camel-component-grpc depends on both)
+publish_crate "camel-proto-compiler" "crates/services/camel-proto-compiler"
+publish_crate "camel-dataformat-protobuf" "crates/dataformats/camel-dataformat-protobuf"
+publish_crate "camel-component-grpc" "crates/components/camel-component-grpc"
+
 # Component crates (needed by camel-config which has optional deps on most of them)
 publish_crate "camel-component-file" "crates/components/camel-file"
 publish_crate "camel-component-http" "crates/components/camel-http"

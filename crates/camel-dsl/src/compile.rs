@@ -435,23 +435,51 @@ fn compile_declarative_step_with_threshold(
             Ok(BuilderStep::Bean { name, method })
         }
         DeclarativeStep::Marshal(DataFormatDef { format }) => {
-            let df = builtin_data_format(&format).ok_or_else(|| {
-                CamelError::RouteError(format!(
-                    "unknown data format: '{}'. Expected: json, xml",
-                    format
-                ))
-            })?;
+            let df = if format.strip_prefix("protobuf:").is_some() {
+                #[cfg(feature = "protobuf")]
+                {
+                    let rest = format.strip_prefix("protobuf:").expect("checked prefix");
+                    resolve_protobuf_dataformat(rest)?
+                }
+                #[cfg(not(feature = "protobuf"))]
+                {
+                    return Err(CamelError::RouteError(
+                        "protobuf data format requires the 'protobuf' feature flag".to_string(),
+                    ));
+                }
+            } else {
+                builtin_data_format(&format).ok_or_else(|| {
+                    CamelError::RouteError(format!(
+                        "unknown data format: '{}'. Expected: json, xml, protobuf:<path>#<Message>",
+                        format
+                    ))
+                })?
+            };
             Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
                 MarshalService::new(camel_api::IdentityProcessor, df),
             )))
         }
         DeclarativeStep::Unmarshal(DataFormatDef { format }) => {
-            let df = builtin_data_format(&format).ok_or_else(|| {
-                CamelError::RouteError(format!(
-                    "unknown data format: '{}'. Expected: json, xml",
-                    format
-                ))
-            })?;
+            let df = if format.strip_prefix("protobuf:").is_some() {
+                #[cfg(feature = "protobuf")]
+                {
+                    let rest = format.strip_prefix("protobuf:").expect("checked prefix");
+                    resolve_protobuf_dataformat(rest)?
+                }
+                #[cfg(not(feature = "protobuf"))]
+                {
+                    return Err(CamelError::RouteError(
+                        "protobuf data format requires the 'protobuf' feature flag".to_string(),
+                    ));
+                }
+            } else {
+                builtin_data_format(&format).ok_or_else(|| {
+                    CamelError::RouteError(format!(
+                        "unknown data format: '{}'. Expected: json, xml, protobuf:<path>#<Message>",
+                        format
+                    ))
+                })?
+            };
             Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
                 StreamCacheService::new(
                     UnmarshalService::new(camel_api::IdentityProcessor, df),
@@ -493,6 +521,35 @@ fn compile_loop_step(
         while_predicate: def.while_predicate,
         steps: sub_steps,
     })
+}
+
+#[cfg(feature = "protobuf")]
+static PROTO_CACHE: std::sync::OnceLock<camel_proto_compiler::ProtoCache> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "protobuf")]
+fn resolve_protobuf_dataformat(
+    spec: &str,
+) -> Result<std::sync::Arc<dyn camel_api::DataFormat>, CamelError> {
+    let (proto_path, message_name) = spec.split_once('#').ok_or_else(|| {
+        CamelError::RouteError(format!(
+            "invalid protobuf format: 'protobuf:{}'. Expected: protobuf:<proto_path>#<MessageName>",
+            spec
+        ))
+    })?;
+    if proto_path.starts_with('/') || proto_path.contains("..") {
+        return Err(CamelError::RouteError(format!(
+            "proto path '{}' must be relative and cannot contain '..'",
+            proto_path
+        )));
+    }
+    let cache = PROTO_CACHE.get_or_init(camel_proto_compiler::ProtoCache::new);
+    let df = camel_dataformat_protobuf::ProtobufDataFormat::new_with_cache(
+        proto_path,
+        message_name,
+        cache,
+    )?;
+    Ok(std::sync::Arc::new(df))
 }
 
 fn compile_declarative_step_to_canonical(
@@ -1131,6 +1188,49 @@ mod tests {
     fn compile_unmarshal_unknown_format_returns_error() {
         let step = DeclarativeStep::Unmarshal(DataFormatDef {
             format: "protobuf".to_string(),
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "protobuf")]
+    fn proto_fixture_path() -> String {
+        "tests/helloworld.proto".to_string()
+    }
+
+    #[cfg(feature = "protobuf")]
+    #[test]
+    fn compile_marshal_protobuf_to_processor() {
+        let step = DeclarativeStep::Marshal(DataFormatDef {
+            format: format!("protobuf:{}#helloworld.HelloRequest", proto_fixture_path()),
+        });
+        let result = compile_declarative_step(step);
+        assert!(
+            result.is_ok(),
+            "protobuf marshal should resolve: {:?}",
+            result
+        );
+    }
+
+    #[cfg(feature = "protobuf")]
+    #[test]
+    fn compile_unmarshal_protobuf_to_processor() {
+        let step = DeclarativeStep::Unmarshal(DataFormatDef {
+            format: format!("protobuf:{}#helloworld.HelloReply", proto_fixture_path()),
+        });
+        let result = compile_declarative_step(step);
+        assert!(
+            result.is_ok(),
+            "protobuf unmarshal should resolve: {:?}",
+            result
+        );
+    }
+
+    #[cfg(feature = "protobuf")]
+    #[test]
+    fn compile_marshal_protobuf_bad_format() {
+        let step = DeclarativeStep::Marshal(DataFormatDef {
+            format: "protobuf:missing.proto#nonexistent".to_string(),
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err());

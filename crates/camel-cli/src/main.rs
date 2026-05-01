@@ -268,6 +268,8 @@ async fn run(
     register_bundle!(ctx, camel_config, camel_master::MasterBundle);
     register_bundle!(ctx, camel_config, camel_component_redis::RedisBundle);
     register_bundle!(ctx, camel_config, camel_component_sql::SqlBundle);
+    #[cfg(feature = "grpc")]
+    register_bundle!(ctx, camel_config, camel_component_grpc::GrpcBundle);
 
     // Register language plugins bundled in camel-cli.
     // These languages are optional in core, so the CLI wires them explicitly.

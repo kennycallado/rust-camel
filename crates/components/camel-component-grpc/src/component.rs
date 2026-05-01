@@ -1,0 +1,79 @@
+use std::path::PathBuf;
+
+use camel_component_api::{
+    BoxProcessor, CamelError, Component, ComponentContext, Consumer, Endpoint, ProducerContext,
+};
+
+use crate::config::parse_grpc_uri;
+use crate::producer::GrpcProducer;
+
+pub struct GrpcComponent;
+
+impl GrpcComponent {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for GrpcComponent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Component for GrpcComponent {
+    fn scheme(&self) -> &str {
+        "grpc"
+    }
+
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        let (host, port, service_name, method_name, cfg) = parse_grpc_uri(uri)?;
+        let proto_file = cfg.proto_file.ok_or_else(|| {
+            CamelError::EndpointCreationFailed(
+                "missing required query parameter: protoFile".to_string(),
+            )
+        })?;
+        let addr = format!("http://{host}:{port}");
+        Ok(Box::new(GrpcEndpoint {
+            uri: uri.to_string(),
+            addr,
+            proto_path: PathBuf::from(proto_file),
+            service_name,
+            method_name,
+        }))
+    }
+}
+
+struct GrpcEndpoint {
+    uri: String,
+    addr: String,
+    proto_path: PathBuf,
+    service_name: String,
+    method_name: String,
+}
+
+impl Endpoint for GrpcEndpoint {
+    fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+        Err(CamelError::EndpointCreationFailed(
+            "grpc endpoint does not support consumers".to_string(),
+        ))
+    }
+
+    fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+        let producer = GrpcProducer::new(
+            self.addr.clone(),
+            self.proto_path.clone(),
+            self.service_name.clone(),
+            self.method_name.clone(),
+        )?;
+        Ok(BoxProcessor::new(producer))
+    }
+}

@@ -850,6 +850,7 @@ dependencies = [
  "camel-component-controlbus",
  "camel-component-direct",
  "camel-component-file",
+ "camel-component-grpc",
  "camel-component-http",
  "camel-component-jms",
  "camel-component-kafka",
@@ -862,12 +863,14 @@ dependencies = [
  "camel-component-ws",
  "camel-config",
  "camel-core",
+ "camel-dataformat-protobuf",
  "camel-dsl",
  "camel-language-js",
  "camel-language-jsonpath",
  "camel-language-rhai",
  "camel-language-xpath",
  "camel-master",
+ "camel-proto-compiler",
  "camel-xj",
  "camel-xslt",
  "chrono",
@@ -960,6 +963,33 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "camel-component-grpc"
+version = "0.7.5"
+dependencies = [
+ "bytes",
+ "camel-api",
+ "camel-component-api",
+ "camel-dataformat-protobuf",
+ "camel-proto-compiler",
+ "http",
+ "prost",
+ "prost-reflect",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1228,14 +1258,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-dataformat-protobuf"
+version = "0.7.5"
+dependencies = [
+ "bytes",
+ "camel-api",
+ "camel-proto-compiler",
+ "prost",
+ "prost-reflect",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "camel-dsl"
 version = "0.7.5"
 dependencies = [
  "camel-api",
  "camel-component-api",
  "camel-core",
+ "camel-dataformat-protobuf",
  "camel-endpoint",
  "camel-processor",
+ "camel-proto-compiler",
  "criterion",
  "glob",
  "regex",
@@ -1447,6 +1493,19 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "tracing",
+]
+
+[[package]]
+name = "camel-proto-compiler"
+version = "0.7.5"
+dependencies = [
+ "prost",
+ "prost-reflect",
+ "protoc-bin-vendored",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -2987,6 +3046,27 @@ dependencies = [
  "futures-core",
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "grpc-example"
+version = "0.7.5"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-grpc",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "prost",
+ "protoc-bin-vendored",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5188,6 +5268,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "prost-reflect"
+version = "0.16.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b89455ef41ed200cafc47c76c552ee7792370ac420497e551f16123a9135f76e"
+dependencies = [
+ "base64 0.22.1",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde-value",
 ]
 
 [[package]]

@@ -42,6 +42,7 @@ camel-component-file.workspace = true
 camel-component-http.workspace = true
 camel-component-jms.workspace = true
 camel-component-kafka = { workspace = true, optional = true }
+camel-component-grpc = { workspace = true, optional = true }
 camel-component-log.workspace = true
 camel-component-mock.workspace = true
 camel-master = { workspace = true }
@@ -50,6 +51,8 @@ camel-component-sql.workspace = true
 camel-component-timer.workspace = true
 camel-component-validator.workspace = true
 camel-component-ws.workspace = true
+camel-dataformat-protobuf = { workspace = true, optional = true }
+camel-proto-compiler = { workspace = true, optional = true }
 camel-xslt = { workspace = true }
 camel-xj = { workspace = true }
 camel-language-js.workspace = true
@@ -62,9 +65,10 @@ tempfile = "3"
 serde_json.workspace = true
 
 [features]
-default = ["otel"]
+default = ["otel", "grpc"]
 otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 kafka = ["dep:camel-component-kafka", "dynamic-linking"]
+grpc = ["dep:camel-component-grpc", "dep:camel-dataformat-protobuf", "dep:camel-proto-compiler", "camel-dsl/protobuf"]
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]
 kafka-static = ["dep:camel-component-kafka", "cmake-build"]
