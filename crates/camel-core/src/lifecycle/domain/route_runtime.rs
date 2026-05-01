@@ -112,6 +112,7 @@ impl RouteRuntimeAggregate {
                         },
                     ]
                 }
+                RouteRuntimeState::Started => vec![],
                 _ => return Err(invalid(&self.state, "Started")),
             },
             RouteLifecycleCommand::Stop => match self.state {
@@ -123,6 +124,7 @@ impl RouteRuntimeAggregate {
                         route_id: self.route_id.clone(),
                     }]
                 }
+                RouteRuntimeState::Stopped => vec![],
                 _ => return Err(invalid(&self.state, "Stopped")),
             },
             RouteLifecycleCommand::Suspend => match self.state {
@@ -132,6 +134,7 @@ impl RouteRuntimeAggregate {
                         route_id: self.route_id.clone(),
                     }]
                 }
+                RouteRuntimeState::Suspended => vec![],
                 _ => return Err(invalid(&self.state, "Suspended")),
             },
             RouteLifecycleCommand::Resume => match self.state {
@@ -141,6 +144,7 @@ impl RouteRuntimeAggregate {
                         route_id: self.route_id.clone(),
                     }]
                 }
+                RouteRuntimeState::Started => vec![],
                 _ => return Err(invalid(&self.state, "Started")),
             },
             RouteLifecycleCommand::Reload => match self.state {
@@ -248,6 +252,44 @@ mod tests {
             &events[0],
             RuntimeEvent::RouteRemoved { route_id } if route_id == "r1"
         ));
+    }
+
+    #[test]
+    fn start_from_started_is_idempotent() {
+        let mut agg = RouteRuntimeAggregate::new("r1");
+        agg.apply_command(RouteLifecycleCommand::Start).unwrap();
+        let events = agg.apply_command(RouteLifecycleCommand::Start).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(agg.state(), &RouteRuntimeState::Started);
+    }
+
+    #[test]
+    fn stop_from_stopped_is_idempotent() {
+        let mut agg = RouteRuntimeAggregate::new("r1");
+        agg.apply_command(RouteLifecycleCommand::Start).unwrap();
+        agg.apply_command(RouteLifecycleCommand::Stop).unwrap();
+        let events = agg.apply_command(RouteLifecycleCommand::Stop).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(agg.state(), &RouteRuntimeState::Stopped);
+    }
+
+    #[test]
+    fn suspend_from_suspended_is_idempotent() {
+        let mut agg = RouteRuntimeAggregate::new("r1");
+        agg.apply_command(RouteLifecycleCommand::Start).unwrap();
+        agg.apply_command(RouteLifecycleCommand::Suspend).unwrap();
+        let events = agg.apply_command(RouteLifecycleCommand::Suspend).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(agg.state(), &RouteRuntimeState::Suspended);
+    }
+
+    #[test]
+    fn resume_from_started_is_idempotent() {
+        let mut agg = RouteRuntimeAggregate::new("r1");
+        agg.apply_command(RouteLifecycleCommand::Start).unwrap();
+        let events = agg.apply_command(RouteLifecycleCommand::Resume).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(agg.state(), &RouteRuntimeState::Started);
     }
 
     #[test]
