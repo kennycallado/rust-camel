@@ -49,6 +49,7 @@ pub struct TracingProcessor {
     inner: BoxProcessor,
     route_id: String,
     step_id: String,
+    span_name: String,
     step_index: usize,
     detail_level: DetailLevel,
     metrics: Option<Arc<dyn MetricsCollector>>,
@@ -63,19 +64,17 @@ impl TracingProcessor {
         detail_level: DetailLevel,
         metrics: Option<Arc<dyn MetricsCollector>>,
     ) -> Self {
+        let step_id = format!("step-{}", step_index);
+        let span_name = format!("{route_id}:{step_id}");
         Self {
             inner,
             route_id,
-            step_id: format!("step-{}", step_index),
+            step_id,
+            span_name,
             step_index,
             detail_level,
             metrics,
         }
-    }
-
-    /// Build the span name from route_id and step_id.
-    fn span_name(&self) -> String {
-        format!("{}/{}", self.route_id, self.step_id)
     }
 }
 
@@ -90,7 +89,7 @@ impl Service<Exchange> for TracingProcessor {
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let start = Instant::now();
-        let span_name = self.span_name();
+        let span_name = self.span_name.clone();
 
         // Get the global tracer (noop if no provider is configured)
         let tracer = global::tracer("camel-core");
@@ -99,30 +98,30 @@ impl Service<Exchange> for TracingProcessor {
         let parent_cx = exchange.otel_context.clone();
 
         // Build span attributes
-        let mut attributes = vec![
+        let mut attributes = [
+            KeyValue::new("messaging.system", "camel"),
             KeyValue::new("correlation_id", exchange.correlation_id().to_string()),
             KeyValue::new("route_id", self.route_id.clone()),
             KeyValue::new("step_id", self.step_id.clone()),
             KeyValue::new("step_index", self.step_index as i64),
+            KeyValue::new("headers_count", 0i64),
+            KeyValue::new("body_type", ""),
+            KeyValue::new("has_error", false),
         ];
+        let mut attr_count = 5;
 
         if self.detail_level >= DetailLevel::Medium {
-            attributes.push(KeyValue::new(
-                "headers_count",
-                exchange.input.headers.len() as i64,
-            ));
-            attributes.push(KeyValue::new(
-                "body_type",
-                body_type_name(&exchange.input.body),
-            ));
-            attributes.push(KeyValue::new("has_error", exchange.has_error()));
+            attributes[5] = KeyValue::new("headers_count", exchange.input.headers.len() as i64);
+            attributes[6] = KeyValue::new("body_type", body_type_name(&exchange.input.body));
+            attributes[7] = KeyValue::new("has_error", exchange.has_error());
+            attr_count = 8;
         }
 
         // Start a new span as a child of the parent context
         let span = tracer
-            .span_builder(span_name.clone())
+            .span_builder(span_name)
             .with_kind(SpanKind::Internal)
-            .with_attributes(attributes)
+            .with_attributes(attributes[..attr_count].iter().cloned())
             .start_with_context(&tracer, &parent_cx);
 
         // Create new context with this span as the active span
@@ -139,7 +138,6 @@ impl Service<Exchange> for TracingProcessor {
             route_id = %self.route_id,
             step_id = %self.step_id,
             step_index = self.step_index,
-            timestamp = %chrono::Utc::now().to_rfc3339(),
             duration_ms = tracing::field::Empty,
             status = tracing::field::Empty,
             headers_count = tracing::field::Empty,
@@ -160,8 +158,15 @@ impl Service<Exchange> for TracingProcessor {
         }
 
         if self.detail_level >= DetailLevel::Full {
-            for (i, (k, v)) in exchange.input.headers.iter().take(3).enumerate() {
-                tracing_span.record(format!("header_{i}").as_str(), format!("{k}={v:?}"));
+            let headers: Vec<_> = exchange.input.headers.iter().take(3).collect();
+            if let Some((k, v)) = headers.get(0) {
+                tracing_span.record("header_0", format!("{k}={v:?}"));
+            }
+            if let Some((k, v)) = headers.get(1) {
+                tracing_span.record("header_1", format!("{k}={v:?}"));
+            }
+            if let Some((k, v)) = headers.get(2) {
+                tracing_span.record("header_2", format!("{k}={v:?}"));
             }
         }
 
@@ -195,7 +200,7 @@ impl Service<Exchange> for TracingProcessor {
                     metrics.increment_exchanges(&route_id);
 
                     if let Err(e) = &result {
-                        metrics.increment_errors(&route_id, &e.to_string());
+                        metrics.increment_errors(&route_id, e.classify());
                     }
                 }
 
@@ -214,17 +219,18 @@ impl Service<Exchange> for TracingProcessor {
                         }
                     }
                     Err(e) => {
+                        let error_class = e.classify();
+                        cx.span().set_status(Status::error(e.to_string()));
+                        cx.span().add_event(
+                            "error",
+                            vec![
+                                KeyValue::new("error.type", error_class.to_string()),
+                                KeyValue::new("error.message", e.to_string()),
+                            ],
+                        );
                         tracing::Span::current().record("status", "error");
                         tracing::Span::current().record("error", e.to_string());
-                        tracing::Span::current()
-                            .record("error_type", std::any::type_name::<CamelError>());
-
-                        // Record error on OTel span
-                        cx.span().set_status(Status::error(e.to_string()));
-                        cx.span().set_attribute(KeyValue::new(
-                            "error_type",
-                            std::any::type_name::<CamelError>(),
-                        ));
+                        tracing::Span::current().record("error_type", error_class);
                     }
                 }
 
@@ -242,6 +248,7 @@ impl Clone for TracingProcessor {
             inner: self.inner.clone(),
             route_id: self.route_id.clone(),
             step_id: self.step_id.clone(),
+            span_name: self.span_name.clone(),
             step_index: self.step_index,
             detail_level: self.detail_level.clone(),
             metrics: self.metrics.clone(),
@@ -459,8 +466,7 @@ mod tests {
         let tracer =
             TracingProcessor::new(inner, "my-route".to_string(), 5, DetailLevel::Minimal, None);
 
-        // Span name should be "route_id/step_id"
-        assert_eq!(tracer.span_name(), "my-route/step-5");
+        assert_eq!(tracer.span_name, "my-route:step-5");
     }
 
     #[tokio::test]

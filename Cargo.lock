@@ -1172,6 +1172,7 @@ dependencies = [
  "camel-prometheus",
  "config",
  "glob",
+ "opentelemetry-appender-tracing",
  "serde",
  "serde_json",
  "serde_yaml",

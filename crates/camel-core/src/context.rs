@@ -2,6 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -541,6 +542,15 @@ impl CamelContext {
                     causation_id: None,
                 })
                 .await;
+        }
+
+        for service in self.services.iter_mut().rev() {
+            let name = service.name().to_string();
+            match timeout(std::time::Duration::from_secs(5), service.stop()).await {
+                Ok(Ok(())) => info!("Aborted service: {}", name),
+                Ok(Err(e)) => warn!("Service {} failed to stop during abort: {}", name, e),
+                Err(_) => warn!("Service {} timed out during abort (5s)", name),
+            }
         }
     }
 

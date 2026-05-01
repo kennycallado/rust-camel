@@ -56,6 +56,28 @@ pub enum CamelError {
     StreamLimitExceeded(usize),
 }
 
+impl CamelError {
+    pub fn classify(&self) -> &'static str {
+        #[allow(unreachable_patterns)]
+        match self {
+            Self::ComponentNotFound(_) => "component",
+            Self::EndpointCreationFailed(_) | Self::InvalidUri(_) => "endpoint",
+            Self::ProcessorError(_) => "processor",
+            Self::TypeConversionFailed(_) | Self::AlreadyConsumed => "type_conversion",
+            Self::Io(_) => "io",
+            Self::RouteError(_) => "route",
+            Self::CircuitOpen(_) => "circuit_open",
+            Self::HttpOperationFailed { .. } => "http",
+            Self::Config(_) => "config",
+            Self::DeadLetterChannelFailed(_) => "dead_letter",
+            Self::Stopped => "stopped",
+            Self::StreamLimitExceeded(_) => "stream",
+            Self::ChannelClosed => "channel",
+            _ => "unknown",
+        }
+    }
+}
+
 impl From<std::io::Error> for CamelError {
     fn from(err: std::io::Error) -> Self {
         CamelError::Io(err.to_string())
@@ -65,6 +87,32 @@ impl From<std::io::Error> for CamelError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn all_error_samples() -> Vec<CamelError> {
+        vec![
+            CamelError::ComponentNotFound("x".to_string()),
+            CamelError::EndpointCreationFailed("x".to_string()),
+            CamelError::ProcessorError("x".to_string()),
+            CamelError::TypeConversionFailed("x".to_string()),
+            CamelError::InvalidUri("x".to_string()),
+            CamelError::ChannelClosed,
+            CamelError::RouteError("x".to_string()),
+            CamelError::Io("x".to_string()),
+            CamelError::DeadLetterChannelFailed("x".to_string()),
+            CamelError::CircuitOpen("x".to_string()),
+            CamelError::HttpOperationFailed {
+                method: "GET".to_string(),
+                url: "https://example.com".to_string(),
+                status_code: 500,
+                status_text: "Internal Server Error".to_string(),
+                response_body: Some("error".to_string()),
+            },
+            CamelError::Stopped,
+            CamelError::Config("x".to_string()),
+            CamelError::AlreadyConsumed,
+            CamelError::StreamLimitExceeded(42),
+        ]
+    }
 
     #[test]
     fn test_http_operation_failed_display() {
@@ -105,5 +153,64 @@ mod tests {
         let cloned = err.clone();
         assert!(matches!(cloned, CamelError::Stopped));
         assert_eq!(format!("{err}"), "Exchange stopped by Stop EIP");
+    }
+
+    #[test]
+    fn test_classify_maps_all_variants() {
+        assert_eq!(
+            CamelError::ComponentNotFound("x".to_string()).classify(),
+            "component"
+        );
+        assert_eq!(
+            CamelError::EndpointCreationFailed("x".to_string()).classify(),
+            "endpoint"
+        );
+        assert_eq!(
+            CamelError::ProcessorError("x".to_string()).classify(),
+            "processor"
+        );
+        assert_eq!(
+            CamelError::TypeConversionFailed("x".to_string()).classify(),
+            "type_conversion"
+        );
+        assert_eq!(
+            CamelError::InvalidUri("x".to_string()).classify(),
+            "endpoint"
+        );
+        assert_eq!(CamelError::ChannelClosed.classify(), "channel");
+        assert_eq!(CamelError::RouteError("x".to_string()).classify(), "route");
+        assert_eq!(CamelError::Io("x".to_string()).classify(), "io");
+        assert_eq!(
+            CamelError::DeadLetterChannelFailed("x".to_string()).classify(),
+            "dead_letter"
+        );
+        assert_eq!(
+            CamelError::CircuitOpen("x".to_string()).classify(),
+            "circuit_open"
+        );
+        assert_eq!(
+            CamelError::HttpOperationFailed {
+                method: "GET".to_string(),
+                url: "https://example.com".to_string(),
+                status_code: 500,
+                status_text: "Internal Server Error".to_string(),
+                response_body: None,
+            }
+            .classify(),
+            "http"
+        );
+        assert_eq!(CamelError::Stopped.classify(), "stopped");
+        assert_eq!(CamelError::Config("x".to_string()).classify(), "config");
+        assert_eq!(CamelError::AlreadyConsumed.classify(), "type_conversion");
+        assert_eq!(CamelError::StreamLimitExceeded(42).classify(), "stream");
+    }
+
+    #[test]
+    fn test_classify_output_is_ascii_and_short() {
+        for error in all_error_samples() {
+            let class = error.classify();
+            assert!(class.is_ascii());
+            assert!(class.len() <= 15, "class too long: {class}");
+        }
     }
 }

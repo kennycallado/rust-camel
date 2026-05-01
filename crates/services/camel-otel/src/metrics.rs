@@ -4,10 +4,12 @@
 //! trait that integrates with OpenTelemetry for distributed metrics collection.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use camel_api::metrics::MetricsCollector;
+use opentelemetry::InstrumentationScope;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram, UpDownCounter};
@@ -38,7 +40,7 @@ struct MetricInstruments {
 /// Uses lazy initialization - instruments are created on first use to ensure
 /// the global meter provider is configured (by OtelService::start()) before use.
 pub struct OtelMetrics {
-    service_name: &'static str,
+    service_name: Arc<str>,
     instruments: OnceLock<MetricInstruments>,
     queue_depths: std::sync::Mutex<HashMap<String, i64>>,
     cb_states: std::sync::Mutex<HashMap<String, i64>>,
@@ -46,9 +48,8 @@ pub struct OtelMetrics {
 
 impl OtelMetrics {
     pub fn new(service_name: impl Into<String>) -> Self {
-        let service_name: &'static str = Box::leak(service_name.into().into_boxed_str());
         Self {
-            service_name,
+            service_name: service_name.into().into(),
             instruments: OnceLock::new(),
             queue_depths: std::sync::Mutex::new(HashMap::new()),
             cb_states: std::sync::Mutex::new(HashMap::new()),
@@ -57,7 +58,9 @@ impl OtelMetrics {
 
     fn instruments(&self) -> &MetricInstruments {
         self.instruments.get_or_init(|| {
-            let meter = global::meter(self.service_name);
+            let meter = global::meter_with_scope(
+                InstrumentationScope::builder(self.service_name.to_string()).build(),
+            );
             MetricInstruments {
                 exchanges_total: meter
                     .u64_counter(metric_names::EXCHANGES_TOTAL)

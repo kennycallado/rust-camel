@@ -41,9 +41,9 @@ impl CamelConfig {
 
     /// Create a CamelContext configured from this CamelConfig.
     ///
-    /// Always installs a unified tracing subscriber (Layers 1–3, plus Layer 4
-    /// when OTel is enabled). `OtelService`, if present, only manages providers —
-    /// it never installs a subscriber.
+    /// Always installs a unified tracing subscriber (Layers 1–4).
+    /// When OTel is enabled, the OtelService is created *before* the subscriber
+    /// so the LoggerProvider can be wired into the tracing bridge for log export.
     pub async fn configure_context(config: &CamelConfig) -> Result<CamelContext, CamelError> {
         let otel_enabled = config
             .observability
@@ -77,11 +77,10 @@ impl CamelConfig {
 
         let tracer_config = config.observability.tracer.clone();
 
-        // Always install the unified subscriber — OtelService no longer owns it
-        Self::init_tracing_subscriber(&tracer_config, &config.log_level, otel_enabled)?;
-
-        // OtelService manages providers only — subscriber is already installed above
-        if otel_enabled {
+        // Create OtelService *before* subscriber so providers are available
+        // for the tracing-opentelemetry layer and the log bridge.
+        #[cfg(feature = "otel")]
+        let otel_service_opt = if otel_enabled {
             let otel_cfg = config.observability.otel.as_ref().unwrap();
 
             let protocol = match otel_cfg.protocol {
@@ -109,9 +108,40 @@ impl CamelConfig {
                 otel_config = otel_config.with_resource_attr(key, value);
             }
 
-            let otel_service = OtelService::new(otel_config);
+            let mut otel_service = OtelService::new(otel_config);
+
+            // Initialize LoggerProvider early so the log bridge can attach to the subscriber
+            let logger_provider = otel_service.init_logger_provider()?;
+
+            // Initialize TracerProvider early so the tracing-opentelemetry layer
+            // picks up the global tracer provider at subscriber install time
+            otel_service.init_tracer_provider()?;
+
+            Some((otel_service, logger_provider))
+        } else {
+            None
+        };
+        #[cfg(not(feature = "otel"))]
+        let otel_service_opt: Option<()> = if otel_enabled { None } else { None };
+
+        // Install subscriber with all layers including OTel log bridge + tracing
+        Self::init_tracing_subscriber(
+            &tracer_config,
+            &config.log_level,
+            otel_enabled,
+            #[cfg(feature = "otel")]
+            otel_service_opt.as_ref().map(|(_, lp)| lp.clone()),
+        )?;
+
+        // Register OtelService as lifecycle (start()/stop() manage providers)
+        #[cfg(feature = "otel")]
+        if let Some((otel_service, _)) = otel_service_opt {
             ctx = ctx.with_lifecycle(otel_service);
         }
+
+        // Enable tracer pipeline when OTel is active (spans + metrics per route)
+        let final_tracer_config = effective_tracer_config(tracer_config, otel_enabled);
+        ctx = ctx.with_tracer_config(final_tracer_config).await;
 
         let health_state: HealthState = Arc::new(Mutex::new(Vec::new()));
 
@@ -186,7 +216,6 @@ impl CamelConfig {
             ctx = ctx.with_lifecycle(health_server);
         }
 
-        ctx.set_tracer_config(tracer_config).await;
         Ok(ctx)
     }
 
@@ -234,10 +263,12 @@ impl CamelConfig {
         ))
     }
 
+    #[cfg(feature = "otel")]
     fn init_tracing_subscriber(
         config: &TracerConfig,
         log_level: &str,
         otel_active: bool,
+        logger_provider: Option<camel_otel::SdkLoggerProvider>,
     ) -> Result<(), CamelError> {
         let level = parse_log_level(log_level);
 
@@ -311,20 +342,25 @@ impl CamelConfig {
             None
         };
 
-        // Layer 4: tracing-opentelemetry bridge — only when OTel is active
-        #[cfg(feature = "otel")]
-        let otel_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = if otel_active
-        {
-            Some(
-                tracing_opentelemetry::layer()
-                    .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
-                    .boxed(),
-            )
-        } else {
-            None
-        };
-        #[cfg(not(feature = "otel"))]
-        let _ = otel_active; // suppress unused variable warning
+        // Layer 4a: tracing-opentelemetry span bridge — all targets when OTel active
+        let otel_span_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
+            if otel_active {
+                Some(tracing_opentelemetry::layer().boxed())
+            } else {
+                None
+            };
+
+        // Layer 4b: OTel log bridge — exports tracing logs via OTLP (respects log_level)
+        let otel_log_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
+            if let Some(lp) = logger_provider {
+                Some(
+                    opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&lp)
+                        .with_filter(tracing_subscriber::filter::LevelFilter::from_level(level))
+                        .boxed(),
+                )
+            } else {
+                None
+            };
 
         let mut layers: Vec<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = Vec::new();
         layers.push(general_layer);
@@ -334,16 +370,126 @@ impl CamelConfig {
         if let Some(l) = file_layer {
             layers.push(l);
         }
-        #[cfg(feature = "otel")]
-        if let Some(l) = otel_layer {
+        if let Some(l) = otel_span_layer {
+            layers.push(l);
+        }
+        if let Some(l) = otel_log_layer {
             layers.push(l);
         }
 
-        // try_init() silently ignores "already set" error (expected in tests)
-        let _ = tracing_subscriber::registry().with(layers).try_init();
+        let result = tracing_subscriber::registry().with(layers).try_init();
+        if result.is_err() {
+            eprintln!(
+                "WARNING: OTel tracing subscriber not installed — a global subscriber \
+                 was already set. OTel span/log bridge is inactive. \
+                 Ensure no other crate calls tracing_subscriber::init() before camel."
+            );
+        }
 
         Ok(())
     }
+
+    #[cfg(not(feature = "otel"))]
+    fn init_tracing_subscriber(
+        config: &TracerConfig,
+        log_level: &str,
+        _otel_active: bool,
+    ) -> Result<(), CamelError> {
+        let level = parse_log_level(log_level);
+
+        let general_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stdout)
+            .with_filter(tracing_subscriber::filter::LevelFilter::from_level(level))
+            .boxed();
+
+        let stdout_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
+            if config.enabled && config.outputs.stdout.enabled {
+                match config.outputs.stdout.format {
+                    OutputFormat::Json => Some(
+                        tracing_subscriber::fmt::layer()
+                            .json()
+                            .with_span_events(FmtSpan::CLOSE)
+                            .with_target(true)
+                            .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
+                            .boxed(),
+                    ),
+                    OutputFormat::Plain => Some(
+                        tracing_subscriber::fmt::layer()
+                            .with_span_events(FmtSpan::CLOSE)
+                            .with_target(true)
+                            .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
+                            .boxed(),
+                    ),
+                }
+            } else {
+                None
+            };
+
+        let file_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = if config
+            .enabled
+            && let Some(ref file_config) = config.outputs.file
+            && file_config.enabled
+        {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&file_config.path)
+                .map_err(|e| {
+                    CamelError::Config(format!(
+                        "Failed to open trace file '{}': {}",
+                        file_config.path, e
+                    ))
+                })?;
+
+            match file_config.format {
+                OutputFormat::Json => Some(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_span_events(FmtSpan::CLOSE)
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_target(true)
+                        .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
+                        .boxed(),
+                ),
+                OutputFormat::Plain => Some(
+                    tracing_subscriber::fmt::layer()
+                        .with_span_events(FmtSpan::CLOSE)
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_target(true)
+                        .with_filter(filter_fn(|meta| meta.target() == "camel_tracer"))
+                        .boxed(),
+                ),
+            }
+        } else {
+            None
+        };
+
+        let mut layers: Vec<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = Vec::new();
+        layers.push(general_layer);
+        if let Some(l) = stdout_layer {
+            layers.push(l);
+        }
+        if let Some(l) = file_layer {
+            layers.push(l);
+        }
+
+        let result = tracing_subscriber::registry().with(layers).try_init();
+        if result.is_err() {
+            eprintln!(
+                "WARNING: Tracing subscriber not installed — a global subscriber \
+                 was already set. Trace output may be incomplete."
+            );
+        }
+
+        Ok(())
+    }
+}
+
+fn effective_tracer_config(mut tracer_config: TracerConfig, otel_enabled: bool) -> TracerConfig {
+    if otel_enabled {
+        tracer_config.enabled = true;
+    }
+    tracer_config
 }
 
 /// Parse a log level string, defaulting to INFO on failure.
@@ -577,5 +723,27 @@ type = "kubernetes"
             msg.contains("kubernetes"),
             "error should mention kubernetes feature: {msg}"
         );
+    }
+
+    #[test]
+    fn effective_tracer_config_enables_tracing_when_otel_is_enabled() {
+        let cfg = TracerConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let out = effective_tracer_config(cfg, true);
+        assert!(out.enabled);
+    }
+
+    #[test]
+    fn effective_tracer_config_preserves_tracing_when_otel_is_disabled() {
+        let cfg = TracerConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let out = effective_tracer_config(cfg, false);
+        assert!(!out.enabled);
     }
 }

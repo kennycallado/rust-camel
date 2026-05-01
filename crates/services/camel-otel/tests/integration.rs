@@ -257,7 +257,7 @@ async fn test_tracing_processor_records_span() {
     assert!(!spans.is_empty(), "Should have exported spans");
 
     // Find the span created by TracingProcessor
-    let tracing_span = spans.iter().find(|s| s.name == "test-route/step-0");
+    let tracing_span = spans.iter().find(|s| s.name == "test-route:step-0");
     assert!(
         tracing_span.is_some(),
         "Should find span created by TracingProcessor"

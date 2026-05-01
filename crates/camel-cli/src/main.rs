@@ -339,10 +339,22 @@ async fn run(
         tracing::info!("camel-cli: running (hot-reload disabled). Press Ctrl+C to stop.");
     }
 
-    // 9. Wait for Ctrl+C
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to listen for Ctrl+C");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => tracing::info!("Received Ctrl+C"),
+        _ = async {
+            #[cfg(unix)]
+            {
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to install SIGTERM handler")
+                    .recv()
+                    .await
+            }
+            #[cfg(not(unix))]
+            {
+                std::future::pending::<()>().await
+            }
+        } => tracing::info!("Received SIGTERM"),
+    }
 
     tracing::info!("camel-cli: shutting down...");
     watcher_shutdown.cancel();

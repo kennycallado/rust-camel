@@ -25,7 +25,6 @@ use async_trait::async_trait;
 use camel_api::{CamelError, Lifecycle, MetricsCollector, ServiceStatus};
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
@@ -34,9 +33,7 @@ use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
-use tracing::warn;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing::{error, info, warn};
 
 use crate::OtelMetrics;
 use crate::config::{OtelConfig, OtelProtocol, OtelSampler};
@@ -56,6 +53,12 @@ const STATUS_FAILED: u8 = 2;
 /// The service also installs an `OpenTelemetryTracingBridge` to export tracing
 /// logs via OTel. Note that the log bridge is installed globally and is NOT
 /// hot-reloadable - changing OTel configuration requires a process restart.
+///
+/// # Constraints
+///
+/// Only one `OtelService` should be active per process. Creating multiple
+/// instances (e.g., in tests) may leave stale batch exporter tasks running.
+/// Use `shutdown_logger_provider()` at process exit to fully clean up.
 pub struct OtelService {
     config: OtelConfig,
     tracer_provider: Option<SdkTracerProvider>,
@@ -123,7 +126,7 @@ impl OtelService {
     }
 
     /// Build the OTLP log exporter and logger provider based on the configured protocol.
-    fn build_logger_provider(&self) -> Result<SdkLoggerProvider, CamelError> {
+    fn build_logger_provider_internal(&self) -> Result<SdkLoggerProvider, CamelError> {
         let exporter = match self.config.protocol {
             OtelProtocol::Grpc => LogExporter::builder()
                 .with_tonic()
@@ -149,6 +152,71 @@ impl OtelService {
             .build();
 
         Ok(provider)
+    }
+
+    /// Initializes and returns the `SdkLoggerProvider`.
+    ///
+    /// This should be called before initializing the `tracing_subscriber` so you can attach
+    /// the OpenTelemetry log layer to your global subscriber.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let provider = otel_service.init_logger_provider()?;
+    /// let layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&provider);
+    /// tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).with(layer).init();
+    /// ```
+    pub fn init_logger_provider(&mut self) -> Result<SdkLoggerProvider, CamelError> {
+        if let Some(p) = &self.logger_provider {
+            return Ok(p.clone());
+        }
+        let p = self.build_logger_provider_internal()?;
+        self.logger_provider = Some(p.clone());
+        Ok(p)
+    }
+
+    pub fn shutdown_logger_provider(&mut self) {
+        if let Some(provider) = self.logger_provider.take() {
+            if let Err(e) = provider.force_flush() {
+                warn!(
+                    "Error force-flushing LoggerProvider during shutdown: {:?}",
+                    e
+                );
+            }
+            if let Err(e) = provider.shutdown() {
+                warn!("Error shutting down LoggerProvider: {:?}", e);
+            }
+        }
+    }
+
+    /// Build and install the global TracerProvider early.
+    ///
+    /// Must be called before `init_tracing_subscriber()` so that
+    /// `tracing_opentelemetry::layer()` picks up the global provider.
+    pub fn init_tracer_provider(&mut self) -> Result<(), CamelError> {
+        self.validate_config()?;
+
+        if self.tracer_provider.is_some() {
+            return Ok(());
+        }
+
+        let resource = self.build_resource();
+        let span_exporter = self.build_span_exporter()?;
+        let sampler = Self::to_sdk_sampler(&self.config.sampler);
+
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_sampler(sampler)
+            .with_resource(resource)
+            .with_batch_exporter(span_exporter)
+            .build();
+
+        global::set_tracer_provider(tracer_provider.clone());
+        self.tracer_provider = Some(tracer_provider);
+        info!(
+            endpoint = %self.config.endpoint,
+            service_name = %self.config.service_name,
+            "OTel TracerProvider initialized"
+        );
+        Ok(())
     }
 
     /// Build the OpenTelemetry resource with service name and additional attributes.
@@ -205,100 +273,116 @@ impl Lifecycle for OtelService {
     }
 
     async fn start(&mut self) -> Result<(), CamelError> {
-        // Validate configuration first
-        if let Err(e) = self.validate_config() {
-            self.status.store(STATUS_FAILED, Ordering::SeqCst);
-            return Err(e);
+        if self.status.load(Ordering::SeqCst) == STATUS_STARTED {
+            info!("OTel service already started");
+            return Ok(());
         }
 
-        // Guard against double initialization
-        if self.tracer_provider.is_some() {
-            warn!("OtelService already initialized, skipping start()");
-            return Ok(());
+        if let Err(e) = self.validate_config() {
+            self.status.store(STATUS_FAILED, Ordering::SeqCst);
+            error!(error = %e, "OTel config validation failed");
+            return Err(e);
         }
 
         let resource = self.build_resource();
 
-        // Build and install TracerProvider
-        let span_exporter = match self.build_span_exporter() {
-            Ok(exporter) => exporter,
-            Err(e) => {
-                self.status.store(STATUS_FAILED, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
-        let sampler = Self::to_sdk_sampler(&self.config.sampler);
+        // Build and install TracerProvider (if not already initialized early)
+        if self.tracer_provider.is_none() {
+            let span_exporter = match self.build_span_exporter() {
+                Ok(exporter) => exporter,
+                Err(e) => {
+                    self.status.store(STATUS_FAILED, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
+            let sampler = Self::to_sdk_sampler(&self.config.sampler);
 
-        let tracer_provider = SdkTracerProvider::builder()
-            .with_sampler(sampler)
-            .with_resource(resource.clone())
-            .with_batch_exporter(span_exporter)
-            .build();
+            let tracer_provider = SdkTracerProvider::builder()
+                .with_sampler(sampler)
+                .with_resource(resource.clone())
+                .with_batch_exporter(span_exporter)
+                .build();
 
-        global::set_tracer_provider(tracer_provider.clone());
-        self.tracer_provider = Some(tracer_provider);
+            global::set_tracer_provider(tracer_provider.clone());
+            self.tracer_provider = Some(tracer_provider);
+        }
 
-        // Build and install MeterProvider with periodic exporter (60s interval)
-        let metric_exporter = match self.build_metric_exporter() {
-            Ok(exporter) => exporter,
-            Err(e) => {
-                self.status.store(STATUS_FAILED, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
+        // Build and install MeterProvider (if not already initialized)
+        if self.meter_provider.is_none() {
+            let metric_exporter = match self.build_metric_exporter() {
+                Ok(exporter) => exporter,
+                Err(e) => {
+                    self.status.store(STATUS_FAILED, Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
 
-        let periodic_reader = PeriodicReader::builder(metric_exporter)
-            .with_interval(Duration::from_millis(self.config.metrics_interval_ms))
-            .build();
+            let periodic_reader = PeriodicReader::builder(metric_exporter)
+                .with_interval(Duration::from_millis(self.config.metrics_interval_ms))
+                .build();
 
-        let meter_provider = SdkMeterProvider::builder()
-            .with_resource(resource)
-            .with_reader(periodic_reader)
-            .build();
+            let meter_provider = SdkMeterProvider::builder()
+                .with_resource(resource)
+                .with_reader(periodic_reader)
+                .build();
 
-        global::set_meter_provider(meter_provider.clone());
-        self.meter_provider = Some(meter_provider);
+            global::set_meter_provider(meter_provider.clone());
+            self.meter_provider = Some(meter_provider);
+            info!(
+                endpoint = %self.config.endpoint,
+                interval_ms = self.config.metrics_interval_ms,
+                "OTel MeterProvider initialized"
+            );
+        }
 
-        // Install log bridge to export tracing logs via OTel
-        // Note: Log bridge is NOT hot-reloadable - requires process restart for config changes
-        let logger_provider = self.build_logger_provider()?;
-        let layer = OpenTelemetryTracingBridge::new(&logger_provider);
-
-        // Install as additional layer (try_init to not panic if subscriber exists)
-        let _ = tracing_subscriber::registry().with(layer).try_init();
-
-        self.logger_provider = Some(logger_provider);
+        // Initialize logger provider if not already initialized
+        if self.logger_provider.is_none() {
+            let logger_provider = self.build_logger_provider_internal()?;
+            self.logger_provider = Some(logger_provider);
+        }
 
         self.status.store(STATUS_STARTED, Ordering::SeqCst);
+        info!(service_name = %self.config.service_name, "OTel service started");
 
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
-        // Shutdown LoggerProvider (flushes batch exporter)
-        if let Some(provider) = self.logger_provider.take()
-            && let Err(e) = provider.shutdown()
-        {
-            warn!("Error shutting down LoggerProvider: {:?}", e);
+        if self.status.load(Ordering::SeqCst) == STATUS_STOPPED {
+            info!(service_name = %self.config.service_name, "OTel service already stopped, skipping stop()");
+            return Ok(());
         }
 
-        // Shutdown TracerProvider
-        if let Some(provider) = self.tracer_provider.take()
-            && let Err(e) = provider.shutdown()
-        {
-            warn!("Error shutting down TracerProvider: {:?}", e);
+        // Shutdown TracerProvider first (flushes batch span exporter)
+        if let Some(provider) = self.tracer_provider.take() {
+            if let Err(e) = provider.force_flush() {
+                warn!("Error force-flushing TracerProvider: {:?}", e);
+            }
+            if let Err(e) = provider.shutdown() {
+                warn!("Error shutting down TracerProvider: {:?}", e);
+            }
         }
 
-        // Shutdown MeterProvider
-        if let Some(provider) = self.meter_provider.take()
-            && let Err(e) = provider.shutdown()
-        {
-            warn!("Error shutting down MeterProvider: {:?}", e);
+        // Shutdown MeterProvider (flushes periodic metric exporter)
+        if let Some(provider) = self.meter_provider.take() {
+            if let Err(e) = provider.force_flush() {
+                warn!("Error force-flushing MeterProvider: {:?}", e);
+            }
+            if let Err(e) = provider.shutdown() {
+                warn!("Error shutting down MeterProvider: {:?}", e);
+            }
+        }
+
+        if let Some(provider) = self.logger_provider.as_ref() {
+            if let Err(e) = provider.force_flush() {
+                warn!("Error force-flushing LoggerProvider: {:?}", e);
+            }
         }
 
         // Note: metrics collector remains available (Arc<OtelMetrics> is stateless)
 
         self.status.store(STATUS_STOPPED, Ordering::SeqCst);
+        info!(service_name = %self.config.service_name, "OTel service stopped");
 
         Ok(())
     }

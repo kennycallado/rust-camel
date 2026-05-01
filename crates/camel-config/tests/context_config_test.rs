@@ -180,6 +180,7 @@ async fn test_configure_context_with_invalid_log_level() {
     );
 }
 
+#[cfg(feature = "otel")]
 #[tokio::test]
 async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
     let config = CamelConfig {

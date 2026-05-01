@@ -796,6 +796,23 @@ async fn test_context_starts_lifecycle_services() {
 }
 
 #[tokio::test]
+async fn test_context_abort_stops_lifecycle_services() {
+    let (service, _start_count, stop_count) = MockService::new();
+
+    let mut ctx = CamelContext::builder()
+        .build()
+        .await
+        .unwrap()
+        .with_lifecycle(service);
+
+    assert_eq!(stop_count.load(Ordering::SeqCst), 0);
+
+    ctx.abort().await;
+
+    assert_eq!(stop_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn test_service_start_failure_rollback() {
     struct FailingService {
         start_count: Arc<AtomicUsize>,

@@ -55,7 +55,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // - Global MeterProvider (metrics exported via OTLP)
     // - Global LoggerProvider + Log bridge (logs exported via OTLP)
     // - as_metrics_collector() for automatic route metrics
-    let otel_service = OtelService::new(otel_config);
+    let mut otel_service = OtelService::new(otel_config);
+
+    // Initialize tracing subscriber with both stdout and OTel log bridge
+    let logger_provider = otel_service.init_logger_provider()?;
+    let otel_layer =
+        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&logger_provider);
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(otel_layer)
+        .init();
 
     // Build CamelContext with the OtelService as a lifecycle service.
     // with_lifecycle() auto-registers the metrics collector from OtelService.
