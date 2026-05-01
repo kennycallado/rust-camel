@@ -1,5 +1,11 @@
 # camel-component-kafka
 
+> Kafka component for rust-camel integration framework
+
+## Overview
+
+Kafka component for rust-camel integration framework.
+
 Kafka component for [rust-camel](https://github.com/kennycallado/rust-camel).
 
 ## URI Format
@@ -151,3 +157,11 @@ security_protocol = "SASL_SSL"
 
 - Batch consumption mode not implemented
 - Multiple parallel consumers (`consumersCount`) not implemented
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-component-kafka = "*"
+```

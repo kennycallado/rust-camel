@@ -207,7 +207,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-api = "0.2"
+camel-api = "*"
 ```
 
 ## Usage

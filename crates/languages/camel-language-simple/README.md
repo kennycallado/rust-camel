@@ -95,3 +95,12 @@ let lang = ctx.resolve_language("simple").unwrap();
 ## License
 
 Apache-2.0
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-language-simple = "*"
+```

@@ -1,5 +1,7 @@
 # camel-otel
 
+> OpenTelemetry integration for rust-camel
+
 OpenTelemetry integration for rust-camel.
 
 ## Overview
@@ -186,3 +188,12 @@ MIT — see [LICENSE](../../LICENSE) for details.
 ## Contributing
 
 Contributions welcome. Please open an issue or pull request on [GitHub](https://github.com/rust-camel/rust-camel).
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-otel = "*"
+```

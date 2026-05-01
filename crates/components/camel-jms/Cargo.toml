@@ -1,6 +1,7 @@
 [package]
 name = "camel-component-jms"
 description = "JMS component for rust-camel via Java bridge"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

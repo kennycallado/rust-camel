@@ -46,3 +46,12 @@ fn evaluate_with(lang: &dyn Language, exchange: &Exchange) -> Result<(), Languag
 ## License
 
 Apache-2.0
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-language-api = "*"
+```

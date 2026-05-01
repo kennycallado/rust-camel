@@ -20,7 +20,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-component-redis = "0.2"
+camel-component-redis = "*"
 ```
 
 ## URI Format

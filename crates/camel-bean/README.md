@@ -315,3 +315,12 @@ Planned features include:
 ## License
 
 Licensed under the same terms as rust-camel.
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-bean = "*"
+```

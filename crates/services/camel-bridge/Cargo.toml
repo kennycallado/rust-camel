@@ -1,6 +1,7 @@
 [package]
 name = "camel-bridge"
 description = "Bridge process lifecycle management for rust-camel (spawn, health, download)"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

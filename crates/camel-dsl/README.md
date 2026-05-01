@@ -126,7 +126,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-dsl = "0.2"
+camel-dsl = "*"
 ```
 
 ## Quick Start

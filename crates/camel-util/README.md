@@ -20,7 +20,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-util = "0.2"
+camel-util = "*"
 ```
 
 ## Documentation

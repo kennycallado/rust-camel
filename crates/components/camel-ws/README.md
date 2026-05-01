@@ -27,7 +27,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-component-ws = "0.5"
+camel-component-ws = "*"
 ```
 
 ## URI Parameters

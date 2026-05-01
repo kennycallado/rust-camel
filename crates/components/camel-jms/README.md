@@ -31,6 +31,10 @@ Using `activemq:` or `artemis:` as scheme locks the `broker_type` automatically 
 
 > `brokerUrl`, `username`, and `password` are **not** URI parameters — credentials live in `Camel.toml` or programmatic config. `broker_type` is inferred from the scheme (`activemq:` → ActiveMQ Classic, `artemis:` → Artemis) or from the broker config entry.
 
+## Overview
+
+JMS component for rust-camel via Java bridge.
+
 ## Camel.toml Configuration
 
 ```toml
@@ -140,3 +144,12 @@ cargo run -p jms-example
 
 - IBM MQ not supported (planned for a future release)
 - No durable topic subscribers yet
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-component-jms = "*"
+```

@@ -26,7 +26,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-component-http = "0.2"
+camel-component-http = "*"
 ```
 
 ## URI Format

@@ -21,7 +21,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-endpoint = "0.2"
+camel-endpoint = "*"
 ```
 
 ## Usage
@@ -49,7 +49,7 @@ use camel_endpoint::UriConfig;
 #[derive(UriConfig)]
 pub struct TimerConfig {
     pub period: u64,         // ?period=1000
-    #[uri(default = "0")]
+    #[uri(default = "*")]
     pub delay: u64,          // ?delay=500  (optional, default 0)
     #[uri(rename = "repeatCount")]
     pub repeat_count: Option<u64>,

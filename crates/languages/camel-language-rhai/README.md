@@ -88,3 +88,12 @@ ctx.register_language("rhai", Box::new(RhaiLanguage::new())).unwrap();
 ## License
 
 Apache-2.0
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-language-rhai = "*"
+```

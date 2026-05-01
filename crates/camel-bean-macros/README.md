@@ -247,3 +247,12 @@ The `#[bean_impl]` macro:
 ## License
 
 Apache-2.0
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-bean-macros = "*"
+```

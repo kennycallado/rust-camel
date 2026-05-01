@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Kubernetes platform integration for Apache Camel Rust"
+readme = "README.md"
 repository.workspace = true
 
 [dependencies]

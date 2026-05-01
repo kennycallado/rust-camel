@@ -21,7 +21,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-master = "0.6"
+camel-master = "*"
 ```
 
 ## URI Format

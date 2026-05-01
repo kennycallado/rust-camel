@@ -26,7 +26,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-builder = "0.2"
+camel-builder = "*"
 ```
 
 ## Usage

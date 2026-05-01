@@ -32,7 +32,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-processor = "0.2"
+camel-processor = "*"
 ```
 
 ## Usage

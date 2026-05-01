@@ -1,5 +1,11 @@
 # camel-endpoint-macros
 
+> Proc-macros for camel-endpoint
+
+## Overview
+
+Proc-macros for camel-endpoint.
+
 Proc-macros for the `camel-endpoint` crate.
 
 ## UriConfig Derive Macro
@@ -30,7 +36,7 @@ use camel_endpoint_macros::UriConfig;
 struct TimerConfig {
     name: String,
 
-    #[uri_param(default = "1000")]
+    #[uri_param(default = "*")]
     period: u64,
 }
 ```
@@ -38,3 +44,12 @@ struct TimerConfig {
 ## License
 
 Apache-2.0
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-endpoint-macros = "*"
+```

@@ -22,7 +22,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-component-mock = "0.2"
+camel-component-mock = "*"
 ```
 
 ## URI Format

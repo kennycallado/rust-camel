@@ -1,5 +1,7 @@
 # camel-bridge
 
+> Bridge process lifecycle management for rust-camel (spawn, health, download)
+
 Bridge process lifecycle management for [rust-camel](https://github.com/kennycallado/rust-camel).
 
 Internal crate — not intended for direct use. Provides process management, binary download, and gRPC connectivity for bridge-based components (e.g. `camel-component-jms`).
@@ -33,5 +35,5 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-bridge = "0.5"
+camel-bridge = "*"
 ```

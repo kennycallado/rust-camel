@@ -1,5 +1,7 @@
 # camel-config
 
+> Configuration and route discovery for rust-camel
+
 Configuration management for the Rust Camel framework. Provides profile-based configuration with environment variable overrides, component defaults, and supervision settings.
 
 ## Overview
@@ -165,7 +167,7 @@ Requires the `jms` feature flag:
 
 ```toml
 [dependencies]
-camel-config = { version = "0.1", features = ["jms"] }
+camel-config = { version = "*", features = ["jms"] }
 ```
 
 ```toml
@@ -376,7 +378,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-config = "0.1"
+camel-config = "*"
 ```
 
 ## Related Crates

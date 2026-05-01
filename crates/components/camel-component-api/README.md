@@ -21,7 +21,7 @@ It also re-exports common types from `camel-api` and URI helpers from `camel-end
 
 ```toml
 [dependencies]
-camel-component-api = "0.5"
+camel-component-api = "*"
 ```
 
 ## Usage

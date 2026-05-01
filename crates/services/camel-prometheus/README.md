@@ -1,5 +1,7 @@
 # camel-prometheus
 
+> Prometheus metrics integration for rust-camel
+
 Prometheus metrics integration for rust-camel.
 
 ## Overview
@@ -124,4 +126,13 @@ readinessProbe:
     }
   ]
 }
+```
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-prometheus = "*"
 ```

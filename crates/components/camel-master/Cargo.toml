@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Master crate for Rust Camel, re-exporting all public APIs of the workspace"
+readme = "README.md"
 
 [dependencies]
 camel-api.workspace = true

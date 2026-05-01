@@ -34,6 +34,10 @@ camel new <NAME>
 Arguments:
   <NAME>  Project name and directory to create
 
+## Overview
+
+Command-line interface for Apache Camel in Rust.
+
 Options:
   --template <TEMPLATE>       Template to use (default: basic)
   --profile-layout <LAYOUT>   Profile layout: simple or env (default: env)

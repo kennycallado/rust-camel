@@ -45,7 +45,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-core = "0.5"
+camel-core = "*"
 ```
 
 ### Optional Features
@@ -57,7 +57,7 @@ camel-core = "0.5"
 
 ```toml
 [dependencies]
-camel-core = { version = "0.5", features = ["lang-rhai"] }
+camel-core = { version = "*", features = ["lang-rhai"] }
 ```
 
 ## Usage

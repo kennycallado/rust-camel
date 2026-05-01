@@ -22,7 +22,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-component-timer = "0.2"
+camel-component-timer = "*"
 ```
 
 ## URI Format

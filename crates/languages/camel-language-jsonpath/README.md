@@ -29,7 +29,7 @@ Enable in `Cargo.toml`:
 
 ```toml
 [dependencies.camel-core]
-version = "0.5"
+version = "*"
 features = ["lang-jsonpath"]
 ```
 
@@ -145,3 +145,12 @@ let lang = ctx.resolve_language("jsonpath").unwrap();
 ## License
 
 Apache-2.0
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-language-jsonpath = "*"
+```

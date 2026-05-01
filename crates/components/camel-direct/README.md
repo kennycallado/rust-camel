@@ -21,7 +21,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-component-direct = "0.2"
+camel-component-direct = "*"
 ```
 
 ## URI Format

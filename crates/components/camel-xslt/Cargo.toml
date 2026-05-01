@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "XSLT Component for rust-camel (via xml-bridge)"
+readme = "README.md"
 
 [dependencies]
 camel-api = { workspace = true }

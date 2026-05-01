@@ -1,5 +1,7 @@
 # camel-test
 
+> Testing utilities for rust-camel
+
 Testing utilities for [rust-camel](https://github.com/rust-camel/rust-camel).
 
 ## Overview
@@ -87,5 +89,5 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dev-dependencies]
-camel-test = "0.5"
+camel-test = "*"
 ```

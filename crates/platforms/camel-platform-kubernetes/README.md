@@ -1,13 +1,19 @@
 # camel-platform-kubernetes
 
+> Kubernetes platform integration for Apache Camel Rust
+
+## Overview
+
+Kubernetes platform integration for Apache Camel Rust.
+
 Kubernetes-native implementations of the rust-camel Platform SPI (`camel-api`) for distributed runtime coordination. This crate provides pod identity discovery from Downward API environment variables, per-lock Lease-based leader election, and pod readiness-gate updates via the Kubernetes API.
 
 ## Installation
 
 ```toml
 [dependencies]
-camel-platform-kubernetes = "0.7"
-kube = "0.99"
+camel-platform-kubernetes = "*"
+kube = "*"
 ```
 
 ## Usage

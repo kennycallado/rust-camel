@@ -23,6 +23,10 @@ use camel_api::HealthChecker;
 
 let checker: Option<HealthChecker> = None;
 
+## Overview
+
+Health check HTTP endpoints and standalone server for rust-camel.
+
 let app = Router::new()
     .nest("/", health_router(checker));
 ```
@@ -53,3 +57,12 @@ Fields:
 ## CLI override
 
 Use `--health-port PORT` to enable health server and override `observability.health.port` from config.
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+camel-health = "*"
+```
