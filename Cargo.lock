@@ -947,6 +947,8 @@ dependencies = [
  "async-trait",
  "bytes",
  "camel-component-api",
+ "camel-language-api",
+ "camel-language-simple",
  "futures",
  "regex",
  "serde",

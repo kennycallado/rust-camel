@@ -13,6 +13,8 @@ categories.workspace = true
 
 [dependencies]
 camel-component-api.workspace = true
+camel-language-api.workspace = true
+camel-language-simple.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["io"] }

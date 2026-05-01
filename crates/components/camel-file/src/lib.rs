@@ -22,6 +22,8 @@ use tokio_util::io::ReaderStream;
 use tower::Service;
 use tracing::{debug, warn};
 
+use camel_language_api::Language;
+use camel_language_simple::SimpleLanguage;
 use camel_component_api::{
     Body, BoxProcessor, CamelError, Exchange, Message, StreamBody, StreamMetadata,
 };
@@ -698,19 +700,41 @@ struct FileProducer {
 
 impl FileProducer {
     fn resolve_filename(exchange: &Exchange, config: &FileConfig) -> Result<String, CamelError> {
-        if let Some(name) = exchange
+        let raw = if let Some(name) = exchange
             .input
             .header("CamelFileName")
             .and_then(|v| v.as_str())
         {
-            return Ok(name.to_string());
+            Some(name.to_string())
+        } else {
+            config.file_name.clone()
+        };
+
+        match raw {
+            Some(name) if name.contains("${") => {
+                let lang = SimpleLanguage;
+                let expr = lang.create_expression(&name).map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "cannot parse fileName expression '{}': {e}",
+                        name
+                    ))
+                })?;
+                let val = expr.evaluate(exchange).map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "cannot evaluate fileName expression '{}': {e}",
+                        name
+                    ))
+                })?;
+                match val {
+                    serde_json::Value::String(s) => Ok(s),
+                    other => Ok(other.to_string()),
+                }
+            }
+            Some(name) => Ok(name),
+            None => Err(CamelError::ProcessorError(
+                "No filename specified: set CamelFileName header or fileName option".to_string(),
+            )),
         }
-        if let Some(ref name) = config.file_name {
-            return Ok(name.clone());
-        }
-        Err(CamelError::ProcessorError(
-            "No filename specified: set CamelFileName header or fileName option".to_string(),
-        ))
     }
 }
 
@@ -1862,5 +1886,95 @@ mod tests {
         // read_timeout was not set by URI → macro default (30000) → global wins if different
         // (read_timeout stays at 30000 since global has same default = 30000)
         assert_eq!(config.read_timeout, Duration::from_millis(30_000));
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_filename_simple_language_from_header() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}"), &ctx)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("content"));
+        exchange.input.set_header(
+            "CamelTimerCounter",
+            serde_json::Value::Number(42.into()),
+        );
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("test-${header.CamelTimerCounter}.txt".to_string()),
+        );
+
+        producer.oneshot(exchange).await.unwrap();
+
+        assert!(
+            dir.path().join("test-42.txt").exists(),
+            "fileName should have been evaluated from Simple Language expression"
+        );
+        let content = std::fs::read_to_string(dir.path().join("test-42.txt")).unwrap();
+        assert_eq!(content, "content");
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_filename_simple_language_from_uri_param() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("file:{dir_path}?fileName=msg-${{header.id}}.dat"),
+                &ctx,
+            )
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("data"));
+        exchange
+            .input
+            .set_header("id", serde_json::Value::String("abc".to_string()));
+
+        producer.oneshot(exchange).await.unwrap();
+
+        assert!(
+            dir.path().join("msg-abc.dat").exists(),
+            "fileName URI param should have been evaluated from Simple Language expression"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_filename_literal_without_expression() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}?fileName=plain.txt"), &ctx)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let exchange = Exchange::new(Message::new("data"));
+        producer.oneshot(exchange).await.unwrap();
+
+        assert!(
+            dir.path().join("plain.txt").exists(),
+            "literal fileName without expressions should still work"
+        );
     }
 }
