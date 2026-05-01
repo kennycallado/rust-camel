@@ -69,7 +69,7 @@ async fn test_container_producer_run_with_volumes() {
     let _ = docker
         .remove_container(
             &container_id,
-            Some(bollard::container::RemoveContainerOptions {
+            Some(bollard::query_parameters::RemoveContainerOptions {
                 force: true,
                 ..Default::default()
             }),
@@ -159,7 +159,7 @@ async fn test_container_producer_exec() {
     let _ = docker
         .remove_container(
             &container_id,
-            Some(bollard::container::RemoveContainerOptions {
+            Some(bollard::query_parameters::RemoveContainerOptions {
                 force: true,
                 ..Default::default()
             }),

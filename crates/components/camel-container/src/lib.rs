@@ -2635,7 +2635,7 @@ mod tests {
             ContainerConfig::from_uri("container:run?image=alpine&volumes=/tmp/app-data").unwrap();
         let (binds, anon) = config.parse_volumes().unwrap();
         assert!(binds.is_empty());
-        assert!(anon.contains_key("/tmp/app-data"));
+        assert!(anon.contains(&"/tmp/app-data".to_string()));
     }
 
     #[test]
@@ -2645,7 +2645,7 @@ mod tests {
                 .unwrap();
         let (binds, anon) = config.parse_volumes().unwrap();
         assert!(binds.is_empty());
-        assert!(anon.contains_key("/tmp/app-data"));
+        assert!(anon.contains(&"/tmp/app-data".to_string()));
     }
 
     #[test]
@@ -2669,7 +2669,7 @@ mod tests {
         .unwrap();
         let (binds, anon) = config.parse_volumes().unwrap();
         assert_eq!(binds.len(), 1);
-        assert!(anon.contains_key("/tmp/cache"));
+        assert!(anon.contains(&"/tmp/cache".to_string()));
     }
 
     #[test]
