@@ -966,4 +966,89 @@ mod body_field_eval_tests {
             .unwrap();
         assert_eq!(val, Value::String("Received: ping".to_string()));
     }
+
+    // --- XML→Json→Simple integration tests ---
+    // These verify that JSON keys produced by xml_to_json() (@attr, #text, arrays)
+    // are navigable via Simple language BodyField expressions.
+
+    #[test]
+    fn body_field_xml_attr_key() {
+        // XML: <order id="123"> → JSON: {"order": {"@id": "123"}}
+        let lang = SimpleLanguage;
+        let mut ex = Exchange::default();
+        ex.input.body = Body::Json(json!({"order": {"@id": "123"}}));
+        let val = lang
+            .create_expression("${body.order.@id}")
+            .unwrap()
+            .evaluate(&ex)
+            .unwrap();
+        assert_eq!(val, json!("123"));
+    }
+
+    #[test]
+    fn body_field_xml_hash_text() {
+        // XML: <status active="true">pending</status> → JSON: {"status": {"@active": "true", "#text": "pending"}}
+        let lang = SimpleLanguage;
+        let mut ex = Exchange::default();
+        ex.input.body = Body::Json(json!({"status": {"@active": "true", "#text": "pending"}}));
+        let val = lang
+            .create_expression("${body.status.#text}")
+            .unwrap()
+            .evaluate(&ex)
+            .unwrap();
+        assert_eq!(val, json!("pending"));
+    }
+
+    #[test]
+    fn body_field_xml_array_items() {
+        // XML: <order><item>coffee</item><item>tea</item></order> → JSON: {"order": {"item": ["coffee", "tea"]}}
+        let lang = SimpleLanguage;
+        let mut ex = Exchange::default();
+        ex.input.body = Body::Json(json!({"order": {"item": ["coffee", "tea"]}}));
+        let val0 = lang
+            .create_expression("${body.order.item.0}")
+            .unwrap()
+            .evaluate(&ex)
+            .unwrap();
+        assert_eq!(val0, json!("coffee"));
+        let val1 = lang
+            .create_expression("${body.order.item.1}")
+            .unwrap()
+            .evaluate(&ex)
+            .unwrap();
+        assert_eq!(val1, json!("tea"));
+    }
+
+    #[test]
+    fn body_field_xml_array_with_attrs() {
+        // XML: <root><item id="1">a</item><item id="2">b</item></root>
+        // → JSON: {"root": {"item": [{"@id": "1", "#text": "a"}, {"@id": "2", "#text": "b"}]}}
+        let lang = SimpleLanguage;
+        let mut ex = Exchange::default();
+        ex.input.body = Body::Json(
+            json!({"root": {"item": [{"@id": "1", "#text": "a"}, {"@id": "2", "#text": "b"}]}}),
+        );
+        let val = lang
+            .create_expression("${body.root.item.0.@id}")
+            .unwrap()
+            .evaluate(&ex)
+            .unwrap();
+        assert_eq!(val, json!("1"));
+        let val_text = lang
+            .create_expression("${body.root.item.1.#text}")
+            .unwrap()
+            .evaluate(&ex)
+            .unwrap();
+        assert_eq!(val_text, json!("b"));
+    }
+
+    #[test]
+    fn body_field_xml_predicate_on_attr() {
+        // Predicate: ${body.order.@id} == '123'
+        let lang = SimpleLanguage;
+        let mut ex = Exchange::default();
+        ex.input.body = Body::Json(json!({"order": {"@id": "123", "name": "test"}}));
+        let pred = lang.create_predicate("${body.order.@id} == '123'").unwrap();
+        assert!(pred.matches(&ex).unwrap());
+    }
 }

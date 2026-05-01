@@ -134,20 +134,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_marshal_xml_to_text() {
+    async fn test_marshal_xml_json_to_text() {
         let df = builtin_data_format("xml").unwrap();
         let svc = MarshalService::new(IdentityProcessor, df);
-        let exchange = Exchange::new(Message::new(Body::Xml("<root/>".to_string())));
+        let exchange = Exchange::new(Message::new(Body::Json(json!({"root": {"c": "1"}}))));
         let result = svc.oneshot(exchange).await.unwrap();
-        assert_eq!(result.input.body, Body::Text("<root/>".to_string()));
+        match result.input.body {
+            Body::Text(s) => {
+                assert_eq!(s, "<root><c>1</c></root>");
+            }
+            _ => panic!("expected Body::Text, got {:?}", result.input.body),
+        }
     }
 
     #[tokio::test]
-    async fn test_unmarshal_text_to_xml() {
+    async fn test_unmarshal_text_to_json_via_xml() {
         let df = builtin_data_format("xml").unwrap();
         let svc = UnmarshalService::new(IdentityProcessor, df);
         let exchange = Exchange::new(Message::new(Body::Text("<root><c/></root>".to_string())));
         let result = svc.oneshot(exchange).await.unwrap();
-        assert!(matches!(result.input.body, Body::Xml(_)));
+        match result.input.body {
+            Body::Json(v) => {
+                assert_eq!(v["root"]["c"], serde_json::Value::Null);
+                assert_eq!(v, json!({"root": {"c": null}}));
+            }
+            _ => panic!("expected Body::Json, got {:?}", result.input.body),
+        }
     }
 }

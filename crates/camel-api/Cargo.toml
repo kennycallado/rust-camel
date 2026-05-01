@@ -26,7 +26,6 @@ tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
 opentelemetry = { workspace = true }
 quick-xml = { workspace = true }
-sxd-document = { workspace = true }
 
 [dev-dependencies]
 criterion.workspace = true

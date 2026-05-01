@@ -6,7 +6,7 @@
 //!
 //! - `unmarshal("json")` — Text/Bytes with JSON content -> `Body::Json`
 //! - `marshal("json")`   — `Body::Json` -> `Body::Text` (JSON string)
-//! - `unmarshal("xml")`  — Text/Bytes with XML content -> `Body::Xml`
+//! - `unmarshal("xml")`  — Text/Bytes with XML content -> `Body::Json` (parsed to JSON)
 //!
 //! Each route demonstrates a specific marshal/unmarshal flow and how errors
 //! are handled gracefully via the error handler.
@@ -57,11 +57,11 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(route_json_roundtrip).await?;
 
     // =========================================================================
-    // Route 2: XML unmarshal (Text -> Xml)
+    // Route 2: XML unmarshal (Text -> Json)
     // =========================================================================
-    // Demonstrates unmarshalling an XML string into a structured Xml body.
-    // Useful when receiving XML payloads that need to be processed as
-    // structured data.
+    // Demonstrates unmarshalling an XML string into a structured Json body.
+    // The XML is parsed and converted to JSON, enabling Simple language
+    // field navigation like ${body.root.item}.
     let route_xml_unmarshal = RouteBuilder::from("timer:xml-unmarshal?period=2000&repeatCount=3")
         .route_id("xml-unmarshal")
         .set_body("<root><item>hello</item></root>")
@@ -70,7 +70,10 @@ async fn main() -> Result<(), CamelError> {
             LogLevel::Info,
         )
         .unmarshal("xml")
-        .log("Route 2: Unmarshalled Text -> Xml", LogLevel::Info)
+        .log(
+            "Route 2: Unmarshalled Text -> Json (from XML)",
+            LogLevel::Info,
+        )
         .to("log:info?showBody=true")
         .error_handler(ErrorHandlerConfig::log_only())
         .build()?;
@@ -112,7 +115,7 @@ async fn main() -> Result<(), CamelError> {
     println!("|        Marshal/Unmarshal EIP Example - Running              |");
     println!("+==============================================================+");
     println!("|  Route 1: Text -> Json -> Text  (json roundtrip)             |");
-    println!("|  Route 2: Text -> Xml           (xml unmarshal)              |");
+    println!("|  Route 2: Text -> Json (from XML) (xml unmarshal)           |");
     println!("|  Route 3: Invalid -> Json        (error demonstration)       |");
     println!("+==============================================================+");
     println!("|  Press Ctrl+C to stop                                        |");

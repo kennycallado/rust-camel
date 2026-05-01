@@ -1,7 +1,7 @@
 use crate::body::Body;
 use crate::error::CamelError;
+use crate::xml_convert;
 use bytes::Bytes;
-use sxd_document::{Package, parser};
 use thiserror::Error;
 
 /// Target type for body conversion.
@@ -22,13 +22,13 @@ pub enum BodyConverterError {
     Parse(String),
 }
 
-/// Parse XML bytes into a document package.
+/// Parse and validate XML bytes.
 ///
-/// XSD validation moved to `camel-validator` component (xsd mode via xml-bridge) in v0.7.0.
-pub fn parse_xml(input: &[u8]) -> Result<Package, BodyConverterError> {
+/// XSD validation moved to `camel-validator` component (xsd mode via xml-bridge) in v0.7+.
+pub fn parse_xml(input: &[u8]) -> Result<(), BodyConverterError> {
     let s =
         std::str::from_utf8(input).map_err(|e| BodyConverterError::InvalidUtf8(e.to_string()))?;
-    parser::parse(s).map_err(|e| BodyConverterError::Parse(e.to_string()))
+    xml_convert::validate_xml(s).map_err(|e| BodyConverterError::Parse(e.to_string()))
 }
 
 pub fn is_well_formed_xml(input: &[u8]) -> bool {
@@ -74,9 +74,10 @@ pub fn convert(body: Body, target: BodyType) -> Result<Body, CamelError> {
             })?;
             Ok(Body::Bytes(Bytes::from(b)))
         }
-        (Body::Json(_), BodyType::Xml) => Err(CamelError::TypeConversionFailed(
-            "cannot convert Body::Json to Xml: JSON to XML conversion is not supported".to_string(),
-        )),
+        (Body::Json(v), BodyType::Xml) => {
+            let s = xml_convert::json_to_xml(&v)?;
+            Ok(Body::Xml(s))
+        }
         (Body::Json(_), BodyType::Empty) => Err(CamelError::TypeConversionFailed(
             "cannot convert Body::Json to Empty".to_string(),
         )),
@@ -118,9 +119,10 @@ pub fn convert(body: Body, target: BodyType) -> Result<Body, CamelError> {
         // Xml conversions
         (Body::Xml(s), BodyType::Text) => Ok(Body::Text(s)),
         (Body::Xml(s), BodyType::Bytes) => Ok(Body::Bytes(Bytes::from(s.into_bytes()))),
-        (Body::Xml(_), BodyType::Json) => Err(CamelError::TypeConversionFailed(
-            "cannot convert Body::Xml to Json: XML to JSON conversion is not supported".to_string(),
-        )),
+        (Body::Xml(s), BodyType::Json) => {
+            let v = xml_convert::xml_to_json(&s)?;
+            Ok(Body::Json(v))
+        }
         (Body::Xml(_), BodyType::Empty) => Err(CamelError::TypeConversionFailed(
             "cannot convert Body::Xml to Empty".to_string(),
         )),
@@ -385,31 +387,17 @@ mod tests {
     }
 
     #[test]
-    fn test_json_to_xml_unsupported() {
+    fn test_json_to_xml_supported() {
         let body = Body::Json(json!({"key": "value"}));
-        let result = convert(body, BodyType::Xml);
-        assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
-        if let Err(CamelError::TypeConversionFailed(msg)) = result {
-            assert!(
-                msg.contains("not supported"),
-                "error message should mention 'not supported', got: {}",
-                msg
-            );
-        }
+        let result = convert(body, BodyType::Xml).unwrap();
+        assert!(matches!(result, Body::Xml(_)));
     }
 
     #[test]
-    fn test_xml_to_json_unsupported() {
+    fn test_xml_to_json_supported() {
         let body = Body::Xml("<root/>".to_string());
-        let result = convert(body, BodyType::Json);
-        assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
-        if let Err(CamelError::TypeConversionFailed(msg)) = result {
-            assert!(
-                msg.contains("not supported"),
-                "error message should mention 'not supported', got: {}",
-                msg
-            );
-        }
+        let result = convert(body, BodyType::Json).unwrap();
+        assert!(matches!(result, Body::Json(_)));
     }
 
     #[test]
@@ -514,5 +502,46 @@ mod tests {
             result.is_ok(),
             "self-closing root element should be accepted"
         );
+    }
+
+    // =============================================================================
+    // Xml↔Json Conversion Tests (Task 5)
+    // =============================================================================
+
+    #[test]
+    fn xml_to_json_valid() {
+        let body = Body::Xml("<root><a>1</a></root>".to_string());
+        let result = convert(body, BodyType::Json).unwrap();
+        match result {
+            Body::Json(v) => assert_eq!(v["root"]["a"], json!("1")),
+            _ => panic!("expected Body::Json"),
+        }
+    }
+
+    #[test]
+    fn xml_to_json_invalid() {
+        let body = Body::Xml("not xml".to_string());
+        let result = convert(body, BodyType::Json);
+        assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    }
+
+    #[test]
+    fn json_to_xml_valid() {
+        let body = Body::Json(json!({"root": {"a": "1"}}));
+        let result = convert(body, BodyType::Xml).unwrap();
+        match result {
+            Body::Xml(s) => {
+                assert!(s.contains("<root>"));
+                assert!(s.contains("<a>1</a>"));
+            }
+            _ => panic!("expected Body::Xml"),
+        }
+    }
+
+    #[test]
+    fn json_to_xml_non_object_fails() {
+        let body = Body::Json(json!("just a string"));
+        let result = convert(body, BodyType::Xml);
+        assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
     }
 }

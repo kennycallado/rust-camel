@@ -738,7 +738,6 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
- "sxd-document",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

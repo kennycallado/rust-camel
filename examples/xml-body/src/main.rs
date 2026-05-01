@@ -5,8 +5,9 @@
 //! - Constructing `Body::Xml` directly
 //! - Accessing XML content with `as_xml()`
 //! - Converting between `Body::Xml` and `Body::Text`
+//! - Converting between `Body::Json` and `Body::Xml` (via body_converter)
 //! - XML validation during conversion
-//! - Error handling for unsupported conversions (JSON ↔ XML)
+//! - Error handling for invalid XML
 
 use camel_api::body::Body;
 
@@ -73,14 +74,18 @@ async fn main() {
     println!();
 
     // =========================================================================
-    // 6. JSON → XML is unsupported
+    // 6. JSON → XML conversion (via body_converter)
     // =========================================================================
-    println!("6. JSON → XML is unsupported");
-    println!("   ─────────────────────────────");
+    println!("6. Converting Body::Json → Body::Xml");
+    println!("   ──────────────────────────────────");
     let json_body = Body::Json(serde_json::json!({"key": "value"}));
     match json_body.try_into_xml() {
-        Ok(_) => println!("   ERROR: Should have failed!"),
-        Err(e) => println!("   Expected error: {}", e),
+        Ok(xml) => {
+            if let Some(s) = xml.as_xml() {
+                println!("   Converted Json to Xml: {:?}", s);
+            }
+        }
+        Err(e) => println!("   Error: {}", e),
     }
     println!();
 

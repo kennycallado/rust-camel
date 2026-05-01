@@ -32,6 +32,7 @@ pub mod supervision;
 pub mod throttler;
 pub mod unit_of_work;
 pub mod value;
+pub mod xml_convert;
 
 // Re-export core types at crate root for convenience.
 pub use aggregator::{AggregationFn, AggregatorConfig, CompletionCondition};

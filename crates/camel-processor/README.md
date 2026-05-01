@@ -119,7 +119,7 @@ The `DataFormat` trait defines serialization/deserialization for message bodies:
 | Format | Marshal (structured → wire) | Unmarshal (wire → structured) |
 |--------|---------------------------|------------------------------|
 | `json` | `Body::Json` → `Body::Text` | `Body::Text`/`Body::Bytes` → `Body::Json` |
-| `xml`  | `Body::Xml` → `Body::Text` | `Body::Text`/`Body::Bytes` → `Body::Xml` |
+| `xml`  | `Body::Json` → `Body::Text` | `Body::Text`/`Body::Bytes`/`Body::Xml` → `Body::Json` |
 
 ### Usage with RouteBuilder
 
