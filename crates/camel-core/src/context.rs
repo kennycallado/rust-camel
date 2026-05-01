@@ -171,7 +171,7 @@ impl CamelContext {
         let mut languages: HashMap<String, Arc<dyn Language>> = HashMap::new();
         languages.insert(
             "simple".to_string(),
-            Arc::new(camel_language_simple::SimpleLanguage),
+            Arc::new(camel_language_simple::SimpleLanguage::new()),
         );
         #[cfg(feature = "lang-js")]
         {
@@ -678,6 +678,21 @@ impl CamelContextBuilder {
         let languages = self
             .languages
             .unwrap_or_else(CamelContext::built_in_languages);
+        let simple_with_resolver: Arc<dyn Language> = Arc::new(
+            camel_language_simple::SimpleLanguage::with_resolver(Arc::new({
+                let languages = Arc::clone(&languages);
+                move |name| {
+                    languages
+                        .lock()
+                        .ok()
+                        .and_then(|registry| registry.get(name).cloned())
+                }
+            })),
+        );
+        languages
+            .lock()
+            .expect("mutex poisoned: another thread panicked while holding this lock")
+            .insert("simple".to_string(), simple_with_resolver);
         let metrics = self.metrics.unwrap_or_else(|| Arc::new(NoOpMetrics));
         let platform_service = self
             .platform_service

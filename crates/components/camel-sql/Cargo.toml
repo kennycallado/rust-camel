@@ -13,7 +13,7 @@ categories = ["database", "asynchronous", "network-programming"]
 
 [dependencies]
 camel-component-api = { workspace = true }
-sqlx = { version = "0.8", features = ["runtime-tokio", "any", "postgres", "mysql", "sqlite"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "any", "postgres", "mysql", "sqlite", "chrono"] }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 tower = { workspace = true }
@@ -25,6 +25,7 @@ async-stream = "0.3"
 serde = { workspace = true }
 toml = { workspace = true }
 url = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

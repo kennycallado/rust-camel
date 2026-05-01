@@ -68,13 +68,25 @@ Compare JSON boolean fields with `true`/`false` literals:
     source: "${body.active} == true"
 ```
 
+## Language Delegation
+
+Delegate expression evaluation to another registered language using `${lang:expr}` syntax:
+
+| Syntax | Description |
+|--------|-------------|
+| `${jsonpath:$.store.book[0].title}` | Evaluate a JSONPath expression |
+| `${xpath://user/name}` | Evaluate an XPath expression |
+| `${constant:hello}` | Evaluate a constant expression |
+
+The language name must be registered in the `CamelContext` language registry. When used outside a context (standalone), delegation returns an error.
+
 ## Usage
 
 ```rust
 use camel_language_simple::SimpleLanguage;
 use camel_language_api::Language;
 
-let lang = SimpleLanguage;
+let lang = SimpleLanguage::new();
 
 // Create a predicate
 let pred = lang.create_predicate("${header.type} == 'order'").unwrap();

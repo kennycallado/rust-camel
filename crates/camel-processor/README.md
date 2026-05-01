@@ -17,6 +17,7 @@
 - **Aggregator**: Aggregate multiple messages into one
 - **Multicast**: Send to multiple destinations in parallel
 - **RecipientList**: Dynamically resolve endpoints from expression at runtime
+- **Dynamic Router**: Route to endpoints determined at runtime by a closure; includes same-destination loop detection
 - **WireTap**: Fire-and-forget message copying
 - **Circuit Breaker**: Resilience pattern implementation
 - **Error Handler**: Centralized error handling
@@ -111,6 +112,7 @@ let route = RouteBuilder::from("timer:tick")
 | `UnmarshalService` | Unmarshal body using a DataFormat (e.g., Text → Json) |
 | `DelayerService` | Delay message processing by a fixed or dynamic duration |
 | `RecipientListService` | Dynamic recipient list — resolve endpoints from expression at runtime |
+| `DynamicRouterService` | Dynamic router — resolve destination at runtime via closure; detects same-destination loops |
 
 ## Data Formats
 

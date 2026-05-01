@@ -31,7 +31,7 @@ fn build_controller_with_components() -> DefaultRouteController {
 fn register_simple_language(controller: &mut DefaultRouteController) {
     controller.languages.lock().expect("languages lock").insert(
         "simple".into(),
-        Arc::new(camel_language_simple::SimpleLanguage),
+        Arc::new(camel_language_simple::SimpleLanguage::new()),
     );
 }
 

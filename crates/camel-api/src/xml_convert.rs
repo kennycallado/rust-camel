@@ -368,11 +368,9 @@ fn parse_attrs(
             "@{}",
             String::from_utf8_lossy(attr.key.local_name().as_ref())
         );
-        let val = attr
-            .decode_and_unescape_value(decoder)
-            .map_err(|err| {
-                CamelError::TypeConversionFailed(format!("cannot unescape attribute value: {err}"))
-            })?;
+        let val = attr.decode_and_unescape_value(decoder).map_err(|err| {
+            CamelError::TypeConversionFailed(format!("cannot unescape attribute value: {err}"))
+        })?;
         map.insert(key, serde_json::Value::String(val.to_string()));
     }
     Ok(map)

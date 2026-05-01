@@ -22,13 +22,13 @@ use tokio_util::io::ReaderStream;
 use tower::Service;
 use tracing::{debug, warn};
 
-use camel_language_api::Language;
-use camel_language_simple::SimpleLanguage;
 use camel_component_api::{
     Body, BoxProcessor, CamelError, Exchange, Message, StreamBody, StreamMetadata,
 };
 use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 use camel_component_api::{UriConfig, parse_uri};
+use camel_language_api::Language;
+use camel_language_simple::SimpleLanguage;
 
 // ---------------------------------------------------------------------------
 // TempFileGuard — RAII cleanup for temp files (panic-safe)
@@ -712,7 +712,7 @@ impl FileProducer {
 
         match raw {
             Some(name) if name.contains("${") => {
-                let lang = SimpleLanguage;
+                let lang = SimpleLanguage::new();
                 let expr = lang.create_expression(&name).map_err(|e| {
                     CamelError::ProcessorError(format!(
                         "cannot parse fileName expression '{}': {e}",
@@ -1904,10 +1904,9 @@ mod tests {
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let mut exchange = Exchange::new(Message::new("content"));
-        exchange.input.set_header(
-            "CamelTimerCounter",
-            serde_json::Value::Number(42.into()),
-        );
+        exchange
+            .input
+            .set_header("CamelTimerCounter", serde_json::Value::Number(42.into()));
         exchange.input.set_header(
             "CamelFileName",
             serde_json::Value::String("test-${header.CamelTimerCounter}.txt".to_string()),

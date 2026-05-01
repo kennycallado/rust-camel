@@ -47,6 +47,7 @@ impl Service<Exchange> for DynamicRouterService {
         Box::pin(async move {
             let start = Instant::now();
             let mut iterations = 0;
+            let mut last_destinations: Option<String> = None;
 
             loop {
                 iterations += 1;
@@ -71,6 +72,15 @@ impl Service<Exchange> for DynamicRouterService {
                     None => break,
                     Some(uris) => uris,
                 };
+
+                if last_destinations.as_deref() == Some(destinations.as_str()) {
+                    return Err(CamelError::ProcessorError(format!(
+                        "Dynamic router detected infinite loop: expression returned the same destination '{}' on consecutive iterations. The destination endpoint must clear or update the routing header to signal completion.",
+                        destinations
+                    )));
+                }
+
+                last_destinations = Some(destinations.clone());
 
                 for uri in destinations.split(&config.uri_delimiter) {
                     let uri = uri.trim();
@@ -168,10 +178,10 @@ mod tests {
 
         let config = DynamicRouterConfig::new(Arc::new(move |_ex: &Exchange| {
             let count = iterations_clone.fetch_add(1, Ordering::SeqCst);
-            if count < 2 {
-                Some("mock:a".to_string())
-            } else {
-                None
+            match count {
+                0 => Some("mock:a".to_string()),
+                1 => Some("mock:b".to_string()),
+                _ => None,
             }
         }));
 
@@ -195,7 +205,23 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("max iterations"));
+        assert!(err.contains("infinite loop"));
+        assert!(err.contains("same destination"));
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_router_detects_same_destination_loop() {
+        let config = make_config(|_| Some("mock:loop".to_string())).max_iterations(100);
+
+        let mut svc = DynamicRouterService::new(config, mock_resolver());
+
+        let ex = Exchange::new(Message::new("test"));
+        let result = svc.ready().await.unwrap().call(ex).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("infinite loop"));
+        assert!(err.contains("mock:loop"));
     }
 
     #[tokio::test]

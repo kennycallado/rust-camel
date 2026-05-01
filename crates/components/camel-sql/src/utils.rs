@@ -8,7 +8,7 @@ use tracing::warn;
 /// Converts a database row to a JSON object.
 ///
 /// Iterates columns and extracts values by trying types in order:
-/// Option<i64>, Option<i32>, Option<f64>, Option<bool>, Option<String>.
+/// Option<i64>, Option<i32>, Option<f64>, Option<bool>, Option<String>, timestamp strings.
 /// SQL NULLs are properly represented as JSON null.
 pub(crate) fn row_to_json(row: &AnyRow) -> Result<serde_json::Value, CamelError> {
     let mut map = serde_json::Map::new();
@@ -28,6 +28,30 @@ pub(crate) fn row_to_json(row: &AnyRow) -> Result<serde_json::Value, CamelError>
             serde_json::Value::Bool(v)
         } else if let Ok(Some(v)) = row.try_get::<Option<String>, _>(i) {
             serde_json::Value::String(v)
+        } else if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(i) {
+            if let Ok(text) = std::str::from_utf8(&v) {
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+                    serde_json::Value::String(date.format("%Y-%m-%d").to_string())
+                } else if let Ok(dt) =
+                    chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f")
+                {
+                    serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
+                } else if let Ok(dt) =
+                    chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
+                {
+                    serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+                } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
+                    serde_json::Value::String(
+                        dt.with_timezone(&chrono::Utc)
+                            .format("%Y-%m-%dT%H:%M:%SZ")
+                            .to_string(),
+                    )
+                } else {
+                    serde_json::Value::String(text.to_string())
+                }
+            } else {
+                serde_json::Value::Null
+            }
         } else if matches!(row.try_get::<Option<String>, _>(i), Ok(None)) {
             // Confirmed SQL NULL — no warning needed
             serde_json::Value::Null

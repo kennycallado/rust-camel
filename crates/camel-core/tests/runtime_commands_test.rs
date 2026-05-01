@@ -26,7 +26,7 @@ fn simple_languages() -> camel_core::route_controller::SharedLanguageRegistry {
         std::collections::HashMap::new();
     map.insert(
         "simple".to_string(),
-        Arc::new(camel_language_simple::SimpleLanguage),
+        Arc::new(camel_language_simple::SimpleLanguage::new()),
     );
     Arc::new(std::sync::Mutex::new(map))
 }

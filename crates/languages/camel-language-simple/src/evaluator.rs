@@ -1,7 +1,12 @@
+use crate::ResolverFn;
 use crate::parser::{Expr, InterpolatedPart, LogicalOp, Op, PathSegment};
 use camel_language_api::{Body, Exchange, LanguageError, Value};
 
-pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError> {
+pub fn evaluate(
+    expr: &Expr,
+    exchange: &Exchange,
+    resolver: &Option<ResolverFn>,
+) -> Result<Value, LanguageError> {
     match expr {
         Expr::Header(key) => Ok(exchange.input.header(key).cloned().unwrap_or(Value::Null)),
 
@@ -35,6 +40,25 @@ pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError
 
         Expr::ExchangeProperty(key) => Ok(exchange.property(key).cloned().unwrap_or(Value::Null)),
 
+        Expr::LanguageDelegate {
+            language,
+            expression,
+        } => {
+            let resolver = resolver.as_ref().ok_or_else(|| {
+                LanguageError::EvalError(
+                    "No language resolver configured. Register languages via CamelContext to use ${lang:expr} syntax.".into(),
+                )
+            })?;
+            let lang = resolver(language.as_str()).ok_or_else(|| {
+                LanguageError::EvalError(format!(
+                    "Language '{}' not found in registry. Available languages must be registered via CamelContext.",
+                    language
+                ))
+            })?;
+            let expr = lang.create_expression(expression)?;
+            expr.evaluate(exchange)
+        }
+
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
         Expr::EscapedString(s) => Ok(Value::String(s.clone())),
         Expr::NumberLit(n) => serde_json::Number::from_f64(*n)
@@ -43,8 +67,8 @@ pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError
         Expr::Null => Ok(Value::Null),
 
         Expr::BinOp { left, op, right } => {
-            let lv = evaluate(left, exchange)?;
-            let rv = evaluate(right, exchange)?;
+            let lv = evaluate(left, exchange, resolver)?;
+            let rv = evaluate(right, exchange, resolver)?;
             let result = apply_op(&lv, op, &rv)?;
             // Design note: BinOp always produces a Bool result. The Simple Language
             // only supports comparison/predicate expressions — arithmetic or
@@ -60,7 +84,7 @@ pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError
                 match part {
                     InterpolatedPart::Literal(text) => result.push_str(text),
                     InterpolatedPart::Expr(sub_expr) => {
-                        let val = evaluate(sub_expr, exchange)?;
+                        let val = evaluate(sub_expr, exchange, resolver)?;
                         match val {
                             Value::Null => {} // missing value → empty string in interpolation
                             Value::String(s) => result.push_str(&s),
@@ -73,20 +97,20 @@ pub fn evaluate(expr: &Expr, exchange: &Exchange) -> Result<Value, LanguageError
         }
 
         Expr::LogicalOp { left, op, right } => {
-            let lv = evaluate(left, exchange)?;
+            let lv = evaluate(left, exchange, resolver)?;
             match op {
                 LogicalOp::And => {
                     if !is_truthy(&lv) {
                         return Ok(Value::Bool(false));
                     }
-                    let rv = evaluate(right, exchange)?;
+                    let rv = evaluate(right, exchange, resolver)?;
                     Ok(Value::Bool(is_truthy(&rv)))
                 }
                 LogicalOp::Or => {
                     if is_truthy(&lv) {
                         return Ok(Value::Bool(true));
                     }
-                    let rv = evaluate(right, exchange)?;
+                    let rv = evaluate(right, exchange, resolver)?;
                     Ok(Value::Bool(is_truthy(&rv)))
                 }
             }

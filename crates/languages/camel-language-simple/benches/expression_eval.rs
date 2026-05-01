@@ -1,11 +1,13 @@
+use std::hint::black_box;
+
 use camel_language_api::{Exchange, Language, Message, Value};
 use camel_language_simple::SimpleLanguage;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 fn bench_expression_eval(c: &mut Criterion) {
     let mut group = c.benchmark_group("language_simple/expression_eval");
 
-    let lang = SimpleLanguage;
+    let lang = SimpleLanguage::new();
 
     let mut ex = Exchange::new(Message::new("hello world"));
     ex.input.set_header("foo", Value::String("bar".to_string()));
@@ -42,7 +44,7 @@ fn bench_expression_eval(c: &mut Criterion) {
 fn bench_predicate_eval(c: &mut Criterion) {
     let mut group = c.benchmark_group("language_simple/predicate_eval");
 
-    let lang = SimpleLanguage;
+    let lang = SimpleLanguage::new();
 
     let mut ex = Exchange::new(Message::new("hello world"));
     ex.input.set_header("foo", Value::String("bar".to_string()));

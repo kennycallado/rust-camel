@@ -36,7 +36,7 @@ async fn main() -> Result<(), CamelError> {
 
     // --- Build language predicates / expressions up-front ---
 
-    let lang = SimpleLanguage;
+    let lang = SimpleLanguage::new();
 
     // Predicate: only let 'order' messages through the filter
     let order_pred = lang

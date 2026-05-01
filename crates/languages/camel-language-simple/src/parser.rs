@@ -9,6 +9,10 @@ pub enum Expr {
     /// Array indexing: `${body.items.0}` → `BodyField([Key("items"), Index(0)])`
     BodyField(Vec<PathSegment>),
     ExchangeProperty(String),
+    LanguageDelegate {
+        language: String,
+        expression: String,
+    },
     StringLit(String),
     NumberLit(f64),
     Null,
@@ -441,6 +445,19 @@ fn parse_expr_atom(s: &str) -> Result<Expr, LanguageError> {
             });
         }
         return Ok(Expr::ExchangeProperty(key.to_string()));
+    }
+
+    if let Some((language, expression)) = s.split_once(':')
+        && !expression.is_empty()
+        && !language.is_empty()
+        && language
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Ok(Expr::LanguageDelegate {
+            language: language.to_string(),
+            expression: expression.to_string(),
+        });
     }
 
     Err(LanguageError::ParseError {
