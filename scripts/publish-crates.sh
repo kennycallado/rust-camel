@@ -98,6 +98,7 @@ publish_crate() {
   cd "$WORKSPACE_ROOT" >/dev/null
   if [ -z "$DRY_RUN" ]; then
     wait_for_crate_index "$crate" "$current_version"
+    sleep 10
   fi
 }
 
