@@ -185,7 +185,21 @@ async fn handle_lifecycle(
     let expected_version = aggregate.version();
 
     let execution_command = command.clone();
-    let events = aggregate.apply_command(command)?;
+    let events = aggregate.apply_command(command.clone())?;
+
+    if events.is_empty() {
+        let target = match &execution_command {
+            RouteLifecycleCommand::Start => "Started",
+            RouteLifecycleCommand::Stop => "Stopped",
+            RouteLifecycleCommand::Suspend => "Suspended",
+            RouteLifecycleCommand::Resume => "Started",
+            _ => "unknown",
+        };
+        return Err(CamelError::RouteError(format!(
+            "invalid transition: route '{}' already in {target} state",
+            aggregate.route_id()
+        )));
+    }
 
     if matches!(execution_command, RouteLifecycleCommand::Reload) && deps.execution.is_none() {
         return Err(CamelError::RouteError(
