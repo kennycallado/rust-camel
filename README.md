@@ -40,10 +40,10 @@ rust-camel separates two planes:
 │  └──────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────┘
           │                          │
-┌─────────▼──────────┐   ┌──────────▼─────────────────┐
-│   camel-processor  │   │   Components                │
-│   EIP patterns     │   │   timer, log, http, file,   │
-│   (Tower layers)   │   │   kafka, redis, sql, jms, …  │
+┌─────────▼──────────┐   ┌───────────▼────────────────┐
+│   camel-processor  │   │   Components               │
+│   EIP patterns     │   │   timer, log, http, file,  │
+│   (Tower layers)   │   │   kafka, redis, sql, ...,  │
 └────────────────────┘   └────────────────────────────┘
 ```
 
@@ -91,7 +91,7 @@ camel run
 This scaffolds a project with a `Camel.toml`, `routes/hello.yaml`, and runs it.
 See [`crates/camel-cli/README.md`](crates/camel-cli/README.md) for all CLI commands.
 
-## Quick Example
+## Quick Rust Example
 
 ```rust
 use camel_api::{CamelError, Value};
@@ -125,7 +125,7 @@ async fn main() -> Result<(), CamelError> {
 ```
 
 ```sh
-cargo run -p hello-world
+cargo run
 ```
 
 ## Crate Map
