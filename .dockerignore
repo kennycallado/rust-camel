@@ -1,0 +1,12 @@
+.git
+.github
+target
+docs
+bridges
+.flake*
+.envrc
+.worktrees
+.worktree
+coverage.toml
+Cross.toml
+AGENTS.md

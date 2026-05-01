@@ -91,6 +91,36 @@ camel run
 This scaffolds a project with a `Camel.toml`, `routes/hello.yaml`, and runs it.
 See [`crates/camel-cli/README.md`](crates/camel-cli/README.md) for all CLI commands.
 
+## Docker
+
+Pre-built images are available on [GHCR](https://github.com/kennycallado/rust-camel/pkgs/container/rust-camel) and [Docker Hub](https://hub.docker.com/r/kennycallado/rust-camel).
+
+```bash
+# Pull the scratch image (production)
+docker pull ghcr.io/kennycallado/rust-camel:latest
+
+# Pull the alpine image (debugging)
+docker pull ghcr.io/kennycallado/rust-camel:latest-alpine
+
+# Run with routes mounted
+docker run -v $(pwd)/routes:/app/routes ghcr.io/kennycallado/rust-camel:latest camel run
+
+# Interactive shell (alpine)
+docker run -it -v $(pwd):/app ghcr.io/kennycallado/rust-camel:latest-alpine sh
+
+# Docker Hub equivalent
+docker pull kennycallado/rust-camel:latest
+```
+
+Two image variants are published per release:
+
+| Tag suffix | Base | Use case |
+|------------|------|----------|
+| *(none)* | scratch | Production. Minimal attack surface. |
+| `-alpine` | alpine:3.21 | Debugging. Includes busybox shell. |
+
+Both variants support `linux/amd64` and `linux/arm64`.
+
 ## Quick Rust Example
 
 ```rust
