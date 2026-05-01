@@ -95,7 +95,7 @@ pub fn xml_to_json(input: &str) -> Result<serde_json::Value, CamelError> {
                 }
                 got_root = true;
                 let name = local_name(&e);
-                let attrs = parse_attrs(&e)?;
+                let attrs = parse_attrs(&e, reader.decoder())?;
                 stack.push(XmlNode {
                     name,
                     attrs,
@@ -111,7 +111,7 @@ pub fn xml_to_json(input: &str) -> Result<serde_json::Value, CamelError> {
                 }
                 got_root = true;
                 let name = local_name(&e);
-                let attrs = parse_attrs(&e)?;
+                let attrs = parse_attrs(&e, reader.decoder())?;
                 let value = if attrs.is_empty() {
                     serde_json::Value::Null
                 } else {
@@ -351,6 +351,7 @@ fn local_name(e: &quick_xml::events::BytesStart<'_>) -> String {
 
 fn parse_attrs(
     e: &quick_xml::events::BytesStart<'_>,
+    decoder: quick_xml::Decoder,
 ) -> Result<serde_json::Map<String, serde_json::Value>, CamelError> {
     let mut map = serde_json::Map::new();
     for attr_result in e.attributes() {
@@ -358,7 +359,6 @@ fn parse_attrs(
             CamelError::TypeConversionFailed(format!("cannot parse attribute: {err}"))
         })?;
 
-        // Skip namespace declarations (both xmlns and xmlns:prefix)
         let full_name = String::from_utf8_lossy(attr.key.as_ref());
         if full_name == "xmlns" || full_name.starts_with("xmlns:") {
             continue;
@@ -368,10 +368,11 @@ fn parse_attrs(
             "@{}",
             String::from_utf8_lossy(attr.key.local_name().as_ref())
         );
-        let val_str = String::from_utf8_lossy(&attr.value);
-        let val = quick_xml::escape::unescape(&val_str).map_err(|err| {
-            CamelError::TypeConversionFailed(format!("cannot unescape attribute value: {err}"))
-        })?;
+        let val = attr
+            .decode_and_unescape_value(decoder)
+            .map_err(|err| {
+                CamelError::TypeConversionFailed(format!("cannot unescape attribute value: {err}"))
+            })?;
         map.insert(key, serde_json::Value::String(val.to_string()));
     }
     Ok(map)
