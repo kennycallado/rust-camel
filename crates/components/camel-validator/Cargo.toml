@@ -18,6 +18,7 @@ dashmap = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tonic = { workspace = true }
+tonic-prost = { workspace = true }
 prost = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
@@ -28,7 +29,7 @@ tower.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
-tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]

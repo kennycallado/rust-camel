@@ -11,6 +11,7 @@ camel-api = { workspace = true }
 camel-component-api = { workspace = true }
 camel-bridge = { workspace = true }
 tonic = { workspace = true }
+tonic-prost = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 async-trait = { workspace = true }
@@ -22,7 +23,7 @@ url = { workspace = true }
 tower = { workspace = true }
 
 [build-dependencies]
-tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]

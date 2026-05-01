@@ -9,9 +9,10 @@ use camel_api::platform::{
     LeadershipEvent, LeadershipHandle, LeadershipService, NoopReadinessGate, PlatformError,
     PlatformIdentity, PlatformService, ReadinessGate,
 };
-use chrono::Utc;
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
+use k8s_openapi::jiff::Span;
+use k8s_openapi::jiff::Timestamp as JiffTimestamp;
 use kube::api::{DeleteParams, PostParams, Preconditions};
 use kube::{Api, Client};
 use tokio::sync::{Notify, oneshot, watch};
@@ -363,7 +364,7 @@ async fn reconcile_lease(
     config: &KubernetesPlatformConfig,
     holder_identity: &str,
 ) -> Result<bool, kube::Error> {
-    let now = Utc::now();
+    let now = JiffTimestamp::now();
 
     let maybe_lease = leases.get_opt(lease_name).await?;
     let Some(mut lease) = maybe_lease else {
@@ -442,14 +443,14 @@ async fn reconcile_lease(
     Ok(false)
 }
 
-fn lease_is_expired(spec: &LeaseSpec, now: chrono::DateTime<Utc>) -> bool {
+fn lease_is_expired(spec: &LeaseSpec, now: JiffTimestamp) -> bool {
     let Some(lease_duration_seconds) = spec.lease_duration_seconds else {
         return true;
     };
     let Some(last_renewal) = spec.renew_time.as_ref().or(spec.acquire_time.as_ref()) else {
         return true;
     };
-    let expires_at = last_renewal.0 + chrono::Duration::seconds(lease_duration_seconds as i64);
+    let expires_at = last_renewal.0 + Span::new().seconds(lease_duration_seconds as i64);
     expires_at < now
 }
 
@@ -508,7 +509,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use kube::error::ErrorResponse;
+    use kube::core::Status;
+    use kube::core::response::StatusSummary;
 
     #[test]
     fn namespace_resolution_uses_explicit_config_namespace_first() {
@@ -616,12 +618,14 @@ mod tests {
 
     #[test]
     fn conflict_classification_is_explicit_for_409_api_errors() {
-        let err = kube::Error::Api(ErrorResponse {
-            status: "Failure".to_string(),
+        let err = kube::Error::Api(Box::new(Status {
+            status: Some(StatusSummary::Failure),
             message: "conflict".to_string(),
             reason: "Conflict".to_string(),
             code: 409,
-        });
+            metadata: None,
+            details: None,
+        }));
 
         assert!(is_optimistic_conflict(&err));
     }

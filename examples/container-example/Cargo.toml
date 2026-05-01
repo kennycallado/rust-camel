@@ -15,5 +15,5 @@ camel-component-log.workspace = true
 camel-component-direct.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal", "time"] }
 tracing-subscriber.workspace = true
-bollard = "0.18.1"
+bollard = "0.20"
 futures = { workspace = true }

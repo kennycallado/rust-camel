@@ -15,6 +15,14 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use bollard::Docker;
+use bollard::models::{
+    ContainerCreateBody, NetworkConnectRequest, NetworkCreateRequest, NetworkDisconnectRequest,
+};
+use bollard::query_parameters::{
+    CreateContainerOptions, CreateImageOptions, EventsOptions, ListContainersOptions,
+    ListImagesOptions, ListNetworksOptions, LogsOptions, RemoveContainerOptions,
+    StartContainerOptions,
+};
 use bollard::service::{HostConfig, PortBinding};
 use camel_component_api::parse_uri;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, Message};
@@ -67,7 +75,7 @@ pub async fn cleanup_tracked_containers() {
         match docker
             .remove_container(
                 &id,
-                Some(bollard::container::RemoveContainerOptions {
+                Some(RemoveContainerOptions {
                     force: true,
                     ..Default::default()
                 }),
@@ -355,15 +363,10 @@ impl ContainerConfig {
     }
 
     #[allow(clippy::type_complexity)]
-    fn parse_ports(
-        &self,
-    ) -> Option<(
-        HashMap<String, HashMap<(), ()>>,
-        HashMap<String, Option<Vec<PortBinding>>>,
-    )> {
+    fn parse_ports(&self) -> Option<(Vec<String>, HashMap<String, Option<Vec<PortBinding>>>)> {
         let ports_str = self.ports.as_ref()?;
 
-        let mut exposed_ports: HashMap<String, HashMap<(), ()>> = HashMap::new();
+        let mut exposed_ports: Vec<String> = Vec::new();
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
 
         for mapping in ports_str.split(',') {
@@ -383,7 +386,7 @@ impl ContainerConfig {
 
             let container_key = format!("{}/{}", container_port, protocol);
 
-            exposed_ports.insert(container_key.clone(), HashMap::new());
+            exposed_ports.push(container_key.clone());
 
             port_bindings.insert(
                 container_key,
@@ -419,7 +422,7 @@ impl ContainerConfig {
 
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
-    fn parse_volumes(&self) -> Option<(Vec<String>, HashMap<String, HashMap<(), ()>>)> {
+    fn parse_volumes(&self) -> Option<(Vec<String>, Vec<String>)> {
         self.volumes.as_deref().and_then(parse_volume_str)
     }
 }
@@ -429,9 +432,9 @@ impl ContainerConfig {
 /// Format: `host:container:ro|rw` for bind mounts, `path` for anonymous volumes,
 /// `path:ro|rw` for anonymous volumes with mode, or `name:container` for named volumes.
 #[allow(clippy::type_complexity)]
-fn parse_volume_str(volumes_str: &str) -> Option<(Vec<String>, HashMap<String, HashMap<(), ()>>)> {
+fn parse_volume_str(volumes_str: &str) -> Option<(Vec<String>, Vec<String>)> {
     let mut binds: Vec<String> = Vec::new();
-    let mut anonymous_volumes: HashMap<String, HashMap<(), ()>> = HashMap::new();
+    let mut anonymous_volumes: Vec<String> = Vec::new();
 
     for entry in volumes_str.split(',') {
         let entry = entry.trim();
@@ -455,13 +458,13 @@ fn parse_volume_str(volumes_str: &str) -> Option<(Vec<String>, HashMap<String, H
                 let a = segments[0];
                 let b = segments[1];
                 if b == "ro" || b == "rw" {
-                    anonymous_volumes.insert(a.to_string(), HashMap::new());
+                    anonymous_volumes.push(a.to_string());
                 } else {
                     binds.push(format!("{}:{}", a, b));
                 }
             }
             1 => {
-                anonymous_volumes.insert(segments[0].to_string(), HashMap::new());
+                anonymous_volumes.push(segments[0].to_string());
             }
             _ => continue,
         }
@@ -519,7 +522,7 @@ fn resolve_container_name(exchange: &Exchange, config: &ContainerConfig) -> Opti
 
 async fn image_exists_locally(docker: &Docker, image: &str) -> Result<bool, CamelError> {
     let images = docker
-        .list_images::<&str>(None)
+        .list_images(None::<ListImagesOptions>)
         .await
         .map_err(|e| CamelError::ProcessorError(format!("Failed to list images: {}", e)))?;
 
@@ -540,8 +543,8 @@ async fn pull_image_with_progress(
     tracing::info!("Pulling image: {}", image);
 
     let mut stream = docker.create_image(
-        Some(bollard::image::CreateImageOptions {
-            from_image: image,
+        Some(CreateImageOptions {
+            from_image: Some(image.to_string()),
             ..Default::default()
         }),
         None,
@@ -695,7 +698,7 @@ async fn handle_list(
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
     let containers = docker
-        .list_containers::<String>(None)
+        .list_containers(None::<ListContainersOptions>)
         .await
         .map_err(|e| CamelError::ProcessorError(format!("Failed to list containers: {}", e)))?;
 
@@ -767,11 +770,11 @@ async fn handle_run(
 
     let container_id = run_container_with_cleanup(
         move || async move {
-            let create_options = bollard::container::CreateContainerOptions {
-                name: container_name_ref,
+            let create_options = CreateContainerOptions {
+                name: Some(container_name_ref.to_string()),
                 ..Default::default()
             };
-            let container_config = bollard::container::Config::<String> {
+            let container_config = ContainerCreateBody {
                 image: Some(image.clone()),
                 cmd: cmd_parts,
                 env: env_vars,
@@ -809,7 +812,7 @@ async fn handle_run(
         },
         move |container_id| async move {
             docker_start
-                .start_container::<String>(&container_id, None)
+                .start_container(&container_id, None::<StartContainerOptions>)
                 .await
                 .map_err(|e| {
                     CamelError::ProcessorError(format!(
@@ -865,7 +868,7 @@ async fn handle_lifecycle(
     match operation {
         ProducerOperation::Start => {
             docker
-                .start_container::<String>(&container_id, None)
+                .start_container(&container_id, None::<StartContainerOptions>)
                 .await
                 .map_err(|e| {
                     CamelError::ProcessorError(format!("Failed to start container: {}", e))
@@ -1051,9 +1054,9 @@ async fn handle_network_create(
 
     let driver = config.driver.as_deref().unwrap_or("bridge");
 
-    let options = bollard::network::CreateNetworkOptions {
+    let options = NetworkCreateRequest {
         name: network_name.clone(),
-        driver: driver.to_string(),
+        driver: Some(driver.to_string()),
         ..Default::default()
     };
 
@@ -1114,7 +1117,7 @@ async fn handle_network_connect(
     docker
         .connect_network(
             &network,
-            bollard::network::ConnectNetworkOptions {
+            NetworkConnectRequest {
                 container,
                 ..Default::default()
             },
@@ -1168,9 +1171,9 @@ async fn handle_network_disconnect(
     docker
         .disconnect_network(
             &network,
-            bollard::network::DisconnectNetworkOptions {
+            NetworkDisconnectRequest {
                 container,
-                force: config.force,
+                force: Some(config.force),
             },
         )
         .await
@@ -1234,7 +1237,7 @@ async fn handle_network_list(
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
     let networks = docker
-        .list_networks::<String>(None)
+        .list_networks(None::<ListNetworksOptions>)
         .await
         .map_err(|e| CamelError::ProcessorError(format!("Failed to list networks: {}", e)))?;
 
@@ -1382,7 +1385,7 @@ impl ContainerConsumer {
                 }
             };
 
-            let mut event_stream = docker.events::<String>(None);
+            let mut event_stream = docker.events(None::<EventsOptions>);
 
             loop {
                 tokio::select! {
@@ -1466,7 +1469,7 @@ impl ContainerConsumer {
                 .clone()
                 .unwrap_or_else(|| "all".to_string());
 
-            let options = bollard::container::LogsOptions::<String> {
+            let options = LogsOptions {
                 follow: self.config.follow,
                 stdout: true,
                 stderr: true,
@@ -1902,7 +1905,7 @@ mod tests {
         let config = ContainerConfig::from_uri("container:run?image=nginx&ports=8080:80").unwrap();
         let (exposed, bindings) = config.parse_ports().unwrap();
 
-        assert!(exposed.contains_key("80/tcp"));
+        assert!(exposed.contains(&"80/tcp".to_string()));
         assert!(bindings.contains_key("80/tcp"));
 
         let binding = bindings.get("80/tcp").unwrap().as_ref().unwrap();
@@ -1916,8 +1919,8 @@ mod tests {
             ContainerConfig::from_uri("container:run?image=nginx&ports=8080:80,8443:443").unwrap();
         let (exposed, bindings) = config.parse_ports().unwrap();
 
-        assert!(exposed.contains_key("80/tcp"));
-        assert!(exposed.contains_key("443/tcp"));
+        assert!(exposed.contains(&"80/tcp".to_string()));
+        assert!(exposed.contains(&"443/tcp".to_string()));
         assert_eq!(bindings.len(), 2);
     }
 
@@ -1928,8 +1931,8 @@ mod tests {
                 .unwrap();
         let (exposed, _bindings) = config.parse_ports().unwrap();
 
-        assert!(exposed.contains_key("80/tcp"));
-        assert!(exposed.contains_key("53/udp"));
+        assert!(exposed.contains(&"80/tcp".to_string()));
+        assert!(exposed.contains(&"53/udp".to_string()));
     }
 
     #[test]
@@ -2287,7 +2290,7 @@ mod tests {
         }
 
         // Pull alpine:latest if not present
-        let images = docker.list_images::<&str>(None).await.unwrap();
+        let images = docker.list_images(None::<ListImagesOptions>).await.unwrap();
         let has_alpine = images
             .iter()
             .any(|img| img.repo_tags.iter().any(|t| t.starts_with("alpine")));
@@ -2295,8 +2298,8 @@ mod tests {
         if !has_alpine {
             eprintln!("Pulling alpine:latest image...");
             let mut stream = docker.create_image(
-                Some(bollard::image::CreateImageOptions {
-                    from_image: "alpine:latest",
+                Some(CreateImageOptions {
+                    from_image: Some("alpine:latest".to_string()),
                     ..Default::default()
                 }),
                 None,
@@ -2370,7 +2373,7 @@ mod tests {
         docker
             .remove_container(
                 &container_id,
-                Some(bollard::container::RemoveContainerOptions {
+                Some(RemoveContainerOptions {
                     force: true,
                     ..Default::default()
                 }),

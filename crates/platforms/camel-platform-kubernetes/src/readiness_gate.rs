@@ -37,7 +37,7 @@ impl KubernetesReadinessGate {
                     "type": self.condition_type,
                     "status": status,
                     "reason": reason,
-                    "lastTransitionTime": chrono::Utc::now().to_rfc3339()
+                    "lastTransitionTime": k8s_openapi::jiff::Timestamp::now().to_string()
                 }]
             }
         });

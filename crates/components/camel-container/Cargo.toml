@@ -18,7 +18,7 @@ tokio-util = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
-bollard = { version = "0.18.1" }
+bollard = { version = "0.20" }
 futures = { workspace = true }
 tower = { workspace = true }
 once_cell = "1.20"

@@ -27,14 +27,14 @@ camel-endpoint.workspace = true
 camel-component-controlbus.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
-testcontainers = { version = "0.23", optional = true }
-testcontainers-modules = { version = "0.11", features = ["redis", "kafka", "postgres", "k3s"], optional = true }
+testcontainers = { version = "0.27", optional = true }
+testcontainers-modules = { version = "0.15", features = ["redis", "kafka", "postgres", "k3s"], optional = true }
 camel-component-redis = { workspace = true, optional = true }
 camel-component-kafka = { workspace = true, optional = true }
 camel-component-sql = { workspace = true, optional = true }
 camel-component-jms = { workspace = true, optional = true }
 camel-component-container = { workspace = true, optional = true }
-bollard = { version = "0.18.1", optional = true }
+bollard = { version = "0.20", optional = true }
 camel-component-validator = { workspace = true, optional = true }
 camel-xslt = { workspace = true, optional = true }
 camel-xj = { workspace = true, optional = true }

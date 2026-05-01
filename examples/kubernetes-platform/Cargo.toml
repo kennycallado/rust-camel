@@ -10,6 +10,6 @@ camel-api.workspace = true
 camel-platform-kubernetes = { path = "../../crates/platforms/camel-platform-kubernetes" }
 k8s-openapi = { workspace = true }
 kube.workspace = true
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["k3s"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["k3s"] }
 tokio = { workspace = true, features = ["full"] }

@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{
+    Database, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+};
 use serde::{Deserialize, Serialize};
 
 use camel_api::CamelError;
@@ -187,10 +189,10 @@ impl RedbRuntimeEventJournal {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
-    fn redb_durability(&self) -> redb::Durability {
+    fn redb_durability(&self) -> Durability {
         match self.options.durability {
-            JournalDurability::Immediate => redb::Durability::Immediate,
-            JournalDurability::Eventual => redb::Durability::Eventual,
+            JournalDurability::Immediate => Durability::Immediate,
+            JournalDurability::Eventual => Durability::None,
         }
     }
 
@@ -327,7 +329,8 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
             let mut tx = db
                 .begin_write()
                 .map_err(|e| CamelError::Io(format!("redb begin_write: {e}")))?;
-            tx.set_durability(durability);
+            tx.set_durability(durability)
+                .map_err(|e| CamelError::Io(format!("redb set_durability: {e}")))?;
             {
                 let mut table = tx
                     .open_table(EVENTS_TABLE)
@@ -411,7 +414,8 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
             let mut tx = db
                 .begin_write()
                 .map_err(|e| CamelError::Io(format!("redb begin_write: {e}")))?;
-            tx.set_durability(durability);
+            tx.set_durability(durability)
+                .map_err(|e| CamelError::Io(format!("redb set_durability: {e}")))?;
             {
                 let mut table = tx
                     .open_table(COMMAND_IDS_TABLE)
@@ -438,7 +442,8 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
             let mut tx = db
                 .begin_write()
                 .map_err(|e| CamelError::Io(format!("redb begin_write: {e}")))?;
-            tx.set_durability(durability);
+            tx.set_durability(durability)
+                .map_err(|e| CamelError::Io(format!("redb set_durability: {e}")))?;
             {
                 let mut table = tx
                     .open_table(COMMAND_IDS_TABLE)

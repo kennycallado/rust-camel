@@ -175,7 +175,7 @@ fn build_map_object(
                 .to_string(ctx)?
                 .to_std_string_escaped();
             let has = data_obj.has_own_property(js_string!(key.as_str()), ctx)?;
-            Ok(JsValue::Boolean(has))
+            Ok(JsValue::from(has))
         },
         data_has,
     );
@@ -215,7 +215,7 @@ fn build_map_object(
             let js_keys: Vec<JsValue> = keys
                 .iter()
                 .filter_map(|k| match k {
-                    PropertyKey::String(s) => Some(JsValue::String(s.clone())),
+                    PropertyKey::String(s) => Some(JsValue::from(s.clone())),
                     _ => None,
                 })
                 .collect();
@@ -243,9 +243,9 @@ pub fn extract_camel_state(ctx: &mut Context) -> Result<JsExchange, JsLanguageEr
             message: e.to_string(),
         })?;
 
-    let camel = match camel_val {
-        JsValue::Object(ref obj) => obj.clone(),
-        _ => {
+    let camel = match camel_val.as_object() {
+        Some(obj) => obj,
+        None => {
             return Err(JsLanguageError::ExchangeAccess {
                 message: "camel global is not an object".to_string(),
             });
@@ -290,9 +290,9 @@ fn extract_map(
     map_val: &JsValue,
     ctx: &mut Context,
 ) -> Result<HashMap<String, Value>, JsLanguageError> {
-    let map_obj = match map_val {
-        JsValue::Object(obj) => obj.clone(),
-        _ => return Ok(HashMap::new()),
+    let map_obj = match map_val.as_object() {
+        Some(obj) => obj,
+        None => return Ok(HashMap::new()),
     };
 
     let data_val =
@@ -302,9 +302,9 @@ fn extract_map(
                 message: e.to_string(),
             })?;
 
-    let data_obj = match data_val {
-        JsValue::Object(obj) => obj,
-        _ => return Ok(HashMap::new()),
+    let data_obj = match data_val.as_object() {
+        Some(obj) => obj,
+        None => return Ok(HashMap::new()),
     };
 
     let keys = data_obj

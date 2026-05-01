@@ -29,13 +29,13 @@ fn value_to_js_inner(
 
     match value {
         Value::Null => Ok(JsValue::null()),
-        Value::Bool(b) => Ok(JsValue::Boolean(*b)),
+        Value::Bool(b) => Ok(JsValue::from(*b)),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
-                    Ok(JsValue::Integer(i as i32))
+                    Ok(JsValue::from(i as i32))
                 } else if (-JS_MAX_SAFE_INT_I64..=JS_MAX_SAFE_INT_I64).contains(&i) {
-                    Ok(JsValue::Rational(i as f64))
+                    Ok(JsValue::rational(i as f64))
                 } else {
                     Err(JsLanguageError::TypeConversion {
                         message: format!(
@@ -44,14 +44,14 @@ fn value_to_js_inner(
                     })
                 }
             } else if let Some(f) = n.as_f64() {
-                Ok(JsValue::Rational(f))
+                Ok(JsValue::rational(f))
             } else {
                 Err(JsLanguageError::TypeConversion {
                     message: format!("cannot convert number: {n}"),
                 })
             }
         }
-        Value::String(s) => Ok(JsValue::String(JsString::from(s.as_str()))),
+        Value::String(s) => Ok(JsValue::from(JsString::from(s.as_str()))),
         Value::Array(arr) => {
             let js_arr = JsArray::new(ctx);
             for (i, item) in arr.iter().enumerate() {
@@ -96,77 +96,84 @@ fn js_to_value_inner(
         });
     }
 
-    match value {
-        JsValue::Null | JsValue::Undefined => Ok(Value::Null),
-        JsValue::Boolean(b) => Ok(Value::Bool(*b)),
-        JsValue::Integer(i) => Ok(Value::Number((*i).into())),
-        JsValue::Rational(f) => {
-            if f.fract() == 0.0 && *f >= -JS_MAX_SAFE_INT_F64 && *f <= JS_MAX_SAFE_INT_F64 {
-                return Ok(Value::Number((*f as i64).into()));
-            }
-
-            let n = serde_json::Number::from_f64(*f).ok_or_else(|| {
-                JsLanguageError::TypeConversion {
-                    message: format!("non-finite float: {f}"),
-                }
-            })?;
-            Ok(Value::Number(n))
-        }
-        JsValue::String(s) => Ok(Value::String(s.to_std_string_escaped())),
-        JsValue::Object(obj) => {
-            // Check if it's an Array
-            if obj.is_array() {
-                let js_arr = JsArray::from_object(obj.clone()).map_err(|e| {
-                    JsLanguageError::TypeConversion {
-                        message: format!("array conversion error: {e}"),
-                    }
-                })?;
-                let len = js_arr
-                    .length(ctx)
-                    .map_err(|e| JsLanguageError::TypeConversion {
-                        message: format!("array length error: {e}"),
-                    })?;
-                let mut arr = Vec::with_capacity(len as usize);
-                for i in 0..len {
-                    let item = js_arr
-                        .get(i, ctx)
-                        .map_err(|e| JsLanguageError::TypeConversion {
-                            message: format!("array get error at {i}: {e}"),
-                        })?;
-                    arr.push(js_to_value_inner(&item, ctx, depth + 1)?);
-                }
-                Ok(Value::Array(arr))
-            } else {
-                // Plain object — enumerate own string keys
-                let keys =
-                    obj.own_property_keys(ctx)
-                        .map_err(|e| JsLanguageError::TypeConversion {
-                            message: format!("object keys error: {e}"),
-                        })?;
-                let mut map = Map::new();
-                for key in keys {
-                    let key_str = match &key {
-                        boa_engine::property::PropertyKey::String(s) => s.to_std_string_escaped(),
-                        boa_engine::property::PropertyKey::Index(i) => i.get().to_string(),
-                        boa_engine::property::PropertyKey::Symbol(_) => continue, // skip symbols
-                    };
-                    let val = obj
-                        .get(boa_engine::JsString::from(key_str.as_str()), ctx)
-                        .map_err(|e| JsLanguageError::TypeConversion {
-                            message: format!("object get error for key '{key_str}': {e}"),
-                        })?;
-                    map.insert(key_str, js_to_value_inner(&val, ctx, depth + 1)?);
-                }
-                Ok(Value::Object(map))
-            }
-        }
-        JsValue::Symbol(_) => Err(JsLanguageError::TypeConversion {
-            message: "JS Symbol cannot be converted to serde_json::Value".to_string(),
-        }),
-        JsValue::BigInt(_) => Err(JsLanguageError::TypeConversion {
-            message: "JS BigInt cannot be converted to serde_json::Value".to_string(),
-        }),
+    if value.is_null() || value.is_undefined() {
+        return Ok(Value::Null);
     }
+    if let Some(b) = value.as_boolean() {
+        return Ok(Value::Bool(b));
+    }
+    if let Some(i) = value.as_i32() {
+        return Ok(Value::Number(i.into()));
+    }
+    if let Some(f) = value.as_number() {
+        if f.fract() == 0.0 && (-JS_MAX_SAFE_INT_F64..=JS_MAX_SAFE_INT_F64).contains(&f) {
+            return Ok(Value::Number((f as i64).into()));
+        }
+        let n = serde_json::Number::from_f64(f).ok_or_else(|| JsLanguageError::TypeConversion {
+            message: format!("non-finite float: {f}"),
+        })?;
+        return Ok(Value::Number(n));
+    }
+    if let Some(s) = value.as_string() {
+        return Ok(Value::String(s.to_std_string_escaped()));
+    }
+    if value.is_symbol() {
+        return Err(JsLanguageError::TypeConversion {
+            message: "JS Symbol cannot be converted to serde_json::Value".to_string(),
+        });
+    }
+    if value.is_bigint() {
+        return Err(JsLanguageError::TypeConversion {
+            message: "JS BigInt cannot be converted to serde_json::Value".to_string(),
+        });
+    }
+    if let Some(obj) = value.as_object() {
+        // Check if it's an Array
+        if obj.is_array() {
+            let js_arr =
+                JsArray::from_object(obj.clone()).map_err(|e| JsLanguageError::TypeConversion {
+                    message: format!("array conversion error: {e}"),
+                })?;
+            let len = js_arr
+                .length(ctx)
+                .map_err(|e| JsLanguageError::TypeConversion {
+                    message: format!("array length error: {e}"),
+                })?;
+            let mut arr = Vec::with_capacity(len as usize);
+            for i in 0..len {
+                let item = js_arr
+                    .get(i, ctx)
+                    .map_err(|e| JsLanguageError::TypeConversion {
+                        message: format!("array get error at {i}: {e}"),
+                    })?;
+                arr.push(js_to_value_inner(&item, ctx, depth + 1)?);
+            }
+            return Ok(Value::Array(arr));
+        } else {
+            // Plain object — enumerate own string keys
+            let keys = obj
+                .own_property_keys(ctx)
+                .map_err(|e| JsLanguageError::TypeConversion {
+                    message: format!("object keys error: {e}"),
+                })?;
+            let mut map = Map::new();
+            for key in keys {
+                let key_str = match &key {
+                    boa_engine::property::PropertyKey::String(s) => s.to_std_string_escaped(),
+                    boa_engine::property::PropertyKey::Index(i) => i.get().to_string(),
+                    boa_engine::property::PropertyKey::Symbol(_) => continue, // skip symbols
+                };
+                let val = obj
+                    .get(boa_engine::JsString::from(key_str.as_str()), ctx)
+                    .map_err(|e| JsLanguageError::TypeConversion {
+                        message: format!("object get error for key '{key_str}': {e}"),
+                    })?;
+                map.insert(key_str, js_to_value_inner(&val, ctx, depth + 1)?);
+            }
+            return Ok(Value::Object(map));
+        }
+    }
+    unreachable!("unhandled JsValue type")
 }
 
 #[cfg(test)]

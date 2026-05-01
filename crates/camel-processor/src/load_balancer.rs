@@ -95,7 +95,7 @@ async fn process_random(
     endpoints: Vec<BoxProcessor>,
 ) -> Result<Exchange, CamelError> {
     let len = endpoints.len();
-    let idx = rand::random::<usize>() % len;
+    let idx = rand::random_range(0..len);
     let mut endpoint = endpoints[idx].clone();
     endpoint.ready().await?.call(exchange).await
 }

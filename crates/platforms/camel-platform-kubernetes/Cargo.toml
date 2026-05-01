@@ -16,7 +16,6 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-chrono = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
 
