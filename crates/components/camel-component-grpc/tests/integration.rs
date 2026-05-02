@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 
 use camel_component_api::{Body, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message};
+use camel_component_grpc::consumer::take_stream_observer;
 use camel_component_grpc::consumer::GrpcConsumer;
 use camel_component_grpc::producer::GrpcProducer;
+use camel_component_grpc::GrpcMode;
+use futures::StreamExt;
 use http::uri::PathAndQuery;
 use prost::Message as ProstMessage;
 use tokio::net::TcpListener;
@@ -15,8 +18,15 @@ mod helloworld {
     tonic::include_proto!("helloworld");
 }
 
+mod streaming {
+    tonic::include_proto!("streaming");
+}
+
 use helloworld::greeter_server::{Greeter, GreeterServer};
 use helloworld::{HelloReply, HelloRequest};
+use streaming::stream_service_server::{StreamService, StreamServiceServer};
+use streaming::stream_service_client::StreamServiceClient;
+use streaming::*;
 
 struct GreeterImpl;
 
@@ -32,6 +42,75 @@ impl Greeter for GreeterImpl {
         }))
     }
 }
+
+// ── Mock streaming server ──────────────────────────────────────────────────
+
+struct StreamServiceImpl;
+
+#[tonic::async_trait]
+impl StreamService for StreamServiceImpl {
+    type ServerListStream = tokio_stream::wrappers::ReceiverStream<Result<ItemResponse, Status>>;
+    type BidiEchoStream = tokio_stream::wrappers::ReceiverStream<Result<EchoResponse, Status>>;
+
+    async fn server_list(
+        &self,
+        request: tonic::Request<ListRequest>,
+    ) -> Result<tonic::Response<Self::ServerListStream>, Status> {
+        let count = request.into_inner().count;
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        tokio::spawn(async move {
+            for i in 0..count {
+                let item = ItemResponse {
+                    index: i,
+                    name: format!("item-{i}"),
+                };
+                let _ = tx.send(Ok(item)).await;
+            }
+        });
+        Ok(tonic::Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+
+    async fn client_sum(
+        &self,
+        request: tonic::Request<tonic::Streaming<NumberRequest>>,
+    ) -> Result<tonic::Response<SumResponse>, Status> {
+        let mut stream = request.into_inner();
+        let mut total: i32 = 0;
+        while let Some(item) = stream.next().await {
+            total += item?.value;
+        }
+        Ok(tonic::Response::new(SumResponse { total }))
+    }
+
+    async fn bidi_echo(
+        &self,
+        request: tonic::Request<tonic::Streaming<EchoRequest>>,
+    ) -> Result<tonic::Response<Self::BidiEchoStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        tokio::spawn(async move {
+            let mut stream = request.into_inner();
+            let mut seq = 0;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(req) => {
+                        seq += 1;
+                        let resp = EchoResponse {
+                            message: req.message,
+                            sequence: seq,
+                        };
+                        if tx.send(Ok(resp)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(tonic::Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+}
+
+// ── Existing unary tests (with GrpcMode::Unary) ────────────────────────────
 
 #[tokio::test]
 async fn grpc_producer_roundtrip_json() {
@@ -52,6 +131,7 @@ async fn grpc_producer_roundtrip_json() {
         proto_path,
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     )
     .expect("producer");
 
@@ -82,6 +162,7 @@ async fn grpc_consumer_roundtrip_json() {
         proto_path,
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     );
 
     assert_eq!(
@@ -149,6 +230,7 @@ async fn grpc_consumer_bad_proto_startup_fails() {
         PathBuf::from("/nonexistent/path.proto"),
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     );
 
     let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
@@ -197,6 +279,7 @@ async fn grpc_consumer_unknown_path_returns_unimplemented() {
         proto_path,
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -251,6 +334,7 @@ async fn grpc_consumer_stop_then_request_returns_unimplemented() {
         proto_path.clone(),
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -310,6 +394,7 @@ async fn grpc_consumer_multiple_paths_same_port() {
         proto_path.clone(),
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     );
 
     let (route_tx1, mut route_rx1) = tokio::sync::mpsc::channel(16);
@@ -336,6 +421,7 @@ async fn grpc_consumer_multiple_paths_same_port() {
         proto_path,
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     );
 
     let (route_tx2, mut route_rx2) = tokio::sync::mpsc::channel(16);
@@ -410,6 +496,7 @@ async fn grpc_consumer_invalid_body_returns_error() {
         proto_path,
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -471,6 +558,7 @@ async fn grpc_consumer_duplicate_path_fails() {
         proto_path.clone(),
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     );
 
     let (route_tx1, mut route_rx1) = tokio::sync::mpsc::channel(16);
@@ -495,6 +583,7 @@ async fn grpc_consumer_duplicate_path_fails() {
         proto_path,
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     );
 
     let (route_tx2, _route_rx2) = tokio::sync::mpsc::channel(16);
@@ -540,6 +629,7 @@ async fn grpc_consumer_pipeline_error_returns_internal() {
         proto_path,
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
+        GrpcMode::Unary,
     );
 
     let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
@@ -585,4 +675,209 @@ async fn grpc_consumer_pipeline_error_returns_internal() {
         pipeline_task.await.unwrap();
     })
     .await;
+}
+
+// ── Consumer streaming tests ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn grpc_consumer_server_streaming_roundtrip() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/streaming.proto");
+
+    let mut consumer = GrpcConsumer::new(
+        "127.0.0.1".to_string(),
+        port,
+        "/streaming.StreamService/ServerList".to_string(),
+        proto_path,
+        "streaming.StreamService".to_string(),
+        "ServerList".to_string(),
+        GrpcMode::ServerStreaming,
+    );
+
+    let (route_tx, mut route_rx) = tokio::sync::mpsc::channel(16);
+    let cancel_token = CancellationToken::new();
+    let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
+
+    let consumer_task = tokio::spawn(async move {
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("consumer start");
+    });
+
+    // Pipeline: receive exchange, take observer, send items via on_next, then on_completed
+    let pipeline_task = tokio::spawn(async move {
+        if let Some(envelope) = route_rx.recv().await {
+            let exchange = &envelope.exchange;
+            if let Some(observer) = take_stream_observer(exchange) {
+                // Send 5 items
+                for i in 0..5 {
+                    let item = serde_json::json!({ "index": i, "name": format!("pipeline-item-{i}") });
+                    if let Err(e) = observer.on_next(item).await {
+                        eprintln!("on_next error: {e}");
+                        break;
+                    }
+                }
+                observer.on_completed().await;
+            }
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Client calls ServerList via generated tonic client
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("endpoint")
+        .connect_lazy();
+    let mut client = StreamServiceClient::new(channel);
+
+    let mut stream = client
+        .server_list(ListRequest { count: 5 })
+        .await
+        .expect("call")
+        .into_inner();
+
+    let mut items = Vec::new();
+    while let Some(item) = stream.next().await {
+        items.push(item.expect("item"));
+    }
+
+    assert_eq!(items.len(), 5, "should receive 5 items");
+    for (i, item) in items.iter().enumerate() {
+        assert_eq!(item.index as usize, i);
+        assert_eq!(item.name, format!("pipeline-item-{i}"));
+    }
+
+    cancel_token.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        consumer_task.await.unwrap();
+        pipeline_task.await.unwrap();
+    })
+    .await;
+}
+
+// ── Producer streaming tests ───────────────────────────────────────────────
+
+/// Start the mock streaming server on a random port, return the port.
+async fn start_streaming_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let incoming = TcpListenerStream::new(listener);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(StreamServiceServer::new(StreamServiceImpl))
+            .serve_with_incoming(incoming)
+            .await
+            .expect("serve");
+    });
+    port
+}
+
+#[tokio::test]
+async fn grpc_producer_server_streaming() {
+    let port = start_streaming_server().await;
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/streaming.proto");
+
+    let mut producer = GrpcProducer::new(
+        format!("http://127.0.0.1:{port}"),
+        proto_path,
+        "streaming.StreamService".to_string(),
+        "ServerList".to_string(),
+        GrpcMode::ServerStreaming,
+    )
+    .expect("producer");
+
+    // Call with single JSON body (count=3)
+    let exchange = Exchange::new(Message::new(Body::Json(
+        serde_json::json!({"count": 3}),
+    )));
+    let out = producer.call(exchange).await.expect("call");
+
+    // Response should be JSON array of items
+    // Note: prost-reflect omits default values (0 for int32) in JSON serialization
+    match out.input.body {
+        Body::Json(v) => {
+            let arr = v.as_array().expect("expected array");
+            assert_eq!(arr.len(), 3);
+            for (i, item) in arr.iter().enumerate() {
+                let idx = item.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                assert_eq!(idx, i as i64, "item {} index mismatch", i);
+                assert_eq!(name, format!("item-{i}"), "item {} name mismatch", i);
+            }
+        }
+        other => panic!("expected json body, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn grpc_producer_client_streaming() {
+    let port = start_streaming_server().await;
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/streaming.proto");
+
+    let mut producer = GrpcProducer::new(
+        format!("http://127.0.0.1:{port}"),
+        proto_path,
+        "streaming.StreamService".to_string(),
+        "ClientSum".to_string(),
+        GrpcMode::ClientStreaming,
+    )
+    .expect("producer");
+
+    // Call with JSON array body (values 1, 2, 3, 4, 5)
+    let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!([
+        {"value": 1},
+        {"value": 2},
+        {"value": 3},
+        {"value": 4},
+        {"value": 5},
+    ]))));
+    let out = producer.call(exchange).await.expect("call");
+
+    // Response should be single JSON object with total=15
+    match out.input.body {
+        Body::Json(v) => {
+            assert_eq!(v["total"], serde_json::json!(15));
+        }
+        other => panic!("expected json body, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn grpc_producer_bidi_streaming() {
+    let port = start_streaming_server().await;
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/streaming.proto");
+
+    let mut producer = GrpcProducer::new(
+        format!("http://127.0.0.1:{port}"),
+        proto_path,
+        "streaming.StreamService".to_string(),
+        "BidiEcho".to_string(),
+        GrpcMode::Bidi,
+    )
+    .expect("producer");
+
+    // Call with JSON array body (3 echo messages)
+    let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!([
+        {"message": "hello"},
+        {"message": "world"},
+        {"message": "test"},
+    ]))));
+    let out = producer.call(exchange).await.expect("call");
+
+    // Response should be JSON array of echoed messages with sequence numbers
+    match out.input.body {
+        Body::Json(v) => {
+            let arr = v.as_array().expect("expected array");
+            assert_eq!(arr.len(), 3);
+            assert_eq!(arr[0]["message"], "hello");
+            assert_eq!(arr[0]["sequence"], 1);
+            assert_eq!(arr[1]["message"], "world");
+            assert_eq!(arr[1]["sequence"], 2);
+            assert_eq!(arr[2]["message"], "test");
+            assert_eq!(arr[2]["sequence"], 3);
+        }
+        other => panic!("expected json body, got {other:?}"),
+    }
 }

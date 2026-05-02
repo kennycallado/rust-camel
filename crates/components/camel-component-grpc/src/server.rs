@@ -5,19 +5,23 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
 use camel_api::CamelError;
+use futures::StreamExt;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::sync::{OnceCell, RwLock, mpsc};
-use tonic::{Request, Response, Status, body::Body as TonicBody};
+use tonic::body::Body as TonicBody;
+use tonic::codec::Streaming;
+use tonic::{Request, Response, Status};
 use tower::Service;
 use tracing::{debug, error};
 
 use crate::codec::RawBytesCodec;
-use crate::consumer::{GrpcReply, GrpcRequestEnvelope};
+use crate::consumer::{GrpcReply, GrpcRequestEnvelope, GrpcStreamItem};
+use crate::mode::GrpcMode;
 
 pub(crate) type GrpcDispatchTable =
-    Arc<RwLock<HashMap<String, mpsc::Sender<GrpcRequestEnvelope>>>>;
+    Arc<RwLock<HashMap<String, (mpsc::Sender<GrpcRequestEnvelope>, GrpcMode)>>>;
 
 type ServerKey = (String, u16);
 
@@ -166,32 +170,80 @@ async fn run_grpc_server(listener: tokio::net::TcpListener, dispatch: GrpcDispat
     }
 }
 
+// ── Response stream type ───────────────────────────────────────────────────
+
+type ResponseStream = Pin<Box<dyn futures::Stream<Item = Result<Vec<u8>, Status>> + Send>>;
+
+// ── Manual stream implementation (no async-stream dep) ─────────────────────
+
+struct GrpcItemStream {
+    rx: mpsc::Receiver<GrpcStreamItem>,
+}
+
+impl futures::Stream for GrpcItemStream {
+    type Item = Result<Vec<u8>, Status>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        match self.rx.poll_recv(cx) {
+            Poll::Ready(Some(GrpcStreamItem::Message(bytes))) => Poll::Ready(Some(Ok(bytes))),
+            Poll::Ready(Some(GrpcStreamItem::Error(status))) => Poll::Ready(Some(Err(status))),
+            Poll::Ready(Some(GrpcStreamItem::Done)) => Poll::Ready(None),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+// ── Mode-aware dispatch ────────────────────────────────────────────────────
+
 async fn handle_grpc_request(
     req: hyper::Request<hyper::body::Incoming>,
     dispatch: GrpcDispatchTable,
 ) -> Result<hyper::Response<TonicBody>, std::convert::Infallible> {
     let path = req.uri().path().to_string();
 
-    let sender = {
+    let entry = {
         let table = dispatch.read().await;
-        table.get(&path).cloned()
+        table.get(&path).map(|(tx, mode)| (tx.clone(), *mode))
     };
 
-    let Some(sender) = sender else {
+    let Some((sender, mode)) = entry else {
         let handler = UnimplementedHandler;
         let mut grpc = tonic::server::Grpc::new(RawBytesCodec);
         let response = grpc.unary(handler, req).await;
         return Ok(response);
     };
 
-    let handler = GrpcHandler {
-        sender,
-        path,
-    };
     let mut grpc = tonic::server::Grpc::new(RawBytesCodec);
-    let response = grpc.unary(handler, req).await;
-    Ok(response)
+
+    match mode {
+        GrpcMode::Unary => {
+            let handler = UnaryHandler { sender };
+            let response = grpc.unary(handler, req).await;
+            Ok(response)
+        }
+        GrpcMode::ServerStreaming => {
+            let handler = ServerStreamingHandler { sender };
+            let response = grpc.server_streaming(handler, req).await;
+            Ok(response)
+        }
+        GrpcMode::ClientStreaming => {
+            let handler = ClientStreamingHandler { sender };
+            let response = grpc.client_streaming(handler, req).await;
+            Ok(response)
+        }
+        GrpcMode::Bidi => {
+            let handler = BidiHandler { sender };
+            let response = grpc.streaming(handler, req).await;
+            Ok(response)
+        }
+    }
 }
+
+// ── Unimplemented handler (fallback) ───────────────────────────────────────
 
 struct UnimplementedHandler;
 
@@ -209,24 +261,19 @@ impl Service<Request<Vec<u8>>> for UnimplementedHandler {
     }
 }
 
-struct GrpcHandler {
+// ── Unary handler ──────────────────────────────────────────────────────────
+
+struct UnaryHandler {
     sender: mpsc::Sender<GrpcRequestEnvelope>,
-    #[allow(dead_code)]
-    path: String,
 }
 
-impl Service<Request<Vec<u8>>> for GrpcHandler {
-    type Response = Response<Vec<u8>>;
-    type Error = Status;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
+impl tonic::server::UnaryService<Vec<u8>> for UnaryHandler {
+    type Response = Vec<u8>;
+    type Future = Pin<Box<dyn Future<Output = Result<Response<Self::Response>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Vec<u8>>) -> Self::Future {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let envelope = GrpcRequestEnvelope {
+        let envelope = GrpcRequestEnvelope::Unary {
             metadata: req.metadata().clone(),
             body: req.into_inner(),
             reply_tx,
@@ -244,6 +291,149 @@ impl Service<Request<Vec<u8>>> for GrpcHandler {
                 GrpcReply::Ok(bytes) => Ok(Response::new(bytes)),
                 GrpcReply::Err(status) => Err(status),
             }
+        })
+    }
+}
+
+// ── Server-streaming handler ───────────────────────────────────────────────
+
+struct ServerStreamingHandler {
+    sender: mpsc::Sender<GrpcRequestEnvelope>,
+}
+
+impl tonic::server::ServerStreamingService<Vec<u8>> for ServerStreamingHandler {
+    type Response = Vec<u8>;
+    type ResponseStream = ResponseStream;
+    type Future = Pin<Box<dyn Future<Output = Result<Response<Self::ResponseStream>, Status>> + Send>>;
+
+    fn call(&mut self, req: Request<Vec<u8>>) -> Self::Future {
+        let (reply_tx, reply_rx) = mpsc::channel::<GrpcStreamItem>(64);
+        let envelope = GrpcRequestEnvelope::ServerStreaming {
+            metadata: req.metadata().clone(),
+            body: req.into_inner(),
+            reply_tx,
+        };
+        let sender = self.sender.clone();
+        Box::pin(async move {
+            sender
+                .send(envelope)
+                .await
+                .map_err(|_| Status::unavailable("consumer stopped"))?;
+            Ok(Response::new(Box::pin(GrpcItemStream { rx: reply_rx }) as ResponseStream))
+        })
+    }
+}
+
+// ── Client-streaming handler ───────────────────────────────────────────────
+
+struct ClientStreamingHandler {
+    sender: mpsc::Sender<GrpcRequestEnvelope>,
+}
+
+impl tonic::server::ClientStreamingService<Vec<u8>> for ClientStreamingHandler {
+    type Response = Vec<u8>;
+    type Future = Pin<Box<dyn Future<Output = Result<Response<Self::Response>, Status>> + Send>>;
+
+    fn call(&mut self, req: Request<Streaming<Vec<u8>>>) -> Self::Future {
+        let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<GrpcReply>();
+        let envelope = GrpcRequestEnvelope::ClientStreaming {
+            metadata: req.metadata().clone(),
+            body_rx,
+            reply_tx,
+        };
+        let sender = self.sender.clone();
+
+        Box::pin(async move {
+            let forward_handle = tokio::spawn(async move {
+                let mut stream = req.into_inner();
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(bytes) => {
+                            if body_tx.send(bytes).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(status) => {
+                            tracing::warn!(error = %status, "client streaming decode error");
+                            return Some(status);
+                        }
+                    }
+                }
+                None
+            });
+
+            sender
+                .send(envelope)
+                .await
+                .map_err(|_| Status::unavailable("consumer stopped"))?;
+
+            let reply = reply_rx
+                .await
+                .map_err(|_| Status::internal("reply channel dropped"))?;
+
+            // If the inbound stream had a decode error, propagate it instead of the consumer's reply.
+            if let Ok(Some(status)) = forward_handle.await {
+                return Err(status);
+            }
+
+            match reply {
+                GrpcReply::Ok(bytes) => Ok(Response::new(bytes)),
+                GrpcReply::Err(status) => Err(status),
+            }
+        })
+    }
+}
+
+// ── Bidi handler ───────────────────────────────────────────────────────────
+
+struct BidiHandler {
+    sender: mpsc::Sender<GrpcRequestEnvelope>,
+}
+
+impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
+    type Response = Vec<u8>;
+    type ResponseStream = ResponseStream;
+    type Future = Pin<Box<dyn Future<Output = Result<Response<Self::ResponseStream>, Status>> + Send>>;
+
+    fn call(&mut self, req: Request<Streaming<Vec<u8>>>) -> Self::Future {
+        let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (reply_tx, reply_rx) = mpsc::channel::<GrpcStreamItem>(64);
+        let reply_tx_forward = reply_tx.clone();
+        let envelope = GrpcRequestEnvelope::Bidi {
+            metadata: req.metadata().clone(),
+            body_rx,
+            reply_tx,
+        };
+        let sender = self.sender.clone();
+
+        Box::pin(async move {
+            tokio::spawn(async move {
+                let mut stream = req.into_inner();
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(bytes) => {
+                            if body_tx.send(bytes).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(status) => {
+                            tracing::warn!(error = %status, "bidi streaming decode error");
+                            let _ = reply_tx_forward
+                                .send(GrpcStreamItem::Error(status))
+                                .await;
+                            break;
+                        }
+                    }
+                }
+            });
+
+            sender
+                .send(envelope)
+                .await
+                .map_err(|_| Status::unavailable("consumer stopped"))?;
+
+            Ok(Response::new(Box::pin(GrpcItemStream { rx: reply_rx }) as ResponseStream))
         })
     }
 }

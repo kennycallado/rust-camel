@@ -976,6 +976,7 @@ dependencies = [
  "camel-component-api",
  "camel-dataformat-protobuf",
  "camel-proto-compiler",
+ "futures",
  "http",
  "http-body-util",
  "hyper",

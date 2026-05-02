@@ -5,7 +5,7 @@ use camel_component_api::{
 };
 
 use crate::config::parse_grpc_uri;
-use crate::consumer::GrpcConsumer;
+use crate::consumer::{resolve_grpc_mode, GrpcConsumer};
 use crate::producer::GrpcProducer;
 
 pub struct GrpcComponent;
@@ -68,6 +68,11 @@ impl Endpoint for GrpcEndpoint {
 
     fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
         let path = format!("/{}/{}", self.service_name, self.method_name);
+        let mode = resolve_grpc_mode(
+            &self.proto_path,
+            &self.service_name,
+            &self.method_name,
+        )?;
         Ok(Box::new(GrpcConsumer::new(
             self.host.clone(),
             self.port,
@@ -75,15 +80,22 @@ impl Endpoint for GrpcEndpoint {
             self.proto_path.clone(),
             self.service_name.clone(),
             self.method_name.clone(),
+            mode,
         )))
     }
 
     fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+        let mode = resolve_grpc_mode(
+            &self.proto_path,
+            &self.service_name,
+            &self.method_name,
+        )?;
         let producer = GrpcProducer::new(
             self.addr.clone(),
             self.proto_path.clone(),
             self.service_name.clone(),
             self.method_name.clone(),
+            mode,
         )?;
         Ok(BoxProcessor::new(producer))
     }

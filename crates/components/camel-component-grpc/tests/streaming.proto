@@ -1,0 +1,15 @@
+syntax = "proto3";
+package streaming;
+
+service StreamService {
+  rpc ServerList (ListRequest) returns (stream ItemResponse);
+  rpc ClientSum (stream NumberRequest) returns (SumResponse);
+  rpc BidiEcho (stream EchoRequest) returns (stream EchoResponse);
+}
+
+message ListRequest { int32 count = 1; }
+message ItemResponse { int32 index = 1; string name = 2; }
+message NumberRequest { int32 value = 1; }
+message SumResponse { int32 total = 1; }
+message EchoRequest { string message = 1; }
+message EchoResponse { string message = 1; int32 sequence = 2; }

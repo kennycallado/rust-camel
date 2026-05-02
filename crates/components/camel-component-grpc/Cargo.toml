@@ -30,6 +30,7 @@ hyper = "1"
 hyper-util = "0.1"
 http-body-util = "0.1"
 async-trait.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 tonic.workspace = true
@@ -39,6 +40,7 @@ tokio-stream = "0.1"
 tokio-util.workspace = true
 tower.workspace = true
 tonic-prost.workspace = true
+futures.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
