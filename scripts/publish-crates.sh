@@ -142,6 +142,13 @@ publish_crate "camel-component-direct" "crates/components/camel-direct"
 # Remaining core crates
 publish_crate "camel-health" "crates/camel-health"
 publish_crate "camel-platform-kubernetes" "crates/platforms/camel-platform-kubernetes"
+
+# gRPC/protobuf crates (camel-dataformat-protobuf depends on camel-proto-compiler;
+# camel-dsl depends on camel-dataformat-protobuf; camel-component-grpc depends on both)
+publish_crate "camel-proto-compiler" "crates/services/camel-proto-compiler"
+publish_crate "camel-dataformat-protobuf" "crates/dataformats/camel-dataformat-protobuf"
+
+# DSL & builder (camel-dsl depends on camel-dataformat-protobuf via protobuf feature)
 publish_crate "camel-dsl" "crates/camel-dsl"
 publish_crate "camel-builder" "crates/camel-builder"
 
@@ -154,10 +161,6 @@ publish_crate "camel-prometheus" "crates/services/camel-prometheus"
 # Component crates (before components)
 publish_crate "camel-bridge" "crates/services/camel-bridge"
 
-# gRPC/protobuf crates (camel-dataformat-protobuf depends on camel-proto-compiler;
-# camel-component-grpc depends on both)
-publish_crate "camel-proto-compiler" "crates/services/camel-proto-compiler"
-publish_crate "camel-dataformat-protobuf" "crates/dataformats/camel-dataformat-protobuf"
 publish_crate "camel-component-grpc" "crates/components/camel-component-grpc"
 
 # Component crates (needed by camel-config which has optional deps on most of them)
