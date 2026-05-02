@@ -188,7 +188,7 @@ cargo run
 | `camel-redis`             | Redis producer and consumer                                                                                                                                                       |
 | `camel-sql`               | SQL producer/consumer with IN clause separator, SSL/TLS, streaming result support                                                                                                 |
 | `camel-jms`               | JMS producer and consumer via native-image bridge (ActiveMQ Classic, Artemis)                                                                                                     |
-| `camel-grpc`              | gRPC producer and consumer with dynamic proto resolution, unary support                                                                                                          |
+| `camel-grpc`              | gRPC producer and consumer with dynamic proto resolution, unary + server/client/bidi streaming                                                                                  |
 | `camel-xslt`              | XSLT 3.0 transformation via xml-bridge (`xslt:<stylesheet>`) — [example](examples/xslt-example/README.md)                                                                        |
 | `camel-xj`                | XML↔JSON conversion via xml-bridge (`xj:<stylesheet>?direction=xml2json\|json2xml`) — [example](examples/xj-example/README.md)                                                  |
 | `camel-container`         | Docker container producer/consumer via `bollard`. Container lifecycle, volume mounts, exec, network operations                                                                   |
