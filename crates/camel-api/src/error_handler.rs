@@ -316,4 +316,78 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_redelivery_policy_builder_methods_apply_values() {
+        let p = RedeliveryPolicy::new(5)
+            .with_initial_delay(Duration::from_millis(250))
+            .with_multiplier(3.0)
+            .with_max_delay(Duration::from_secs(2))
+            .with_jitter(2.0);
+
+        assert_eq!(p.initial_delay, Duration::from_millis(250));
+        assert_eq!(p.multiplier, 3.0);
+        assert_eq!(p.max_delay, Duration::from_secs(2));
+        assert_eq!(p.jitter_factor, 1.0);
+    }
+
+    #[test]
+    fn test_with_jitter_clamps_low_bound() {
+        let p = RedeliveryPolicy::new(1).with_jitter(-0.2);
+        assert_eq!(p.jitter_factor, 0.0);
+    }
+
+    #[test]
+    fn test_delay_for_exponential_growth_and_cap() {
+        let p = RedeliveryPolicy::new(3)
+            .with_initial_delay(Duration::from_millis(100))
+            .with_multiplier(2.0)
+            .with_max_delay(Duration::from_millis(250));
+
+        assert_eq!(p.delay_for(0), Duration::from_millis(100));
+        assert_eq!(p.delay_for(1), Duration::from_millis(200));
+        assert_eq!(p.delay_for(2), Duration::from_millis(250));
+        assert_eq!(p.delay_for(20), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn test_exception_policy_builder_backoff_and_jitter() {
+        let config = ErrorHandlerConfig::log_only()
+            .on_exception(|e| matches!(e, CamelError::Io(_)))
+            .retry(4)
+            .with_backoff(Duration::from_millis(10), 1.5, Duration::from_millis(40))
+            .with_jitter(1.5)
+            .build();
+
+        let retry = config.policies[0].retry.as_ref().unwrap();
+        assert_eq!(retry.max_attempts, 4);
+        assert_eq!(retry.initial_delay, Duration::from_millis(10));
+        assert_eq!(retry.multiplier, 1.5);
+        assert_eq!(retry.max_delay, Duration::from_millis(40));
+        assert_eq!(retry.jitter_factor, 1.0);
+    }
+
+    #[test]
+    fn test_exception_policy_builder_no_retry_ignores_backoff_and_jitter() {
+        let config = ErrorHandlerConfig::log_only()
+            .on_exception(|_| true)
+            .with_backoff(Duration::from_secs(1), 9.0, Duration::from_secs(2))
+            .with_jitter(0.8)
+            .build();
+
+        assert!(config.policies[0].retry.is_none());
+    }
+
+    #[test]
+    fn test_exception_policy_clone_preserves_behavior_and_fields() {
+        let policy = ExceptionPolicy::new(|e| matches!(e, CamelError::RouteError(_)));
+        let mut configured = policy;
+        configured.retry = Some(RedeliveryPolicy::new(2));
+        configured.handled_by = Some("log:route-errors".to_string());
+
+        let cloned = configured.clone();
+        assert!((cloned.matches)(&CamelError::RouteError("x".into())));
+        assert_eq!(cloned.retry.as_ref().unwrap().max_attempts, 2);
+        assert_eq!(cloned.handled_by.as_deref(), Some("log:route-errors"));
+    }
 }

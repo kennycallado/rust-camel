@@ -115,14 +115,32 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "RuntimeExecutionHandle::new_for_test is not available; covered by integration tests in Task 6"]
     async fn drain_returns_immediately_when_zero_in_flight() {
-        panic!("requires RuntimeExecutionHandle::new_for_test");
+        use crate::CamelContext;
+
+        let ctx = CamelContext::builder().build().await.unwrap();
+        let result = drain_route(
+            "missing-route",
+            "remove",
+            &ctx.runtime_execution_handle(),
+            Duration::from_millis(1),
+        )
+        .await;
+        assert!(matches!(result, DrainResult::Drained));
     }
 
     #[tokio::test]
-    #[ignore = "RuntimeExecutionHandle::new_for_test is not available; covered by integration tests in Task 6"]
     async fn drain_returns_drained_for_nonexistent_route_regardless_of_timeout() {
-        panic!("requires RuntimeExecutionHandle::new_for_test");
+        use crate::CamelContext;
+
+        let ctx = CamelContext::builder().build().await.unwrap();
+        let result = drain_route(
+            "also-missing-route",
+            "restart",
+            &ctx.runtime_execution_handle(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(matches!(result, DrainResult::Drained));
     }
 }

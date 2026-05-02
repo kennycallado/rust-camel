@@ -171,7 +171,7 @@ fn aggregate_results(
 mod tests {
     use super::*;
     use camel_api::MulticastStrategy;
-    use camel_api::{BoxProcessor, BoxProcessorExt, Message};
+    use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Message};
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -322,6 +322,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recipient_list_ignores_empty_uri_tokens() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        let resolver = Arc::new(move |uri: &str| {
+            if uri.starts_with("mock:") {
+                let count = call_count_clone.clone();
+                Some(BoxProcessor::from_fn(move |ex| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(ex) })
+                }))
+            } else {
+                None
+            }
+        });
+
+        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
+            " ,mock:a, ,mock:b,, ".to_string()
+        }));
+
+        let mut svc = RecipientListService::new(config, resolver);
+        let ex = Exchange::new(Message::new("test"));
+        let result = svc.ready().await.unwrap().call(ex).await;
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn recipient_list_mutation_between_steps() {
         let resolver = Arc::new(|uri: &str| {
             if uri == "mock:mutate" {
@@ -406,6 +434,32 @@ mod tests {
         }
 
         assert!(overlap_found);
+    }
+
+    #[tokio::test]
+    async fn recipient_list_parallel_stop_on_exception_returns_error() {
+        let resolver = Arc::new(|uri: &str| {
+            if uri == "mock:err" {
+                Some(BoxProcessor::from_fn(|_ex| {
+                    Box::pin(async { Err(CamelError::ProcessorError("boom".to_string())) })
+                }))
+            } else if uri.starts_with("mock:") {
+                Some(BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })))
+            } else {
+                None
+            }
+        });
+
+        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
+            "mock:a,mock:err,mock:c".to_string()
+        }))
+        .parallel(true)
+        .stop_on_exception(true);
+
+        let mut svc = RecipientListService::new(config, resolver);
+        let ex = Exchange::new(Message::new("test"));
+        let result = svc.ready().await.unwrap().call(ex).await;
+        assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "boom"));
     }
 
     #[tokio::test]

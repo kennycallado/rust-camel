@@ -974,3 +974,48 @@ async fn test_set_overwrites_previous_config() {
     ctx.set_component_config(MyConfig { value: 2 });
     assert_eq!(ctx.get_component_config::<MyConfig>().unwrap().value, 2);
 }
+
+#[tokio::test]
+async fn context_producer_context_is_wired_to_runtime() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    let producer_ctx = ctx.producer_context();
+    assert!(producer_ctx.runtime().is_some());
+}
+
+#[tokio::test]
+async fn context_metrics_defaults_to_noop() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    let metrics = ctx.metrics();
+    metrics.record_exchange_duration("r1", std::time::Duration::from_millis(1));
+    metrics.increment_exchanges("r1");
+    metrics.increment_errors("r1", "e1");
+    metrics.set_queue_depth("r1", 3);
+    metrics.record_circuit_breaker_change("r1", "closed", "open");
+}
+
+#[tokio::test]
+async fn context_exposes_platform_ports() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    let readiness = ctx.readiness_gate();
+    readiness.notify_starting().await;
+    readiness.notify_not_ready("boot").await;
+    readiness.notify_ready().await;
+
+    let leadership = ctx.leadership();
+    let handle = leadership.start("coverage-group").await.unwrap();
+    assert!(handle.is_leader());
+
+    let service = ctx.platform_service();
+    let identity = service.identity();
+    assert!(!identity.node_id.is_empty());
+}
+
+#[tokio::test]
+async fn builder_shutdown_timeout_is_applied() {
+    let ctx = CamelContext::builder()
+        .shutdown_timeout(std::time::Duration::from_secs(7))
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(ctx.shutdown_timeout(), std::time::Duration::from_secs(7));
+}

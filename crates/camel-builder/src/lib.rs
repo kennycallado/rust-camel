@@ -2744,4 +2744,165 @@ mod tests {
             .unmarshal("csv")
             .build();
     }
+
+    #[test]
+    fn test_builder_recipient_list_creates_step() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("recipient-list-test")
+            .recipient_list(Arc::new(|_| "direct:a,direct:b".to_string()))
+            .build()
+            .unwrap();
+
+        assert!(matches!(
+            &route.steps()[0],
+            BuilderStep::RecipientList { .. }
+        ));
+    }
+
+    #[test]
+    fn test_builder_recipient_list_with_config_creates_step() {
+        let config = RecipientListConfig::new(Arc::new(|_| "mock:a".to_string()));
+
+        let route = RouteBuilder::from("direct:start")
+            .route_id("recipient-list-config-test")
+            .recipient_list_with_config(config)
+            .build()
+            .unwrap();
+
+        assert!(matches!(
+            &route.steps()[0],
+            BuilderStep::RecipientList { .. }
+        ));
+    }
+
+    #[test]
+    fn test_builder_script_adds_script_step() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("script-test")
+            .script("rhai", "headers[\"x\"] = \"y\"")
+            .build()
+            .unwrap();
+
+        assert!(matches!(
+            &route.steps()[0],
+            BuilderStep::Script { language, script }
+            if language == "rhai" && script == "headers[\"x\"] = \"y\""
+        ));
+    }
+
+    #[test]
+    fn test_builder_delay_and_delay_with_header_add_steps() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("delay-test")
+            .delay(Duration::from_millis(250))
+            .delay_with_header(Duration::from_millis(500), "x-delay")
+            .build()
+            .unwrap();
+
+        assert_eq!(route.steps().len(), 2);
+        assert!(matches!(&route.steps()[0], BuilderStep::Delay { .. }));
+        assert!(matches!(&route.steps()[1], BuilderStep::Delay { .. }));
+    }
+
+    #[test]
+    fn test_builder_log_and_stop_add_steps_in_order() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("log-stop-test")
+            .log("hello", LogLevel::Info)
+            .stop()
+            .to("mock:after")
+            .build()
+            .unwrap();
+
+        assert_eq!(route.steps().len(), 3);
+        assert!(matches!(
+            &route.steps()[0],
+            BuilderStep::Log { message, .. } if message == "hello"
+        ));
+        assert!(matches!(&route.steps()[1], BuilderStep::Stop));
+        assert!(matches!(&route.steps()[2], BuilderStep::To(uri) if uri == "mock:after"));
+    }
+
+    #[test]
+    fn test_builder_stream_cache_default_adds_processor_step() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("stream-cache-default-test")
+            .stream_cache_default()
+            .build()
+            .unwrap();
+
+        assert!(matches!(&route.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn test_validate_preserves_existing_validator_prefix() {
+        let route = RouteBuilder::from("direct:in")
+            .route_id("validate-prefix-test")
+            .validate("validator:schemas/order.xsd")
+            .build()
+            .unwrap();
+
+        assert!(matches!(
+            &route.steps()[0],
+            BuilderStep::To(uri) if uri == "validator:schemas/order.xsd"
+        ));
+    }
+
+    #[test]
+    fn test_load_balance_builder_weighted_failover_parallel_config() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("lb-weighted-failover-parallel")
+            .load_balance()
+            .weighted(vec![("direct:a".to_string(), 3), ("direct:b".to_string(), 1)])
+            .failover()
+            .parallel(true)
+            .to("mock:result")
+            .end_load_balance()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::LoadBalance { config, .. } = &route.steps()[0] {
+            assert_eq!(config.strategy, LoadBalanceStrategy::Failover);
+            assert!(config.parallel);
+        } else {
+            panic!("Expected LoadBalance step");
+        }
+    }
+
+    #[test]
+    fn test_multicast_builder_all_config_setters() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("multicast-config-test")
+            .multicast()
+            .parallel(true)
+            .parallel_limit(4)
+            .stop_on_exception(true)
+            .timeout(Duration::from_millis(300))
+            .aggregation(MulticastStrategy::Original)
+            .to("mock:a")
+            .end_multicast()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Multicast { config, .. } = &route.steps()[0] {
+            assert!(config.parallel);
+            assert_eq!(config.parallel_limit, Some(4));
+            assert!(config.stop_on_exception);
+            assert_eq!(config.timeout, Some(Duration::from_millis(300)));
+            assert!(matches!(config.aggregation, MulticastStrategy::Original));
+        } else {
+            panic!("Expected Multicast step");
+        }
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_unsupported_processor_step() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-reject")
+            .set_header("k", Value::String("v".into()))
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("does not support step `processor`"));
+    }
 }

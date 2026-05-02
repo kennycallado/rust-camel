@@ -93,7 +93,24 @@ mod tests {
     use crate::data_format::builtin_data_format;
     use camel_api::{IdentityProcessor, Message, Value};
     use serde_json::json;
+    use std::sync::Arc;
     use tower::ServiceExt;
+
+    struct FailingDataFormat;
+
+    impl DataFormat for FailingDataFormat {
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn marshal(&self, _body: Body) -> Result<Body, CamelError> {
+            Err(CamelError::ProcessorError("marshal-fail".to_string()))
+        }
+
+        fn unmarshal(&self, _body: Body) -> Result<Body, CamelError> {
+            Err(CamelError::ProcessorError("unmarshal-fail".to_string()))
+        }
+    }
 
     #[tokio::test]
     async fn test_marshal_json_to_text() {
@@ -160,5 +177,21 @@ mod tests {
             }
             _ => panic!("expected Body::Json, got {:?}", result.input.body),
         }
+    }
+
+    #[tokio::test]
+    async fn test_marshal_error_propagates() {
+        let svc = MarshalService::new(IdentityProcessor, Arc::new(FailingDataFormat));
+        let exchange = Exchange::new(Message::new(Body::Text("x".to_string())));
+        let result = svc.oneshot(exchange).await;
+        assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "marshal-fail"));
+    }
+
+    #[tokio::test]
+    async fn test_unmarshal_error_propagates() {
+        let svc = UnmarshalService::new(IdentityProcessor, Arc::new(FailingDataFormat));
+        let exchange = Exchange::new(Message::new(Body::Text("x".to_string())));
+        let result = svc.oneshot(exchange).await;
+        assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "unmarshal-fail"));
     }
 }

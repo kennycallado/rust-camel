@@ -85,7 +85,9 @@ pub async fn metrics_handler(metrics: Arc<PrometheusMetrics>) -> MetricsResponse
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::{HealthReport, HealthStatus};
     use camel_api::metrics::MetricsCollector;
+    use tokio::time::{Duration, sleep};
 
     #[tokio::test]
     async fn test_metrics_handler_returns_prometheus_format() {
@@ -107,5 +109,63 @@ mod tests {
         let response = metrics_handler(metrics).await;
 
         assert_eq!(response.content_type, "text/plain; version=0.0.4");
+    }
+
+    #[tokio::test]
+    async fn test_run_with_listener_serves_metrics_and_health() {
+        let metrics = Arc::new(PrometheusMetrics::new());
+        metrics.increment_exchanges("route-http");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let checker = Arc::new(|| HealthReport {
+            status: HealthStatus::Healthy,
+            services: vec![],
+            ..Default::default()
+        });
+
+        let handle = tokio::spawn(MetricsServer::run_with_listener_and_health_checker(
+            listener,
+            Arc::clone(&metrics),
+            Some(checker),
+        ));
+
+        sleep(Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let metrics_resp = client
+            .get(format!("http://{}/metrics", addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(metrics_resp.status().as_u16(), 200);
+        assert_eq!(
+            metrics_resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/plain; version=0.0.4"
+        );
+        let body = metrics_resp.text().await.unwrap();
+        assert!(body.contains("camel_exchanges_total"));
+        assert!(body.contains("route-http"));
+
+        let health_resp = client
+            .get(format!("http://{}/health", addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health_resp.status().as_u16(), 200);
+
+        let not_found = client
+            .get(format!("http://{}/does-not-exist", addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(not_found.status().as_u16(), 404);
+
+        handle.abort();
     }
 }

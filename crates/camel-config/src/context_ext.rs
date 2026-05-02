@@ -685,6 +685,14 @@ routes = ["["]
         assert!(matches!(err, CamelError::Config(_)));
     }
 
+    #[test]
+    fn load_routes_propagates_config_error_for_missing_file() {
+        let err = CamelConfig::load_routes("/definitely/missing/camel-config.toml")
+            .err()
+            .expect("missing file should error");
+        assert!(matches!(err, CamelError::Config(_)));
+    }
+
     #[tokio::test]
     async fn configure_context_with_noop_platform_succeeds() {
         let cfg = config::Config::builder()
@@ -746,5 +754,71 @@ type = "kubernetes"
 
         let out = effective_tracer_config(cfg, false);
         assert!(!out.enabled);
+    }
+
+    #[test]
+    fn parse_log_level_is_case_insensitive_and_defaults_to_info() {
+        assert_eq!(parse_log_level("TRACE"), Level::TRACE);
+        assert_eq!(parse_log_level("DeBuG"), Level::DEBUG);
+        assert_eq!(parse_log_level("WARNING"), Level::WARN);
+        assert_eq!(parse_log_level(""), Level::INFO);
+    }
+
+    #[tokio::test]
+    async fn build_platform_service_noop_returns_ok() {
+        let result = CamelConfig::build_platform_service(&PlatformCamelConfig::Noop).await;
+        assert!(result.is_ok());
+    }
+
+    #[cfg(not(feature = "kubernetes"))]
+    #[tokio::test]
+    async fn build_kubernetes_platform_without_feature_returns_error() {
+        let k8s = KubernetesPlatformCamelConfig::default();
+        let err = CamelConfig::build_kubernetes_platform(&k8s).await.err().unwrap();
+        assert!(err.to_string().contains("requires camel-config feature `kubernetes`"));
+    }
+
+    #[tokio::test]
+    async fn configure_context_rejects_invalid_prometheus_bind_address() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.prometheus]
+enabled = true
+host = "bad host"
+port = 9000
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let err = CamelConfig::configure_context(&cfg).await.err().unwrap();
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid prometheus bind address"));
+    }
+
+    #[tokio::test]
+    async fn configure_context_rejects_invalid_health_bind_address() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.health]
+enabled = true
+host = "bad host"
+port = 8080
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let err = CamelConfig::configure_context(&cfg).await.err().unwrap();
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid health bind address"));
     }
 }

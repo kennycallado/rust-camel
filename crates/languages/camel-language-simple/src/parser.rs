@@ -529,3 +529,119 @@ fn parse_body_path(path: &str) -> Result<Vec<PathSegment>, LanguageError> {
     }
     Ok(segments)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_header_body_property_and_delegate_atoms() {
+        assert_eq!(parse("${header.foo}").unwrap(), Expr::Header("foo".to_string()));
+        assert_eq!(parse("${body}").unwrap(), Expr::Body);
+        assert_eq!(
+            parse("${exchangeProperty.id}").unwrap(),
+            Expr::ExchangeProperty("id".to_string())
+        );
+        assert_eq!(
+            parse("${jsonpath:$.a[0]}").unwrap(),
+            Expr::LanguageDelegate {
+                language: "jsonpath".to_string(),
+                expression: "$.a[0]".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_body_field_nested_and_index_paths() {
+        assert_eq!(
+            parse("${body.user.address.city}").unwrap(),
+            Expr::BodyField(vec![
+                PathSegment::Key("user".to_string()),
+                PathSegment::Key("address".to_string()),
+                PathSegment::Key("city".to_string()),
+            ])
+        );
+        assert_eq!(
+            parse("${body.items.0}").unwrap(),
+            Expr::BodyField(vec![PathSegment::Key("items".to_string()), PathSegment::Index(0)])
+        );
+        assert_eq!(
+            parse("${body.01}").unwrap(),
+            Expr::BodyField(vec![PathSegment::Key("01".to_string())])
+        );
+    }
+
+    #[test]
+    fn parse_literals_and_escaped_string() {
+        assert_eq!(parse("'abc'").unwrap(), Expr::StringLit("abc".to_string()));
+        assert_eq!(
+            parse("\"a\\n\\t\\\"b\"").unwrap(),
+            Expr::EscapedString("a\n\t\"b".to_string())
+        );
+        assert_eq!(parse("12.5").unwrap(), Expr::NumberLit(12.5));
+        assert_eq!(parse("true").unwrap(), Expr::Bool(true));
+        assert_eq!(parse("false").unwrap(), Expr::Bool(false));
+        assert_eq!(parse("null").unwrap(), Expr::Null);
+    }
+
+    #[test]
+    fn parse_comparison_and_logical_precedence() {
+        assert_eq!(
+            parse("${header.a} >= 10").unwrap(),
+            Expr::BinOp {
+                left: Box::new(Expr::Header("a".to_string())),
+                op: Op::Gte,
+                right: Box::new(Expr::NumberLit(10.0)),
+            }
+        );
+        assert_eq!(
+            parse("${header.a} == '1' || ${header.b} == '2' && ${header.c} == '3'").unwrap(),
+            Expr::LogicalOp {
+                left: Box::new(Expr::BinOp {
+                    left: Box::new(Expr::Header("a".to_string())),
+                    op: Op::Eq,
+                    right: Box::new(Expr::StringLit("1".to_string())),
+                }),
+                op: LogicalOp::Or,
+                right: Box::new(Expr::LogicalOp {
+                    left: Box::new(Expr::BinOp {
+                        left: Box::new(Expr::Header("b".to_string())),
+                        op: Op::Eq,
+                        right: Box::new(Expr::StringLit("2".to_string())),
+                    }),
+                    op: LogicalOp::And,
+                    right: Box::new(Expr::BinOp {
+                        left: Box::new(Expr::Header("c".to_string())),
+                        op: Op::Eq,
+                        right: Box::new(Expr::StringLit("3".to_string())),
+                    }),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_interpolated_text_and_expressions() {
+        assert_eq!(
+            parse("Got ${body} from ${header.source}").unwrap(),
+            Expr::Interpolated(vec![
+                InterpolatedPart::Literal("Got ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Body)),
+                InterpolatedPart::Literal(" from ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Header("source".to_string()))),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_error_cases() {
+        assert!(parse("").is_err());
+        assert!(parse("${header.}").is_err());
+        assert!(parse("${exchangeProperty.}").is_err());
+        assert!(parse("${body..name}").is_err());
+        assert!(parse("'abc").is_err());
+        assert!(parse("\"abc").is_err());
+        assert!(parse("&& true").is_err());
+        assert!(parse("${Unknown:expr}").is_err());
+    }
+}

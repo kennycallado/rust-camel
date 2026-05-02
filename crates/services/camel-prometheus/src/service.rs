@@ -127,6 +127,7 @@ mod tests {
     use super::*;
     use camel_api::HealthReport;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn test_create_prometheus_service() {
@@ -147,6 +148,42 @@ mod tests {
 
         service.stop().await.unwrap();
         assert_eq!(service.status(), ServiceStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_port_and_port_accessor_after_start() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let mut service = PrometheusService::new(addr);
+
+        assert_eq!(service.port(), 0);
+        let accessor = service.port_accessor();
+        assert_eq!(accessor.load(Ordering::SeqCst), 0);
+
+        service.start().await.unwrap();
+        let port = service.port();
+        assert!(port > 0);
+        assert_eq!(accessor.load(Ordering::SeqCst), port);
+
+        service.stop().await.unwrap();
+    }
+
+    #[test]
+    fn test_as_metrics_collector_returns_metrics_instance() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9090);
+        let service = PrometheusService::new(addr);
+        let collector = service.as_metrics_collector().unwrap();
+        collector.increment_exchanges("route-a");
+        let output = service.metrics.gather();
+        assert!(output.contains("camel_exchanges_total"));
+        assert!(output.contains("route-a"));
+    }
+
+    #[test]
+    fn test_unknown_internal_status_maps_to_failed() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9090);
+        let service = PrometheusService::new(addr);
+        service.status_arc().store(9, Ordering::SeqCst);
+        assert_eq!(service.status(), ServiceStatus::Failed);
     }
 
     #[test]

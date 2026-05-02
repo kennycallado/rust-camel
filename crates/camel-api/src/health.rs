@@ -114,4 +114,55 @@ mod tests {
         assert!(report.services.is_empty());
         assert!(report.timestamp <= chrono::Utc::now());
     }
+
+    #[test]
+    fn test_service_health_serialization_round_trip() {
+        let svc = ServiceHealth {
+            name: "kafka".to_string(),
+            status: ServiceStatus::Stopped,
+        };
+
+        let json = serde_json::to_string(&svc).unwrap();
+        assert!(json.contains("kafka"));
+        assert!(json.contains("Stopped"));
+
+        let decoded: ServiceHealth = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.name, "kafka");
+        assert_eq!(decoded.status, ServiceStatus::Stopped);
+    }
+
+    #[test]
+    fn test_health_checker_type_alias_invocation() {
+        let checker: HealthChecker = Arc::new(|| HealthReport {
+            status: HealthStatus::Unhealthy,
+            services: vec![ServiceHealth {
+                name: "db".to_string(),
+                status: ServiceStatus::Started,
+            }],
+            timestamp: chrono::Utc::now(),
+        });
+
+        let report = checker();
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert_eq!(report.services.len(), 1);
+        assert_eq!(report.services[0].name, "db");
+    }
+
+    #[test]
+    fn test_health_source_liveness_and_readiness() {
+        struct MixedSource;
+        impl HealthSource for MixedSource {
+            fn liveness(&self) -> HealthStatus {
+                HealthStatus::Healthy
+            }
+
+            fn readiness(&self) -> HealthStatus {
+                HealthStatus::Unhealthy
+            }
+        }
+
+        let s = MixedSource;
+        assert_eq!(s.liveness(), HealthStatus::Healthy);
+        assert_eq!(s.readiness(), HealthStatus::Unhealthy);
+    }
 }

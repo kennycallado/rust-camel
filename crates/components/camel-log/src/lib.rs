@@ -207,6 +207,7 @@ impl Service<Exchange> for LogProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::Body;
     use camel_component_api::Message;
     use camel_component_api::NoOpComponentContext;
     use tower::ServiceExt;
@@ -247,6 +248,42 @@ mod tests {
     }
 
     #[test]
+    fn test_log_component_default() {
+        let component = LogComponent::default();
+        assert_eq!(component.scheme(), "log");
+    }
+
+    #[test]
+    fn test_log_level_from_str_variants() {
+        assert_eq!("trace".parse::<LogLevel>().unwrap(), LogLevel::Trace);
+        assert_eq!("DEBUG".parse::<LogLevel>().unwrap(), LogLevel::Debug);
+        assert_eq!("Info".parse::<LogLevel>().unwrap(), LogLevel::Info);
+        assert_eq!("warning".parse::<LogLevel>().unwrap(), LogLevel::Warn);
+        assert_eq!("error".parse::<LogLevel>().unwrap(), LogLevel::Error);
+    }
+
+    #[test]
+    fn test_log_level_from_str_invalid() {
+        let err = "nope".parse::<LogLevel>().unwrap_err();
+        assert_eq!(err, "Invalid log level: nope");
+    }
+
+    #[test]
+    fn test_log_config_invalid_level_falls_back_to_default() {
+        let config = LogConfig::from_uri("log:test?level=invalid").unwrap();
+        assert_eq!(config.level, LogLevel::Info);
+    }
+
+    #[test]
+    fn test_log_endpoint_uri() {
+        let component = LogComponent::new();
+        let endpoint = component
+            .create_endpoint("log:uri-check", &NoOpComponentContext)
+            .unwrap();
+        assert_eq!(endpoint.uri(), "log:uri-check");
+    }
+
+    #[test]
     fn test_log_endpoint_no_consumer() {
         let component = LogComponent::new();
         let endpoint = component
@@ -282,5 +319,50 @@ mod tests {
         let result = producer.oneshot(exchange).await.unwrap();
         // Log producer passes exchange through unchanged
         assert_eq!(result.input.body.as_text(), Some("hello world"));
+    }
+
+    #[test]
+    fn test_format_exchange_without_body_or_headers() {
+        let producer = LogProducer {
+            config: LogConfig {
+                category: "cat".to_string(),
+                level: LogLevel::Info,
+                show_headers: false,
+                show_body: false,
+            },
+        };
+        let exchange = Exchange::new(Message::new("ignored"));
+        let formatted = producer.format_exchange(&exchange);
+        assert_eq!(formatted, "[cat] Exchange received");
+    }
+
+    #[test]
+    fn test_format_exchange_body_variants() {
+        let base = LogProducer {
+            config: LogConfig {
+                category: "cat".to_string(),
+                level: LogLevel::Info,
+                show_headers: false,
+                show_body: true,
+            },
+        };
+
+        let empty = Exchange::new(Message::default());
+        assert!(base.format_exchange(&empty).contains("Body: [empty]"));
+
+        let mut json_msg = Message::new("");
+        json_msg.body = Body::Json(serde_json::json!({"k":"v"}));
+        let json_ex = Exchange::new(json_msg);
+        assert!(base.format_exchange(&json_ex).contains("Body: {\"k\":\"v\"}"));
+
+        let mut xml_msg = Message::new("");
+        xml_msg.body = Body::Xml("<a/>".to_string());
+        let xml_ex = Exchange::new(xml_msg);
+        assert!(base.format_exchange(&xml_ex).contains("Body: <a/>"));
+
+        let mut bytes_msg = Message::new("");
+        bytes_msg.body = Body::Bytes(b"abc".to_vec().into());
+        let bytes_ex = Exchange::new(bytes_msg);
+        assert!(base.format_exchange(&bytes_ex).contains("Body: [3 bytes]"));
     }
 }

@@ -79,3 +79,48 @@ pub fn discover_routes_with_threshold(
 
     Ok(routes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn discover_routes_with_no_patterns_returns_empty() {
+        let routes = discover_routes(&[]).unwrap();
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn discover_routes_invalid_glob_returns_pattern_error() {
+        let err = discover_routes(&["[".to_string()]).err().unwrap();
+        assert!(matches!(err, DiscoveryError::GlobPattern(_)));
+    }
+
+    #[test]
+    fn discover_routes_nonexistent_file_returns_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir
+            .path()
+            .join("missing-*.yaml")
+            .to_string_lossy()
+            .to_string();
+        let link_path = dir.path().join("missing-route.yaml");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("does-not-exist.yaml"), &link_path).unwrap();
+
+        let err = discover_routes(&[pattern]).err().unwrap();
+        assert!(matches!(err, DiscoveryError::Io { .. }));
+    }
+
+    #[test]
+    fn discover_routes_invalid_yaml_returns_yaml_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bad.yaml");
+        fs::write(&file, "not: [valid").unwrap();
+        let pattern = dir.path().join("*.yaml").to_string_lossy().to_string();
+
+        let err = discover_routes(&[pattern]).err().unwrap();
+        assert!(matches!(err, DiscoveryError::Yaml { .. }));
+    }
+}

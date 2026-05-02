@@ -248,6 +248,27 @@ mod tests {
     }
 
     #[test]
+    fn test_direct_component_default() {
+        let component = DirectComponent::default();
+        assert_eq!(component.scheme(), "direct");
+    }
+
+    #[test]
+    fn test_direct_config_from_uri() {
+        let config = DirectConfig::from_uri("direct:orders").unwrap();
+        assert_eq!(config.name, "orders");
+    }
+
+    #[test]
+    fn test_direct_endpoint_uri() {
+        let component = DirectComponent::new();
+        let endpoint = component
+            .create_endpoint("direct:uri-check", &NoOpComponentContext)
+            .unwrap();
+        assert_eq!(endpoint.uri(), "direct:uri-check");
+    }
+
+    #[test]
     fn test_direct_creates_endpoint() {
         let component = DirectComponent::new();
         let endpoint = component.create_endpoint("direct:foo", &NoOpComponentContext);
@@ -452,5 +473,16 @@ mod tests {
 
         // After cancellation, the consumer should have cleaned up the registry
         assert!(!registry.lock().await.contains_key("cancel-test"));
+    }
+
+    #[tokio::test]
+    async fn test_direct_consumer_stop_missing_entry_is_ok() {
+        let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let mut consumer = DirectConsumer {
+            name: "never-registered".to_string(),
+            registry,
+        };
+        let result = consumer.stop().await;
+        assert!(result.is_ok());
     }
 }

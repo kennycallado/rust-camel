@@ -866,4 +866,37 @@ mod tests {
         assert_eq!(arr[0]["_stream"]["origin"], serde_json::Value::Null);
         assert_eq!(arr[0]["_stream"]["placeholder"], true);
     }
+
+    #[tokio::test]
+    async fn test_multicast_collect_all_converts_bytes_xml_and_empty() {
+        let endpoints = vec![
+            BoxProcessor::from_fn(|mut ex: Exchange| {
+                Box::pin(async move {
+                    ex.input.body = Body::Bytes(vec![65, 66].into());
+                    Ok(ex)
+                })
+            }),
+            BoxProcessor::from_fn(|mut ex: Exchange| {
+                Box::pin(async move {
+                    ex.input.body = Body::Xml("<a/>".to_string());
+                    Ok(ex)
+                })
+            }),
+            BoxProcessor::from_fn(|mut ex: Exchange| {
+                Box::pin(async move {
+                    ex.input.body = Body::Empty;
+                    Ok(ex)
+                })
+            }),
+        ];
+
+        let config = MulticastConfig::new().aggregation(MulticastStrategy::CollectAll);
+        let mut svc = MulticastService::new(endpoints, config);
+        let result = svc.ready().await.unwrap().call(make_exchange("x")).await.unwrap();
+
+        match result.input.body {
+            Body::Json(v) => assert_eq!(v, serde_json::json!(["AB", "<a/>", null])),
+            _ => panic!("expected json"),
+        }
+    }
 }

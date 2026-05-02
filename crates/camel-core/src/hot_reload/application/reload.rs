@@ -810,4 +810,84 @@ mod tests {
 
         ctx.stop().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_execute_swap_action_missing_definition_returns_error() {
+        use crate::CamelContext;
+
+        let ctx = CamelContext::builder().build().await.unwrap();
+        let errors = execute_reload_actions(
+            vec![ReloadAction::Swap {
+                route_id: "missing-swap-def".into(),
+            }],
+            vec![],
+            &ctx.runtime_execution_handle(),
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].action, "Swap");
+        assert_eq!(errors[0].route_id, "missing-swap-def");
+    }
+
+    #[tokio::test]
+    async fn test_execute_add_action_missing_definition_returns_error() {
+        use crate::CamelContext;
+
+        let ctx = CamelContext::builder().build().await.unwrap();
+        let errors = execute_reload_actions(
+            vec![ReloadAction::Add {
+                route_id: "missing-add-def".into(),
+            }],
+            vec![],
+            &ctx.runtime_execution_handle(),
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].action, "Add");
+        assert_eq!(errors[0].route_id, "missing-add-def");
+    }
+
+    #[tokio::test]
+    async fn test_execute_remove_action_status_error_returns_error() {
+        use crate::CamelContext;
+
+        let ctx = CamelContext::builder().build().await.unwrap();
+        let errors = execute_reload_actions(
+            vec![ReloadAction::Remove {
+                route_id: "missing-remove-route".into(),
+            }],
+            vec![],
+            &ctx.runtime_execution_handle(),
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].action.starts_with("Remove"));
+        assert_eq!(errors[0].route_id, "missing-remove-route");
+    }
+
+    #[tokio::test]
+    async fn test_execute_restart_action_missing_definition_returns_error() {
+        use crate::CamelContext;
+
+        let ctx = CamelContext::builder().build().await.unwrap();
+        let errors = execute_reload_actions(
+            vec![ReloadAction::Restart {
+                route_id: "missing-restart-def".into(),
+            }],
+            vec![],
+            &ctx.runtime_execution_handle(),
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].action, "Restart");
+        assert_eq!(errors[0].route_id, "missing-restart-def");
+    }
 }

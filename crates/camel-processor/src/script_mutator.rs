@@ -55,7 +55,7 @@ fn language_err_to_camel(e: camel_language_api::LanguageError) -> CamelError {
 
 #[cfg(test)]
 mod tests {
-    use camel_api::{Exchange, Message, Value};
+    use camel_api::{CamelError, Exchange, Message, Value};
     use camel_language_api::LanguageError;
     use tower::ServiceExt;
 
@@ -64,6 +64,10 @@ mod tests {
     /// A simple test mutating expression that sets a header
     struct TestMutatingExpression;
 
+    struct ParseErrorMutatingExpression;
+    struct NotSupportedMutatingExpression;
+    struct UnknownVariableMutatingExpression;
+
     impl MutatingExpression for TestMutatingExpression {
         fn evaluate(&self, exchange: &mut Exchange) -> Result<Value, LanguageError> {
             exchange
@@ -71,6 +75,30 @@ mod tests {
                 .headers
                 .insert("mutated".into(), Value::Bool(true));
             Ok(Value::Null)
+        }
+    }
+
+    impl MutatingExpression for ParseErrorMutatingExpression {
+        fn evaluate(&self, _exchange: &mut Exchange) -> Result<Value, LanguageError> {
+            Err(LanguageError::ParseError {
+                expr: "x".to_string(),
+                reason: "bad".to_string(),
+            })
+        }
+    }
+
+    impl MutatingExpression for NotSupportedMutatingExpression {
+        fn evaluate(&self, _exchange: &mut Exchange) -> Result<Value, LanguageError> {
+            Err(LanguageError::NotSupported {
+                feature: "f".to_string(),
+                language: "l".to_string(),
+            })
+        }
+    }
+
+    impl MutatingExpression for UnknownVariableMutatingExpression {
+        fn evaluate(&self, _exchange: &mut Exchange) -> Result<Value, LanguageError> {
+            Err(LanguageError::UnknownVariable("foo".to_string()))
         }
     }
 
@@ -98,6 +126,29 @@ mod tests {
     async fn test_script_mutator_is_clone() {
         let mutator = ScriptMutator::new(Box::new(TestMutatingExpression));
         let _cloned = mutator.clone();
-        // If this compiles, Clone is implemented correctly via Arc
+    }
+
+    #[tokio::test]
+    async fn test_script_mutator_maps_parse_error() {
+        let exchange = Exchange::new(Message::new("test"));
+        let mutator = ScriptMutator::new(Box::new(ParseErrorMutatingExpression));
+        let result = mutator.oneshot(exchange).await;
+        assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "parse error in `x`: bad"));
+    }
+
+    #[tokio::test]
+    async fn test_script_mutator_maps_not_supported_error() {
+        let exchange = Exchange::new(Message::new("test"));
+        let mutator = ScriptMutator::new(Box::new(NotSupportedMutatingExpression));
+        let result = mutator.oneshot(exchange).await;
+        assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "feature 'f' not supported by language 'l'"));
+    }
+
+    #[tokio::test]
+    async fn test_script_mutator_maps_other_language_error() {
+        let exchange = Exchange::new(Message::new("test"));
+        let mutator = ScriptMutator::new(Box::new(UnknownVariableMutatingExpression));
+        let result = mutator.oneshot(exchange).await;
+        assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg.contains("unknown variable: foo")));
     }
 }

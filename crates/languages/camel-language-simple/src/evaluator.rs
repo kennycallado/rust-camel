@@ -166,3 +166,223 @@ fn to_f64(v: &Value) -> Result<f64, LanguageError> {
     v.as_f64()
         .ok_or_else(|| LanguageError::EvalError(format!("expected number, got {v}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camel_language_api::{Expression, Language, Message};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    struct MockExpression {
+        out: Value,
+    }
+
+    impl Expression for MockExpression {
+        fn evaluate(&self, _exchange: &Exchange) -> Result<Value, LanguageError> {
+            Ok(self.out.clone())
+        }
+    }
+
+    struct MockLanguage;
+
+    impl Language for MockLanguage {
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+
+        fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
+            Ok(Box::new(MockExpression {
+                out: Value::String(format!("mock:{script}")),
+            }))
+        }
+
+        fn create_predicate(
+            &self,
+            _script: &str,
+        ) -> Result<Box<dyn camel_language_api::Predicate>, LanguageError> {
+            Err(LanguageError::NotSupported {
+                feature: "predicate".to_string(),
+                language: "mock".to_string(),
+            })
+        }
+    }
+
+    fn exchange_with_body(body: Body) -> Exchange {
+        let mut ex = Exchange::default();
+        ex.input.body = body;
+        ex
+    }
+
+    #[test]
+    fn evaluate_body_variants_and_header_property() {
+        let mut msg = Message::new("txt");
+        msg.set_header("k", Value::String("v".to_string()));
+        let mut ex = Exchange::new(msg);
+        ex.set_property("p".to_string(), Value::String("pv".to_string()));
+
+        assert_eq!(
+            evaluate(&Expr::Header("k".to_string()), &ex, &None).unwrap(),
+            Value::String("v".to_string())
+        );
+        assert_eq!(
+            evaluate(&Expr::ExchangeProperty("p".to_string()), &ex, &None).unwrap(),
+            Value::String("pv".to_string())
+        );
+        assert_eq!(
+            evaluate(&Expr::Body, &exchange_with_body(Body::Empty), &None).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            evaluate(&Expr::Body, &exchange_with_body(Body::from(b"abc".to_vec())), &None).unwrap(),
+            Value::String("abc".to_string())
+        );
+        assert_eq!(
+            evaluate(&Expr::Body, &exchange_with_body(Body::Json(json!({"a": 1}))), &None).unwrap(),
+            Value::String("{\"a\":1}".to_string())
+        );
+    }
+
+    #[test]
+    fn evaluate_body_field_success_and_missing() {
+        let ex = exchange_with_body(Body::Json(json!({"users":[{"name":"Ana"}]})));
+        let found = evaluate(
+            &Expr::BodyField(vec![
+                PathSegment::Key("users".to_string()),
+                PathSegment::Index(0),
+                PathSegment::Key("name".to_string()),
+            ]),
+            &ex,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(found, json!("Ana"));
+
+        let missing = evaluate(
+            &Expr::BodyField(vec![PathSegment::Key("missing".to_string())]),
+            &ex,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(missing, Value::Null);
+    }
+
+    #[test]
+    fn evaluate_delegate_and_delegate_errors() {
+        let expr = Expr::LanguageDelegate {
+            language: "mock".to_string(),
+            expression: "x".to_string(),
+        };
+        let ex = Exchange::default();
+        let resolver: Option<ResolverFn> = Some(Arc::new(|n| {
+            if n == "mock" {
+                Some(Arc::new(MockLanguage) as Arc<dyn Language>)
+            } else {
+                None
+            }
+        }));
+        assert_eq!(
+            evaluate(&expr, &ex, &resolver).unwrap(),
+            Value::String("mock:x".to_string())
+        );
+        assert!(evaluate(&expr, &ex, &None).is_err());
+
+        let missing_resolver: Option<ResolverFn> = Some(Arc::new(|_| None));
+        assert!(evaluate(&expr, &ex, &missing_resolver).is_err());
+    }
+
+    #[test]
+    fn evaluate_binop_and_contains_and_type_errors() {
+        let ex = Exchange::default();
+        assert_eq!(
+            evaluate(
+                &Expr::BinOp {
+                    left: Box::new(Expr::NumberLit(7.0)),
+                    op: Op::Gt,
+                    right: Box::new(Expr::NumberLit(3.0)),
+                },
+                &ex,
+                &None,
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            evaluate(
+                &Expr::BinOp {
+                    left: Box::new(Expr::StringLit("abcdef".to_string())),
+                    op: Op::Contains,
+                    right: Box::new(Expr::StringLit("bcd".to_string())),
+                },
+                &ex,
+                &None,
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+        assert!(evaluate(
+            &Expr::BinOp {
+                left: Box::new(Expr::Bool(true)),
+                op: Op::Contains,
+                right: Box::new(Expr::StringLit("x".to_string())),
+            },
+            &ex,
+            &None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn evaluate_interpolated_and_logical_truthiness() {
+        let mut msg = Message::new("hello");
+        msg.set_header("id", Value::Number(7.into()));
+        let ex = Exchange::new(msg);
+
+        let out = evaluate(
+            &Expr::Interpolated(vec![
+                InterpolatedPart::Literal("id=".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Header("id".to_string()))),
+                InterpolatedPart::Literal(" body=".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Body)),
+                InterpolatedPart::Literal(" miss=".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Header("missing".to_string()))),
+            ]),
+            &ex,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(out, Value::String("id=7 body=hello miss=".to_string()));
+
+        let and_short = evaluate(
+            &Expr::LogicalOp {
+                left: Box::new(Expr::Bool(false)),
+                op: LogicalOp::And,
+                right: Box::new(Expr::BinOp {
+                    left: Box::new(Expr::StringLit("x".to_string())),
+                    op: Op::Gt,
+                    right: Box::new(Expr::NumberLit(1.0)),
+                }),
+            },
+            &ex,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(and_short, Value::Bool(false));
+
+        let or_short = evaluate(
+            &Expr::LogicalOp {
+                left: Box::new(Expr::StringLit("non-empty".to_string())),
+                op: LogicalOp::Or,
+                right: Box::new(Expr::BinOp {
+                    left: Box::new(Expr::StringLit("x".to_string())),
+                    op: Op::Gt,
+                    right: Box::new(Expr::NumberLit(1.0)),
+                }),
+            },
+            &ex,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(or_short, Value::Bool(true));
+    }
+}

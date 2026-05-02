@@ -295,4 +295,63 @@ mod tests {
         assert!(!config.force_completion_on_stop);
         assert!(!config.discard_on_timeout);
     }
+
+    #[test]
+    fn test_builder_sets_timeout_and_flags_and_limits() {
+        let config = AggregatorConfig::correlate_by("key")
+            .complete_on_timeout(Duration::from_secs(2))
+            .max_buckets(7)
+            .bucket_ttl(Duration::from_secs(10))
+            .force_completion_on_stop(true)
+            .discard_on_timeout(true)
+            .build();
+
+        assert!(matches!(
+            config.completion,
+            CompletionMode::Single(CompletionCondition::Timeout(d)) if d == Duration::from_secs(2)
+        ));
+        assert_eq!(config.max_buckets, Some(7));
+        assert_eq!(config.bucket_ttl, Some(Duration::from_secs(10)));
+        assert!(config.force_completion_on_stop);
+        assert!(config.discard_on_timeout);
+    }
+
+    #[test]
+    fn test_builder_correlate_by_overrides_header_and_strategy() {
+        let config = AggregatorConfig::correlate_by("original")
+            .correlate_by("override")
+            .complete_when_size(1)
+            .build();
+
+        assert_eq!(config.header_name, "override");
+        assert!(matches!(
+            config.correlation,
+            CorrelationStrategy::HeaderName(ref h) if h == "override"
+        ));
+    }
+
+    #[test]
+    fn test_completion_reason_as_str_all_variants() {
+        assert_eq!(CompletionReason::Size.as_str(), "size");
+        assert_eq!(CompletionReason::Predicate.as_str(), "predicate");
+        assert_eq!(CompletionReason::Timeout.as_str(), "timeout");
+        assert_eq!(CompletionReason::Stop.as_str(), "stop");
+    }
+
+    #[test]
+    fn test_correlation_strategy_clone_and_debug() {
+        let strategy = CorrelationStrategy::Expression {
+            expr: "${header.orderId}".to_string(),
+            language: "simple".to_string(),
+        };
+        let cloned = strategy.clone();
+        assert!(matches!(
+            cloned,
+            CorrelationStrategy::Expression { ref expr, ref language }
+                if expr == "${header.orderId}" && language == "simple"
+        ));
+
+        let f = CorrelationStrategy::Fn(Arc::new(|_| Some("k".to_string())));
+        assert_eq!(format!("{:?}", f), "Fn(..)");
+    }
 }

@@ -1197,3 +1197,65 @@ mod body_field_eval_tests {
         assert!(pred.matches(&ex).unwrap());
     }
 }
+
+#[cfg(test)]
+mod public_api_tests {
+    use super::SimpleLanguage;
+    use camel_language_api::{Exchange, Expression, Language, LanguageError, Predicate, Value};
+    use std::sync::Arc;
+
+    struct BoolExpression(bool);
+
+    impl Expression for BoolExpression {
+        fn evaluate(&self, _exchange: &Exchange) -> Result<Value, LanguageError> {
+            Ok(Value::Bool(self.0))
+        }
+    }
+
+    struct BoolLanguage;
+
+    impl Language for BoolLanguage {
+        fn name(&self) -> &'static str {
+            "boollang"
+        }
+
+        fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
+            Ok(Box::new(BoolExpression(script == "yes")))
+        }
+
+        fn create_predicate(&self, _script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
+            Err(LanguageError::NotSupported {
+                feature: "predicate".to_string(),
+                language: "boollang".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn language_name_and_default() {
+        let lang = SimpleLanguage::default();
+        assert_eq!(lang.name(), "simple");
+    }
+
+    #[test]
+    fn create_expression_and_predicate_propagate_parse_errors() {
+        let lang = SimpleLanguage::new();
+        assert!(lang.create_expression("${header.}").is_err());
+        assert!(lang.create_predicate("${exchangeProperty.}").is_err());
+    }
+
+    #[test]
+    fn with_resolver_allows_delegate_expressions() {
+        let resolver = Arc::new(|name: &str| {
+            if name == "boollang" {
+                Some(Arc::new(BoolLanguage) as Arc<dyn Language>)
+            } else {
+                None
+            }
+        });
+        let lang = SimpleLanguage::with_resolver(resolver);
+        let expr = lang.create_expression("${boollang:yes}").unwrap();
+        let val = expr.evaluate(&Exchange::default()).unwrap();
+        assert_eq!(val, Value::Bool(true));
+    }
+}

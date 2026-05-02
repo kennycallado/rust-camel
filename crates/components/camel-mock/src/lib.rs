@@ -431,6 +431,13 @@ mod tests {
     }
 
     #[test]
+    fn test_mock_component_default() {
+        let component = MockComponent::default();
+        assert_eq!(component.scheme(), "mock");
+        assert!(component.get_endpoint("missing").is_none());
+    }
+
+    #[test]
     fn test_mock_creates_endpoint() {
         let component = MockComponent::new();
         let endpoint = component.create_endpoint("mock:result", &NoOpComponentContext);
@@ -461,6 +468,30 @@ mod tests {
             .create_endpoint("mock:result", &NoOpComponentContext)
             .unwrap();
         assert!(endpoint.create_producer(&ctx).is_ok());
+    }
+
+    #[test]
+    fn test_mock_endpoint_uri() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:uri-check", &NoOpComponentContext)
+            .unwrap();
+        assert_eq!(endpoint.uri(), "mock:uri-check");
+    }
+
+    #[test]
+    fn test_mock_get_endpoint_returns_same_inner_for_same_name() {
+        let component = MockComponent::new();
+        let _ = component
+            .create_endpoint("mock:shared-inner", &NoOpComponentContext)
+            .unwrap();
+        let _ = component
+            .create_endpoint("mock:shared-inner", &NoOpComponentContext)
+            .unwrap();
+
+        let first = component.get_endpoint("shared-inner").unwrap();
+        let second = component.get_endpoint("shared-inner").unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[tokio::test]

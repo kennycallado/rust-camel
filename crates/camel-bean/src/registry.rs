@@ -65,6 +65,8 @@ mod tests {
 
     struct MockBean;
 
+    struct ErrorBean;
+
     #[async_trait]
     impl BeanProcessor for MockBean {
         async fn call(&self, method: &str, _exchange: &mut Exchange) -> Result<(), CamelError> {
@@ -77,6 +79,24 @@ mod tests {
         fn methods(&self) -> Vec<&'static str> {
             vec!["process"]
         }
+    }
+
+    #[async_trait]
+    impl BeanProcessor for ErrorBean {
+        async fn call(&self, _method: &str, _exchange: &mut Exchange) -> Result<(), CamelError> {
+            Err(CamelError::ProcessorError("boom".to_string()))
+        }
+
+        fn methods(&self) -> Vec<&'static str> {
+            vec!["process"]
+        }
+    }
+
+    #[test]
+    fn test_default_is_empty() {
+        let registry = BeanRegistry::default();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
     }
 
     #[test]
@@ -96,6 +116,14 @@ mod tests {
         registry.register("mock", MockBean);
         assert_eq!(registry.len(), 1);
         assert!(!registry.is_empty());
+    }
+
+    #[test]
+    fn test_register_same_name_overwrites() {
+        let mut registry = BeanRegistry::new();
+        registry.register("dup", MockBean);
+        registry.register("dup", ErrorBean);
+        assert_eq!(registry.len(), 1);
     }
 
     #[tokio::test]
@@ -129,5 +157,16 @@ mod tests {
         let result = registry.invoke("mock", "unknown", &mut exchange).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_invoke_propagates_bean_error() {
+        let mut registry = BeanRegistry::new();
+        registry.register("err", ErrorBean);
+
+        let mut exchange = Exchange::new(Message::default());
+        let result = registry.invoke("err", "process", &mut exchange).await;
+
+        assert!(matches!(result, Err(CamelError::ProcessorError(_))));
     }
 }

@@ -469,4 +469,148 @@ mod tests {
         assert_eq!(cmd.command_id(), "c2");
         assert_eq!(cmd.causation_id(), Some("c1"));
     }
+
+    #[test]
+    fn canonical_contract_rejects_empty_route_id_and_from() {
+        let spec = CanonicalRouteSpec::new("   ", "timer:tick");
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("route_id cannot be empty"));
+
+        let spec = CanonicalRouteSpec::new("r1", "  ");
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("from cannot be empty"));
+    }
+
+    #[test]
+    fn canonical_contract_rejects_invalid_nested_steps() {
+        let mut spec = CanonicalRouteSpec::new("r1", "timer:tick");
+        spec.steps = vec![CanonicalStepSpec::Split {
+            expression: CanonicalSplitExpressionSpec::BodyLines,
+            aggregation: CanonicalSplitAggregationSpec::CollectAll,
+            parallel: true,
+            parallel_limit: Some(0),
+            stop_on_exception: false,
+            steps: vec![CanonicalStepSpec::To {
+                uri: "log:ok".to_string(),
+            }],
+        }];
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("split.parallel_limit must be > 0"));
+
+        spec.steps = vec![CanonicalStepSpec::To {
+            uri: "   ".to_string(),
+        }];
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("endpoint uri cannot be empty"));
+    }
+
+    #[test]
+    fn canonical_contract_rejects_invalid_aggregate_and_circuit_breaker() {
+        let mut spec = CanonicalRouteSpec::new("r1", "timer:tick");
+        spec.steps = vec![CanonicalStepSpec::Aggregate {
+            config: CanonicalAggregateSpec {
+                header: " ".to_string(),
+                completion_size: Some(1),
+                completion_timeout_ms: None,
+                correlation_key: None,
+                force_completion_on_stop: None,
+                discard_on_timeout: None,
+                strategy: CanonicalAggregateStrategySpec::CollectAll,
+                max_buckets: None,
+                bucket_ttl_ms: None,
+            },
+        }];
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("aggregate.header cannot be empty"));
+
+        spec.steps = vec![CanonicalStepSpec::Aggregate {
+            config: CanonicalAggregateSpec {
+                header: "k".to_string(),
+                completion_size: Some(0),
+                completion_timeout_ms: None,
+                correlation_key: None,
+                force_completion_on_stop: None,
+                discard_on_timeout: None,
+                strategy: CanonicalAggregateStrategySpec::CollectAll,
+                max_buckets: None,
+                bucket_ttl_ms: None,
+            },
+        }];
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("aggregate.completion_size must be > 0"));
+
+        spec.steps = vec![];
+        spec.circuit_breaker = Some(CanonicalCircuitBreakerSpec {
+            failure_threshold: 0,
+            open_duration_ms: 10,
+        });
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("failure_threshold must be > 0"));
+
+        spec.circuit_breaker = Some(CanonicalCircuitBreakerSpec {
+            failure_threshold: 1,
+            open_duration_ms: 0,
+        });
+        let err = spec.validate_contract().unwrap_err().to_string();
+        assert!(err.contains("open_duration_ms must be > 0"));
+    }
+
+    #[test]
+    fn canonical_contract_rejection_reason_none_for_regular_steps() {
+        assert!(canonical_contract_rejection_reason("to").is_none());
+        assert!(canonical_contract_rejection_reason("unknown-step").is_none());
+    }
+
+    #[test]
+    fn command_helpers_cover_all_variants() {
+        let spec = CanonicalRouteSpec::new("r1", "timer:tick");
+        let cmds = vec![
+            RuntimeCommand::RegisterRoute {
+                spec,
+                command_id: "c1".into(),
+                causation_id: Some("root".into()),
+            },
+            RuntimeCommand::StartRoute {
+                route_id: "r1".into(),
+                command_id: "c2".into(),
+                causation_id: None,
+            },
+            RuntimeCommand::StopRoute {
+                route_id: "r1".into(),
+                command_id: "c3".into(),
+                causation_id: None,
+            },
+            RuntimeCommand::SuspendRoute {
+                route_id: "r1".into(),
+                command_id: "c4".into(),
+                causation_id: None,
+            },
+            RuntimeCommand::ResumeRoute {
+                route_id: "r1".into(),
+                command_id: "c5".into(),
+                causation_id: None,
+            },
+            RuntimeCommand::ReloadRoute {
+                route_id: "r1".into(),
+                command_id: "c6".into(),
+                causation_id: None,
+            },
+            RuntimeCommand::FailRoute {
+                route_id: "r1".into(),
+                error: "boom".into(),
+                command_id: "c7".into(),
+                causation_id: None,
+            },
+            RuntimeCommand::RemoveRoute {
+                route_id: "r1".into(),
+                command_id: "c8".into(),
+                causation_id: None,
+            },
+        ];
+
+        let ids: Vec<&str> = cmds.iter().map(RuntimeCommand::command_id).collect();
+        assert_eq!(ids, vec!["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]);
+        assert_eq!(cmds[0].causation_id(), Some("root"));
+        assert_eq!(cmds[1].causation_id(), None);
+    }
 }
