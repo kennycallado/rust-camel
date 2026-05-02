@@ -1,10 +1,9 @@
 FROM rust:alpine AS builder
 
 RUN apk add --no-cache \
-    gcc-g++ \
+    build-base \
     ca-certificates \
     cmake \
-    make \
     pkgconf \
     openssl-dev \
     openssl-libs-static \
@@ -12,8 +11,7 @@ RUN apk add --no-cache \
     cyrus-sasl-dev \
     zlib-dev \
     zstd-dev \
-    libxml2-dev \
-    musl-dev
+    libxml2-dev
 
 WORKDIR /app
 
