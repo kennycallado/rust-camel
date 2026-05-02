@@ -3,14 +3,9 @@ FROM rust:alpine AS builder
 RUN apk add --no-cache \
     build-base \
     ca-certificates \
-    cmake \
     pkgconf \
     openssl-dev \
     openssl-libs-static \
-    curl-dev \
-    cyrus-sasl-dev \
-    zlib-dev \
-    zstd-dev \
     libxml2-dev
 
 WORKDIR /app
@@ -20,7 +15,7 @@ COPY crates crates
 COPY scripts scripts
 COPY examples examples
 
-RUN cargo build -p camel-cli --release --features kafka-static
+RUN cargo build -p camel-cli --release
 
 FROM scratch AS production
 WORKDIR /app
