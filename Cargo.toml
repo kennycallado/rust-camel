@@ -235,6 +235,7 @@ testcontainers-modules = { version = "0.15", features = ["kafka", "postgres", "r
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 prometheus = "0.14"
 quick-xml = "0.39"
+base64 = "0.22"
 rand = "0.10"
 sxd-document = "0.3"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }

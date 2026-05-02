@@ -5,6 +5,7 @@ use camel_component_api::{
 };
 
 use crate::config::parse_grpc_uri;
+use crate::consumer::GrpcConsumer;
 use crate::producer::GrpcProducer;
 
 pub struct GrpcComponent;
@@ -41,6 +42,8 @@ impl Component for GrpcComponent {
         Ok(Box::new(GrpcEndpoint {
             uri: uri.to_string(),
             addr,
+            host,
+            port,
             proto_path: PathBuf::from(proto_file),
             service_name,
             method_name,
@@ -51,6 +54,8 @@ impl Component for GrpcComponent {
 struct GrpcEndpoint {
     uri: String,
     addr: String,
+    host: String,
+    port: u16,
     proto_path: PathBuf,
     service_name: String,
     method_name: String,
@@ -62,9 +67,15 @@ impl Endpoint for GrpcEndpoint {
     }
 
     fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Err(CamelError::EndpointCreationFailed(
-            "grpc endpoint does not support consumers".to_string(),
-        ))
+        let path = format!("/{}/{}", self.service_name, self.method_name);
+        Ok(Box::new(GrpcConsumer::new(
+            self.host.clone(),
+            self.port,
+            path,
+            self.proto_path.clone(),
+            self.service_name.clone(),
+            self.method_name.clone(),
+        )))
     }
 
     fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
