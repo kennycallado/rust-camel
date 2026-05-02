@@ -329,3 +329,95 @@ pub enum DeclarativeStep {
     Delay(DelayStepDef),
     Loop(LoopStepDef),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_step_def_new() {
+        let def = ToStepDef::new("direct:a");
+        assert_eq!(def.uri, "direct:a");
+    }
+
+    #[test]
+    fn log_step_def_info() {
+        let def = LogStepDef::info("hello");
+        assert_eq!(def.level, LogLevelDef::Info);
+        match def.message {
+            ValueSourceDef::Literal(v) => assert_eq!(v, serde_json::Value::String("hello".into())),
+            _ => panic!("expected literal"),
+        }
+    }
+
+    #[test]
+    fn set_header_literal() {
+        let def = SetHeaderStepDef::literal("key", "value");
+        assert_eq!(def.key, "key");
+        match def.value {
+            ValueSourceDef::Literal(v) => assert_eq!(v, serde_json::Value::String("value".into())),
+            _ => panic!("expected literal"),
+        }
+    }
+
+    #[test]
+    fn bean_step_def_new() {
+        let def = BeanStepDef::new("myBean", "process");
+        assert_eq!(def.name, "myBean");
+        assert_eq!(def.method, "process");
+    }
+
+    #[test]
+    fn throttle_strategy_default() {
+        assert_eq!(ThrottleStrategyDef::default(), ThrottleStrategyDef::Delay);
+    }
+
+    #[test]
+    fn load_balance_strategy_default() {
+        assert_eq!(LoadBalanceStrategyDef::default(), LoadBalanceStrategyDef::RoundRobin);
+    }
+
+    #[test]
+    fn concurrency_variants_equality() {
+        assert_eq!(
+            DeclarativeConcurrency::Sequential,
+            DeclarativeConcurrency::Sequential
+        );
+        assert_ne!(
+            DeclarativeConcurrency::Sequential,
+            DeclarativeConcurrency::Concurrent { max: None }
+        );
+    }
+
+    #[test]
+    fn body_type_variants() {
+        assert_eq!(BodyTypeDef::Text, BodyTypeDef::Text);
+        assert_ne!(BodyTypeDef::Text, BodyTypeDef::Json);
+    }
+
+    #[test]
+    fn data_format_def() {
+        let def = DataFormatDef { format: "protobuf".into() };
+        assert_eq!(def.format, "protobuf");
+    }
+
+    #[test]
+    fn stream_cache_step_def() {
+        let def = StreamCacheStepDef { threshold: Some(1024) };
+        assert_eq!(def.threshold, Some(1024));
+    }
+
+    #[test]
+    fn delay_step_def() {
+        let def = DelayStepDef { delay_ms: 500, dynamic_header: Some("X-Delay".into()) };
+        assert_eq!(def.delay_ms, 500);
+        assert_eq!(def.dynamic_header.as_deref(), Some("X-Delay"));
+    }
+
+    #[test]
+    fn circuit_breaker_def() {
+        let cb = DeclarativeCircuitBreaker { failure_threshold: 3, open_duration_ms: 5000 };
+        assert_eq!(cb.failure_threshold, 3);
+        assert_eq!(cb.open_duration_ms, 5000);
+    }
+}

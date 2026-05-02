@@ -69,3 +69,65 @@ impl std::fmt::Debug for DynamicRouterConfig {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::*;
+
+    fn noop_expr() -> RouterExpression {
+        Arc::new(|_| None)
+    }
+
+    #[test]
+    fn new_has_defaults() {
+        let cfg = DynamicRouterConfig::new(noop_expr());
+        assert_eq!(cfg.uri_delimiter, ",");
+        assert_eq!(cfg.cache_size, 1000);
+        assert!(!cfg.ignore_invalid_endpoints);
+        assert_eq!(cfg.max_iterations, 1000);
+        assert_eq!(cfg.timeout, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn builder_chaining() {
+        let cfg = DynamicRouterConfig::new(noop_expr())
+            .uri_delimiter(";")
+            .cache_size(100)
+            .ignore_invalid_endpoints(true)
+            .max_iterations(50)
+            .timeout(Duration::from_secs(10));
+        assert_eq!(cfg.uri_delimiter, ";");
+        assert_eq!(cfg.cache_size, 100);
+        assert!(cfg.ignore_invalid_endpoints);
+        assert_eq!(cfg.max_iterations, 50);
+        assert_eq!(cfg.timeout, Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn no_timeout_clears() {
+        let cfg = DynamicRouterConfig::new(noop_expr()).no_timeout();
+        assert!(cfg.timeout.is_none());
+    }
+
+    #[test]
+    fn debug_format_contains_fields() {
+        let cfg = DynamicRouterConfig::new(noop_expr());
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("DynamicRouterConfig"));
+        assert!(debug.contains("uri_delimiter"));
+        assert!(debug.contains("cache_size"));
+    }
+
+    #[test]
+    fn clone_preserves_values() {
+        let cfg = DynamicRouterConfig::new(noop_expr())
+            .uri_delimiter("|")
+            .cache_size(42);
+        let cloned = cfg.clone();
+        assert_eq!(cloned.uri_delimiter, "|");
+        assert_eq!(cloned.cache_size, 42);
+    }
+}

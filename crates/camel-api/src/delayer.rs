@@ -33,3 +33,44 @@ impl DelayConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_sets_delay_no_header() {
+        let cfg = DelayConfig::new(500);
+        assert_eq!(cfg.delay_ms, 500);
+        assert!(cfg.dynamic_header.is_none());
+    }
+
+    #[test]
+    fn with_dynamic_header_sets_header() {
+        let cfg = DelayConfig::new(200).with_dynamic_header("X-Delay");
+        assert_eq!(cfg.delay_ms, 200);
+        assert_eq!(cfg.dynamic_header.as_deref(), Some("X-Delay"));
+    }
+
+    #[test]
+    fn from_duration_converts_ms() {
+        let cfg = DelayConfig::from_duration(Duration::from_millis(1500));
+        assert_eq!(cfg.delay_ms, 1500);
+        assert!(cfg.dynamic_header.is_none());
+    }
+
+    #[test]
+    fn from_duration_with_header() {
+        let cfg = DelayConfig::from_duration_with_header(Duration::from_secs(2), "MyHeader");
+        assert_eq!(cfg.delay_ms, 2000);
+        assert_eq!(cfg.dynamic_header.as_deref(), Some("MyHeader"));
+    }
+
+    #[test]
+    fn clone_preserves_values() {
+        let cfg = DelayConfig::new(100).with_dynamic_header("H");
+        let cloned = cfg.clone();
+        assert_eq!(cloned.delay_ms, 100);
+        assert_eq!(cloned.dynamic_header.as_deref(), Some("H"));
+    }
+}

@@ -62,3 +62,55 @@ impl std::fmt::Debug for RecipientListConfig {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn noop_expr() -> RecipientListExpression {
+        Arc::new(|_| String::new())
+    }
+
+    #[test]
+    fn new_has_defaults() {
+        let cfg = RecipientListConfig::new(noop_expr());
+        assert_eq!(cfg.delimiter, ",");
+        assert!(!cfg.parallel);
+        assert!(cfg.parallel_limit.is_none());
+        assert!(!cfg.stop_on_exception);
+    }
+
+    #[test]
+    fn builder_chaining() {
+        let cfg = RecipientListConfig::new(noop_expr())
+            .delimiter(";")
+            .parallel(true)
+            .parallel_limit(4)
+            .stop_on_exception(true)
+            .strategy(crate::MulticastStrategy::CollectAll);
+        assert_eq!(cfg.delimiter, ";");
+        assert!(cfg.parallel);
+        assert_eq!(cfg.parallel_limit, Some(4));
+        assert!(cfg.stop_on_exception);
+    }
+
+    #[test]
+    fn clone_preserves_values() {
+        let cfg = RecipientListConfig::new(noop_expr())
+            .delimiter("|")
+            .parallel(true);
+        let cloned = cfg.clone();
+        assert_eq!(cloned.delimiter, "|");
+        assert!(cloned.parallel);
+    }
+
+    #[test]
+    fn debug_format() {
+        let cfg = RecipientListConfig::new(noop_expr());
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("RecipientListConfig"));
+        assert!(debug.contains("delimiter"));
+    }
+}

@@ -573,6 +573,292 @@ fn default_lb_strategy() -> String {
     "round_robin".to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_values() {
+        assert!(default_true());
+        assert_eq!(default_startup_order(), 1000);
+        assert_eq!(default_initial_delay_ms(), 100);
+        assert_eq!(default_multiplier(), 2.0);
+        assert_eq!(default_max_delay_ms(), 10_000);
+        assert_eq!(default_jitter_factor(), 0.0);
+        assert_eq!(default_failure_threshold(), 5);
+        assert_eq!(default_open_duration_ms(), 30_000);
+        assert_eq!(default_split_aggregation(), "last_wins");
+        assert_eq!(default_aggregate_strategy(), "collect_all");
+        assert_eq!(default_multicast_aggregation(), "last_wins");
+        assert_eq!(default_throttle_period_secs(), 1);
+        assert_eq!(default_lb_strategy(), "round_robin");
+        assert_eq!(default_uri_delimiter(), ",");
+        assert_eq!(default_cache_size(), 1000);
+        assert_eq!(default_max_iterations(), 1000);
+    }
+
+    #[test]
+    fn parse_minimal_route() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.routes.len(), 1);
+        assert_eq!(parsed.routes[0].id, "r1");
+        assert_eq!(parsed.routes[0].from, "direct:start");
+        assert!(parsed.routes[0].auto_startup);
+        assert_eq!(parsed.routes[0].startup_order, 1000);
+        assert!(parsed.routes[0].steps.is_empty());
+    }
+
+    #[test]
+    fn parse_route_with_concurrency() {
+        let yaml = r#"
+routes:
+  - id: r2
+    from: timer:tick
+    concurrent: 4
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.routes[0].concurrent, Some(4));
+        assert!(!parsed.routes[0].sequential);
+    }
+
+    #[test]
+    fn parse_route_with_error_handler() {
+        let yaml = r#"
+routes:
+  - id: r3
+    from: direct:in
+    error_handler:
+      dead_letter_channel: log:dlq
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let eh = parsed.routes[0].error_handler.as_ref().unwrap();
+        assert_eq!(eh.dead_letter_channel.as_deref(), Some("log:dlq"));
+    }
+
+    #[test]
+    fn parse_route_with_circuit_breaker() {
+        let yaml = r#"
+routes:
+  - id: r4
+    from: direct:in
+    circuit_breaker:
+      failure_threshold: 3
+      open_duration_ms: 5000
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let cb = parsed.routes[0].circuit_breaker.as_ref().unwrap();
+        assert_eq!(cb.failure_threshold, 3);
+        assert_eq!(cb.open_duration_ms, 5000);
+    }
+
+    #[test]
+    fn parse_circuit_breaker_defaults() {
+        let yaml = r#"
+routes:
+  - id: r5
+    from: direct:in
+    circuit_breaker: {}
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let cb = parsed.routes[0].circuit_breaker.as_ref().unwrap();
+        assert_eq!(cb.failure_threshold, 5);
+        assert_eq!(cb.open_duration_ms, 30_000);
+    }
+
+    #[test]
+    fn parse_to_step() {
+        let yaml = r#"
+routes:
+  - id: r6
+    from: direct:start
+    steps:
+      - to: log:out
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.routes[0].steps.len(), 1);
+    }
+
+    #[test]
+    fn parse_delay_short_form() {
+        let yaml = r#"
+routes:
+  - id: r7
+    from: direct:start
+    steps:
+      - delay: 500
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        match &parsed.routes[0].steps[0] {
+            YamlStep::Delay(d) => match &d.delay {
+                DelayBody::Short(ms) => assert_eq!(*ms, 500),
+                _ => panic!("expected short form"),
+            },
+            _ => panic!("expected delay step"),
+        }
+    }
+
+    #[test]
+    fn parse_delay_full_form() {
+        let yaml = r#"
+routes:
+  - id: r8
+    from: direct:start
+    steps:
+      - delay:
+          delay_ms: 200
+          dynamic_header: X-Delay
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        match &parsed.routes[0].steps[0] {
+            YamlStep::Delay(d) => match &d.delay {
+                DelayBody::Full(cfg) => {
+                    assert_eq!(cfg.delay_ms, 200);
+                    assert_eq!(cfg.dynamic_header.as_deref(), Some("X-Delay"));
+                }
+                _ => panic!("expected full form"),
+            },
+            _ => panic!("expected delay step"),
+        }
+    }
+
+    #[test]
+    fn parse_redelivery_policy_defaults() {
+        let yaml = r#"
+routes:
+  - id: r9
+    from: direct:in
+    error_handler:
+      retry:
+        max_attempts: 3
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let retry = parsed.routes[0]
+            .error_handler
+            .as_ref()
+            .unwrap()
+            .retry
+            .as_ref()
+            .unwrap();
+        assert_eq!(retry.max_attempts, 3);
+        assert_eq!(retry.initial_delay_ms, 100);
+        assert_eq!(retry.multiplier, 2.0);
+        assert_eq!(retry.max_delay_ms, 10_000);
+        assert_eq!(retry.jitter_factor, 0.0);
+    }
+
+    #[test]
+    fn parse_stream_cache_bool() {
+        let yaml = r#"
+routes:
+  - id: r10
+    from: direct:start
+    steps:
+      - stream_cache: true
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        match &parsed.routes[0].steps[0] {
+            YamlStep::StreamCache(s) => match &s.stream_cache {
+                StreamCacheBody::Enabled(b) => assert!(*b),
+                _ => panic!("expected enabled"),
+            },
+            _ => panic!("expected stream_cache"),
+        }
+    }
+
+    #[test]
+    fn parse_stop_step() {
+        let yaml = r#"
+routes:
+  - id: r11
+    from: direct:start
+    steps:
+      - stop: true
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        match &parsed.routes[0].steps[0] {
+            YamlStep::Stop(s) => assert!(s.stop),
+            _ => panic!("expected stop"),
+        }
+    }
+
+    #[test]
+    fn parse_convert_body_to() {
+        let yaml = r#"
+routes:
+  - id: r12
+    from: direct:start
+    steps:
+      - convert_body_to: json
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        match &parsed.routes[0].steps[0] {
+            YamlStep::ConvertBodyTo(s) => assert_eq!(s.convert_body_to, "json"),
+            _ => panic!("expected convert_body_to"),
+        }
+    }
+
+    #[test]
+    fn parse_marshal_unmarshal() {
+        let yaml = r#"
+routes:
+  - id: r13
+    from: direct:start
+    steps:
+      - marshal: protobuf
+      - unmarshal: protobuf
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(parsed.routes[0].steps.len(), 2);
+    }
+
+    #[test]
+    fn parse_bean_step() {
+        let yaml = r#"
+routes:
+  - id: r14
+    from: direct:start
+    steps:
+      - bean:
+          name: myBean
+          method: handle
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        match &parsed.routes[0].steps[0] {
+            YamlStep::Bean(b) => {
+                assert_eq!(b.bean.name, "myBean");
+                assert_eq!(b.bean.method, "handle");
+            }
+            _ => panic!("expected bean"),
+        }
+    }
+
+    #[test]
+    fn parse_script_step() {
+        let yaml = r#"
+routes:
+  - id: r15
+    from: direct:start
+    steps:
+      - script:
+          language: rhai
+          source: "1 + 1"
+"#;
+        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        match &parsed.routes[0].steps[0] {
+            YamlStep::Script(s) => {
+                assert_eq!(s.script.language, "rhai");
+                assert_eq!(s.script.source, "1 + 1");
+            }
+            _ => panic!("expected script"),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicRouterStep {

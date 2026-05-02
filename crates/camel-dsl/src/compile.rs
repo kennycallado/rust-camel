@@ -875,7 +875,22 @@ fn compile_log_level(level: LogLevelDef) -> LogLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DeclarativeOnException, DeclarativeRedeliveryPolicy, StreamCacheStepDef};
+    use crate::model::{
+        AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
+        DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
+        DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
+        DelayStepDef, DynamicRouterStepDef,
+        FilterStepDef, LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef,
+        LogStepDef, LogLevelDef, LoopStepDef, MulticastAggregationDef, MulticastStepDef,
+        RecipientListStepDef, RoutingSlipStepDef, SetBodyStepDef, SetHeaderStepDef,
+        SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef,
+        ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef,
+        WireTapStepDef,
+    };
+
+    fn make_predicate(simple_src: &str) -> LanguageExpressionDef {
+        LanguageExpressionDef { language: "simple".into(), source: simple_src.into() }
+    }
 
     #[test]
     fn test_compile_error_handler_on_exceptions_order_preserved() {
@@ -1290,5 +1305,580 @@ mod tests {
     fn declarative_step_name_stream_cache() {
         let step = DeclarativeStep::StreamCache(StreamCacheStepDef { threshold: None });
         assert_eq!(declarative_step_name(&step), "stream_cache");
+    }
+
+    #[test]
+    fn compile_log_level_all_variants() {
+        assert_eq!(compile_log_level(LogLevelDef::Trace), LogLevel::Trace);
+        assert_eq!(compile_log_level(LogLevelDef::Debug), LogLevel::Debug);
+        assert_eq!(compile_log_level(LogLevelDef::Info), LogLevel::Info);
+        assert_eq!(compile_log_level(LogLevelDef::Warn), LogLevel::Warn);
+        assert_eq!(compile_log_level(LogLevelDef::Error), LogLevel::Error);
+    }
+
+    #[test]
+    fn compile_log_message_literal_string() {
+        let msg = ValueSourceDef::Literal(serde_json::Value::String("hello".into()));
+        assert_eq!(compile_log_message(msg).unwrap(), "hello");
+    }
+
+    #[test]
+    fn compile_log_message_literal_number() {
+        let msg = ValueSourceDef::Literal(serde_json::json!(42));
+        assert_eq!(compile_log_message(msg).unwrap(), "42");
+    }
+
+    #[test]
+    fn compile_log_message_expression_simple() {
+        let msg = ValueSourceDef::Expression(LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body}".into(),
+        });
+        assert_eq!(compile_log_message(msg).unwrap(), "${body}");
+    }
+
+    #[test]
+    fn compile_log_message_expression_non_simple_rejected() {
+        let msg = ValueSourceDef::Expression(LanguageExpressionDef {
+            language: "rhai".into(),
+            source: "1+1".into(),
+        });
+        assert!(compile_log_message(msg).is_err());
+    }
+
+    #[test]
+    fn declarative_step_name_all_variants() {
+        assert_eq!(declarative_step_name(&DeclarativeStep::To(ToStepDef::new("x"))), "to");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Log(LogStepDef::info("x"))), "log");
+        assert_eq!(declarative_step_name(&DeclarativeStep::SetHeader(SetHeaderStepDef::literal("k","v"))), "set_header");
+        assert_eq!(declarative_step_name(&DeclarativeStep::SetBody(SetBodyStepDef { value: ValueSourceDef::Literal(serde_json::json!("x")) })), "set_body");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Filter(FilterStepDef { predicate: LanguageExpressionDef { language: "simple".into(), source: "true".into() }, steps: vec![] })), "filter");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Choice(ChoiceStepDef { whens: vec![], otherwise: None })), "choice");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Split(SplitStepDef { expression: SplitExpressionDef::BodyLines, aggregation: SplitAggregationDef::LastWins, parallel: false, parallel_limit: None, stop_on_exception: false, steps: vec![] })), "split");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Aggregate(AggregateStepDef { header: "h".into(), correlation_key: None, completion_size: None, completion_timeout_ms: None, completion_predicate: None, strategy: AggregateStrategyDef::CollectAll, max_buckets: None, bucket_ttl_ms: None, force_completion_on_stop: None, discard_on_timeout: None })), "aggregate");
+        assert_eq!(declarative_step_name(&DeclarativeStep::WireTap(WireTapStepDef { uri: "x".into() })), "wire_tap");
+        assert_eq!(declarative_step_name(&DeclarativeStep::DynamicRouter(DynamicRouterStepDef { expression: LanguageExpressionDef { language: "simple".into(), source: "x".into() }, uri_delimiter: ",".into(), cache_size: 1000, ignore_invalid_endpoints: false, max_iterations: 100 })), "dynamic_router");
+        assert_eq!(declarative_step_name(&DeclarativeStep::LoadBalance(LoadBalanceStepDef { strategy: LoadBalanceStrategyDef::RoundRobin, parallel: false, steps: vec![] })), "load_balance");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Multicast(MulticastStepDef { steps: vec![], parallel: false, parallel_limit: None, stop_on_exception: false, timeout_ms: None, aggregation: MulticastAggregationDef::LastWins })), "multicast");
+        assert_eq!(declarative_step_name(&DeclarativeStep::RoutingSlip(RoutingSlipStepDef { expression: LanguageExpressionDef { language: "simple".into(), source: "x".into() }, uri_delimiter: ",".into(), cache_size: 1000, ignore_invalid_endpoints: false })), "routing_slip");
+        assert_eq!(declarative_step_name(&DeclarativeStep::RecipientList(RecipientListStepDef { expression: LanguageExpressionDef { language: "simple".into(), source: "x".into() }, delimiter: ",".into(), parallel: false, parallel_limit: None, stop_on_exception: false, aggregation: MulticastAggregationDef::LastWins })), "recipient_list");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Stop), "stop");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Throttle(ThrottleStepDef { max_requests: 10, period_ms: 1000, strategy: ThrottleStrategyDef::Delay, steps: vec![] })), "throttle");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Script(ScriptStepDef { expression: LanguageExpressionDef { language: "rhai".into(), source: "1".into() } })), "script");
+        assert_eq!(declarative_step_name(&DeclarativeStep::ConvertBodyTo(BodyTypeDef::Json)), "convert_body_to");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Bean(BeanStepDef::new("b","m"))), "bean");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Delay(DelayStepDef { delay_ms: 100, dynamic_header: None })), "delay");
+        assert_eq!(declarative_step_name(&DeclarativeStep::Loop(LoopStepDef { count: Some(3), while_predicate: None, steps: vec![] })), "loop");
+    }
+
+    #[test]
+    fn compile_circuit_breaker_def() {
+        let def = DeclarativeCircuitBreaker { failure_threshold: 3, open_duration_ms: 5000 };
+        let config = compile_circuit_breaker(def);
+        assert_eq!(config.failure_threshold, 3);
+        assert_eq!(config.open_duration, Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn ensure_known_exception_kind_valid() {
+        assert!(ensure_known_exception_kind("Io").is_ok());
+        assert!(ensure_known_exception_kind("ProcessorError").is_ok());
+        assert!(ensure_known_exception_kind("Stopped").is_ok());
+    }
+
+    #[test]
+    fn ensure_known_exception_kind_invalid() {
+        assert!(ensure_known_exception_kind("NoSuchError").is_err());
+    }
+
+    #[test]
+    fn compile_aggregate_step_timeout_and_size() {
+        let def = AggregateStepDef {
+            header: "corr".into(),
+            correlation_key: None,
+            completion_size: Some(5),
+            completion_timeout_ms: Some(2000),
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        };
+        let result = compile_aggregate_step(def);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_aggregate_step_timeout_only() {
+        let def = AggregateStepDef {
+            header: "corr".into(),
+            correlation_key: None,
+            completion_size: None,
+            completion_timeout_ms: Some(1000),
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        };
+        let result = compile_aggregate_step(def);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_aggregate_step_rejects_predicate() {
+        let def = AggregateStepDef {
+            header: "corr".into(),
+            correlation_key: None,
+            completion_size: None,
+            completion_timeout_ms: None,
+            completion_predicate: Some(make_predicate("true")),
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: None,
+            bucket_ttl_ms: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+        };
+        assert!(compile_aggregate_step(def).is_err());
+    }
+
+    #[test]
+    fn compile_aggregate_step_with_extras() {
+        let def = AggregateStepDef {
+            header: "corr".into(),
+            correlation_key: None,
+            completion_size: Some(3),
+            completion_timeout_ms: None,
+            completion_predicate: None,
+            strategy: AggregateStrategyDef::CollectAll,
+            max_buckets: Some(100),
+            bucket_ttl_ms: Some(60000),
+            force_completion_on_stop: Some(true),
+            discard_on_timeout: Some(true),
+        };
+        let result = compile_aggregate_step(def);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_step_to() {
+        let step = DeclarativeStep::To(ToStepDef::new("direct:a"));
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::To(u) if u == "direct:a"));
+    }
+
+    #[test]
+    fn compile_step_wire_tap() {
+        let step = DeclarativeStep::WireTap(WireTapStepDef { uri: "log:tap".into() });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::WireTap { uri } if uri == "log:tap"));
+    }
+
+    #[test]
+    fn compile_step_stop() {
+        let step = DeclarativeStep::Stop;
+        let result = compile_declarative_step(step);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_step_bean() {
+        let step = DeclarativeStep::Bean(BeanStepDef::new("myBean", "process"));
+        let result = compile_declarative_step(step);
+        match result.unwrap() {
+            BuilderStep::Bean { name, method } => {
+                assert_eq!(name, "myBean");
+                assert_eq!(method, "process");
+            }
+            other => panic!("expected Bean, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_step_delay() {
+        let step = DeclarativeStep::Delay(DelayStepDef { delay_ms: 500, dynamic_header: None });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::Delay { .. }));
+    }
+
+    #[test]
+    fn compile_step_delay_with_header() {
+        let step = DeclarativeStep::Delay(DelayStepDef { delay_ms: 200, dynamic_header: Some("X-D".into()) });
+        let result = compile_declarative_step(step);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_step_dynamic_router() {
+        let step = DeclarativeStep::DynamicRouter(DynamicRouterStepDef {
+            expression: make_predicate("x"),
+            uri_delimiter: ",".into(),
+            cache_size: 500,
+            ignore_invalid_endpoints: true,
+            max_iterations: 100,
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeDynamicRouter { .. }));
+    }
+
+    #[test]
+    fn compile_step_routing_slip() {
+        let step = DeclarativeStep::RoutingSlip(RoutingSlipStepDef {
+            expression: make_predicate("x"),
+            uri_delimiter: ",".into(),
+            cache_size: 500,
+            ignore_invalid_endpoints: false,
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeRoutingSlip { .. }));
+    }
+
+    #[test]
+    fn compile_step_recipient_list() {
+        let step = DeclarativeStep::RecipientList(RecipientListStepDef {
+            expression: make_predicate("x"),
+            delimiter: ",".into(),
+            parallel: true,
+            parallel_limit: Some(4),
+            stop_on_exception: false,
+            aggregation: MulticastAggregationDef::CollectAll,
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeRecipientList { .. }));
+    }
+
+    #[test]
+    fn compile_step_script() {
+        let step = DeclarativeStep::Script(ScriptStepDef {
+            expression: make_predicate("1+1"),
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeScript { .. }));
+    }
+
+    #[test]
+    fn compile_step_throttle() {
+        let step = DeclarativeStep::Throttle(ThrottleStepDef {
+            max_requests: 10,
+            period_ms: 1000,
+            strategy: ThrottleStrategyDef::Reject,
+            steps: vec![],
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::Throttle { .. }));
+    }
+
+    #[test]
+    fn compile_step_load_balance_round_robin() {
+        let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
+            strategy: LoadBalanceStrategyDef::RoundRobin,
+            parallel: false,
+            steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::LoadBalance { .. }));
+    }
+
+    #[test]
+    fn compile_step_load_balance_weighted() {
+        let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
+            strategy: LoadBalanceStrategyDef::Weighted { distribution_ratio: "3,1".into() },
+            parallel: false,
+            steps: vec![
+                DeclarativeStep::To(ToStepDef::new("direct:a")),
+                DeclarativeStep::To(ToStepDef::new("direct:b")),
+            ],
+        });
+        let result = compile_declarative_step(step);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_step_load_balance_weighted_bad_ratio() {
+        let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
+            strategy: LoadBalanceStrategyDef::Weighted { distribution_ratio: "abc".into() },
+            parallel: false,
+            steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
+        });
+        assert!(compile_declarative_step(step).is_err());
+    }
+
+    #[test]
+    fn compile_step_load_balance_weighted_mismatched_count() {
+        let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
+            strategy: LoadBalanceStrategyDef::Weighted { distribution_ratio: "3,1".into() },
+            parallel: false,
+            steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
+        });
+        assert!(compile_declarative_step(step).is_err());
+    }
+
+    #[test]
+    fn compile_step_convert_body_to_text() {
+        let step = DeclarativeStep::ConvertBodyTo(BodyTypeDef::Text);
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_convert_body_to_json() {
+        let step = DeclarativeStep::ConvertBodyTo(BodyTypeDef::Json);
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_convert_body_to_bytes() {
+        let step = DeclarativeStep::ConvertBodyTo(BodyTypeDef::Bytes);
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_convert_body_to_xml() {
+        let step = DeclarativeStep::ConvertBodyTo(BodyTypeDef::Xml);
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_convert_body_to_empty() {
+        let step = DeclarativeStep::ConvertBodyTo(BodyTypeDef::Empty);
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    fn make_when(simple_src: &str) -> WhenStepDef {
+        WhenStepDef {
+            predicate: make_predicate(simple_src),
+            steps: vec![],
+        }
+    }
+
+    #[test]
+    fn compile_step_choice_with_otherwise() {
+        let step = DeclarativeStep::Choice(ChoiceStepDef {
+            whens: vec![make_when("true")],
+            otherwise: Some(vec![DeclarativeStep::Stop]),
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeChoice { .. }));
+    }
+
+    #[test]
+    fn compile_step_choice_without_otherwise() {
+        let step = DeclarativeStep::Choice(ChoiceStepDef {
+            whens: vec![],
+            otherwise: None,
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeChoice { .. }));
+    }
+
+    #[test]
+    fn compile_step_filter() {
+        let step = DeclarativeStep::Filter(FilterStepDef {
+            predicate: make_predicate("true"),
+            steps: vec![DeclarativeStep::Stop],
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeFilter { .. }));
+    }
+
+    #[test]
+    fn compile_step_multicast() {
+        let step = DeclarativeStep::Multicast(MulticastStepDef {
+            steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
+            parallel: true,
+            parallel_limit: Some(2),
+            stop_on_exception: false,
+            timeout_ms: Some(5000),
+            aggregation: MulticastAggregationDef::CollectAll,
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::Multicast { .. }));
+    }
+
+    #[test]
+    fn compile_step_split_body_lines() {
+        let step = DeclarativeStep::Split(SplitStepDef {
+            expression: SplitExpressionDef::BodyLines,
+            aggregation: SplitAggregationDef::LastWins,
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: false,
+            steps: vec![],
+        });
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_split_body_json_array() {
+        let step = DeclarativeStep::Split(SplitStepDef {
+            expression: SplitExpressionDef::BodyJsonArray,
+            aggregation: SplitAggregationDef::CollectAll,
+            parallel: true,
+            parallel_limit: Some(4),
+            stop_on_exception: true,
+            steps: vec![],
+        });
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_split_language() {
+        let step = DeclarativeStep::Split(SplitStepDef {
+            expression: SplitExpressionDef::Language(make_predicate("x")),
+            aggregation: SplitAggregationDef::Original,
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: false,
+            steps: vec![],
+        });
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_log_expression() {
+        let step = DeclarativeStep::Log(LogStepDef {
+            message: ValueSourceDef::Expression(make_predicate("${body}")),
+            level: LogLevelDef::Info,
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeLog { .. }));
+    }
+
+    #[test]
+    fn compile_step_set_header() {
+        let step = DeclarativeStep::SetHeader(SetHeaderStepDef {
+            key: "myKey".into(),
+            value: ValueSourceDef::Literal(serde_json::json!("myValue")),
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeSetHeader { .. }));
+    }
+
+    #[test]
+    fn compile_step_set_body() {
+        let step = DeclarativeStep::SetBody(SetBodyStepDef {
+            value: ValueSourceDef::Literal(serde_json::json!("hello")),
+        });
+        let result = compile_declarative_step(step);
+        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeSetBody { .. }));
+    }
+
+    #[test]
+    fn compile_declarative_route_minimal() {
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "test-route".into(),
+            auto_startup: true,
+            startup_order: 1000,
+            concurrency: None,
+            error_handler: None,
+            circuit_breaker: None,
+            unit_of_work: None,
+            steps: vec![DeclarativeStep::Stop],
+        };
+        let result = compile_declarative_route(route);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_declarative_route_with_error_handler() {
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "test-route".into(),
+            auto_startup: true,
+            startup_order: 1000,
+            concurrency: None,
+            error_handler: Some(DeclarativeErrorHandler {
+                dead_letter_channel: Some("log:dlq".into()),
+                retry: None,
+                on_exceptions: None,
+            }),
+            circuit_breaker: None,
+            unit_of_work: None,
+            steps: vec![],
+        };
+        let result = compile_declarative_route(route);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_declarative_route_with_circuit_breaker() {
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "test-route".into(),
+            auto_startup: false,
+            startup_order: 500,
+            concurrency: Some(DeclarativeConcurrency::Concurrent { max: Some(4) }),
+            error_handler: None,
+            circuit_breaker: Some(DeclarativeCircuitBreaker {
+                failure_threshold: 3,
+                open_duration_ms: 5000,
+            }),
+            unit_of_work: None,
+            steps: vec![DeclarativeStep::To(ToStepDef::new("log:out"))],
+        };
+        let result = compile_declarative_route(route);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_step_load_balance_failover() {
+        let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
+            strategy: LoadBalanceStrategyDef::Failover,
+            parallel: true,
+            steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
+        });
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_load_balance_random() {
+        let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
+            strategy: LoadBalanceStrategyDef::Random,
+            parallel: false,
+            steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
+        });
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_throttle_drop() {
+        let step = DeclarativeStep::Throttle(ThrottleStepDef {
+            max_requests: 5,
+            period_ms: 500,
+            strategy: ThrottleStrategyDef::Drop,
+            steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
+        });
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_throttle_delay() {
+        let step = DeclarativeStep::Throttle(ThrottleStepDef {
+            max_requests: 100,
+            period_ms: 2000,
+            strategy: ThrottleStrategyDef::Delay,
+            steps: vec![],
+        });
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_log_literal_number() {
+        let step = DeclarativeStep::Log(LogStepDef {
+            message: ValueSourceDef::Literal(serde_json::json!(42)),
+            level: LogLevelDef::Debug,
+        });
+        assert!(compile_declarative_step(step).is_ok());
+    }
+
+    #[test]
+    fn compile_step_log_literal_string() {
+        let step = DeclarativeStep::Log(LogStepDef {
+            message: ValueSourceDef::Literal(serde_json::Value::String("hello".into())),
+            level: LogLevelDef::Warn,
+        });
+        assert!(compile_declarative_step(step).is_ok());
     }
 }

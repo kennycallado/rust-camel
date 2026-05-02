@@ -47,3 +47,49 @@ impl std::fmt::Debug for RoutingSlipConfig {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn noop_expr() -> RoutingSlipExpression {
+        Arc::new(|_| None)
+    }
+
+    #[test]
+    fn new_has_defaults() {
+        let cfg = RoutingSlipConfig::new(noop_expr());
+        assert_eq!(cfg.uri_delimiter, ",");
+        assert_eq!(cfg.cache_size, 1000);
+        assert!(!cfg.ignore_invalid_endpoints);
+    }
+
+    #[test]
+    fn builder_chaining() {
+        let cfg = RoutingSlipConfig::new(noop_expr())
+            .uri_delimiter("|")
+            .cache_size(50)
+            .ignore_invalid_endpoints(true);
+        assert_eq!(cfg.uri_delimiter, "|");
+        assert_eq!(cfg.cache_size, 50);
+        assert!(cfg.ignore_invalid_endpoints);
+    }
+
+    #[test]
+    fn clone_preserves_values() {
+        let cfg = RoutingSlipConfig::new(noop_expr())
+            .uri_delimiter(";");
+        let cloned = cfg.clone();
+        assert_eq!(cloned.uri_delimiter, ";");
+    }
+
+    #[test]
+    fn debug_format() {
+        let cfg = RoutingSlipConfig::new(noop_expr());
+        let debug = format!("{cfg:?}");
+        assert!(debug.contains("RoutingSlipConfig"));
+        assert!(debug.contains("uri_delimiter"));
+    }
+}

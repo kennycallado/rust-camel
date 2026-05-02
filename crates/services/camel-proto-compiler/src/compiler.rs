@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use prost_reflect::DescriptorPool;
 use tracing::debug;
 
 use crate::ProtoCompileError;
+
+static COMPILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn compile_proto<P, I>(proto_path: P, includes: I) -> Result<DescriptorPool, ProtoCompileError>
 where
@@ -28,10 +31,7 @@ where
 
     let descriptor_file = std::env::temp_dir().join(format!(
         "camel-proto-{}.desc",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| ProtoCompileError::Io(std::io::Error::other(e)))?
-            .as_nanos()
+        COMPILE_COUNTER.fetch_add(1, Ordering::Relaxed),
     ));
 
     let mut cmd = Command::new(&protoc);

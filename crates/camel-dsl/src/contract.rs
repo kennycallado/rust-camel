@@ -90,3 +90,49 @@ pub const fn assert_contract_coverage(implemented: &[DeclarativeStepKind]) {
         i += 1;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_rust_only_kind_true() {
+        assert!(is_rust_only_kind(DeclarativeStepKind::Process));
+        assert!(is_rust_only_kind(DeclarativeStepKind::ProcessFn));
+        assert!(is_rust_only_kind(DeclarativeStepKind::MapBody));
+        assert!(is_rust_only_kind(DeclarativeStepKind::SetBodyFn));
+        assert!(is_rust_only_kind(DeclarativeStepKind::SetHeaderFn));
+    }
+
+    #[test]
+    fn is_rust_only_kind_false() {
+        assert!(!is_rust_only_kind(DeclarativeStepKind::To));
+        assert!(!is_rust_only_kind(DeclarativeStepKind::Log));
+        assert!(!is_rust_only_kind(DeclarativeStepKind::Filter));
+        assert!(!is_rust_only_kind(DeclarativeStepKind::Choice));
+        assert!(!is_rust_only_kind(DeclarativeStepKind::Multicast));
+    }
+
+    #[test]
+    fn mandatory_kinds_has_22_entries() {
+        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 22);
+        assert_eq!(mandatory_declarative_step_kinds().len(), 22);
+    }
+
+    #[test]
+    fn assert_contract_coverage_passes_with_all() {
+        assert_contract_coverage(&MANDATORY_DECLARATIVE_STEP_KINDS);
+    }
+
+    #[test]
+    #[should_panic(expected = "DSL is missing mandatory declarative step")]
+    fn assert_contract_coverage_panics_on_missing() {
+        assert_contract_coverage(&[DeclarativeStepKind::To, DeclarativeStepKind::Log]);
+    }
+
+    #[test]
+    fn kind_equality() {
+        assert_eq!(DeclarativeStepKind::To, DeclarativeStepKind::To);
+        assert_ne!(DeclarativeStepKind::To, DeclarativeStepKind::Log);
+    }
+}
