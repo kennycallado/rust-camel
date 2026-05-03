@@ -61,20 +61,20 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
     String subId = request.getSubscriptionId();
     activeConsumers.put(subId, consumer);
 
-    // Tracks whether the gRPC client cancelled the stream.
-    // Passed to JmsConsumer so the polling thread never calls onCompleted()
-    // or onError() after cancellation — doing so throws StatusRuntimeException
-    // from a Vert.x worker thread and causes Quarkus to tear down the H2
-    // connection, breaking all other concurrent gRPC streams.
-    AtomicBoolean clientCancelled = new AtomicBoolean(false);
+    // Tracks whether the stream has been terminated (by client cancel, error,
+    // or completion). compareAndSet ensures exactly ONE of the three paths
+    // wins the race and touches the responseObserver — preventing the
+    // StatusRuntimeException that tears down the shared H2 connection.
+    AtomicBoolean finished = new AtomicBoolean(false);
 
     if (responseObserver instanceof ServerCallStreamObserver<JmsMessage> serverObs) {
       serverObs.setOnCancelHandler(
           () -> {
-            clientCancelled.set(true);
-            consumer.stop();
-            activeConsumers.remove(subId);
-            consumerFactory.destroy(consumer);
+            if (finished.compareAndSet(false, true)) {
+              consumer.stop();
+              activeConsumers.remove(subId);
+              consumerFactory.destroy(consumer);
+            }
           });
     }
 
@@ -84,30 +84,34 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
         new StreamObserver<>() {
           @Override
           public void onNext(JmsMessage msg) {
-            if (!clientCancelled.get()) responseObserver.onNext(msg);
+            if (!finished.get()) {
+              try {
+                responseObserver.onNext(msg);
+              } catch (Exception ignored) {}
+            }
           }
 
           @Override
           public void onError(Throwable t) {
-            consumer.stop();
-            activeConsumers.remove(subId);
-            consumerFactory.destroy(consumer);
-            // Guard: the polling thread may race with OnCancelHandler. If the
-            // client already cancelled, calling onError() throws
-            // StatusRuntimeException from the Vert.x worker, potentially
-            // tearing down the shared H2 connection.
-            if (!clientCancelled.get()) responseObserver.onError(t);
+            if (finished.compareAndSet(false, true)) {
+              consumer.stop();
+              activeConsumers.remove(subId);
+              consumerFactory.destroy(consumer);
+              safeRespond(responseObserver, t);
+            }
           }
 
           @Override
           public void onCompleted() {
-            consumer.stop();
-            activeConsumers.remove(subId);
-            consumerFactory.destroy(consumer);
-            if (!clientCancelled.get()) responseObserver.onCompleted();
+            if (finished.compareAndSet(false, true)) {
+              consumer.stop();
+              activeConsumers.remove(subId);
+              consumerFactory.destroy(consumer);
+              safeComplete(responseObserver);
+            }
           }
         },
-        clientCancelled);
+        finished);
   }
 
   @Override
@@ -147,6 +151,19 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
       consumerFactory.destroy(c);
     }
     activeConsumers.clear();
+  }
+
+  private static void safeRespond(
+      StreamObserver<JmsMessage> responseObserver, Throwable t) {
+    try {
+      responseObserver.onError(t);
+    } catch (Exception ignored) {}
+  }
+
+  private static void safeComplete(StreamObserver<JmsMessage> responseObserver) {
+    try {
+      responseObserver.onCompleted();
+    } catch (Exception ignored) {}
   }
 
   private static String summarizeThrowable(Throwable error) {

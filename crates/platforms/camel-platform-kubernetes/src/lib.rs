@@ -14,5 +14,6 @@ pub use camel_api::platform::PlatformError;
 pub use identity::KubernetesPlatformIdentity;
 pub use platform_service::{
     KubernetesLeadershipService, KubernetesPlatformConfig, KubernetesPlatformService,
+    ensure_rustls_provider,
 };
 pub use readiness_gate::KubernetesReadinessGate;

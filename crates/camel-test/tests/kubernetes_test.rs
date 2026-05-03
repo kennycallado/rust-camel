@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use camel_api::platform::{LeadershipEvent, LeadershipService, PlatformIdentity};
-use camel_platform_kubernetes::{KubernetesLeadershipService, KubernetesPlatformConfig};
+use camel_platform_kubernetes::{KubernetesLeadershipService, KubernetesPlatformConfig, ensure_rustls_provider};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::k3s::K3s;
 
@@ -33,8 +33,9 @@ async fn wait_for_leader(handle: &camel_api::platform::LeadershipHandle, timeout
 /// Internal K3s API secure port.
 const KUBE_SECURE_PORT: u16 = 6443;
 
-/// Start a K3s container and return a configured kube client.
 async fn start_k3s() -> (ContainerAsync<K3s>, kube::Client) {
+    ensure_rustls_provider();
+
     let conf_dir = std::env::temp_dir().join(format!(
         "camel-k3s-{}-{}",
         std::process::id(),

@@ -39,18 +39,16 @@ public class JmsConsumer {
    * <p>Polling on a dedicated thread avoids this: the thread owns both the JMS receive and the gRPC
    * write, so there is no cross-thread blocking.
    *
-   * @param clientCancelled set to {@code true} by the caller's OnCancelHandler when the gRPC client
-   *     cancels the stream. The polling thread checks this flag before calling any observer method
-   *     to avoid calling {@code onCompleted()} or {@code onError()} on an already-cancelled stream
-   *     — which would throw a {@code StatusRuntimeException} from the Vert.x worker thread and
-   *     cause Quarkus to close the underlying H2 connection, breaking all other concurrent gRPC
-   *     streams on that connection.
+   * @param finished shared flag indicating the stream has terminated. Set to {@code true} by
+   *     exactly one of: gRPC cancel handler, consumer error, or normal completion. Uses
+   *     compareAndSet to prevent the TOCTOU race that could call observer methods on a cancelled
+   *     stream, which tears down the shared H2 connection in Quarkus.
    */
   public void subscribe(
       String destination,
       String subscriptionId,
       StreamObserver<JmsMessage> observer,
-      AtomicBoolean clientCancelled) {
+      AtomicBoolean finished) {
     running = true;
     resourcesClosed.set(false);
 
@@ -60,7 +58,9 @@ public class JmsConsumer {
               try {
                 connection = factory.createDedicatedConnection();
               } catch (Exception e) {
-                if (running && !clientCancelled.get()) observer.onError(e);
+                if (running && finished.compareAndSet(false, true)) {
+                  safeOnError(observer, e);
+                }
                 return;
               }
 
@@ -78,25 +78,29 @@ public class JmsConsumer {
                   LOG.debug("Received JMS message on " + destination);
                   try {
                     JmsMessage grpcMsg = convertMessage(msg, destination);
-                    if (!clientCancelled.get()) observer.onNext(grpcMsg);
+                    if (!finished.get()) {
+                      try {
+                        observer.onNext(grpcMsg);
+                      } catch (Exception ignored) {}
+                    }
                   } catch (Exception e) {
                     LOG.error("Error forwarding message: " + e.getMessage(), e);
-                    if (running && !clientCancelled.get()) {
-                      observer.onError(e);
+                    if (running && finished.compareAndSet(false, true)) {
+                      safeOnError(observer, e);
                       return;
                     }
                   }
                 }
 
-                // Only signal completion if the client is still listening.
-                // Calling onCompleted() on a cancelled stream throws
-                // StatusRuntimeException from the Vert.x worker thread,
-                // which can cause Quarkus to tear down the H2 connection.
-                if (!clientCancelled.get()) {
-                  observer.onCompleted();
+                if (finished.compareAndSet(false, true)) {
+                  try {
+                    observer.onCompleted();
+                  } catch (Exception ignored) {}
                 }
               } catch (Exception e) {
-                if (running && !clientCancelled.get()) observer.onError(e);
+                if (running && finished.compareAndSet(false, true)) {
+                  safeOnError(observer, e);
+                }
               } finally {
                 closeResources();
               }
@@ -104,6 +108,12 @@ public class JmsConsumer {
             "jms-consumer-" + subscriptionId);
     t.setDaemon(true);
     t.start();
+  }
+
+  private static void safeOnError(StreamObserver<JmsMessage> observer, Throwable t) {
+    try {
+      observer.onError(t);
+    } catch (Exception ignored) {}
   }
 
   public void stop() {

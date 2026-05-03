@@ -13,6 +13,10 @@ use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
 use k8s_openapi::jiff::Span;
 use k8s_openapi::jiff::Timestamp as JiffTimestamp;
+
+pub fn ensure_rustls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
 use kube::api::{DeleteParams, PostParams, Preconditions};
 use kube::{Api, Client};
 use tokio::sync::{Notify, oneshot, watch};
@@ -308,7 +312,7 @@ impl KubernetesPlatformService {
     pub async fn try_default(config: KubernetesPlatformConfig) -> Result<Self, PlatformError> {
         config.validate()?;
 
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = rustls::crypto::ring::default_provider().install_default();
 
         let client = Client::try_default().await.map_err(|err| {
             PlatformError::NotAvailable(format!("kubernetes client not available: {err}"))

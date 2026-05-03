@@ -10,7 +10,7 @@ use camel_platform_kubernetes::{
 };
 
 fn install_rustls_provider() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 /// Verify that the builder accepts a `KubernetesPlatformService` via `.platform_service(...)`.

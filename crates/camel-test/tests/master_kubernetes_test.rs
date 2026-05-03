@@ -20,6 +20,7 @@ use camel_core::CamelContext;
 use camel_master::MasterBundle;
 use camel_platform_kubernetes::{
     KubernetesLeadershipService, KubernetesPlatformConfig, KubernetesPlatformService,
+    ensure_rustls_provider,
 };
 use k8s_openapi::api::coordination::v1::Lease;
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
@@ -28,6 +29,7 @@ use testcontainers_modules::k3s::K3s;
 const KUBE_SECURE_PORT: u16 = 6443;
 
 async fn start_k3s() -> (ContainerAsync<K3s>, kube::Client) {
+    ensure_rustls_provider();
     let conf_dir = std::env::temp_dir().join(format!(
         "camel-k3s-{}-{}",
         std::process::id(),

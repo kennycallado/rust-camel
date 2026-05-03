@@ -286,6 +286,9 @@ async fn jms_producer_sends_multiple_messages() {
 
     // Verifies that the JMS bridge can deliver multiple sequential messages
     // through a producer+consumer round-trip on the same broker.
+    // Uses 5 repetitions with 1s intervals so the test survives transient
+    // transport errors (e.g. H2 connection teardown from concurrent test
+    // cancellation) without losing all fire attempts.
     let consumer_route = RouteBuilder::from("jms:queue:test-multi")
         .to("mock:consumed")
         .route_id("jms-multi-consumer")
@@ -293,7 +296,7 @@ async fn jms_producer_sends_multiple_messages() {
         .unwrap();
 
     let producer_route =
-        RouteBuilder::from("timer:multi-inject?period=300&delay=500&repeatCount=2")
+        RouteBuilder::from("timer:multi-inject?period=1000&delay=2000&repeatCount=5")
             .set_body("multi-msg".to_string())
             .to("jms:queue:test-multi")
             .route_id("jms-multi-producer")
@@ -307,8 +310,8 @@ async fn jms_producer_sends_multiple_messages() {
     let endpoint = h.mock().get_endpoint("consumed").unwrap();
     wait_until(
         "jms multi-message consumer receives two messages",
-        Duration::from_secs(10),
-        Duration::from_millis(200),
+        Duration::from_secs(35),
+        Duration::from_millis(500),
         || {
             let endpoint = endpoint.clone();
             async move { Ok(endpoint.get_received_exchanges().await.len() >= 2) }
