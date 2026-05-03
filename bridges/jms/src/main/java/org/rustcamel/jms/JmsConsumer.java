@@ -81,7 +81,8 @@ public class JmsConsumer {
                     if (!finished.get()) {
                       try {
                         observer.onNext(grpcMsg);
-                      } catch (Exception ignored) {}
+                      } catch (Exception ignored) {
+                      }
                     }
                   } catch (Exception e) {
                     LOG.error("Error forwarding message: " + e.getMessage(), e);
@@ -95,7 +96,8 @@ public class JmsConsumer {
                 if (finished.compareAndSet(false, true)) {
                   try {
                     observer.onCompleted();
-                  } catch (Exception ignored) {}
+                  } catch (Exception ignored) {
+                  }
                 }
               } catch (Exception e) {
                 if (running && finished.compareAndSet(false, true)) {
@@ -113,7 +115,8 @@ public class JmsConsumer {
   private static void safeOnError(StreamObserver<JmsMessage> observer, Throwable t) {
     try {
       observer.onError(t);
-    } catch (Exception ignored) {}
+    } catch (Exception ignored) {
+    }
   }
 
   public void stop() {

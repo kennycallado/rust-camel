@@ -87,7 +87,8 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
             if (!finished.get()) {
               try {
                 responseObserver.onNext(msg);
-              } catch (Exception ignored) {}
+              } catch (Exception ignored) {
+              }
             }
           }
 
@@ -153,17 +154,18 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
     activeConsumers.clear();
   }
 
-  private static void safeRespond(
-      StreamObserver<JmsMessage> responseObserver, Throwable t) {
+  private static void safeRespond(StreamObserver<JmsMessage> responseObserver, Throwable t) {
     try {
       responseObserver.onError(t);
-    } catch (Exception ignored) {}
+    } catch (Exception ignored) {
+    }
   }
 
   private static void safeComplete(StreamObserver<JmsMessage> responseObserver) {
     try {
       responseObserver.onCompleted();
-    } catch (Exception ignored) {}
+    } catch (Exception ignored) {
+    }
   }
 
   private static String summarizeThrowable(Throwable error) {
