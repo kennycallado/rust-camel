@@ -214,6 +214,7 @@ jobs:
           ARM64_BIN=$(find binary-arm64 -type f | head -1)
           cp "$AMD64_BIN" context/camel-amd64
           cp "$ARM64_BIN" context/camel-arm64
+          chmod +x context/camel-amd64 context/camel-arm64
           cp Dockerfile context/Dockerfile
           docker run --rm alpine:3.21 cat /etc/ssl/certs/ca-certificates.crt > context/ca-certificates.crt
 
