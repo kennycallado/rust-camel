@@ -542,6 +542,148 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_queue_pop_command_derives() {
+        let cmd = QueuePopCommand::Blpop;
+        let _cmd2 = cmd; // Copy
+        let _cmd3 = cmd.clone(); // Clone
+        assert_eq!(format!("{:?}", cmd), "Blpop"); // Debug
+        assert_eq!(QueuePopCommand::Blpop, QueuePopCommand::Blpop); // PartialEq
+        assert_ne!(QueuePopCommand::Blpop, QueuePopCommand::Brpop);
+    }
+
+    #[test]
+    fn test_build_pubsub_exchange_with_empty_payload() {
+        let exchange = build_pubsub_exchange("".to_string(), "ch".to_string(), None);
+        assert_eq!(exchange.input.body.as_text(), Some(""));
+        assert_eq!(
+            exchange.input.header("CamelRedis.Channel"),
+            Some(&serde_json::json!("ch"))
+        );
+    }
+
+    #[test]
+    fn test_build_exchange_from_blpop_with_empty_values() {
+        let exchange = build_exchange_from_blpop("".to_string(), "".to_string());
+        assert_eq!(exchange.input.body.as_text(), Some(""));
+        assert_eq!(
+            exchange.input.header("CamelRedis.Key"),
+            Some(&serde_json::Value::String("".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_consumer_stop_without_start() {
+        let config = create_test_config(RedisCommand::Subscribe);
+        let mut consumer = RedisConsumer::new(config);
+
+        // Stop without start should succeed gracefully
+        let result = consumer.stop().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_consumer_start_sets_task_handle() {
+        let config = create_test_config(RedisCommand::Blpop);
+        let mut consumer = RedisConsumer::new(config);
+
+        let (tx, _rx) = mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+
+        assert!(consumer.task_handle.is_none());
+        let result = consumer.start(ctx).await;
+        assert!(result.is_ok());
+        assert!(consumer.task_handle.is_some());
+
+        // Clean up
+        consumer.stop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_consumer_start_pubsub_mode() {
+        let config = create_test_config(RedisCommand::Subscribe);
+        let mut consumer = RedisConsumer::new(config);
+
+        let (tx, _rx) = mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+
+        let result = consumer.start(ctx).await;
+        assert!(result.is_ok());
+        assert!(consumer.cancel_token.is_some());
+        assert!(consumer.task_handle.is_some());
+
+        consumer.stop().await.ok();
+    }
+
+    #[test]
+    fn test_consumer_new_blpop_with_default_key_when_none() {
+        let mut config = create_test_config(RedisCommand::Blpop);
+        config.key = None;
+        let consumer = RedisConsumer::new(config);
+
+        match &consumer.mode {
+            RedisConsumerMode::Queue { key, .. } => {
+                assert_eq!(key, "queue");
+            }
+            _ => panic!("Expected Queue mode"),
+        }
+    }
+
+    #[test]
+    fn test_consumer_new_brpop_with_default_key_when_none() {
+        let mut config = create_test_config(RedisCommand::Brpop);
+        config.key = None;
+        let consumer = RedisConsumer::new(config);
+
+        match &consumer.mode {
+            RedisConsumerMode::Queue { key, pop_command, .. } => {
+                assert_eq!(key, "queue");
+                assert_eq!(*pop_command, QueuePopCommand::Brpop);
+            }
+            _ => panic!("Expected Queue mode"),
+        }
+    }
+
+    #[test]
+    fn test_consumer_new_invalid_command_defaults_to_blpop() {
+        let mut config = create_test_config(RedisCommand::Get);
+        config.key = None;
+        let consumer = RedisConsumer::new(config);
+
+        match consumer.mode {
+            RedisConsumerMode::Queue {
+                key,
+                pop_command,
+                timeout,
+            } => {
+                assert_eq!(key, "queue");
+                assert_eq!(pop_command, QueuePopCommand::Blpop);
+                assert_eq!(timeout, 1);
+            }
+            _ => panic!("Expected Queue mode for invalid consumer command"),
+        }
+    }
+
+    #[test]
+    fn test_consumer_mode_debug() {
+        let pubsub_mode = RedisConsumerMode::PubSub {
+            channels: vec!["test".to_string()],
+            patterns: vec!["pattern:*".to_string()],
+        };
+        let debug_str = format!("{:?}", pubsub_mode);
+        assert!(debug_str.contains("PubSub"));
+
+        let queue_mode = RedisConsumerMode::Queue {
+            key: "mykey".to_string(),
+            timeout: 5,
+            pop_command: QueuePopCommand::Brpop,
+        };
+        let debug_str = format!("{:?}", queue_mode);
+        assert!(debug_str.contains("Queue"));
+    }
+
     #[tokio::test]
     async fn test_consumer_stops_gracefully() {
         let config = create_test_config(RedisCommand::Blpop);

@@ -80,4 +80,46 @@ mod tests {
         let endpoint = make_endpoint(false);
         assert_eq!(endpoint.body_contract(), None);
     }
+
+    #[test]
+    fn new_stores_uri_and_config() {
+        let config =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test")
+                .expect("valid config");
+        let endpoint = SqlEndpoint::new("sql:select 1".to_string(), config.clone());
+        assert_eq!(endpoint.uri(), "sql:select 1");
+        assert_eq!(endpoint.config.db_url, "postgres://localhost/test");
+    }
+
+    #[test]
+    fn uri_returns_stored_uri() {
+        let endpoint = make_endpoint(false);
+        assert_eq!(endpoint.uri(), "sql:select 1");
+    }
+
+    #[test]
+    fn create_producer_returns_ok() {
+        let endpoint = make_endpoint(false);
+        let ctx = ProducerContext::new();
+        let result = endpoint.create_producer(&ctx);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn create_consumer_returns_ok() {
+        let endpoint = make_endpoint(false);
+        let result = endpoint.create_consumer();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn pool_is_shared_via_arc() {
+        let config =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test")
+                .expect("valid config");
+        let endpoint = SqlEndpoint::new("sql:select 1".to_string(), config);
+        let pool_ref1 = Arc::clone(&endpoint.pool);
+        let pool_ref2 = Arc::clone(&endpoint.pool);
+        assert!(Arc::ptr_eq(&pool_ref1, &pool_ref2));
+    }
 }

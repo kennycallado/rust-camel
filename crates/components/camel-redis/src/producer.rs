@@ -383,6 +383,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_poll_ready_always_returns_ready() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        let mut producer = RedisProducer::new(config);
+        let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
+        let result = producer.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+    }
+
+    #[test]
+    fn test_apply_default_key_does_nothing_when_config_key_is_none() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+
+        RedisProducer::apply_default_key(&mut exchange, &config);
+        assert!(exchange.input.header("CamelRedis.Key").is_none());
+    }
+
+    #[test]
+    fn test_apply_default_channels_preserves_existing_header() {
+        let config =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=SUBSCRIBE&channels=a,b")
+                .unwrap();
+        let mut msg = Message::default();
+        msg.set_header(
+            "CamelRedis.Channels",
+            serde_json::json!(["existing-channel"]),
+        );
+        let mut exchange = Exchange::new(msg);
+
+        RedisProducer::apply_default_channels(&mut exchange, &config);
+        assert_eq!(
+            exchange.input.header("CamelRedis.Channels"),
+            Some(&serde_json::json!(["existing-channel"]))
+        );
+    }
+
+    #[test]
+    fn test_producer_clone_is_independent_for_async_state() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        let producer = RedisProducer::new(config);
+        let producer2 = producer.clone();
+
+        // Both share the same Arc
+        assert!(Arc::ptr_eq(&producer.conn, &producer2.conn));
+
+        // Cloning one doesn't affect the other's config
+        assert_eq!(producer.config.command, producer2.config.command);
+    }
+
+    #[tokio::test]
+    async fn test_producer_connection_is_none_initially() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        let producer = RedisProducer::new(config);
+
+        let guard = producer.conn.lock().await;
+        assert!(guard.is_none());
+    }
+
+    #[test]
+    fn test_producer_clone_increments_arc_count() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        let producer = RedisProducer::new(config);
+        assert_eq!(Arc::strong_count(&producer.conn), 1);
+
+        let _producer2 = producer.clone();
+        assert_eq!(Arc::strong_count(&producer.conn), 2);
+    }
+
+    #[tokio::test]
     async fn test_producer_creates_connection_on_first_call() {
         // This test requires a real Redis server, so we mark it as a pattern test
         // In CI, this would be skipped unless Redis is available

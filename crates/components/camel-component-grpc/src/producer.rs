@@ -316,3 +316,197 @@ impl Service<Exchange> for GrpcProducer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GrpcProducer;
+    use crate::GrpcMode;
+    use camel_api::{Body, CamelError, Exchange, Message};
+    use tonic::Request;
+
+    fn exchange_with_headers(headers: &[(&str, serde_json::Value)]) -> Exchange {
+        let mut msg = Message::default();
+        for (k, v) in headers {
+            msg.set_header(*k, v.clone());
+        }
+        Exchange::new(msg)
+    }
+
+    #[test]
+    fn test_body_to_json_from_json_body() {
+        let body = Body::Json(serde_json::json!({"key": "value"}));
+        let result = GrpcProducer::body_to_json(body).unwrap();
+        assert_eq!(result["key"], "value");
+    }
+
+    #[test]
+    fn test_body_to_json_from_text_body_valid_json() {
+        let body = Body::Text(r#"{"name":"test"}"#.to_string());
+        let result = GrpcProducer::body_to_json(body).unwrap();
+        assert_eq!(result["name"], "test");
+    }
+
+    #[test]
+    fn test_body_to_json_from_text_body_invalid_json() {
+        let body = Body::Text("not json".to_string());
+        let err = GrpcProducer::body_to_json(body).unwrap_err();
+        assert!(matches!(err, CamelError::TypeConversionFailed(_)));
+        assert!(err.to_string().contains("invalid JSON text body"));
+    }
+
+    #[test]
+    fn test_body_to_json_from_empty_body() {
+        let body = Body::Empty;
+        let err = GrpcProducer::body_to_json(body).unwrap_err();
+        assert!(matches!(err, CamelError::TypeConversionFailed(_)));
+        assert!(err.to_string().contains("requires JSON or text body"));
+    }
+
+    #[test]
+    fn test_body_to_json_from_bytes_body() {
+        let body = Body::Bytes(bytes::Bytes::from_static(b"raw"));
+        let err = GrpcProducer::body_to_json(body).unwrap_err();
+        assert!(matches!(err, CamelError::TypeConversionFailed(_)));
+    }
+
+    #[test]
+    fn test_body_to_json_from_xml_body() {
+        let body = Body::Xml("<root/>".to_string());
+        let err = GrpcProducer::body_to_json(body).unwrap_err();
+        assert!(matches!(err, CamelError::TypeConversionFailed(_)));
+    }
+
+    #[test]
+    fn test_header_to_metadata_from_string() {
+        let value = serde_json::Value::String("hello".to_string());
+        let result = GrpcProducer::header_to_metadata(&value);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_header_to_metadata_from_number() {
+        let value = serde_json::Value::Number(42.into());
+        let result = GrpcProducer::header_to_metadata(&value);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().to_str().unwrap(), "42");
+    }
+
+    #[test]
+    fn test_header_to_metadata_from_bool_true() {
+        let value = serde_json::Value::Bool(true);
+        let result = GrpcProducer::header_to_metadata(&value);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().to_str().unwrap(), "true");
+    }
+
+    #[test]
+    fn test_header_to_metadata_from_bool_false() {
+        let value = serde_json::Value::Bool(false);
+        let result = GrpcProducer::header_to_metadata(&value);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().to_str().unwrap(), "false");
+    }
+
+    #[test]
+    fn test_header_to_metadata_from_object() {
+        let value = serde_json::json!({"key": "value"});
+        let result = GrpcProducer::header_to_metadata(&value);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_header_to_metadata_from_array() {
+        let value = serde_json::json!(["a", "b"]);
+        let result = GrpcProducer::header_to_metadata(&value);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_header_to_metadata_from_null() {
+        let value = serde_json::Value::Null;
+        let result = GrpcProducer::header_to_metadata(&value);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_inject_headers_transfers_all_valid_headers() {
+        let exchange = exchange_with_headers(&[
+            ("x-custom", serde_json::Value::String("val1".to_string())),
+            ("x-number", serde_json::Value::Number(123.into())),
+        ]);
+        let mut request = Request::new(());
+        GrpcProducer::inject_headers(&exchange, &mut request);
+
+        let meta = request.metadata();
+        assert_eq!(meta.get("x-custom").unwrap().to_str().unwrap(), "val1");
+        assert_eq!(meta.get("x-number").unwrap().to_str().unwrap(), "123");
+    }
+
+    #[test]
+    fn test_inject_headers_skips_unsupported_types() {
+        let exchange = exchange_with_headers(&[
+            ("x-good", serde_json::Value::String("ok".to_string())),
+            ("x-bad", serde_json::json!({"nested": true})),
+        ]);
+        let mut request = Request::new(());
+        GrpcProducer::inject_headers(&exchange, &mut request);
+
+        let meta = request.metadata();
+        assert!(meta.get("x-good").is_some());
+        assert!(meta.get("x-bad").is_none());
+    }
+
+    #[test]
+    fn test_inject_headers_empty_exchange() {
+        let exchange = Exchange::new(Message::default());
+        let mut request = Request::new(());
+        GrpcProducer::inject_headers(&exchange, &mut request);
+        assert!(request.metadata().is_empty());
+    }
+
+    #[test]
+    fn test_tonic_to_camel_error_unavailable() {
+        let status = tonic::Status::unavailable("service down");
+        let err = GrpcProducer::tonic_to_camel_error(status);
+        assert!(matches!(err, CamelError::ProcessorError(_)));
+        assert!(err.to_string().contains("grpc call failed"));
+        assert!(err.to_string().contains("service down"));
+    }
+
+    #[test]
+    fn test_tonic_to_camel_error_not_found() {
+        let status = tonic::Status::not_found("method not found");
+        let err = GrpcProducer::tonic_to_camel_error(status);
+        assert!(matches!(err, CamelError::ProcessorError(_)));
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_tonic_to_camel_error_deadline_exceeded() {
+        let status = tonic::Status::deadline_exceeded("timeout");
+        let err = GrpcProducer::tonic_to_camel_error(status);
+        assert!(matches!(err, CamelError::ProcessorError(_)));
+        assert!(err.to_string().contains("grpc call failed"));
+        assert!(err.to_string().to_lowercase().contains("deadline"));
+    }
+
+    #[test]
+    fn test_grpc_mode_derives() {
+        let mode = GrpcMode::Unary;
+        let _ = format!("{mode:?}");
+        let cloned = mode.clone();
+        assert_eq!(mode, cloned);
+        let copied = mode;
+        assert_eq!(mode, copied);
+    }
+
+    #[test]
+    fn test_grpc_mode_all_variants_distinct() {
+        assert_ne!(GrpcMode::Unary, GrpcMode::ServerStreaming);
+        assert_ne!(GrpcMode::Unary, GrpcMode::ClientStreaming);
+        assert_ne!(GrpcMode::Unary, GrpcMode::Bidi);
+        assert_ne!(GrpcMode::ServerStreaming, GrpcMode::ClientStreaming);
+        assert_ne!(GrpcMode::ServerStreaming, GrpcMode::Bidi);
+        assert_ne!(GrpcMode::ClientStreaming, GrpcMode::Bidi);
+    }
+}
