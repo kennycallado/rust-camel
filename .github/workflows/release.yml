@@ -210,8 +210,10 @@ jobs:
       - name: Prepare build context
         run: |
           mkdir -p context
-          cp binary-amd64/camel context/camel-amd64
-          cp binary-arm64/camel context/camel-arm64
+          AMD64_BIN=$(find binary-amd64 -type f | head -1)
+          ARM64_BIN=$(find binary-arm64 -type f | head -1)
+          cp "$AMD64_BIN" context/camel-amd64
+          cp "$ARM64_BIN" context/camel-arm64
           cp Dockerfile context/Dockerfile
           docker run --rm alpine:3.21 cat /etc/ssl/certs/ca-certificates.crt > context/ca-certificates.crt
 
