@@ -31,7 +31,7 @@ async fn main() -> Result<(), CamelError> {
     // Producer route (calls the consumer)
     let producer_route = RouteBuilder::from("timer:grpc-tick?period=3000&repeatCount=3")
         .set_body(Body::Json(serde_json::json!({"name": "World"})))
-        .to(&format!(
+        .to(format!(
             "grpc://127.0.0.1:50051/helloworld.Greeter/SayHello?protoFile={}",
             proto_path
         ))
