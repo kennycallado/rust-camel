@@ -73,6 +73,104 @@ pub(crate) fn json_from_optional_hash_values(values: Vec<Option<String>>) -> ser
     )
 }
 
+#[allow(dead_code)]
+pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result<redis::Cmd, CamelError> {
+    if !is_hash_command(cmd) {
+        return Err(CamelError::ProcessorError("Not a hash command".into()));
+    }
+
+    let redis_cmd = match cmd {
+        RedisCommand::Hset => {
+            let key = require_key(exchange)?;
+            let field = resolve_hash_field(exchange)?;
+            let value = require_value(exchange)?;
+            let mut c = redis::cmd("HSET");
+            c.arg(key).arg(field).arg(value.to_string());
+            c
+        }
+        RedisCommand::Hget => {
+            let (key, field) = resolve_hash_field_operands(exchange)?;
+            let mut c = redis::cmd("HGET");
+            c.arg(key).arg(field);
+            c
+        }
+        RedisCommand::Hsetnx => {
+            let key = require_key(exchange)?;
+            let field = resolve_hash_field(exchange)?;
+            let value = require_value(exchange)?;
+            let mut c = redis::cmd("HSETNX");
+            c.arg(key).arg(field).arg(value.to_string());
+            c
+        }
+        RedisCommand::Hmset => {
+            let key = require_key(exchange)?;
+            let values = resolve_hash_values_map(exchange)?;
+            let mut c = redis::cmd("HMSET");
+            c.arg(key);
+            for (f, v) in values {
+                c.arg(f).arg(v);
+            }
+            c
+        }
+        RedisCommand::Hmget => {
+            let key = require_key(exchange)?;
+            let fields = resolve_hash_fields(exchange)?;
+            let mut c = redis::cmd("HMGET");
+            c.arg(key);
+            for field in fields {
+                c.arg(field);
+            }
+            c
+        }
+        RedisCommand::Hdel => {
+            let (key, field) = resolve_hash_field_operands(exchange)?;
+            let mut c = redis::cmd("HDEL");
+            c.arg(key).arg(field);
+            c
+        }
+        RedisCommand::Hexists => {
+            let (key, field) = resolve_hash_field_operands(exchange)?;
+            let mut c = redis::cmd("HEXISTS");
+            c.arg(key).arg(field);
+            c
+        }
+        RedisCommand::Hlen => {
+            let key = require_key(exchange)?;
+            let mut c = redis::cmd("HLEN");
+            c.arg(key);
+            c
+        }
+        RedisCommand::Hkeys => {
+            let key = require_key(exchange)?;
+            let mut c = redis::cmd("HKEYS");
+            c.arg(key);
+            c
+        }
+        RedisCommand::Hvals => {
+            let key = require_key(exchange)?;
+            let mut c = redis::cmd("HVALS");
+            c.arg(key);
+            c
+        }
+        RedisCommand::Hgetall => {
+            let key = require_key(exchange)?;
+            let mut c = redis::cmd("HGETALL");
+            c.arg(key);
+            c
+        }
+        RedisCommand::Hincrby => {
+            let (key, field) = resolve_hash_field_operands(exchange)?;
+            let by = resolve_hash_increment(exchange);
+            let mut c = redis::cmd("HINCRBY");
+            c.arg(key).arg(field).arg(by);
+            c
+        }
+        _ => unreachable!("non-hash commands rejected above"),
+    };
+
+    Ok(redis_cmd)
+}
+
 pub async fn dispatch(
     cmd: &RedisCommand,
     conn: &mut MultiplexedConnection,
@@ -219,7 +317,6 @@ mod tests {
     #[test]
     fn test_hset_requires_field() {
         let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
-        // Field is extracted via get_str_header, so we test that it returns None
         assert!(crate::commands::get_str_header(&ex, "CamelRedis.Field").is_none());
     }
 
@@ -339,5 +436,261 @@ mod tests {
 
         let vals = json_from_optional_hash_values(vec![Some("a".to_string()), None]);
         assert_eq!(vals, serde_json::json!(["a", null]));
+    }
+
+    fn cmd_args(cmd: &redis::Cmd) -> Vec<String> {
+        cmd.args_iter()
+            .skip(1)
+            .filter_map(|a| match a {
+                redis::Arg::Simple(bytes) => String::from_utf8(bytes.to_vec()).ok(),
+                redis::Arg::Cursor => Some("CURSOR".to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn cmd_name(cmd: &redis::Cmd) -> String {
+        cmd.args_iter()
+            .next()
+            .and_then(|a| match a {
+                redis::Arg::Simple(bytes) => String::from_utf8(bytes.to_vec()).ok(),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hset() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Field", serde_json::json!("myfield")),
+            ("CamelRedis.Value", serde_json::json!("myvalue")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Hset, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HSET");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "myfield", "\"myvalue\""]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hset_missing_key() {
+        let ex = ex_with(&[
+            ("CamelRedis.Field", serde_json::json!("f")),
+            ("CamelRedis.Value", serde_json::json!("v")),
+        ]);
+        assert!(build_redis_cmd(&RedisCommand::Hset, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hset_missing_field() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("k")),
+            ("CamelRedis.Value", serde_json::json!("v")),
+        ]);
+        assert!(build_redis_cmd(&RedisCommand::Hset, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hset_missing_value() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("k")),
+            ("CamelRedis.Field", serde_json::json!("f")),
+        ]);
+        assert!(build_redis_cmd(&RedisCommand::Hset, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hget() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Field", serde_json::json!("myfield")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Hget, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HGET");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "myfield"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hget_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Field", serde_json::json!("f"))]);
+        assert!(build_redis_cmd(&RedisCommand::Hget, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hget_missing_field() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("k"))]);
+        assert!(build_redis_cmd(&RedisCommand::Hget, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hsetnx() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Field", serde_json::json!("myfield")),
+            ("CamelRedis.Value", serde_json::json!("myvalue")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Hsetnx, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HSETNX");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "myfield", "\"myvalue\""]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hsetnx_missing_key() {
+        let ex = ex_with(&[
+            ("CamelRedis.Field", serde_json::json!("f")),
+            ("CamelRedis.Value", serde_json::json!("v")),
+        ]);
+        assert!(build_redis_cmd(&RedisCommand::Hsetnx, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hmset() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            (
+                "CamelRedis.Values",
+                serde_json::json!({"f1": "v1", "f2": "v2"}),
+            ),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Hmset, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HMSET");
+        let args = cmd_args(&cmd);
+        assert_eq!(args[0], "mykey");
+        assert!(args.contains(&"f1".to_string()));
+        assert!(args.contains(&"\"v1\"".to_string()));
+        assert!(args.contains(&"f2".to_string()));
+        assert!(args.contains(&"\"v2\"".to_string()));
+        assert_eq!(args.len(), 5);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hmset_missing_key() {
+        let ex = ex_with(&[(
+            "CamelRedis.Values",
+            serde_json::json!({"f1": "v1"}),
+        )]);
+        assert!(build_redis_cmd(&RedisCommand::Hmset, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hmset_missing_values() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("k"))]);
+        assert!(build_redis_cmd(&RedisCommand::Hmset, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hmget() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Fields", serde_json::json!(["f1", "f2", "f3"])),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Hmget, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HMGET");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "f1", "f2", "f3"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hmget_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Fields", serde_json::json!(["f1"]))]);
+        assert!(build_redis_cmd(&RedisCommand::Hmget, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hmget_missing_fields() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("k"))]);
+        assert!(build_redis_cmd(&RedisCommand::Hmget, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hdel() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Field", serde_json::json!("myfield")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Hdel, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HDEL");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "myfield"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hdel_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Field", serde_json::json!("f"))]);
+        assert!(build_redis_cmd(&RedisCommand::Hdel, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hexists() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Field", serde_json::json!("myfield")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Hexists, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HEXISTS");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "myfield"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hlen() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Hlen, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HLEN");
+        assert_eq!(cmd_args(&cmd), vec!["mykey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hlen_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Hlen, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hkeys() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Hkeys, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HKEYS");
+        assert_eq!(cmd_args(&cmd), vec!["mykey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hvals() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Hvals, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HVALS");
+        assert_eq!(cmd_args(&cmd), vec!["mykey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hgetall() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Hgetall, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HGETALL");
+        assert_eq!(cmd_args(&cmd), vec!["mykey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hincrby() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Field", serde_json::json!("counter")),
+            ("CamelRedis.Increment", serde_json::json!(5i64)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Hincrby, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "HINCRBY");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "counter", "5"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hincrby_default_increment() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Field", serde_json::json!("counter")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Hincrby, &ex).unwrap();
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "counter", "1"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_rejects_non_hash() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("k"))]);
+        assert!(build_redis_cmd(&RedisCommand::Set, &ex).is_err());
     }
 }

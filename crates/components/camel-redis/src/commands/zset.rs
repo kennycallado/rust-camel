@@ -101,6 +101,144 @@ pub(crate) fn json_from_scored_members(values: Vec<(String, f64)>) -> serde_json
     )
 }
 
+#[allow(dead_code)]
+pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result<redis::Cmd, CamelError> {
+    if !is_zset_command(cmd) {
+        return Err(CamelError::ProcessorError("Not a sorted set command".into()));
+    }
+
+    match cmd {
+        RedisCommand::Zadd => {
+            let key = require_key(exchange)?;
+            let score = resolve_zadd_score(exchange);
+            let member = require_value(exchange)?;
+            let mut c = redis::Cmd::new();
+            c.arg("ZADD").arg(key).arg(score).arg(member.to_string());
+            Ok(c)
+        }
+        RedisCommand::Zrem => {
+            let key = require_key(exchange)?;
+            let member = require_value(exchange)?;
+            let mut c = redis::Cmd::new();
+            c.arg("ZREM").arg(key).arg(member.to_string());
+            Ok(c)
+        }
+        RedisCommand::Zrange => {
+            let key = require_key(exchange)?;
+            let (start, end) = resolve_range_bounds(exchange);
+            let with_scores = resolve_with_scores(exchange);
+            let mut c = redis::Cmd::new();
+            c.arg("ZRANGE").arg(key).arg(start).arg(end);
+            if with_scores {
+                c.arg("WITHSCORES");
+            }
+            Ok(c)
+        }
+        RedisCommand::Zrevrange => {
+            let key = require_key(exchange)?;
+            let (start, end) = resolve_range_bounds(exchange);
+            let with_scores = resolve_with_scores(exchange);
+            let mut c = redis::Cmd::new();
+            c.arg("ZREVRANGE").arg(key).arg(start).arg(end);
+            if with_scores {
+                c.arg("WITHSCORES");
+            }
+            Ok(c)
+        }
+        RedisCommand::Zrank => {
+            let key = require_key(exchange)?;
+            let member = require_value(exchange)?;
+            let mut c = redis::Cmd::new();
+            c.arg("ZRANK").arg(key).arg(member.to_string());
+            Ok(c)
+        }
+        RedisCommand::Zrevrank => {
+            let key = require_key(exchange)?;
+            let member = require_value(exchange)?;
+            let mut c = redis::Cmd::new();
+            c.arg("ZREVRANK").arg(key).arg(member.to_string());
+            Ok(c)
+        }
+        RedisCommand::Zscore => {
+            let key = require_key(exchange)?;
+            let member = require_value(exchange)?;
+            let mut c = redis::Cmd::new();
+            c.arg("ZSCORE").arg(key).arg(member.to_string());
+            Ok(c)
+        }
+        RedisCommand::Zcard => {
+            let key = require_key(exchange)?;
+            let mut c = redis::Cmd::new();
+            c.arg("ZCARD").arg(key);
+            Ok(c)
+        }
+        RedisCommand::Zincrby => {
+            let key = require_key(exchange)?;
+            let increment = resolve_zincr_increment(exchange);
+            let member = require_value(exchange)?;
+            let mut c = redis::Cmd::new();
+            c.arg("ZINCRBY").arg(key).arg(increment).arg(member.to_string());
+            Ok(c)
+        }
+        RedisCommand::Zcount => {
+            let key = require_key(exchange)?;
+            let (min, max) = resolve_score_bounds(exchange);
+            let mut c = redis::Cmd::new();
+            c.arg("ZCOUNT").arg(key).arg(min).arg(max);
+            Ok(c)
+        }
+        RedisCommand::Zrangebyscore => {
+            let key = require_key(exchange)?;
+            let (min, max) = resolve_score_bounds(exchange);
+            let with_scores = resolve_with_scores(exchange);
+            let mut c = redis::Cmd::new();
+            c.arg("ZRANGEBYSCORE").arg(key).arg(min).arg(max);
+            if with_scores {
+                c.arg("WITHSCORES");
+            }
+            Ok(c)
+        }
+        RedisCommand::Zrevrangebyscore => {
+            let key = require_key(exchange)?;
+            let (max, min) = resolve_revrange_score_bounds(exchange);
+            let with_scores = resolve_with_scores(exchange);
+            let mut c = redis::Cmd::new();
+            c.arg("ZREVRANGEBYSCORE").arg(key).arg(max).arg(min);
+            if with_scores {
+                c.arg("WITHSCORES");
+            }
+            Ok(c)
+        }
+        RedisCommand::Zremrangebyrank => {
+            let key = require_key(exchange)?;
+            let (start, end) = resolve_zremrange_rank_bounds(exchange);
+            let mut c = redis::Cmd::new();
+            c.arg("ZREMRANGEBYRANK").arg(key).arg(start).arg(end);
+            Ok(c)
+        }
+        RedisCommand::Zremrangebyscore => {
+            let key = require_key(exchange)?;
+            let (min, max) = resolve_score_bounds(exchange);
+            let mut c = redis::Cmd::new();
+            c.arg("ZREMRANGEBYSCORE").arg(key).arg(min).arg(max);
+            Ok(c)
+        }
+        RedisCommand::Zunionstore => {
+            let (dest, keys) = resolve_zstore_operands(exchange)?;
+            let mut c = redis::Cmd::new();
+            c.arg("ZUNIONSTORE").arg(dest).arg(keys.len() as i64).arg(&keys);
+            Ok(c)
+        }
+        RedisCommand::Zinterstore => {
+            let (dest, keys) = resolve_zstore_operands(exchange)?;
+            let mut c = redis::Cmd::new();
+            c.arg("ZINTERSTORE").arg(dest).arg(keys.len() as i64).arg(&keys);
+            Ok(c)
+        }
+        _ => unreachable!("non-zset commands rejected above"),
+    }
+}
+
 pub async fn dispatch(
     cmd: &RedisCommand,
     conn: &mut MultiplexedConnection,
@@ -508,5 +646,391 @@ mod tests {
     fn test_json_from_scored_members_shape() {
         let json = json_from_scored_members(vec![("m1".to_string(), 1.0)]);
         assert_eq!(json, serde_json::json!([{"member": "m1", "score": 1.0}]));
+    }
+
+    fn assert_cmd_name(cmd: &redis::Cmd, expected: &str) {
+        let packed = cmd.get_packed_command();
+        let s = String::from_utf8_lossy(&packed);
+        assert!(s.contains(expected), "expected '{expected}' in packed cmd");
+    }
+
+    fn packed_contains(cmd: &redis::Cmd, needle: &str) -> bool {
+        let packed = cmd.get_packed_command();
+        String::from_utf8_lossy(&packed).contains(needle)
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zadd() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Score", serde_json::json!(10.5)),
+            ("CamelRedis.Value", serde_json::json!("member1")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zadd, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZADD");
+        assert!(packed_contains(&cmd, "myzset"));
+        assert!(packed_contains(&cmd, "10.5"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zadd_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zadd, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zadd_missing_member() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("myzset"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zadd, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrem() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Value", serde_json::json!("member1")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrem, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZREM");
+        assert!(packed_contains(&cmd, "myzset"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrem_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zrem, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrem_missing_member() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("myzset"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zrem, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrange() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Start", serde_json::json!(0)),
+            ("CamelRedis.End", serde_json::json!(-1)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrange, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZRANGE");
+        assert!(packed_contains(&cmd, "myzset"));
+        assert!(!packed_contains(&cmd, "WITHSCORES"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrange_with_scores() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.WithScore", serde_json::json!(true)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrange, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZRANGE");
+        assert!(packed_contains(&cmd, "WITHSCORES"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrange_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Zrange, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrevrange() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Start", serde_json::json!(0)),
+            ("CamelRedis.End", serde_json::json!(5)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrevrange, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZREVRANGE");
+        assert!(packed_contains(&cmd, "myzset"));
+        assert!(!packed_contains(&cmd, "WITHSCORES"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrevrange_with_scores() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.WithScore", serde_json::json!(true)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrevrange, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZREVRANGE");
+        assert!(packed_contains(&cmd, "WITHSCORES"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrevrange_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Zrevrange, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrank() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Value", serde_json::json!("member1")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrank, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZRANK");
+        assert!(packed_contains(&cmd, "myzset"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrank_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zrank, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrank_missing_member() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("myzset"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zrank, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrevrank() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Value", serde_json::json!("member1")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrevrank, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZREVRANK");
+        assert!(packed_contains(&cmd, "myzset"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrevrank_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zrevrank, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrevrank_missing_member() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("myzset"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zrevrank, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zscore() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Value", serde_json::json!("member1")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zscore, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZSCORE");
+        assert!(packed_contains(&cmd, "myzset"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zscore_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zscore, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zscore_missing_member() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("myzset"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zscore, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zcard() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("myzset"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Zcard, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZCARD");
+        assert!(packed_contains(&cmd, "myzset"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zcard_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Zcard, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zincrby() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Increment", serde_json::json!(2.5)),
+            ("CamelRedis.Value", serde_json::json!("member1")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zincrby, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZINCRBY");
+        assert!(packed_contains(&cmd, "myzset"));
+        assert!(packed_contains(&cmd, "2.5"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zincrby_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zincrby, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zincrby_missing_member() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("myzset"))]);
+        assert!(build_redis_cmd(&RedisCommand::Zincrby, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zcount() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Min", serde_json::json!(0.0)),
+            ("CamelRedis.Max", serde_json::json!(100.0)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zcount, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZCOUNT");
+        assert!(packed_contains(&cmd, "myzset"));
+        assert!(packed_contains(&cmd, "100"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zcount_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Zcount, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrangebyscore() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Min", serde_json::json!(0.0)),
+            ("CamelRedis.Max", serde_json::json!(50.0)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrangebyscore, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZRANGEBYSCORE");
+        assert!(packed_contains(&cmd, "myzset"));
+        assert!(!packed_contains(&cmd, "WITHSCORES"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrangebyscore_with_scores() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.WithScore", serde_json::json!(true)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrangebyscore, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZRANGEBYSCORE");
+        assert!(packed_contains(&cmd, "WITHSCORES"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrangebyscore_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Zrangebyscore, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrevrangebyscore() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Min", serde_json::json!(0.0)),
+            ("CamelRedis.Max", serde_json::json!(50.0)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrevrangebyscore, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZREVRANGEBYSCORE");
+        assert!(packed_contains(&cmd, "myzset"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrevrangebyscore_with_scores() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.WithScore", serde_json::json!(true)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zrevrangebyscore, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZREVRANGEBYSCORE");
+        assert!(packed_contains(&cmd, "WITHSCORES"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zrevrangebyscore_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Zrevrangebyscore, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zremrangebyrank() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Start", serde_json::json!(0)),
+            ("CamelRedis.End", serde_json::json!(3)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zremrangebyrank, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZREMRANGEBYRANK");
+        assert!(packed_contains(&cmd, "myzset"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zremrangebyrank_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Zremrangebyrank, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zremrangebyscore() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Min", serde_json::json!(0.0)),
+            ("CamelRedis.Max", serde_json::json!(50.0)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zremrangebyscore, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZREMRANGEBYSCORE");
+        assert!(packed_contains(&cmd, "myzset"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zremrangebyscore_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Zremrangebyscore, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zunionstore() {
+        let ex = ex_with(&[
+            ("CamelRedis.Destination", serde_json::json!("dest")),
+            ("CamelRedis.Keys", serde_json::json!(["zset1", "zset2"])),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zunionstore, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZUNIONSTORE");
+        assert!(packed_contains(&cmd, "dest"));
+        assert!(packed_contains(&cmd, "zset1"));
+        assert!(packed_contains(&cmd, "zset2"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zunionstore_missing_destination() {
+        let ex = ex_with(&[("CamelRedis.Keys", serde_json::json!(["k1"]))]);
+        assert!(build_redis_cmd(&RedisCommand::Zunionstore, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zinterstore() {
+        let ex = ex_with(&[
+            ("CamelRedis.Destination", serde_json::json!("dest")),
+            ("CamelRedis.Keys", serde_json::json!(["zset1", "zset2"])),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zinterstore, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZINTERSTORE");
+        assert!(packed_contains(&cmd, "dest"));
+        assert!(packed_contains(&cmd, "zset1"));
+        assert!(packed_contains(&cmd, "zset2"));
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zinterstore_missing_destination() {
+        let ex = ex_with(&[("CamelRedis.Keys", serde_json::json!(["k1"]))]);
+        assert!(build_redis_cmd(&RedisCommand::Zinterstore, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_rejects_non_zset() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("myzset"))]);
+        let err = build_redis_cmd(&RedisCommand::Set, &ex).expect_err("non-zset should fail");
+        assert!(err.to_string().contains("Not a sorted set command"));
     }
 }

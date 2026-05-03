@@ -72,6 +72,109 @@ pub(crate) fn json_from_move_result(result: i64) -> serde_json::Value {
     serde_json::json!(result == 1)
 }
 
+#[allow(dead_code)]
+pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result<redis::Cmd, CamelError> {
+    if !is_key_command(cmd) {
+        return Err(CamelError::ProcessorError("Not a key command".into()));
+    }
+
+    let redis_cmd = match cmd {
+        RedisCommand::Del => {
+            let keys = resolve_del_keys(exchange)?;
+            let mut c = redis::cmd("DEL");
+            for key in keys {
+                c.arg(key);
+            }
+            c
+        }
+        RedisCommand::Exists => {
+            let key = require_key(exchange)?;
+            let mut c = redis::cmd("EXISTS");
+            c.arg(key);
+            c
+        }
+        RedisCommand::Expire => {
+            let key = require_key(exchange)?;
+            let secs = resolve_expire_timeout(exchange);
+            let mut c = redis::cmd("EXPIRE");
+            c.arg(key).arg(secs);
+            c
+        }
+        RedisCommand::Expireat => {
+            let key = require_key(exchange)?;
+            let ts = resolve_expire_timestamp(exchange);
+            let mut c = redis::cmd("EXPIREAT");
+            c.arg(key).arg(ts);
+            c
+        }
+        RedisCommand::Pexpire => {
+            let key = require_key(exchange)?;
+            let ms = resolve_expire_timeout(exchange);
+            let mut c = redis::cmd("PEXPIRE");
+            c.arg(key).arg(ms);
+            c
+        }
+        RedisCommand::Pexpireat => {
+            let key = require_key(exchange)?;
+            let ts = resolve_expire_timestamp(exchange);
+            let mut c = redis::cmd("PEXPIREAT");
+            c.arg(key).arg(ts);
+            c
+        }
+        RedisCommand::Ttl => {
+            let key = require_key(exchange)?;
+            let mut c = redis::cmd("TTL");
+            c.arg(key);
+            c
+        }
+        RedisCommand::Keys => {
+            let pattern = resolve_keys_pattern(exchange);
+            let mut c = redis::cmd("KEYS");
+            c.arg(pattern);
+            c
+        }
+        RedisCommand::Persist => {
+            let key = require_key(exchange)?;
+            let mut c = redis::cmd("PERSIST");
+            c.arg(key);
+            c
+        }
+        RedisCommand::Rename => {
+            let (key, dest) = resolve_rename_operands(exchange)?;
+            let mut c = redis::cmd("RENAME");
+            c.arg(key).arg(dest);
+            c
+        }
+        RedisCommand::Renamenx => {
+            let (key, dest) = resolve_rename_operands(exchange)?;
+            let mut c = redis::cmd("RENAMENX");
+            c.arg(key).arg(dest);
+            c
+        }
+        RedisCommand::Type => {
+            let key = require_key(exchange)?;
+            let mut c = redis::cmd("TYPE");
+            c.arg(key);
+            c
+        }
+        RedisCommand::Move => {
+            let (key, db) = resolve_move_operands(exchange)?;
+            let mut c = redis::cmd("MOVE");
+            c.arg(key).arg(db);
+            c
+        }
+        RedisCommand::Sort => {
+            let key = require_key(exchange)?;
+            let mut c = redis::cmd("SORT");
+            c.arg(key);
+            c
+        }
+        _ => unreachable!("non-key commands rejected above"),
+    };
+
+    Ok(redis_cmd)
+}
+
 pub async fn dispatch(
     cmd: &RedisCommand,
     conn: &mut MultiplexedConnection,
@@ -211,6 +314,35 @@ mod tests {
     use super::*;
     use camel_component_api::{Exchange, Message};
 
+    fn ex_with(headers: &[(&str, serde_json::Value)]) -> Exchange {
+        let mut msg = Message::default();
+        for (k, v) in headers {
+            msg.set_header(*k, v.clone());
+        }
+        Exchange::new(msg)
+    }
+
+    fn cmd_args(cmd: &redis::Cmd) -> Vec<String> {
+        cmd.args_iter()
+            .skip(1)
+            .filter_map(|a| match a {
+                redis::Arg::Simple(bytes) => String::from_utf8(bytes.to_vec()).ok(),
+                redis::Arg::Cursor => Some("CURSOR".to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn cmd_name(cmd: &redis::Cmd) -> String {
+        cmd.args_iter()
+            .next()
+            .and_then(|a| match a {
+                redis::Arg::Simple(bytes) => String::from_utf8(bytes.to_vec()).ok(),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
     fn test_expire_requires_key() {
         let ex = Exchange::new(Message::default());
@@ -327,5 +459,261 @@ mod tests {
     fn test_json_from_move_result_variants() {
         assert_eq!(json_from_move_result(1), serde_json::json!(true));
         assert_eq!(json_from_move_result(0), serde_json::json!(false));
+    }
+
+    // --- build_redis_cmd tests ---
+
+    #[test]
+    fn test_build_redis_cmd_del_with_keys_header() {
+        let ex = ex_with(&[("CamelRedis.Keys", serde_json::json!(["k1", "k2", "k3"]))]);
+        let cmd = build_redis_cmd(&RedisCommand::Del, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "DEL");
+        assert_eq!(cmd_args(&cmd), vec!["k1", "k2", "k3"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_del_with_single_key() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Del, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "DEL");
+        assert_eq!(cmd_args(&cmd), vec!["mykey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_del_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Del, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_exists() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Exists, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "EXISTS");
+        assert_eq!(cmd_args(&cmd), vec!["mykey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_exists_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Exists, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_expire() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Timeout", serde_json::json!(60u64)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Expire, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "EXPIRE");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "60"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_expire_default_timeout() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Expire, &ex).unwrap();
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "0"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_expire_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Expire, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_expireat() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Timestamp", serde_json::json!(1700000000u64)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Expireat, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "EXPIREAT");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "1700000000"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_expireat_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Expireat, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_pexpire() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Timeout", serde_json::json!(5000u64)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Pexpire, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "PEXPIRE");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "5000"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_pexpire_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Pexpire, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_pexpireat() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Timestamp", serde_json::json!(1700000000000u64)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Pexpireat, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "PEXPIREAT");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "1700000000000"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_pexpireat_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Pexpireat, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_ttl() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Ttl, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "TTL");
+        assert_eq!(cmd_args(&cmd), vec!["mykey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_ttl_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Ttl, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_keys_default_pattern() {
+        let ex = Exchange::new(Message::default());
+        let cmd = build_redis_cmd(&RedisCommand::Keys, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "KEYS");
+        assert_eq!(cmd_args(&cmd), vec!["*"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_keys_custom_pattern() {
+        let ex = ex_with(&[("CamelRedis.Pattern", serde_json::json!("user:*"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Keys, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "KEYS");
+        assert_eq!(cmd_args(&cmd), vec!["user:*"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_persist() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Persist, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "PERSIST");
+        assert_eq!(cmd_args(&cmd), vec!["mykey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_persist_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Persist, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_rename() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("oldkey")),
+            ("CamelRedis.Destination", serde_json::json!("newkey")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Rename, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "RENAME");
+        assert_eq!(cmd_args(&cmd), vec!["oldkey", "newkey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_rename_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Destination", serde_json::json!("newkey"))]);
+        assert!(build_redis_cmd(&RedisCommand::Rename, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_rename_missing_destination() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("oldkey"))]);
+        assert!(build_redis_cmd(&RedisCommand::Rename, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_renamenx() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("oldkey")),
+            ("CamelRedis.Destination", serde_json::json!("newkey")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Renamenx, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "RENAMENX");
+        assert_eq!(cmd_args(&cmd), vec!["oldkey", "newkey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_renamenx_missing_key() {
+        let ex = ex_with(&[("CamelRedis.Destination", serde_json::json!("newkey"))]);
+        assert!(build_redis_cmd(&RedisCommand::Renamenx, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_type() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Type, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "TYPE");
+        assert_eq!(cmd_args(&cmd), vec!["mykey"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_type_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Type, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_move() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Db", serde_json::json!(3u64)),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Move, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "MOVE");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "3"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_move_default_db() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Move, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "MOVE");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "0"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_move_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Move, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_sort() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mylist"))]);
+        let cmd = build_redis_cmd(&RedisCommand::Sort, &ex).unwrap();
+        assert_eq!(cmd_name(&cmd), "SORT");
+        assert_eq!(cmd_args(&cmd), vec!["mylist"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_sort_missing_key() {
+        let ex = Exchange::new(Message::default());
+        assert!(build_redis_cmd(&RedisCommand::Sort, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_rejects_non_key() {
+        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("k"))]);
+        assert!(build_redis_cmd(&RedisCommand::Set, &ex).is_err());
     }
 }
