@@ -2581,12 +2581,12 @@ mod tests {
         };
         use futures::stream;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
         let consumer_cfg = HttpServerConfig {
-            host: "127.0.0.1".to_string(),
+            host: "127.0.0.2".to_string(),
             port,
             path: "/limit-stream".to_string(),
             max_request_body: 2 * 1024 * 1024,
@@ -2603,7 +2603,7 @@ mod tests {
 
         let client = reqwest::Client::new();
         let send_fut = client
-            .get(format!("http://127.0.0.1:{port}/limit-stream"))
+            .get(format!("http://127.0.0.2:{port}/limit-stream"))
             .send();
 
         let (http_result, _) = tokio::join!(send_fut, async {
