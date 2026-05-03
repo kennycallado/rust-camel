@@ -774,8 +774,14 @@ type = "kubernetes"
     #[tokio::test]
     async fn build_kubernetes_platform_without_feature_returns_error() {
         let k8s = KubernetesPlatformCamelConfig::default();
-        let err = CamelConfig::build_kubernetes_platform(&k8s).await.err().unwrap();
-        assert!(err.to_string().contains("requires camel-config feature `kubernetes`"));
+        let err = CamelConfig::build_kubernetes_platform(&k8s)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("requires camel-config feature `kubernetes`")
+        );
     }
 
     #[tokio::test]

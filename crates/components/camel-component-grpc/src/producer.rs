@@ -31,9 +31,8 @@ fn json_to_protobuf(
     json: serde_json::Value,
     desc: MessageDescriptor,
 ) -> Result<Vec<u8>, CamelError> {
-    let json_str = serde_json::to_string(&json).map_err(|e| {
-        CamelError::TypeConversionFailed(format!("failed to serialize JSON: {e}"))
-    })?;
+    let json_str = serde_json::to_string(&json)
+        .map_err(|e| CamelError::TypeConversionFailed(format!("failed to serialize JSON: {e}")))?;
     let mut de = serde_json::Deserializer::from_str(&json_str);
     let dyn_msg = DynamicMessage::deserialize(desc, &mut de).map_err(|e| {
         CamelError::TypeConversionFailed(format!("failed to parse JSON into protobuf: {e}"))
@@ -53,9 +52,7 @@ fn protobuf_to_json(
         CamelError::TypeConversionFailed(format!("failed to decode protobuf bytes: {e}"))
     })?;
     serde_json::to_value(&dyn_msg).map_err(|e| {
-        CamelError::TypeConversionFailed(format!(
-            "failed to serialize protobuf to JSON: {e}"
-        ))
+        CamelError::TypeConversionFailed(format!("failed to serialize protobuf to JSON: {e}"))
     })
 }
 

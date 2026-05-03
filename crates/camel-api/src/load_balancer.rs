@@ -86,12 +86,18 @@ mod tests {
 
     #[test]
     fn default_strategy_is_round_robin() {
-        assert_eq!(LoadBalanceStrategy::default(), LoadBalanceStrategy::RoundRobin);
+        assert_eq!(
+            LoadBalanceStrategy::default(),
+            LoadBalanceStrategy::RoundRobin
+        );
     }
 
     #[test]
     fn strategy_equality() {
-        assert_eq!(LoadBalanceStrategy::RoundRobin, LoadBalanceStrategy::RoundRobin);
+        assert_eq!(
+            LoadBalanceStrategy::RoundRobin,
+            LoadBalanceStrategy::RoundRobin
+        );
         assert_ne!(LoadBalanceStrategy::RoundRobin, LoadBalanceStrategy::Random);
     }
 

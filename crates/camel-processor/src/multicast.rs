@@ -892,7 +892,13 @@ mod tests {
 
         let config = MulticastConfig::new().aggregation(MulticastStrategy::CollectAll);
         let mut svc = MulticastService::new(endpoints, config);
-        let result = svc.ready().await.unwrap().call(make_exchange("x")).await.unwrap();
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("x"))
+            .await
+            .unwrap();
 
         match result.input.body {
             Body::Json(v) => assert_eq!(v, serde_json::json!(["AB", "<a/>", null])),

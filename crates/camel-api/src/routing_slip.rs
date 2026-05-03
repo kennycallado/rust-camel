@@ -79,8 +79,7 @@ mod tests {
 
     #[test]
     fn clone_preserves_values() {
-        let cfg = RoutingSlipConfig::new(noop_expr())
-            .uri_delimiter(";");
+        let cfg = RoutingSlipConfig::new(noop_expr()).uri_delimiter(";");
         let cloned = cfg.clone();
         assert_eq!(cloned.uri_delimiter, ";");
     }

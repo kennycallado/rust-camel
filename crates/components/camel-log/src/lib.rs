@@ -353,7 +353,10 @@ mod tests {
         let mut json_msg = Message::new("");
         json_msg.body = Body::Json(serde_json::json!({"k":"v"}));
         let json_ex = Exchange::new(json_msg);
-        assert!(base.format_exchange(&json_ex).contains("Body: {\"k\":\"v\"}"));
+        assert!(
+            base.format_exchange(&json_ex)
+                .contains("Body: {\"k\":\"v\"}")
+        );
 
         let mut xml_msg = Message::new("");
         xml_msg.body = Body::Xml("<a/>".to_string());

@@ -234,11 +234,21 @@ mod tests {
             Value::Null
         );
         assert_eq!(
-            evaluate(&Expr::Body, &exchange_with_body(Body::from(b"abc".to_vec())), &None).unwrap(),
+            evaluate(
+                &Expr::Body,
+                &exchange_with_body(Body::from(b"abc".to_vec())),
+                &None
+            )
+            .unwrap(),
             Value::String("abc".to_string())
         );
         assert_eq!(
-            evaluate(&Expr::Body, &exchange_with_body(Body::Json(json!({"a": 1}))), &None).unwrap(),
+            evaluate(
+                &Expr::Body,
+                &exchange_with_body(Body::Json(json!({"a": 1}))),
+                &None
+            )
+            .unwrap(),
             Value::String("{\"a\":1}".to_string())
         );
     }
@@ -320,16 +330,18 @@ mod tests {
             .unwrap(),
             Value::Bool(true)
         );
-        assert!(evaluate(
-            &Expr::BinOp {
-                left: Box::new(Expr::Bool(true)),
-                op: Op::Contains,
-                right: Box::new(Expr::StringLit("x".to_string())),
-            },
-            &ex,
-            &None,
-        )
-        .is_err());
+        assert!(
+            evaluate(
+                &Expr::BinOp {
+                    left: Box::new(Expr::Bool(true)),
+                    op: Op::Contains,
+                    right: Box::new(Expr::StringLit("x".to_string())),
+                },
+                &ex,
+                &None,
+            )
+            .is_err()
+        );
     }
 
     #[test]

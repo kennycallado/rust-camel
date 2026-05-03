@@ -536,7 +536,10 @@ mod tests {
 
     #[test]
     fn parse_header_body_property_and_delegate_atoms() {
-        assert_eq!(parse("${header.foo}").unwrap(), Expr::Header("foo".to_string()));
+        assert_eq!(
+            parse("${header.foo}").unwrap(),
+            Expr::Header("foo".to_string())
+        );
         assert_eq!(parse("${body}").unwrap(), Expr::Body);
         assert_eq!(
             parse("${exchangeProperty.id}").unwrap(),
@@ -563,7 +566,10 @@ mod tests {
         );
         assert_eq!(
             parse("${body.items.0}").unwrap(),
-            Expr::BodyField(vec![PathSegment::Key("items".to_string()), PathSegment::Index(0)])
+            Expr::BodyField(vec![
+                PathSegment::Key("items".to_string()),
+                PathSegment::Index(0)
+            ])
         );
         assert_eq!(
             parse("${body.01}").unwrap(),

@@ -133,7 +133,9 @@ mod tests {
         let exchange = Exchange::new(Message::new("test"));
         let mutator = ScriptMutator::new(Box::new(ParseErrorMutatingExpression));
         let result = mutator.oneshot(exchange).await;
-        assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "parse error in `x`: bad"));
+        assert!(
+            matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "parse error in `x`: bad")
+        );
     }
 
     #[tokio::test]
@@ -141,7 +143,9 @@ mod tests {
         let exchange = Exchange::new(Message::new("test"));
         let mutator = ScriptMutator::new(Box::new(NotSupportedMutatingExpression));
         let result = mutator.oneshot(exchange).await;
-        assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "feature 'f' not supported by language 'l'"));
+        assert!(
+            matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "feature 'f' not supported by language 'l'")
+        );
     }
 
     #[tokio::test]
@@ -149,6 +153,8 @@ mod tests {
         let exchange = Exchange::new(Message::new("test"));
         let mutator = ScriptMutator::new(Box::new(UnknownVariableMutatingExpression));
         let result = mutator.oneshot(exchange).await;
-        assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg.contains("unknown variable: foo")));
+        assert!(
+            matches!(result, Err(CamelError::ProcessorError(msg)) if msg.contains("unknown variable: foo"))
+        );
     }
 }

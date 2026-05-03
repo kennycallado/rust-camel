@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use camel_component_api::{Body, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message};
-use camel_component_grpc::consumer::take_stream_observer;
-use camel_component_grpc::consumer::GrpcConsumer;
-use camel_component_grpc::producer::GrpcProducer;
 use camel_component_grpc::GrpcMode;
+use camel_component_grpc::consumer::GrpcConsumer;
+use camel_component_grpc::consumer::take_stream_observer;
+use camel_component_grpc::producer::GrpcProducer;
 use futures::StreamExt;
 use http::uri::PathAndQuery;
 use prost::Message as ProstMessage;
@@ -24,8 +24,8 @@ mod streaming {
 
 use helloworld::greeter_server::{Greeter, GreeterServer};
 use helloworld::{HelloReply, HelloRequest};
-use streaming::stream_service_server::{StreamService, StreamServiceServer};
 use streaming::stream_service_client::StreamServiceClient;
+use streaming::stream_service_server::{StreamService, StreamServiceServer};
 use streaming::*;
 
 struct GreeterImpl;
@@ -67,7 +67,9 @@ impl StreamService for StreamServiceImpl {
                 let _ = tx.send(Ok(item)).await;
             }
         });
-        Ok(tonic::Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(tonic::Response::new(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
     }
 
     async fn client_sum(
@@ -106,7 +108,9 @@ impl StreamService for StreamServiceImpl {
                 }
             }
         });
-        Ok(tonic::Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(tonic::Response::new(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
     }
 }
 
@@ -207,19 +211,18 @@ async fn grpc_consumer_roundtrip_json() {
     assert_eq!(response.into_inner().message, "Hello World");
 
     cancel_token.cancel();
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        async {
-            consumer_task.await.unwrap();
-            pipeline_task.await.unwrap();
-        },
-    )
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        consumer_task.await.unwrap();
+        pipeline_task.await.unwrap();
+    })
     .await;
 }
 
 #[tokio::test]
 async fn grpc_consumer_bad_proto_startup_fails() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr = listener.local_addr().expect("addr");
     let port = addr.port();
 
@@ -256,7 +259,10 @@ async fn grpc_consumer_bad_proto_startup_fails() {
         .unary(request, path, camel_component_grpc::codec::RawBytesCodec)
         .await;
 
-    assert!(result.is_err(), "expected error for path with no dispatch entry");
+    assert!(
+        result.is_err(),
+        "expected error for path with no dispatch entry"
+    );
     let status = result.unwrap_err();
     assert_eq!(
         status.code(),
@@ -287,12 +293,14 @@ async fn grpc_consumer_unknown_path_returns_unimplemented() {
     let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
 
     let consumer_task = tokio::spawn(async move {
-        consumer.start_with_listener(ctx, listener).await.expect("start");
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("start");
     });
 
-    let pipeline_task = tokio::spawn(async move {
-        while let Some(_envelope) = route_rx.recv().await {}
-    });
+    let pipeline_task =
+        tokio::spawn(async move { while let Some(_envelope) = route_rx.recv().await {} });
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -342,7 +350,10 @@ async fn grpc_consumer_stop_then_request_returns_unimplemented() {
     let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
 
     let consumer_task = tokio::spawn(async move {
-        consumer.start_with_listener(ctx, listener).await.expect("start");
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("start");
     });
 
     let pipeline_task = tokio::spawn(async move {
@@ -362,7 +373,9 @@ async fn grpc_consumer_stop_then_request_returns_unimplemented() {
     let mut client = helloworld::greeter_client::GreeterClient::new(channel.clone());
 
     let resp = client
-        .say_hello(helloworld::HelloRequest { name: "test".to_string() })
+        .say_hello(helloworld::HelloRequest {
+            name: "test".to_string(),
+        })
         .await;
     assert!(resp.is_ok(), "consumer should work before stop");
 
@@ -375,7 +388,9 @@ async fn grpc_consumer_stop_then_request_returns_unimplemented() {
 
     let mut client2 = helloworld::greeter_client::GreeterClient::new(channel);
     let result = client2
-        .say_hello(helloworld::HelloRequest { name: "test".to_string() })
+        .say_hello(helloworld::HelloRequest {
+            name: "test".to_string(),
+        })
         .await;
     assert!(result.is_err(), "expected error after stop");
     assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
@@ -402,7 +417,10 @@ async fn grpc_consumer_multiple_paths_same_port() {
     let ctx1 = ConsumerContext::new(route_tx1, cancel_token1.clone());
 
     let consumer1_task = tokio::spawn(async move {
-        consumer1.start_with_listener(ctx1, listener).await.expect("start consumer1");
+        consumer1
+            .start_with_listener(ctx1, listener)
+            .await
+            .expect("start consumer1");
     });
 
     let pipeline1_task = tokio::spawn(async move {
@@ -449,13 +467,17 @@ async fn grpc_consumer_multiple_paths_same_port() {
 
     let mut client1 = helloworld::greeter_client::GreeterClient::new(channel.clone());
     let resp1 = client1
-        .say_hello(helloworld::HelloRequest { name: "path1".to_string() })
+        .say_hello(helloworld::HelloRequest {
+            name: "path1".to_string(),
+        })
         .await
         .expect("call path1");
     assert_eq!(resp1.into_inner().message, "hello from path1");
 
     let req_body = {
-        let req = helloworld::HelloRequest { name: "path2".to_string() };
+        let req = helloworld::HelloRequest {
+            name: "path2".to_string(),
+        };
         let mut buf = Vec::new();
         ProstMessage::encode(&req, &mut buf).unwrap();
         buf
@@ -504,12 +526,14 @@ async fn grpc_consumer_invalid_body_returns_error() {
     let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
 
     let consumer_task = tokio::spawn(async move {
-        consumer.start_with_listener(ctx, listener).await.expect("start");
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("start");
     });
 
-    let pipeline_task = tokio::spawn(async move {
-        while let Some(_envelope) = route_rx.recv().await {}
-    });
+    let pipeline_task =
+        tokio::spawn(async move { while let Some(_envelope) = route_rx.recv().await {} });
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -566,12 +590,14 @@ async fn grpc_consumer_duplicate_path_fails() {
     let ctx1 = ConsumerContext::new(route_tx1, cancel_token1.clone());
 
     let consumer1_task = tokio::spawn(async move {
-        consumer1.start_with_listener(ctx1, listener).await.expect("start consumer1");
+        consumer1
+            .start_with_listener(ctx1, listener)
+            .await
+            .expect("start consumer1");
     });
 
-    let pipeline1_task = tokio::spawn(async move {
-        while let Some(_envelope) = route_rx1.recv().await {}
-    });
+    let pipeline1_task =
+        tokio::spawn(async move { while let Some(_envelope) = route_rx1.recv().await {} });
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -598,10 +624,7 @@ async fn grpc_consumer_duplicate_path_fails() {
     // So we need to call start() on consumer2 — it will get the same dispatch table,
     // then try to insert the same path, and fail.
     let result = consumer2.start(ctx2).await;
-    assert!(
-        result.is_err(),
-        "second consumer on same path should fail"
-    );
+    assert!(result.is_err(), "second consumer on same path should fail");
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("duplicate"),
@@ -637,7 +660,10 @@ async fn grpc_consumer_pipeline_error_returns_internal() {
     let ctx = ConsumerContext::new(route_tx, cancel_token.clone());
 
     let consumer_task = tokio::spawn(async move {
-        consumer.start_with_listener(ctx, listener).await.expect("start");
+        consumer
+            .start_with_listener(ctx, listener)
+            .await
+            .expect("start");
     });
 
     // Pipeline drops the reply (simulates error) — receive envelope but don't send reply
@@ -713,7 +739,8 @@ async fn grpc_consumer_server_streaming_roundtrip() {
             if let Some(observer) = take_stream_observer(exchange) {
                 // Send 5 items
                 for i in 0..5 {
-                    let item = serde_json::json!({ "index": i, "name": format!("pipeline-item-{i}") });
+                    let item =
+                        serde_json::json!({ "index": i, "name": format!("pipeline-item-{i}") });
                     if let Err(e) = observer.on_next(item).await {
                         eprintln!("on_next error: {e}");
                         break;
@@ -789,9 +816,7 @@ async fn grpc_producer_server_streaming() {
     .expect("producer");
 
     // Call with single JSON body (count=3)
-    let exchange = Exchange::new(Message::new(Body::Json(
-        serde_json::json!({"count": 3}),
-    )));
+    let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({"count": 3}))));
     let out = producer.call(exchange).await.expect("call");
 
     // Response should be JSON array of items

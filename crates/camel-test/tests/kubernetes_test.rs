@@ -11,7 +11,9 @@
 use std::time::Duration;
 
 use camel_api::platform::{LeadershipEvent, LeadershipService, PlatformIdentity};
-use camel_platform_kubernetes::{KubernetesLeadershipService, KubernetesPlatformConfig, ensure_rustls_provider};
+use camel_platform_kubernetes::{
+    KubernetesLeadershipService, KubernetesPlatformConfig, ensure_rustls_provider,
+};
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::k3s::K3s;
 

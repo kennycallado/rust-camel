@@ -1,7 +1,7 @@
 use std::collections::HashMap as StdHashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -33,9 +33,7 @@ pub fn resolve_grpc_mode(
     let cache = proto_cache();
     let pool = cache
         .get_or_compile(proto_path, std::iter::empty::<&std::path::Path>())
-        .map_err(|e| {
-            CamelError::EndpointCreationFailed(format!("failed to compile proto: {e}"))
-        })?;
+        .map_err(|e| CamelError::EndpointCreationFailed(format!("failed to compile proto: {e}")))?;
 
     let svc = pool.get_service_by_name(service_name).ok_or_else(|| {
         CamelError::EndpointCreationFailed(format!(
@@ -79,7 +77,10 @@ fn extract_metadata(metadata: &tonic::metadata::MetadataMap) -> Vec<(String, ser
                     continue;
                 }
                 if let Ok(v) = value.to_str() {
-                    headers.push((key_str.to_string(), serde_json::Value::String(v.to_string())));
+                    headers.push((
+                        key_str.to_string(),
+                        serde_json::Value::String(v.to_string()),
+                    ));
                 }
             }
             KeyAndValueRef::Binary(key, value) => {
@@ -164,7 +165,10 @@ fn remove_observer(id: &str) -> Option<GrpcStreamObserver> {
 }
 
 pub fn take_stream_observer(exchange: &Exchange) -> Option<GrpcStreamObserver> {
-    let id = exchange.properties.get("CamelGrpcStreamObserverId")?.as_str()?;
+    let id = exchange
+        .properties
+        .get("CamelGrpcStreamObserverId")?
+        .as_str()?;
     remove_observer(id)
 }
 
@@ -279,12 +283,14 @@ impl GrpcConsumer {
                 CamelError::EndpointCreationFailed(format!("failed to compile proto: {e}"))
             })?;
 
-        let svc = pool.get_service_by_name(&self.service_name).ok_or_else(|| {
-            CamelError::EndpointCreationFailed(format!(
-                "service descriptor not found: {}",
-                self.service_name
-            ))
-        })?;
+        let svc = pool
+            .get_service_by_name(&self.service_name)
+            .ok_or_else(|| {
+                CamelError::EndpointCreationFailed(format!(
+                    "service descriptor not found: {}",
+                    self.service_name
+                ))
+            })?;
 
         let method = svc
             .methods()
@@ -429,12 +435,12 @@ async fn process_unary_request(
     resp_desc: MessageDescriptor,
     sender: mpsc::Sender<ExchangeEnvelope>,
 ) -> Result<Vec<u8>, Status> {
-    let req_dyn = DynamicMessage::decode(req_desc, body.as_slice()).map_err(|e| {
-        Status::invalid_argument(format!("failed to decode protobuf: {e}"))
-    })?;
+    let req_dyn = DynamicMessage::decode(req_desc, body.as_slice())
+        .map_err(|e| Status::invalid_argument(format!("failed to decode protobuf: {e}")))?;
 
-    let json = serde_json::to_value(&req_dyn)
-        .map_err(|e| Status::invalid_argument(format!("failed to convert protobuf to JSON: {e}")))?;
+    let json = serde_json::to_value(&req_dyn).map_err(|e| {
+        Status::invalid_argument(format!("failed to convert protobuf to JSON: {e}"))
+    })?;
 
     let mut msg = Message::new(Body::Json(json));
     for (k, v) in extract_metadata(&metadata) {
@@ -464,7 +470,7 @@ async fn process_unary_request(
         other => {
             return Err(Status::internal(format!(
                 "expected JSON response body from pipeline, got {other:?}"
-            )))
+            )));
         }
     };
 
@@ -475,9 +481,9 @@ async fn process_unary_request(
         .map_err(|e| Status::internal(format!("failed to parse JSON into protobuf: {e}")))?;
 
     let mut buf = BytesMut::new();
-    resp_dyn.encode(&mut buf).map_err(|e| {
-        Status::internal(format!("failed to encode protobuf response: {e}"))
-    })?;
+    resp_dyn
+        .encode(&mut buf)
+        .map_err(|e| Status::internal(format!("failed to encode protobuf response: {e}")))?;
 
     Ok(buf.to_vec())
 }
@@ -496,9 +502,9 @@ async fn process_server_streaming_request(
         Ok(m) => m,
         Err(e) => {
             let _ = reply_tx
-                .send(GrpcStreamItem::Error(
-                    Status::invalid_argument(format!("failed to decode protobuf: {e}")),
-                ))
+                .send(GrpcStreamItem::Error(Status::invalid_argument(format!(
+                    "failed to decode protobuf: {e}"
+                ))))
                 .await;
             return;
         }
@@ -508,9 +514,9 @@ async fn process_server_streaming_request(
         Ok(v) => v,
         Err(e) => {
             let _ = reply_tx
-                .send(GrpcStreamItem::Error(
-                    Status::invalid_argument(format!("failed to convert protobuf to JSON: {e}")),
-                ))
+                .send(GrpcStreamItem::Error(Status::invalid_argument(format!(
+                    "failed to convert protobuf to JSON: {e}"
+                ))))
                 .await;
             return;
         }
@@ -527,10 +533,7 @@ async fn process_server_streaming_request(
     let _guard = ObserverGuard::new(observer_id.clone());
 
     let mut exchange = Exchange::new(msg);
-    exchange.set_property(
-        "CamelGrpcStreamObserverId",
-        Value::String(observer_id),
-    );
+    exchange.set_property("CamelGrpcStreamObserverId", Value::String(observer_id));
 
     let envelope = ExchangeEnvelope {
         exchange,
@@ -566,9 +569,9 @@ async fn process_client_streaming_request(
         let req_dyn = match DynamicMessage::decode(req_desc.clone(), body.as_slice()) {
             Ok(d) => d,
             Err(e) => {
-                let _ = reply_tx.send(GrpcReply::Err(Status::invalid_argument(
-                    format!("failed to decode protobuf: {e}"),
-                )));
+                let _ = reply_tx.send(GrpcReply::Err(Status::invalid_argument(format!(
+                    "failed to decode protobuf: {e}"
+                ))));
                 return;
             }
         };
@@ -576,9 +579,9 @@ async fn process_client_streaming_request(
         let json = match serde_json::to_value(&req_dyn) {
             Ok(j) => j,
             Err(e) => {
-                let _ = reply_tx.send(GrpcReply::Err(Status::internal(
-                    format!("failed to convert protobuf to JSON: {e}"),
-                )));
+                let _ = reply_tx.send(GrpcReply::Err(Status::internal(format!(
+                    "failed to convert protobuf to JSON: {e}"
+                ))));
                 return;
             }
         };

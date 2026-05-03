@@ -374,7 +374,10 @@ mod tests {
 
     #[test]
     fn load_balance_strategy_default() {
-        assert_eq!(LoadBalanceStrategyDef::default(), LoadBalanceStrategyDef::RoundRobin);
+        assert_eq!(
+            LoadBalanceStrategyDef::default(),
+            LoadBalanceStrategyDef::RoundRobin
+        );
     }
 
     #[test]
@@ -397,26 +400,36 @@ mod tests {
 
     #[test]
     fn data_format_def() {
-        let def = DataFormatDef { format: "protobuf".into() };
+        let def = DataFormatDef {
+            format: "protobuf".into(),
+        };
         assert_eq!(def.format, "protobuf");
     }
 
     #[test]
     fn stream_cache_step_def() {
-        let def = StreamCacheStepDef { threshold: Some(1024) };
+        let def = StreamCacheStepDef {
+            threshold: Some(1024),
+        };
         assert_eq!(def.threshold, Some(1024));
     }
 
     #[test]
     fn delay_step_def() {
-        let def = DelayStepDef { delay_ms: 500, dynamic_header: Some("X-Delay".into()) };
+        let def = DelayStepDef {
+            delay_ms: 500,
+            dynamic_header: Some("X-Delay".into()),
+        };
         assert_eq!(def.delay_ms, 500);
         assert_eq!(def.dynamic_header.as_deref(), Some("X-Delay"));
     }
 
     #[test]
     fn circuit_breaker_def() {
-        let cb = DeclarativeCircuitBreaker { failure_threshold: 3, open_duration_ms: 5000 };
+        let cb = DeclarativeCircuitBreaker {
+            failure_threshold: 3,
+            open_duration_ms: 5000,
+        };
         assert_eq!(cb.failure_threshold, 3);
         assert_eq!(cb.open_duration_ms, 5000);
     }

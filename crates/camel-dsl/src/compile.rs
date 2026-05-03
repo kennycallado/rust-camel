@@ -878,18 +878,20 @@ mod tests {
     use crate::model::{
         AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
         DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
-        DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
-        DelayStepDef, DynamicRouterStepDef,
-        FilterStepDef, LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef,
-        LogStepDef, LogLevelDef, LoopStepDef, MulticastAggregationDef, MulticastStepDef,
-        RecipientListStepDef, RoutingSlipStepDef, SetBodyStepDef, SetHeaderStepDef,
-        SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef,
-        ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef,
-        WireTapStepDef,
+        DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DelayStepDef,
+        DynamicRouterStepDef, FilterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
+        LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
+        MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, SetBodyStepDef,
+        SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
+        StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef,
+        WhenStepDef, WireTapStepDef,
     };
 
     fn make_predicate(simple_src: &str) -> LanguageExpressionDef {
-        LanguageExpressionDef { language: "simple".into(), source: simple_src.into() }
+        LanguageExpressionDef {
+            language: "simple".into(),
+            source: simple_src.into(),
+        }
     }
 
     #[test]
@@ -1348,32 +1350,183 @@ mod tests {
 
     #[test]
     fn declarative_step_name_all_variants() {
-        assert_eq!(declarative_step_name(&DeclarativeStep::To(ToStepDef::new("x"))), "to");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Log(LogStepDef::info("x"))), "log");
-        assert_eq!(declarative_step_name(&DeclarativeStep::SetHeader(SetHeaderStepDef::literal("k","v"))), "set_header");
-        assert_eq!(declarative_step_name(&DeclarativeStep::SetBody(SetBodyStepDef { value: ValueSourceDef::Literal(serde_json::json!("x")) })), "set_body");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Filter(FilterStepDef { predicate: LanguageExpressionDef { language: "simple".into(), source: "true".into() }, steps: vec![] })), "filter");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Choice(ChoiceStepDef { whens: vec![], otherwise: None })), "choice");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Split(SplitStepDef { expression: SplitExpressionDef::BodyLines, aggregation: SplitAggregationDef::LastWins, parallel: false, parallel_limit: None, stop_on_exception: false, steps: vec![] })), "split");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Aggregate(AggregateStepDef { header: "h".into(), correlation_key: None, completion_size: None, completion_timeout_ms: None, completion_predicate: None, strategy: AggregateStrategyDef::CollectAll, max_buckets: None, bucket_ttl_ms: None, force_completion_on_stop: None, discard_on_timeout: None })), "aggregate");
-        assert_eq!(declarative_step_name(&DeclarativeStep::WireTap(WireTapStepDef { uri: "x".into() })), "wire_tap");
-        assert_eq!(declarative_step_name(&DeclarativeStep::DynamicRouter(DynamicRouterStepDef { expression: LanguageExpressionDef { language: "simple".into(), source: "x".into() }, uri_delimiter: ",".into(), cache_size: 1000, ignore_invalid_endpoints: false, max_iterations: 100 })), "dynamic_router");
-        assert_eq!(declarative_step_name(&DeclarativeStep::LoadBalance(LoadBalanceStepDef { strategy: LoadBalanceStrategyDef::RoundRobin, parallel: false, steps: vec![] })), "load_balance");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Multicast(MulticastStepDef { steps: vec![], parallel: false, parallel_limit: None, stop_on_exception: false, timeout_ms: None, aggregation: MulticastAggregationDef::LastWins })), "multicast");
-        assert_eq!(declarative_step_name(&DeclarativeStep::RoutingSlip(RoutingSlipStepDef { expression: LanguageExpressionDef { language: "simple".into(), source: "x".into() }, uri_delimiter: ",".into(), cache_size: 1000, ignore_invalid_endpoints: false })), "routing_slip");
-        assert_eq!(declarative_step_name(&DeclarativeStep::RecipientList(RecipientListStepDef { expression: LanguageExpressionDef { language: "simple".into(), source: "x".into() }, delimiter: ",".into(), parallel: false, parallel_limit: None, stop_on_exception: false, aggregation: MulticastAggregationDef::LastWins })), "recipient_list");
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::To(ToStepDef::new("x"))),
+            "to"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Log(LogStepDef::info("x"))),
+            "log"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::SetHeader(SetHeaderStepDef::literal(
+                "k", "v"
+            ))),
+            "set_header"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::SetBody(SetBodyStepDef {
+                value: ValueSourceDef::Literal(serde_json::json!("x"))
+            })),
+            "set_body"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Filter(FilterStepDef {
+                predicate: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: "true".into()
+                },
+                steps: vec![]
+            })),
+            "filter"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Choice(ChoiceStepDef {
+                whens: vec![],
+                otherwise: None
+            })),
+            "choice"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Split(SplitStepDef {
+                expression: SplitExpressionDef::BodyLines,
+                aggregation: SplitAggregationDef::LastWins,
+                parallel: false,
+                parallel_limit: None,
+                stop_on_exception: false,
+                steps: vec![]
+            })),
+            "split"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Aggregate(AggregateStepDef {
+                header: "h".into(),
+                correlation_key: None,
+                completion_size: None,
+                completion_timeout_ms: None,
+                completion_predicate: None,
+                strategy: AggregateStrategyDef::CollectAll,
+                max_buckets: None,
+                bucket_ttl_ms: None,
+                force_completion_on_stop: None,
+                discard_on_timeout: None
+            })),
+            "aggregate"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::WireTap(WireTapStepDef {
+                uri: "x".into()
+            })),
+            "wire_tap"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::DynamicRouter(DynamicRouterStepDef {
+                expression: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: "x".into()
+                },
+                uri_delimiter: ",".into(),
+                cache_size: 1000,
+                ignore_invalid_endpoints: false,
+                max_iterations: 100
+            })),
+            "dynamic_router"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::LoadBalance(LoadBalanceStepDef {
+                strategy: LoadBalanceStrategyDef::RoundRobin,
+                parallel: false,
+                steps: vec![]
+            })),
+            "load_balance"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Multicast(MulticastStepDef {
+                steps: vec![],
+                parallel: false,
+                parallel_limit: None,
+                stop_on_exception: false,
+                timeout_ms: None,
+                aggregation: MulticastAggregationDef::LastWins
+            })),
+            "multicast"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::RoutingSlip(RoutingSlipStepDef {
+                expression: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: "x".into()
+                },
+                uri_delimiter: ",".into(),
+                cache_size: 1000,
+                ignore_invalid_endpoints: false
+            })),
+            "routing_slip"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::RecipientList(RecipientListStepDef {
+                expression: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: "x".into()
+                },
+                delimiter: ",".into(),
+                parallel: false,
+                parallel_limit: None,
+                stop_on_exception: false,
+                aggregation: MulticastAggregationDef::LastWins
+            })),
+            "recipient_list"
+        );
         assert_eq!(declarative_step_name(&DeclarativeStep::Stop), "stop");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Throttle(ThrottleStepDef { max_requests: 10, period_ms: 1000, strategy: ThrottleStrategyDef::Delay, steps: vec![] })), "throttle");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Script(ScriptStepDef { expression: LanguageExpressionDef { language: "rhai".into(), source: "1".into() } })), "script");
-        assert_eq!(declarative_step_name(&DeclarativeStep::ConvertBodyTo(BodyTypeDef::Json)), "convert_body_to");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Bean(BeanStepDef::new("b","m"))), "bean");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Delay(DelayStepDef { delay_ms: 100, dynamic_header: None })), "delay");
-        assert_eq!(declarative_step_name(&DeclarativeStep::Loop(LoopStepDef { count: Some(3), while_predicate: None, steps: vec![] })), "loop");
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Throttle(ThrottleStepDef {
+                max_requests: 10,
+                period_ms: 1000,
+                strategy: ThrottleStrategyDef::Delay,
+                steps: vec![]
+            })),
+            "throttle"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Script(ScriptStepDef {
+                expression: LanguageExpressionDef {
+                    language: "rhai".into(),
+                    source: "1".into()
+                }
+            })),
+            "script"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::ConvertBodyTo(BodyTypeDef::Json)),
+            "convert_body_to"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Bean(BeanStepDef::new("b", "m"))),
+            "bean"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Delay(DelayStepDef {
+                delay_ms: 100,
+                dynamic_header: None
+            })),
+            "delay"
+        );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Loop(LoopStepDef {
+                count: Some(3),
+                while_predicate: None,
+                steps: vec![]
+            })),
+            "loop"
+        );
     }
 
     #[test]
     fn compile_circuit_breaker_def() {
-        let def = DeclarativeCircuitBreaker { failure_threshold: 3, open_duration_ms: 5000 };
+        let def = DeclarativeCircuitBreaker {
+            failure_threshold: 3,
+            open_duration_ms: 5000,
+        };
         let config = compile_circuit_breaker(def);
         assert_eq!(config.failure_threshold, 3);
         assert_eq!(config.open_duration, Duration::from_millis(5000));
@@ -1471,7 +1624,9 @@ mod tests {
 
     #[test]
     fn compile_step_wire_tap() {
-        let step = DeclarativeStep::WireTap(WireTapStepDef { uri: "log:tap".into() });
+        let step = DeclarativeStep::WireTap(WireTapStepDef {
+            uri: "log:tap".into(),
+        });
         let result = compile_declarative_step(step);
         assert!(matches!(result.unwrap(), BuilderStep::WireTap { uri } if uri == "log:tap"));
     }
@@ -1498,14 +1653,20 @@ mod tests {
 
     #[test]
     fn compile_step_delay() {
-        let step = DeclarativeStep::Delay(DelayStepDef { delay_ms: 500, dynamic_header: None });
+        let step = DeclarativeStep::Delay(DelayStepDef {
+            delay_ms: 500,
+            dynamic_header: None,
+        });
         let result = compile_declarative_step(step);
         assert!(matches!(result.unwrap(), BuilderStep::Delay { .. }));
     }
 
     #[test]
     fn compile_step_delay_with_header() {
-        let step = DeclarativeStep::Delay(DelayStepDef { delay_ms: 200, dynamic_header: Some("X-D".into()) });
+        let step = DeclarativeStep::Delay(DelayStepDef {
+            delay_ms: 200,
+            dynamic_header: Some("X-D".into()),
+        });
         let result = compile_declarative_step(step);
         assert!(result.is_ok());
     }
@@ -1520,7 +1681,10 @@ mod tests {
             max_iterations: 100,
         });
         let result = compile_declarative_step(step);
-        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeDynamicRouter { .. }));
+        assert!(matches!(
+            result.unwrap(),
+            BuilderStep::DeclarativeDynamicRouter { .. }
+        ));
     }
 
     #[test]
@@ -1532,7 +1696,10 @@ mod tests {
             ignore_invalid_endpoints: false,
         });
         let result = compile_declarative_step(step);
-        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeRoutingSlip { .. }));
+        assert!(matches!(
+            result.unwrap(),
+            BuilderStep::DeclarativeRoutingSlip { .. }
+        ));
     }
 
     #[test]
@@ -1546,7 +1713,10 @@ mod tests {
             aggregation: MulticastAggregationDef::CollectAll,
         });
         let result = compile_declarative_step(step);
-        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeRecipientList { .. }));
+        assert!(matches!(
+            result.unwrap(),
+            BuilderStep::DeclarativeRecipientList { .. }
+        ));
     }
 
     #[test]
@@ -1555,7 +1725,10 @@ mod tests {
             expression: make_predicate("1+1"),
         });
         let result = compile_declarative_step(step);
-        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeScript { .. }));
+        assert!(matches!(
+            result.unwrap(),
+            BuilderStep::DeclarativeScript { .. }
+        ));
     }
 
     #[test]
@@ -1584,7 +1757,9 @@ mod tests {
     #[test]
     fn compile_step_load_balance_weighted() {
         let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
-            strategy: LoadBalanceStrategyDef::Weighted { distribution_ratio: "3,1".into() },
+            strategy: LoadBalanceStrategyDef::Weighted {
+                distribution_ratio: "3,1".into(),
+            },
             parallel: false,
             steps: vec![
                 DeclarativeStep::To(ToStepDef::new("direct:a")),
@@ -1598,7 +1773,9 @@ mod tests {
     #[test]
     fn compile_step_load_balance_weighted_bad_ratio() {
         let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
-            strategy: LoadBalanceStrategyDef::Weighted { distribution_ratio: "abc".into() },
+            strategy: LoadBalanceStrategyDef::Weighted {
+                distribution_ratio: "abc".into(),
+            },
             parallel: false,
             steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
         });
@@ -1608,7 +1785,9 @@ mod tests {
     #[test]
     fn compile_step_load_balance_weighted_mismatched_count() {
         let step = DeclarativeStep::LoadBalance(LoadBalanceStepDef {
-            strategy: LoadBalanceStrategyDef::Weighted { distribution_ratio: "3,1".into() },
+            strategy: LoadBalanceStrategyDef::Weighted {
+                distribution_ratio: "3,1".into(),
+            },
             parallel: false,
             steps: vec![DeclarativeStep::To(ToStepDef::new("direct:a"))],
         });
@@ -1659,7 +1838,10 @@ mod tests {
             otherwise: Some(vec![DeclarativeStep::Stop]),
         });
         let result = compile_declarative_step(step);
-        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeChoice { .. }));
+        assert!(matches!(
+            result.unwrap(),
+            BuilderStep::DeclarativeChoice { .. }
+        ));
     }
 
     #[test]
@@ -1669,7 +1851,10 @@ mod tests {
             otherwise: None,
         });
         let result = compile_declarative_step(step);
-        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeChoice { .. }));
+        assert!(matches!(
+            result.unwrap(),
+            BuilderStep::DeclarativeChoice { .. }
+        ));
     }
 
     #[test]
@@ -1679,7 +1864,10 @@ mod tests {
             steps: vec![DeclarativeStep::Stop],
         });
         let result = compile_declarative_step(step);
-        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeFilter { .. }));
+        assert!(matches!(
+            result.unwrap(),
+            BuilderStep::DeclarativeFilter { .. }
+        ));
     }
 
     #[test]
@@ -1742,7 +1930,10 @@ mod tests {
             level: LogLevelDef::Info,
         });
         let result = compile_declarative_step(step);
-        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeLog { .. }));
+        assert!(matches!(
+            result.unwrap(),
+            BuilderStep::DeclarativeLog { .. }
+        ));
     }
 
     #[test]
@@ -1752,7 +1943,10 @@ mod tests {
             value: ValueSourceDef::Literal(serde_json::json!("myValue")),
         });
         let result = compile_declarative_step(step);
-        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeSetHeader { .. }));
+        assert!(matches!(
+            result.unwrap(),
+            BuilderStep::DeclarativeSetHeader { .. }
+        ));
     }
 
     #[test]
@@ -1761,7 +1955,10 @@ mod tests {
             value: ValueSourceDef::Literal(serde_json::json!("hello")),
         });
         let result = compile_declarative_step(step);
-        assert!(matches!(result.unwrap(), BuilderStep::DeclarativeSetBody { .. }));
+        assert!(matches!(
+            result.unwrap(),
+            BuilderStep::DeclarativeSetBody { .. }
+        ));
     }
 
     #[test]

@@ -85,8 +85,8 @@ pub async fn metrics_handler(metrics: Arc<PrometheusMetrics>) -> MetricsResponse
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{HealthReport, HealthStatus};
     use camel_api::metrics::MetricsCollector;
+    use camel_api::{HealthReport, HealthStatus};
     use tokio::time::{Duration, sleep};
 
     #[tokio::test]

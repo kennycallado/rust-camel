@@ -22,7 +22,9 @@ async fn main() -> Result<(), CamelError> {
         "grpc://0.0.0.0:50051/helloworld.Greeter/SayHello?protoFile={}",
         proto_path
     ))
-    .set_body(Body::Json(serde_json::json!({"message": "Hello from consumer!"})))
+    .set_body(Body::Json(
+        serde_json::json!({"message": "Hello from consumer!"}),
+    ))
     .to("log:grpc-consumer?showBody=true")
     .build()?;
 
@@ -40,7 +42,9 @@ async fn main() -> Result<(), CamelError> {
     ctx.add_route_definition(producer_route).await?;
     ctx.start().await?;
 
-    println!("gRPC example running. Consumer on port 50051, producer sends 3 requests every 3 seconds.");
+    println!(
+        "gRPC example running. Consumer on port 50051, producer sends 3 requests every 3 seconds."
+    );
     println!("Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c()

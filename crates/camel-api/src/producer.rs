@@ -42,9 +42,12 @@ impl Default for ProducerContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use crate::runtime::{RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult, RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult};
     use crate::CamelError;
+    use crate::runtime::{
+        RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult, RuntimeQuery, RuntimeQueryBus,
+        RuntimeQueryResult,
+    };
+    use async_trait::async_trait;
 
     struct NoopRuntime;
 

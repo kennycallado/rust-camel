@@ -2853,7 +2853,10 @@ mod tests {
         let route = RouteBuilder::from("direct:start")
             .route_id("lb-weighted-failover-parallel")
             .load_balance()
-            .weighted(vec![("direct:a".to_string(), 3), ("direct:b".to_string(), 1)])
+            .weighted(vec![
+                ("direct:a".to_string(), 3),
+                ("direct:b".to_string(), 1),
+            ])
             .failover()
             .parallel(true)
             .to("mock:result")

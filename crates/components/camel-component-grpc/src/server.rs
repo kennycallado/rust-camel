@@ -183,10 +183,7 @@ struct GrpcItemStream {
 impl futures::Stream for GrpcItemStream {
     type Item = Result<Vec<u8>, Status>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(GrpcStreamItem::Message(bytes))) => Poll::Ready(Some(Ok(bytes))),
             Poll::Ready(Some(GrpcStreamItem::Error(status))) => Poll::Ready(Some(Err(status))),
@@ -304,7 +301,8 @@ struct ServerStreamingHandler {
 impl tonic::server::ServerStreamingService<Vec<u8>> for ServerStreamingHandler {
     type Response = Vec<u8>;
     type ResponseStream = ResponseStream;
-    type Future = Pin<Box<dyn Future<Output = Result<Response<Self::ResponseStream>, Status>> + Send>>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<Response<Self::ResponseStream>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Vec<u8>>) -> Self::Future {
         let (reply_tx, reply_rx) = mpsc::channel::<GrpcStreamItem>(64);
@@ -319,7 +317,9 @@ impl tonic::server::ServerStreamingService<Vec<u8>> for ServerStreamingHandler {
                 .send(envelope)
                 .await
                 .map_err(|_| Status::unavailable("consumer stopped"))?;
-            Ok(Response::new(Box::pin(GrpcItemStream { rx: reply_rx }) as ResponseStream))
+            Ok(Response::new(
+                Box::pin(GrpcItemStream { rx: reply_rx }) as ResponseStream
+            ))
         })
     }
 }
@@ -394,7 +394,8 @@ struct BidiHandler {
 impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
     type Response = Vec<u8>;
     type ResponseStream = ResponseStream;
-    type Future = Pin<Box<dyn Future<Output = Result<Response<Self::ResponseStream>, Status>> + Send>>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<Response<Self::ResponseStream>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Streaming<Vec<u8>>>) -> Self::Future {
         let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -419,9 +420,7 @@ impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
                         }
                         Err(status) => {
                             tracing::warn!(error = %status, "bidi streaming decode error");
-                            let _ = reply_tx_forward
-                                .send(GrpcStreamItem::Error(status))
-                                .await;
+                            let _ = reply_tx_forward.send(GrpcStreamItem::Error(status)).await;
                             break;
                         }
                     }
@@ -433,7 +432,9 @@ impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
                 .await
                 .map_err(|_| Status::unavailable("consumer stopped"))?;
 
-            Ok(Response::new(Box::pin(GrpcItemStream { rx: reply_rx }) as ResponseStream))
+            Ok(Response::new(
+                Box::pin(GrpcItemStream { rx: reply_rx }) as ResponseStream
+            ))
         })
     }
 }
