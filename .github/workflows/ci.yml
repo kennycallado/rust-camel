@@ -65,6 +65,41 @@ jobs:
       - name: Test (full workspace)
         run: cargo test --workspace
 
+  docker-smoke-test:
+    name: Docker Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl-tools
+        run: sudo apt-get install -y musl-tools
+      - name: Install target
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: Build musl binary
+        run: cargo build -p camel-cli --release --target x86_64-unknown-linux-musl
+      - name: Prepare Docker context
+        run: |
+          mkdir -p context
+          cp target/x86_64-unknown-linux-musl/release/camel context/camel-amd64
+          chmod +x context/camel-amd64
+          cp Dockerfile context/Dockerfile
+          docker run --rm alpine:3.21 cat /etc/ssl/certs/ca-certificates.crt > context/ca-certificates.crt
+      - name: Build production image
+        run: docker build --target production -t camel-smoke:production context/
+      - name: Build alpine image
+        run: docker build --target alpine -t camel-smoke:alpine context/
+      - name: Test production image
+        run: |
+          OUTPUT=$(docker run --rm camel-smoke:production --version)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "camel"
+      - name: Test alpine image
+        run: |
+          OUTPUT=$(docker run --rm camel-smoke:alpine --version)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "camel"
+
   coverage:
     name: Coverage Check
     runs-on: ubuntu-latest
