@@ -34,6 +34,7 @@ members = [
     "crates/components/camel-validator",
     "crates/components/camel-xslt",
     "crates/components/camel-xj",
+    "crates/components/camel-cxf",
     "crates/components/camel-master",
     "crates/languages/camel-language-api",
     "crates/languages/camel-language-js",
@@ -168,6 +169,7 @@ camel-component-controlbus = { path = "crates/components/camel-controlbus", vers
 camel-component-validator = { path = "crates/components/camel-validator", version = "=0.7.7" }
 camel-xslt = { path = "crates/components/camel-xslt", version = "=0.7.7" }
 camel-xj = { path = "crates/components/camel-xj", version = "=0.7.7" }
+camel-component-cxf = { path = "crates/components/camel-cxf", version = "=0.7.7" }
 camel-master = { path = "crates/components/camel-master", version = "=0.7.7" }
 camel-component-prometheus = { path = "crates/services/camel-prometheus", version = "=0.7.7" }
 camel-component-otel = { path = "crates/services/camel-otel", version = "=0.7.7" }
@@ -202,6 +204,7 @@ bytes = "1"
 futures = "0.3"
 tracing = "0.1"
 tokio-util = { version = "0.7", features = ["rt", "io"] }
+tokio-stream = "0.1"
 dashmap = "6"
 chrono = { version = "0.4", features = ["serde"] }
 kube = { version = "3", features = ["runtime", "derive"] }

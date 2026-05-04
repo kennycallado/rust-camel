@@ -138,10 +138,12 @@ mod tests {
     fn test_parse_grpc_uri_missing_method_separator() {
         let result = parse_grpc_uri("grpc://localhost:50051/NoSlashHere");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("package.Service/Method"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("package.Service/Method")
+        );
     }
 
     #[test]

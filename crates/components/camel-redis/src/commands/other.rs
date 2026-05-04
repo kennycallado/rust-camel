@@ -15,7 +15,10 @@ pub(crate) fn extract_echo_message(exchange: &mut Exchange) -> String {
 }
 
 #[allow(dead_code)]
-pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result<redis::Cmd, CamelError> {
+pub(crate) fn build_redis_cmd(
+    cmd: &RedisCommand,
+    exchange: &Exchange,
+) -> Result<redis::Cmd, CamelError> {
     if !is_other_command(cmd) {
         return Err(CamelError::ProcessorError("Not an other command".into()));
     }
@@ -149,7 +152,9 @@ mod tests {
 
     #[test]
     fn test_build_redis_cmd_echo_with_json_body() {
-        let ex = Exchange::new(Message::new(Body::Json(serde_json::json!({"key": "value"}))));
+        let ex = Exchange::new(Message::new(Body::Json(
+            serde_json::json!({"key": "value"}),
+        )));
         let cmd = build_redis_cmd(&RedisCommand::Echo, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "ECHO");
         assert_eq!(cmd_args(&cmd), vec!["{\"key\":\"value\"}"]);

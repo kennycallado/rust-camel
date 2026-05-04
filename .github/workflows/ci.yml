@@ -60,6 +60,12 @@ jobs:
         env:
           CAMEL_XML_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/xml/build/native/xml-bridge
         run: cargo test -p camel-test --features integration-tests --test xml_bridge_validator_test --test xml_bridge_xslt_test
+      - name: Build CXF bridge binary
+        run: cargo xtask build-cxf-bridge
+      - name: CXF bridge integration tests
+        env:
+          CAMEL_CXF_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/cxf/build/native/cxf-bridge
+        run: cargo test -p camel-test --features integration-tests --test cxf_test
       - name: Container integration tests
         run: cargo test -p camel-test --features integration-tests --test container_test
       - name: Test (full workspace)

@@ -22,6 +22,9 @@ pub mod artemis;
 pub mod jms;
 
 #[cfg(feature = "integration-tests")]
+pub mod cxf;
+
+#[cfg(feature = "integration-tests")]
 pub mod xml_bridge;
 
 #[cfg(feature = "integration-tests")]

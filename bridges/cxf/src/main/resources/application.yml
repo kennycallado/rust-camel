@@ -1,0 +1,50 @@
+quarkus:
+  grpc:
+    server:
+      port: 9090       # overridden at runtime via QUARKUS_GRPC_SERVER_PORT env var
+  http:
+    port: -1           # disable HTTP entirely
+  native:
+    resources:
+      includes:
+        - META-INF/services/jakarta.xml.ws.spi.Provider
+        - META-INF/services/jakarta.activation.spi.MailcapRegistryProvider
+        - META-INF/services/jakarta.activation.spi.MimeTypeRegistryProvider
+        - META-INF/services/javax.wsdl.factory.WSDLFactory
+        - META-INF/cxf/bus-extensions.txt
+        - META-INF/cxf/**
+        - META-INF/wsdl/**
+    additional-build-args:
+      - "-H:+AllowVMInspection"
+      - "--initialize-at-run-time=org.apache.cxf.attachment.AttachmentUtil"
+      - "--initialize-at-run-time=org.apache.wss4j.common.saml.builder.SAML1ComponentBuilder"
+      - "--initialize-at-run-time=org.apache.wss4j.common.saml.builder.SAML2ComponentBuilder"
+      - "--initialize-at-run-time=org.apache.wss4j.common.saml.SamlAssertionWrapper"
+      - "--initialize-at-run-time=org.opensaml.core.xml.config.XMLObjectProviderRegistry"
+      - "--initialize-at-run-time=org.apache.cxf.interceptor.FIStaxInInterceptor"
+      - "--initialize-at-run-time=org.apache.cxf.interceptor.FIStaxOutInterceptor"
+      - "--initialize-at-run-time=org.apache.cxf.ws.security.trust.AbstractSTSClient"
+
+cxf:
+  wsdl:
+    path: ${CXF_WSDL_PATH:}
+  service:
+    name: ${CXF_SERVICE_NAME:}
+  port:
+    name: ${CXF_PORT_NAME:}
+  address: ${CXF_ADDRESS:}
+  security:
+    username: ${CXF_SECURITY_USERNAME:}
+    password: ${CXF_SECURITY_PASSWORD:}
+  keystore:
+    path: ${CXF_KEYSTORE_PATH:}
+    password: ${CXF_KEYSTORE_PASSWORD:}
+  truststore:
+    path: ${CXF_TRUSTSTORE_PATH:}
+    password: ${CXF_TRUSTSTORE_PASSWORD:}
+  connection:
+    timeout:
+      ms: ${CXF_CONNECTION_TIMEOUT_MS:30000}
+  max:
+    concurrent:
+      requests: ${CXF_MAX_CONCURRENT_REQUESTS:100}

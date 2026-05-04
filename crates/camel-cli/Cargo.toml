@@ -55,6 +55,7 @@ camel-dataformat-protobuf = { workspace = true, optional = true }
 camel-proto-compiler = { workspace = true, optional = true }
 camel-xslt = { workspace = true }
 camel-xj = { workspace = true }
+camel-component-cxf = { workspace = true }
 camel-language-js.workspace = true
 camel-language-jsonpath.workspace = true
 camel-language-rhai.workspace = true

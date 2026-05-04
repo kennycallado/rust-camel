@@ -74,7 +74,10 @@ pub(crate) fn json_from_optional_hash_values(values: Vec<Option<String>>) -> ser
 }
 
 #[allow(dead_code)]
-pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result<redis::Cmd, CamelError> {
+pub(crate) fn build_redis_cmd(
+    cmd: &RedisCommand,
+    exchange: &Exchange,
+) -> Result<redis::Cmd, CamelError> {
     if !is_hash_command(cmd) {
         return Err(CamelError::ProcessorError("Not a hash command".into()));
     }
@@ -564,10 +567,7 @@ mod tests {
 
     #[test]
     fn test_build_redis_cmd_hmset_missing_key() {
-        let ex = ex_with(&[(
-            "CamelRedis.Values",
-            serde_json::json!({"f1": "v1"}),
-        )]);
+        let ex = ex_with(&[("CamelRedis.Values", serde_json::json!({"f1": "v1"}))]);
         assert!(build_redis_cmd(&RedisCommand::Hmset, &ex).is_err());
     }
 

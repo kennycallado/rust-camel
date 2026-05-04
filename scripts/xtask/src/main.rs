@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 const MANDREL_IMAGE: &str = "quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21";
 const EXPECTED_BINARY: &str = "build/native/jms-bridge";
 const EXPECTED_BINARY_XML: &str = "build/native/xml-bridge";
+const EXPECTED_BINARY_CXF: &str = "build/native/cxf-bridge";
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "rust-camel build tasks")]
@@ -34,6 +35,15 @@ enum Commands {
         #[arg(long)]
         no_cache: bool,
     },
+    /// Build the CXF bridge native binary using Docker (Mandrel)
+    BuildCxfBridge {
+        /// Version tag to pass to build-native.sh (e.g. 0.2.0)
+        #[arg(long)]
+        version: Option<String>,
+        /// Clear Gradle cache before building
+        #[arg(long)]
+        no_cache: bool,
+    },
 }
 
 fn main() {
@@ -47,6 +57,12 @@ fn main() {
         }
         Commands::BuildXmlBridge { version, no_cache } => {
             if let Err(e) = build_xml_bridge(version, no_cache) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::BuildCxfBridge { version, no_cache } => {
+            if let Err(e) = build_cxf_bridge(version, no_cache) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -70,6 +86,10 @@ fn build_jms_bridge(version: Option<String>, no_cache: bool) -> Result<(), Strin
 
 fn build_xml_bridge(version: Option<String>, no_cache: bool) -> Result<(), String> {
     build_bridge("XML", "xml", EXPECTED_BINARY_XML, version, no_cache)
+}
+
+fn build_cxf_bridge(version: Option<String>, no_cache: bool) -> Result<(), String> {
+    build_bridge("CXF", "cxf", EXPECTED_BINARY_CXF, version, no_cache)
 }
 
 fn build_bridge(
@@ -145,6 +165,7 @@ fn build_bridge(
     let mut args = vec![
         "run".to_string(),
         "--rm".to_string(),
+        "--network=host".to_string(),
         format!("--volume={}:/project:z", bridge_dir.display()),
         "--workdir=/project".to_string(),
         "--env=GRADLE_USER_HOME=/project/.gradle-docker-cache".to_string(),

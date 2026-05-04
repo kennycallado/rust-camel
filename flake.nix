@@ -139,6 +139,12 @@
               export CAMEL_XML_BRIDGE_BINARY_PATH="$XML_BRIDGE_BIN"
             fi
 
+            # CXF bridge: auto-detect native binary
+            CXF_BRIDGE_BIN="$PWD/bridges/cxf/build/native/cxf-bridge"
+            if [ -x "$CXF_BRIDGE_BIN" ]; then
+              export CAMEL_CXF_BRIDGE_BINARY_PATH="$CXF_BRIDGE_BIN"
+            fi
+
             echo ""
             echo "  rust-camel dev shell"
             echo ""
@@ -153,6 +159,12 @@
             else
               echo "  XML bridge: not built"
               echo "    run: cargo xtask build-xml-bridge"
+            fi
+            if [ -x "$CXF_BRIDGE_BIN" ]; then
+              echo "  CXF bridge: ready"
+            else
+              echo "  CXF bridge: not built"
+              echo "    run: cargo xtask build-cxf-bridge"
             fi
             echo ""
           '';

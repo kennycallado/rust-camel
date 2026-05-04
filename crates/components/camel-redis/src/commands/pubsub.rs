@@ -46,9 +46,14 @@ pub(crate) fn extract_publish_message(exchange: &mut Exchange) -> Result<String,
 }
 
 #[allow(dead_code)]
-pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result<redis::Cmd, CamelError> {
+pub(crate) fn build_redis_cmd(
+    cmd: &RedisCommand,
+    exchange: &Exchange,
+) -> Result<redis::Cmd, CamelError> {
     if !is_pubsub_producer_command(cmd) {
-        return Err(CamelError::ProcessorError("Not a pubsub producer command".into()));
+        return Err(CamelError::ProcessorError(
+            "Not a pubsub producer command".into(),
+        ));
     }
 
     let redis_cmd = match cmd {

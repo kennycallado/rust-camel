@@ -175,6 +175,7 @@ publish_crate "camel-component-ws" "crates/components/camel-ws"
 publish_crate "camel-component-jms" "crates/components/camel-jms"
 publish_crate "camel-xslt" "crates/components/camel-xslt"
 publish_crate "camel-xj" "crates/components/camel-xj"
+publish_crate "camel-component-cxf" "crates/components/camel-cxf"
 publish_crate "camel-master" "crates/components/camel-master"
 
 # camel-config depends on camel-otel, camel-prometheus and many component crates

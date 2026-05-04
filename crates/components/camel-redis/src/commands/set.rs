@@ -72,7 +72,10 @@ pub(crate) fn json_from_members(values: Vec<String>) -> serde_json::Value {
 }
 
 #[allow(dead_code)]
-pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result<redis::Cmd, CamelError> {
+pub(crate) fn build_redis_cmd(
+    cmd: &RedisCommand,
+    exchange: &Exchange,
+) -> Result<redis::Cmd, CamelError> {
     if !is_set_command(cmd) {
         return Err(CamelError::ProcessorError("Not a set command".into()));
     }

@@ -1,0 +1,9 @@
+routes:
+  - id: "cxf-producer-hello"
+    from:
+      uri: "timer:hello-tick?period=10000"
+    steps:
+      - set-body:
+          constant: "<sayHello><name>World</name></sayHello>"
+      - to: "cxf://http://localhost:8080/hello?wsdl=wsdl/hello.wsdl&service={http://example.com/hello}HelloService&port={http://example.com/hello}HelloPort&operation=sayHello"
+      - log: "SOAP response: ${body}"

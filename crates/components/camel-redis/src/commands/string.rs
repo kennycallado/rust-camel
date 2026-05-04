@@ -62,7 +62,10 @@ pub(crate) fn json_array_from_optional_strings(values: Vec<Option<String>>) -> s
 }
 
 #[allow(dead_code)]
-pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result<redis::Cmd, CamelError> {
+pub(crate) fn build_redis_cmd(
+    cmd: &RedisCommand,
+    exchange: &Exchange,
+) -> Result<redis::Cmd, CamelError> {
     if !is_string_command(cmd) {
         return Err(CamelError::ProcessorError("Not a string command".into()));
     }

@@ -102,9 +102,14 @@ pub(crate) fn json_from_scored_members(values: Vec<(String, f64)>) -> serde_json
 }
 
 #[allow(dead_code)]
-pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result<redis::Cmd, CamelError> {
+pub(crate) fn build_redis_cmd(
+    cmd: &RedisCommand,
+    exchange: &Exchange,
+) -> Result<redis::Cmd, CamelError> {
     if !is_zset_command(cmd) {
-        return Err(CamelError::ProcessorError("Not a sorted set command".into()));
+        return Err(CamelError::ProcessorError(
+            "Not a sorted set command".into(),
+        ));
     }
 
     match cmd {
@@ -177,7 +182,10 @@ pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result
             let increment = resolve_zincr_increment(exchange);
             let member = require_value(exchange)?;
             let mut c = redis::Cmd::new();
-            c.arg("ZINCRBY").arg(key).arg(increment).arg(member.to_string());
+            c.arg("ZINCRBY")
+                .arg(key)
+                .arg(increment)
+                .arg(member.to_string());
             Ok(c)
         }
         RedisCommand::Zcount => {
@@ -226,13 +234,19 @@ pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result
         RedisCommand::Zunionstore => {
             let (dest, keys) = resolve_zstore_operands(exchange)?;
             let mut c = redis::Cmd::new();
-            c.arg("ZUNIONSTORE").arg(dest).arg(keys.len() as i64).arg(&keys);
+            c.arg("ZUNIONSTORE")
+                .arg(dest)
+                .arg(keys.len() as i64)
+                .arg(&keys);
             Ok(c)
         }
         RedisCommand::Zinterstore => {
             let (dest, keys) = resolve_zstore_operands(exchange)?;
             let mut c = redis::Cmd::new();
-            c.arg("ZINTERSTORE").arg(dest).arg(keys.len() as i64).arg(&keys);
+            c.arg("ZINTERSTORE")
+                .arg(dest)
+                .arg(keys.len() as i64)
+                .arg(&keys);
             Ok(c)
         }
         _ => unreachable!("non-zset commands rejected above"),

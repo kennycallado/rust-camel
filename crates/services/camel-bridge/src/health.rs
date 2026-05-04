@@ -80,10 +80,8 @@ mod tests {
     #[tokio::test]
     async fn wait_for_health_returns_ok_when_check_succeeds_immediately() {
         let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
-        let result = wait_for_health(&channel, Duration::from_secs(5), |_ch| async {
-            Ok(true)
-        })
-        .await;
+        let result =
+            wait_for_health(&channel, Duration::from_secs(5), |_ch| async { Ok(true) }).await;
         assert!(result.is_ok());
     }
 
@@ -98,11 +96,7 @@ mod tests {
             let c = counter_clone.clone();
             async move {
                 let prev = c.fetch_add(1, Ordering::SeqCst);
-                if prev < 2 {
-                    Ok(false)
-                } else {
-                    Ok(true)
-                }
+                if prev < 2 { Ok(false) } else { Ok(true) }
             }
         })
         .await;

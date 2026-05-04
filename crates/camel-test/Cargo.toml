@@ -33,6 +33,7 @@ camel-component-redis = { workspace = true, optional = true }
 camel-component-kafka = { workspace = true, optional = true }
 camel-component-sql = { workspace = true, optional = true }
 camel-component-jms = { workspace = true, optional = true }
+camel-component-cxf = { workspace = true, optional = true }
 camel-component-container = { workspace = true, optional = true }
 bollard = { version = "0.20", optional = true }
 camel-component-validator = { workspace = true, optional = true }
@@ -59,9 +60,11 @@ serde_json.workspace = true
 tempfile = "3"
 wiremock = "0.6"
 reqwest = { workspace = true }
+axum.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 redis = { version = "1", features = ["tokio-comp", "aio"] }
 toml.workspace = true
+futures.workspace = true
 
 [features]
 integration-tests = [
@@ -73,6 +76,7 @@ integration-tests = [
     "dep:camel-component-sql",
     "dep:sqlx",
     "dep:camel-component-jms",
+    "dep:camel-component-cxf",
     "dep:camel-component-container",
     "dep:bollard",
     "dep:camel-component-validator",

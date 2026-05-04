@@ -638,7 +638,9 @@ mod tests {
         let consumer = RedisConsumer::new(config);
 
         match &consumer.mode {
-            RedisConsumerMode::Queue { key, pop_command, .. } => {
+            RedisConsumerMode::Queue {
+                key, pop_command, ..
+            } => {
                 assert_eq!(key, "queue");
                 assert_eq!(*pop_command, QueuePopCommand::Brpop);
             }

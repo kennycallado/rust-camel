@@ -462,7 +462,9 @@ mod tests {
     async fn test_grpc_item_stream_yields_message() {
         let (tx, rx) = mpsc::channel::<GrpcStreamItem>(4);
         let mut stream = GrpcItemStream { rx };
-        tx.send(GrpcStreamItem::Message(vec![1, 2, 3])).await.unwrap();
+        tx.send(GrpcStreamItem::Message(vec![1, 2, 3]))
+            .await
+            .unwrap();
         drop(tx);
         let item = stream.next().await.unwrap().unwrap();
         assert_eq!(item, vec![1, 2, 3]);
@@ -474,7 +476,9 @@ mod tests {
         let (tx, rx) = mpsc::channel::<GrpcStreamItem>(4);
         let mut stream = GrpcItemStream { rx };
         let status = Status::internal("test error");
-        tx.send(GrpcStreamItem::Error(status.clone())).await.unwrap();
+        tx.send(GrpcStreamItem::Error(status.clone()))
+            .await
+            .unwrap();
         drop(tx);
         let item = stream.next().await.unwrap();
         assert!(item.is_err());

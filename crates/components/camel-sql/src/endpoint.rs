@@ -83,9 +83,8 @@ mod tests {
 
     #[test]
     fn new_stores_uri_and_config() {
-        let config =
-            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test")
-                .expect("valid config");
+        let config = SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test")
+            .expect("valid config");
         let endpoint = SqlEndpoint::new("sql:select 1".to_string(), config.clone());
         assert_eq!(endpoint.uri(), "sql:select 1");
         assert_eq!(endpoint.config.db_url, "postgres://localhost/test");
@@ -114,9 +113,8 @@ mod tests {
 
     #[test]
     fn pool_is_shared_via_arc() {
-        let config =
-            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test")
-                .expect("valid config");
+        let config = SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test")
+            .expect("valid config");
         let endpoint = SqlEndpoint::new("sql:select 1".to_string(), config);
         let pool_ref1 = Arc::clone(&endpoint.pool);
         let pool_ref2 = Arc::clone(&endpoint.pool);

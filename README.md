@@ -8,7 +8,7 @@ A Rust-native, Tower-native integration framework inspired by [Apache Camel](htt
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `redis`, `sql`, `jms`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`.
+Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`.
 
 ## Architecture
 
@@ -161,7 +161,7 @@ cargo run
 ## Crate Map
 
 | Crate                       | Description                                                                                                                                                                       |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- | ----------------------------------- |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `camel-api`                 | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent`, `FromBody`, `impl_from_body_via_serde!` |
 | `camel-core`                | Runtime engine with DDD/CQRS: `CamelContext`, domain aggregates, ports, adapters, event journal                                                                                   |
 | `camel-config`              | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns                                                                                                  |
@@ -188,13 +188,13 @@ cargo run
 | `camel-redis`               | Redis producer and consumer                                                                                                                                                       |
 | `camel-sql`                 | SQL producer/consumer with IN clause separator, SSL/TLS, streaming result support                                                                                                 |
 | `camel-jms`                 | JMS producer and consumer via native-image bridge (ActiveMQ Classic, Artemis)                                                                                                     |
-| `camel-component-cxf`       | SOAP/Web Services via Apache CXF bridge: SOAP 1.1/1.2, WSDL, WS-Security, PAYLOAD mode                                                                                            |
+| `camel-component-cxf`       | SOAP/Web Services via Apache CXF native-image bridge: SOAP 1.1/1.2, WSDL, WS-Security, PAYLOAD mode                                                                               |
 | `camel-grpc`                | gRPC producer and consumer with dynamic proto resolution, unary + server/client/bidi streaming                                                                                    |
 | `camel-xslt`                | XSLT 3.0 transformation via xml-bridge (`xslt:<stylesheet>`) — [example](examples/xslt-example/README.md)                                                                         |
 | `camel-xj`                  | XML↔JSON conversion via xml-bridge (`xj:<stylesheet>?direction=xml2json\|json2xml`) — [example](examples/xj-example/README.md)                                                   |
 | `camel-container`           | Docker container producer/consumer via `bollard`. Container lifecycle, volume mounts, exec, network operations                                                                    |
 | `camel-language-api`        | Language trait API: `Language`, `Expression`, `Predicate`                                                                                                                         |
-| `camel-language-simple`     | Simple Language: `${header.x}`, `${body}`, operators, `&&`/`                                                                                                                      |     | `, boolean literals, null semantics |
+| `camel-language-simple`     | Simple Language: `${header.x}`, `${body}`, operators, `&&`/\`||\`, boolean literals, null semantics                                                                               |
 | `camel-language-js`         | JavaScript scripting language for expressions and side effects                                                                                                                    |
 | `camel-language-rhai`       | Rhai scripting language for full expression power                                                                                                                                 |
 | `camel-language-jsonpath`   | RFC 9535 JSONPath expressions: `$.items[*].price`. Requires `lang-jsonpath` feature.                                                                                              |

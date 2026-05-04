@@ -83,7 +83,10 @@ pub(crate) fn json_from_optional_pair_value(value: Option<(String, String)>) -> 
 }
 
 #[allow(dead_code)]
-pub(crate) fn build_redis_cmd(cmd: &RedisCommand, exchange: &Exchange) -> Result<redis::Cmd, CamelError> {
+pub(crate) fn build_redis_cmd(
+    cmd: &RedisCommand,
+    exchange: &Exchange,
+) -> Result<redis::Cmd, CamelError> {
     if !is_list_command(cmd) {
         return Err(CamelError::ProcessorError("Not a list command".into()));
     }
@@ -856,5 +859,4 @@ mod tests {
         let err = build_redis_cmd(&RedisCommand::Linsert, &ex).unwrap_err();
         assert!(err.to_string().contains("CamelRedis.Pivot"));
     }
-
 }

@@ -263,6 +263,29 @@ async fn run(
         }
     };
 
+    let cxf_pool = {
+        let raw = camel_config
+            .components
+            .raw
+            .get("cxf")
+            .cloned()
+            .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+        match <camel_component_cxf::CxfBundle as camel_component_api::ComponentBundle>::from_toml(
+            raw,
+        ) {
+            Ok(bundle) => {
+                let pool = bundle.pool();
+                <camel_component_cxf::CxfBundle as camel_component_api::ComponentBundle>::register_all(bundle, &mut ctx);
+                pool
+            }
+            Err(e) => {
+                return Err(camel_api::CamelError::Config(format!(
+                    "Failed to load cxf config: {e}"
+                )));
+            }
+        }
+    };
+
     #[cfg(feature = "kafka")]
     register_bundle!(ctx, camel_config, camel_component_kafka::KafkaBundle);
     register_bundle!(ctx, camel_config, camel_master::MasterBundle);
@@ -366,6 +389,10 @@ async fn run(
 
     if let Err(e) = jms_pool.shutdown().await {
         tracing::error!("JMS pool shutdown error: {e}");
+    }
+
+    if let Err(e) = cxf_pool.shutdown().await {
+        tracing::error!("CXF pool shutdown error: {e}");
     }
 
     tracing::info!("camel-cli: stopped");

@@ -1,0 +1,8 @@
+routes:
+  - id: "cxf-consumer-hello"
+    from:
+      uri: "cxf://http://0.0.0.0:9090/hello?wsdl=wsdl/hello.wsdl&service={http://example.com/hello}HelloService&port={http://example.com/hello}HelloPort"
+    steps:
+      - log: "Received SOAP request: ${body}"
+      - set-body:
+          simple: "<sayHelloResponse><message>Hello from rust-camel!</message></sayHelloResponse>"

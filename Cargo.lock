@@ -848,6 +848,7 @@ dependencies = [
  "camel-component-api",
  "camel-component-container",
  "camel-component-controlbus",
+ "camel-component-cxf",
  "camel-component-direct",
  "camel-component-file",
  "camel-component-grpc",
@@ -929,6 +930,34 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "camel-component-cxf"
+version = "0.7.7"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "camel-bridge",
+ "camel-component-api",
+ "camel-component-cxf",
+ "dashmap 6.1.0",
+ "futures",
+ "prost",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1529,6 +1558,7 @@ dependencies = [
 name = "camel-test"
 version = "0.7.7"
 dependencies = [
+ "axum",
  "bollard",
  "camel-api",
  "camel-bean",
@@ -1536,6 +1566,7 @@ dependencies = [
  "camel-component-api",
  "camel-component-container",
  "camel-component-controlbus",
+ "camel-component-cxf",
  "camel-component-direct",
  "camel-component-file",
  "camel-component-http",
@@ -1560,6 +1591,7 @@ dependencies = [
  "camel-processor",
  "camel-xj",
  "camel-xslt",
+ "futures",
  "k8s-openapi",
  "kube",
  "redis",

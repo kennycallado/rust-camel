@@ -1,0 +1,64 @@
+syntax = "proto3";
+package cxf_bridge;
+
+option java_package = "cxf_bridge";
+option java_multiple_files = true;
+
+service CxfBridge {
+  // Producer: invoke a SOAP operation via CXF Dispatch client
+  rpc Invoke(SoapRequest) returns (SoapResponse);
+
+  // Consumer: bidirectional stream for hosting SOAP endpoints.
+  // Rust sends ConsumerResponse (route processing result),
+  // Bridge sends ConsumerRequest (incoming SOAP request).
+  rpc OpenConsumerStream(stream ConsumerResponse) returns (stream ConsumerRequest);
+
+  // Health check (consistent with JMS/XML bridge pattern)
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// Producer request: invoke a SOAP operation
+message SoapRequest {
+  string wsdl_path = 1;
+  string address = 8;
+  string service_name = 2;
+  string port_name = 3;
+  string operation = 4;
+  bytes payload = 5; // XML body (unwrapped — bridge handles envelope)
+  map<string, string> headers = 6;
+  int32 timeout_ms = 7; // per-request timeout (0 = use default 30s)
+}
+
+// Producer response
+message SoapResponse {
+  bytes payload = 1; // XML body response (or fault XML)
+  map<string, string> headers = 2;
+  bool fault = 3;
+  string fault_code = 4; // e.g. "soap:Server", "soap:Client"
+  string fault_string = 5; // human-readable fault message
+}
+
+// Bridge → Rust: incoming SOAP request (consumer mode)
+message ConsumerRequest {
+  string request_id = 1; // UUID for correlation
+  string operation = 2;
+  bytes payload = 3; // XML body
+  map<string, string> headers = 4;
+  string soap_action = 5;
+}
+
+// Rust → Bridge: route processing result (consumer mode)
+message ConsumerResponse {
+  string request_id = 1; // must match ConsumerRequest.request_id
+  bytes payload = 2; // XML body response
+  bool fault = 3; // true = return SOAP fault
+  string fault_code = 4;
+  string fault_string = 5;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string message = 2;
+}

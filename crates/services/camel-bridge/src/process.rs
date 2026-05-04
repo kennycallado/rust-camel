@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-use crate::spec::{BridgeSpec, JMS_BRIDGE, XML_BRIDGE};
+use crate::spec::{BridgeSpec, CXF_BRIDGE, JMS_BRIDGE, XML_BRIDGE};
 
 #[derive(Debug, Error)]
 pub enum BridgeError {
@@ -111,6 +111,58 @@ impl BridgeProcessConfig {
             password: None,
             start_timeout_ms,
             env_vars: vec![],
+        }
+    }
+
+    /// Constructor for the CXF bridge.
+    #[allow(clippy::too_many_arguments)]
+    pub fn cxf(
+        binary_path: PathBuf,
+        wsdl: String,
+        service: String,
+        port: String,
+        security_username: Option<String>,
+        security_password: Option<String>,
+        keystore_path: Option<String>,
+        keystore_password: Option<String>,
+        truststore_path: Option<String>,
+        truststore_password: Option<String>,
+        start_timeout_ms: u64,
+    ) -> Self {
+        let mut env_vars = vec![
+            ("CXF_WSDL_PATH".to_string(), wsdl),
+            ("CXF_SERVICE_NAME".to_string(), service),
+            ("CXF_PORT_NAME".to_string(), port),
+        ];
+
+        if let Some(v) = security_username {
+            env_vars.push(("CXF_SECURITY_USERNAME".to_string(), v));
+        }
+        if let Some(v) = security_password {
+            env_vars.push(("CXF_SECURITY_PASSWORD".to_string(), v));
+        }
+        if let Some(v) = keystore_path {
+            env_vars.push(("CXF_KEYSTORE_PATH".to_string(), v));
+        }
+        if let Some(v) = keystore_password {
+            env_vars.push(("CXF_KEYSTORE_PASSWORD".to_string(), v));
+        }
+        if let Some(v) = truststore_path {
+            env_vars.push(("CXF_TRUSTSTORE_PATH".to_string(), v));
+        }
+        if let Some(v) = truststore_password {
+            env_vars.push(("CXF_TRUSTSTORE_PASSWORD".to_string(), v));
+        }
+
+        Self {
+            spec: &CXF_BRIDGE,
+            binary_path,
+            broker_url: String::new(),
+            broker_type: BrokerType::Generic,
+            username: None,
+            password: None,
+            start_timeout_ms,
+            env_vars,
         }
     }
 }
@@ -319,5 +371,64 @@ mod tests {
     fn xml_constructor_uses_xml_spec() {
         let cfg = BridgeProcessConfig::xml(PathBuf::from("/tmp/xml-bridge"), 1000);
         assert_eq!(cfg.spec.name, "xml-bridge");
+    }
+
+    #[test]
+    fn cxf_constructor_uses_cxf_spec() {
+        let cfg = BridgeProcessConfig::cxf(
+            PathBuf::from("/tmp/cxf-bridge"),
+            "service.wsdl".into(),
+            "{http://example.com}Service".into(),
+            "{http://example.com}Port".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            15_000,
+        );
+        assert_eq!(cfg.spec.name, "cxf-bridge");
+        assert!(cfg.broker_url.is_empty());
+        assert_eq!(cfg.broker_type, BrokerType::Generic);
+        assert!(cfg.username.is_none());
+        assert!(cfg.password.is_none());
+        assert_eq!(cfg.env_vars.len(), 3);
+        assert_eq!(cfg.env_vars[0].0, "CXF_WSDL_PATH");
+        assert_eq!(cfg.env_vars[0].1, "service.wsdl");
+        assert_eq!(cfg.env_vars[1].0, "CXF_SERVICE_NAME");
+        assert_eq!(cfg.env_vars[1].1, "{http://example.com}Service");
+        assert_eq!(cfg.env_vars[2].0, "CXF_PORT_NAME");
+        assert_eq!(cfg.env_vars[2].1, "{http://example.com}Port");
+    }
+
+    #[test]
+    fn cxf_constructor_passes_security_env_vars() {
+        let cfg = BridgeProcessConfig::cxf(
+            PathBuf::from("/tmp/cxf-bridge"),
+            "svc.wsdl".into(),
+            "Svc".into(),
+            "Port".into(),
+            Some("alice".into()),
+            Some("secret".into()),
+            Some("/keys/keystore.jks".into()),
+            Some("ksPass".into()),
+            Some("/keys/truststore.jks".into()),
+            Some("tsPass".into()),
+            15_000,
+        );
+        assert_eq!(cfg.env_vars.len(), 9);
+        assert_eq!(cfg.env_vars[3].0, "CXF_SECURITY_USERNAME");
+        assert_eq!(cfg.env_vars[3].1, "alice");
+        assert_eq!(cfg.env_vars[4].0, "CXF_SECURITY_PASSWORD");
+        assert_eq!(cfg.env_vars[4].1, "secret");
+        assert_eq!(cfg.env_vars[5].0, "CXF_KEYSTORE_PATH");
+        assert_eq!(cfg.env_vars[5].1, "/keys/keystore.jks");
+        assert_eq!(cfg.env_vars[6].0, "CXF_KEYSTORE_PASSWORD");
+        assert_eq!(cfg.env_vars[6].1, "ksPass");
+        assert_eq!(cfg.env_vars[7].0, "CXF_TRUSTSTORE_PATH");
+        assert_eq!(cfg.env_vars[7].1, "/keys/truststore.jks");
+        assert_eq!(cfg.env_vars[8].0, "CXF_TRUSTSTORE_PASSWORD");
+        assert_eq!(cfg.env_vars[8].1, "tsPass");
     }
 }
