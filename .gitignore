@@ -3,3 +3,5 @@
 /.worktrees
 docs/
 bridges/*/build/
+bridges/*/.gradle/
+bridges/*/.gradle-docker-cache/
