@@ -1,51 +1,28 @@
 [
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapBinding"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapAddress"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapBody"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapFault"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapHeader"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapHeaderFault"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapOperation"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapBinding",
-    "javax.wsdl.extensions.ExtensibilityElement"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapAddress",
-    "javax.wsdl.extensions.ExtensibilityElement"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapBody",
-    "javax.wsdl.extensions.ExtensibilityElement"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapFault",
-    "javax.wsdl.extensions.ExtensibilityElement"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapHeader",
-    "javax.wsdl.extensions.ExtensibilityElement"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapHeaderFault",
-    "javax.wsdl.extensions.ExtensibilityElement"
-  ],
-  [
-    "org.apache.cxf.binding.soap.wsdl.extensions.SoapOperation",
-    "javax.wsdl.extensions.ExtensibilityElement"
-  ]
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapBinding", "javax.wsdl.extensions.ExtensibilityElement"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapAddress", "javax.wsdl.extensions.ExtensibilityElement"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapBody", "javax.wsdl.extensions.ExtensibilityElement"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapFault", "javax.wsdl.extensions.ExtensibilityElement"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapHeader", "javax.wsdl.extensions.ExtensibilityElement"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapHeaderFault", "javax.wsdl.extensions.ExtensibilityElement"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapOperation", "javax.wsdl.extensions.ExtensibilityElement"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapBinding"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapAddress"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapBody"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapFault"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapHeader"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapHeaderFault"],
+  ["org.apache.cxf.binding.soap.wsdl.extensions.SoapOperation"],
+  ["javax.wsdl.extensions.soap.SOAPBinding"],
+  ["javax.wsdl.extensions.soap.SOAPAddress"],
+  ["javax.wsdl.extensions.soap.SOAPBody"],
+  ["javax.wsdl.extensions.soap.SOAPFault"],
+  ["javax.wsdl.extensions.soap.SOAPHeader"],
+  ["javax.wsdl.extensions.soap.SOAPHeaderFault"],
+  ["javax.wsdl.extensions.soap.SOAPOperation"],
+  ["org.apache.cxf.common.jaxb.JAXBContextProxy"],
+  ["org.apache.cxf.common.jaxb.JAXBBeanInfo"],
+  ["org.apache.cxf.common.jaxb.JAXBUtils$BridgeWrapper"],
+  ["org.apache.cxf.common.jaxb.JAXBUtils$SchemaCompiler"],
+  ["org.apache.cxf.common.util.ASMHelper$ClassWriter"]
 ]

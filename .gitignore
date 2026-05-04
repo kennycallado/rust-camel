@@ -2,3 +2,4 @@
 /docs
 /.worktrees
 docs/
+bridges/*/build/

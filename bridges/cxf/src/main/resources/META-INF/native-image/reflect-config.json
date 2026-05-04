@@ -52,5 +52,13 @@
   {"name": "com.ibm.wsdl.extensions.soap12.SOAP12HeaderFaultImpl", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allPublicMethods": true},
   {"name": "com.ibm.wsdl.extensions.soap12.SOAP12OperationImpl", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allPublicMethods": true},
   {"name": "org.apache.wss4j.common.crypto.Merlin", "allDeclaredConstructors": true, "allDeclaredMethods": true},
-  {"name": "org.apache.wss4j.common.ext.WSPasswordCallback", "allDeclaredConstructors": true, "allDeclaredMethods": true}
+  {"name": "org.apache.wss4j.common.ext.WSPasswordCallback", "allDeclaredConstructors": true, "allDeclaredMethods": true},
+  {"name": "org.apache.cxf.binding.soap.wsdl.extensions.SoapBinding", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "org.apache.cxf.binding.soap.wsdl.extensions.SoapAddress", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "org.apache.cxf.binding.soap.wsdl.extensions.SoapBody", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "org.apache.cxf.binding.soap.wsdl.extensions.SoapFault", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "org.apache.cxf.binding.soap.wsdl.extensions.SoapHeader", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "org.apache.cxf.binding.soap.wsdl.extensions.SoapHeaderFault", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "org.apache.cxf.binding.soap.wsdl.extensions.SoapOperation", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true},
+  {"name": "javax.wsdl.extensions.ExtensibilityElement", "allDeclaredConstructors": true, "allDeclaredMethods": true, "allDeclaredFields": true}
 ]

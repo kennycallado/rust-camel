@@ -142,6 +142,16 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       "org.eclipse.angus.activation.MailcapRegistryProviderImpl",
       "org.eclipse.angus.activation.MimeTypeRegistryProviderImpl",
 
+      // --- CXF SOAP WSDL extension impls (ExtensionRegistry proxies) ---
+      "org.apache.cxf.binding.soap.wsdl.extensions.SoapBinding",
+      "org.apache.cxf.binding.soap.wsdl.extensions.SoapAddress",
+      "org.apache.cxf.binding.soap.wsdl.extensions.SoapBody",
+      "org.apache.cxf.binding.soap.wsdl.extensions.SoapFault",
+      "org.apache.cxf.binding.soap.wsdl.extensions.SoapHeader",
+      "org.apache.cxf.binding.soap.wsdl.extensions.SoapHeaderFault",
+      "org.apache.cxf.binding.soap.wsdl.extensions.SoapOperation",
+      "javax.wsdl.extensions.ExtensibilityElement",
+
       // --- WS-Security / WSS4J ---
       "org.apache.wss4j.common.crypto.Merlin",
       "org.apache.wss4j.common.crypto.CryptoFactory",
