@@ -114,10 +114,10 @@ docker pull kennycallado/rust-camel:latest
 
 Two image variants are published per release:
 
-| Tag suffix | Base | Use case |
-|------------|------|----------|
-| *(none)* | scratch | Production. Minimal attack surface. |
-| `-alpine` | alpine:3.21 | Debugging. Includes busybox shell. |
+| Tag suffix | Base        | Use case                            |
+| ---------- | ----------- | ----------------------------------- |
+| _(none)_   | scratch     | Production. Minimal attack surface. |
+| `-alpine`  | alpine:3.21 | Debugging. Includes busybox shell.  |
 
 Both variants support `linux/amd64` and `linux/arm64`.
 
@@ -160,46 +160,47 @@ cargo run
 
 ## Crate Map
 
-| Crate                     | Description                                                                                                                                                                       |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `camel-api`               | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent`, `FromBody`, `impl_from_body_via_serde!` |
-| `camel-core`              | Runtime engine with DDD/CQRS: `CamelContext`, domain aggregates, ports, adapters, event journal                                                                                   |
-| `camel-config`            | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns                                                                                                  |
-| `camel-builder`           | Fluent `RouteBuilder` API                                                                                                                                                         |
-| `camel-component`         | `Component`, `Endpoint`, `Consumer` traits                                                                                                                                        |
-| `camel-processor`         | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody`, `Marshal`/`Unmarshal` + Tower `Layer` types                         |
-| `camel-endpoint`          | Endpoint URI parsing utilities; `UriConfig` derive macro for typed component config                                                                                               |
-| `camel-endpoint-macros`   | Proc-macro crate backing `#[derive(UriConfig)]`                                                                                                                                   |
-| `camel-bean`              | Bean/Registry system for dependency injection and business logic integration                                                                                                      |
-| `camel-bean-macros`       | Proc-macro crate for `#[bean]` attribute                                                                                                                                          |
-| `camel-dsl`               | YAML DSL: load and run routes from `.yaml` files                                                                                                                                  |
-| `camel-health`            | Health check types and endpoint support                                                                                                                                           |
-| `camel-platform-kubernetes` | Kubernetes-native platform SPI: leader election, readiness gates, pod identity |
-| `camel-timer`             | Timer source component                                                                                                                                                            |
-| `camel-log`               | Log sink component                                                                                                                                                                |
-| `camel-direct`            | In-memory synchronous component                                                                                                                                                   |
-| `camel-mock`              | Test component with assertions on received exchanges (`await_exchanges`, `ExchangeAssert`)                                                                                        |
-| `camel-test`              | Integration test harness                                                                                                                                                          |
-| `camel-controlbus`        | Control routes dynamically from within routes                                                                                                                                     |
-| `camel-validator`         | Validate body against JSON/YAML schemas, plus XSD via xml-bridge                                                                                                                  |
-| `camel-http`              | HTTP producer (client) and HTTP consumer (server, native streaming)                                                                                                               |
-| `camel-file`              | File producer and consumer                                                                                                                                                        |
-| `camel-kafka`             | Kafka producer and consumer with SSL/SASL and manual commit                                                                                                                       |
-| `camel-redis`             | Redis producer and consumer                                                                                                                                                       |
-| `camel-sql`               | SQL producer/consumer with IN clause separator, SSL/TLS, streaming result support                                                                                                 |
-| `camel-jms`               | JMS producer and consumer via native-image bridge (ActiveMQ Classic, Artemis)                                                                                                     |
-| `camel-grpc`              | gRPC producer and consumer with dynamic proto resolution, unary + server/client/bidi streaming                                                                                  |
-| `camel-xslt`              | XSLT 3.0 transformation via xml-bridge (`xslt:<stylesheet>`) — [example](examples/xslt-example/README.md)                                                                        |
-| `camel-xj`                | XML↔JSON conversion via xml-bridge (`xj:<stylesheet>?direction=xml2json\|json2xml`) — [example](examples/xj-example/README.md)                                                  |
-| `camel-container`         | Docker container producer/consumer via `bollard`. Container lifecycle, volume mounts, exec, network operations                                                                   |
-| `camel-language-api`      | Language trait API: `Language`, `Expression`, `Predicate`                                                                                                                         |
-| `camel-language-simple`   | Simple Language: `${header.x}`, `${body}`, operators, `&&`/`||`, boolean literals, null semantics                                                                                                                              |
-| `camel-language-js`       | JavaScript scripting language for expressions and side effects                                                                                                                    |
-| `camel-language-rhai`     | Rhai scripting language for full expression power                                                                                                                                 |
-| `camel-language-jsonpath` | RFC 9535 JSONPath expressions: `$.items[*].price`. Requires `lang-jsonpath` feature.                                                                                              |
-| `camel-language-xpath`    | XPath 1.0 language for XML body queries: `/books/book[1]/title`. Requires `lang-xpath` feature.                                                                                   |
-| `camel-prometheus`        | Prometheus metrics exporter with /metrics endpoint                                                                                                                                |
-| `camel-otel`              | OpenTelemetry tracing and metrics exporter                                                                                                                                        |
+| Crate                       | Description                                                                                                                                                                       |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- | ----------------------------------- |
+| `camel-api`                 | Core types: `Exchange`, `Message`, `Body`, `CamelError`, `BoxProcessor`, `ProcessorFn`, `RuntimeCommand`, `RuntimeQuery`, `RuntimeEvent`, `FromBody`, `impl_from_body_via_serde!` |
+| `camel-core`                | Runtime engine with DDD/CQRS: `CamelContext`, domain aggregates, ports, adapters, event journal                                                                                   |
+| `camel-config`              | Configuration: `CamelConfig`, route discovery from YAML files with glob patterns                                                                                                  |
+| `camel-builder`             | Fluent `RouteBuilder` API                                                                                                                                                         |
+| `camel-component`           | `Component`, `Endpoint`, `Consumer` traits                                                                                                                                        |
+| `camel-processor`           | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody`, `Marshal`/`Unmarshal` + Tower `Layer` types                         |
+| `camel-endpoint`            | Endpoint URI parsing utilities; `UriConfig` derive macro for typed component config                                                                                               |
+| `camel-endpoint-macros`     | Proc-macro crate backing `#[derive(UriConfig)]`                                                                                                                                   |
+| `camel-bean`                | Bean/Registry system for dependency injection and business logic integration                                                                                                      |
+| `camel-bean-macros`         | Proc-macro crate for `#[bean]` attribute                                                                                                                                          |
+| `camel-dsl`                 | YAML DSL: load and run routes from `.yaml` files                                                                                                                                  |
+| `camel-health`              | Health check types and endpoint support                                                                                                                                           |
+| `camel-platform-kubernetes` | Kubernetes-native platform SPI: leader election, readiness gates, pod identity                                                                                                    |
+| `camel-timer`               | Timer source component                                                                                                                                                            |
+| `camel-log`                 | Log sink component                                                                                                                                                                |
+| `camel-direct`              | In-memory synchronous component                                                                                                                                                   |
+| `camel-mock`                | Test component with assertions on received exchanges (`await_exchanges`, `ExchangeAssert`)                                                                                        |
+| `camel-test`                | Integration test harness                                                                                                                                                          |
+| `camel-controlbus`          | Control routes dynamically from within routes                                                                                                                                     |
+| `camel-validator`           | Validate body against JSON/YAML schemas, plus XSD via xml-bridge                                                                                                                  |
+| `camel-http`                | HTTP producer (client) and HTTP consumer (server, native streaming)                                                                                                               |
+| `camel-file`                | File producer and consumer                                                                                                                                                        |
+| `camel-kafka`               | Kafka producer and consumer with SSL/SASL and manual commit                                                                                                                       |
+| `camel-redis`               | Redis producer and consumer                                                                                                                                                       |
+| `camel-sql`                 | SQL producer/consumer with IN clause separator, SSL/TLS, streaming result support                                                                                                 |
+| `camel-jms`                 | JMS producer and consumer via native-image bridge (ActiveMQ Classic, Artemis)                                                                                                     |
+| `camel-component-cxf`       | SOAP/Web Services via Apache CXF bridge: SOAP 1.1/1.2, WSDL, WS-Security, PAYLOAD mode                                                                                            |
+| `camel-grpc`                | gRPC producer and consumer with dynamic proto resolution, unary + server/client/bidi streaming                                                                                    |
+| `camel-xslt`                | XSLT 3.0 transformation via xml-bridge (`xslt:<stylesheet>`) — [example](examples/xslt-example/README.md)                                                                         |
+| `camel-xj`                  | XML↔JSON conversion via xml-bridge (`xj:<stylesheet>?direction=xml2json\|json2xml`) — [example](examples/xj-example/README.md)                                                   |
+| `camel-container`           | Docker container producer/consumer via `bollard`. Container lifecycle, volume mounts, exec, network operations                                                                    |
+| `camel-language-api`        | Language trait API: `Language`, `Expression`, `Predicate`                                                                                                                         |
+| `camel-language-simple`     | Simple Language: `${header.x}`, `${body}`, operators, `&&`/`                                                                                                                      |     | `, boolean literals, null semantics |
+| `camel-language-js`         | JavaScript scripting language for expressions and side effects                                                                                                                    |
+| `camel-language-rhai`       | Rhai scripting language for full expression power                                                                                                                                 |
+| `camel-language-jsonpath`   | RFC 9535 JSONPath expressions: `$.items[*].price`. Requires `lang-jsonpath` feature.                                                                                              |
+| `camel-language-xpath`      | XPath 1.0 language for XML body queries: `/books/book[1]/title`. Requires `lang-xpath` feature.                                                                                   |
+| `camel-prometheus`          | Prometheus metrics exporter with /metrics endpoint                                                                                                                                |
+| `camel-otel`                | OpenTelemetry tracing and metrics exporter                                                                                                                                        |
 
 ## Building & Testing
 
@@ -221,23 +222,23 @@ Requires `cargo-llvm-cov`. Coverage baseline is enforced via `coverage.toml` (cu
 
 ## Implemented EIP Patterns
 
-| Pattern              | Builder Method                      | Description                                                                                                    |
-| -------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Aggregator           | `.aggregate(config)`                | Correlate and aggregate exchanges with size/timeout completion, expression correlation, force-complete-on-stop |
-| Content-Based Router | `.choice()` / `.when()`             | Route based on exchange content                                                                                |
-| Delayer              | `.delay()` / `delay:`               | Fixed or dynamic delay (header-based)                                                                          |
-| Dynamic Router       | `.dynamic_router(expr)`             | Expression-based routing with slip pattern                                                                     |
-| Routing Slip         | `.routing_slip(expr)`               | Route through a sequence of endpoints determined at runtime                                                    |
-| Filter               | `.filter(predicate)`                | Forward exchange only when predicate is true                                                                   |
-| Load Balancer        | `.load_balance()`                   | Distribute across endpoints with RoundRobin/Random/Weighted/Failover                                           |
-| Loop                 | `.loop_count(n)` / `loop:`          | Iterate a sub-pipeline N times or while a predicate holds true                                                |
-| Marshal / Unmarshal  | `.marshal(fmt)` / `.unmarshal(fmt)` | Serialize/deserialize bodies using pluggable data formats (JSON, XML)                                          |
-| Multicast            | `.multicast()`                      | Send the same exchange to multiple endpoints                                                                   |
-| RecipientList        | `.recipient_list(config)`           | Dynamically resolve endpoint URIs from an expression at runtime                                                |
-| Splitter             | `.split(config)`                    | Split one exchange into multiple fragments                                                                     |
-| Stream Cache         | `.stream_cache(n)` / `stream_cache:` | Materialize `Body::Stream` into `Body::Bytes` with configurable threshold (128 KB default)                   |
-| Throttler            | `.throttle(n, duration)`            | Rate limiting with Delay/Reject/Drop strategies                                                                |
-| WireTap              | `.wire_tap(uri)`                    | Fire-and-forget copy to a tap endpoint                                                                         |
+| Pattern              | Builder Method                       | Description                                                                                                    |
+| -------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| Aggregator           | `.aggregate(config)`                 | Correlate and aggregate exchanges with size/timeout completion, expression correlation, force-complete-on-stop |
+| Content-Based Router | `.choice()` / `.when()`              | Route based on exchange content                                                                                |
+| Delayer              | `.delay()` / `delay:`                | Fixed or dynamic delay (header-based)                                                                          |
+| Dynamic Router       | `.dynamic_router(expr)`              | Expression-based routing with slip pattern                                                                     |
+| Routing Slip         | `.routing_slip(expr)`                | Route through a sequence of endpoints determined at runtime                                                    |
+| Filter               | `.filter(predicate)`                 | Forward exchange only when predicate is true                                                                   |
+| Load Balancer        | `.load_balance()`                    | Distribute across endpoints with RoundRobin/Random/Weighted/Failover                                           |
+| Loop                 | `.loop_count(n)` / `loop:`           | Iterate a sub-pipeline N times or while a predicate holds true                                                 |
+| Marshal / Unmarshal  | `.marshal(fmt)` / `.unmarshal(fmt)`  | Serialize/deserialize bodies using pluggable data formats (JSON, XML)                                          |
+| Multicast            | `.multicast()`                       | Send the same exchange to multiple endpoints                                                                   |
+| RecipientList        | `.recipient_list(config)`            | Dynamically resolve endpoint URIs from an expression at runtime                                                |
+| Splitter             | `.split(config)`                     | Split one exchange into multiple fragments                                                                     |
+| Stream Cache         | `.stream_cache(n)` / `stream_cache:` | Materialize `Body::Stream` into `Body::Bytes` with configurable threshold (128 KB default)                     |
+| Throttler            | `.throttle(n, duration)`             | Rate limiting with Delay/Reject/Drop strategies                                                                |
+| WireTap              | `.wire_tap(uri)`                     | Fire-and-forget copy to a tap endpoint                                                                         |
 
 Run an example:
 
