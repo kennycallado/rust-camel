@@ -1,30 +1,50 @@
 ## CRITICAL
 
-- Always read (/home/kenny/.config/opencode/instructions/agent/behavior.md)
+- Always read .opencode/instructions/behavior.md
+- If you have access to caveman skill, activate it
 - Never add to staging something that is in .gitignore
 
 ## IMPORTANT
 
-- When user explicitly requests: **"ORCHESTRATE"** must read (/home/kenny/.config/opencode/instructions/agent/orchestrator.md)
-- Also explicitly requests: "ULTRATHINK" must read (/home/kenny/.config/opencode/instructions/agent/ultrathink.md)
-- Code review critical or important issues always should be resolved before continue
-- When implementing a new feature remember this:
+- **ORCHESTRATE** → read .opencode/instructions/orchestrate.md
+- **ULTRATHINK** → read .opencode/instructions/ultrathink.md
+- Code review critical/important issues must be resolved before continuing
 
-  ```txt
-  Usar superpowers siempre y worktree desde main en ./.worktrees/ y activar ORCHESTRATE esto es importante, delegando la implementación a @worker_gpt y siempre haciendo spec + code review a @worker_new. no pasamos de tarea si existe critical o important issues y si esta no está contemplada en una tarea posterior, los minor los consideramos si son relevantes. Si un subagente necesita ULTRATHINK debes indicar que lea AGENTS.md
-  ```
+## NEW FEATURE WORKFLOW
 
-- When user ask to merge to main:
+```
+Use superpowers + worktree from main in ./.worktrees/ + ORCHESTRATE.
+Delegate implementation to workers (w_glm5.1 default, w_gpt5.3-codex or w_qwen3.6-pro as alternatives).
+Spec + code review always (requesting-code-review skill).
+Don't advance tasks with critical/important issues unresolved.
+Minor issues: resolve if relevant.
+Escalate to experts (e_gpt5.5, e_opus4.7) only when workers are stuck after 2 attempts.
+If a subagent needs ULTRATHINK, tell it to read AGENTS.md.
+```
 
-  ```txt
-  Usar opción 1 del skill finishing-a-development-branch (merge branch into main) pero con squash de un solo commit con title + body siguiendo patrón de otros commits, luego actualizar documento de implementación y agregar sección postmortem si procede. Limpiar branch y worktree y revisar que README/s esté/n actualizado/s (keep it simple). Por último actualiza si procede docs/roadmap.md y docs/status.md sin dar seguimiento a docs/ en git. También es necesario revisar ./scripts/publish-crates.sh por si es necesario actualiazar y camel-cli ya que debe incluir todas las características por defecto.
-  ```
+## MERGE TO MAIN
 
-- When user asks to bump version or release a new version:
+```
+Skill: finishing-a-development-branch, option 1 (squash merge into main).
+Single commit: title + body following existing commit pattern.
+Update implementation doc + postmortem if applicable.
+Clean up branch + worktree.
+Verify README/s are up to date.
+Update docs/roadmap.md and docs/status.md (don't track docs/ in git).
+Check ./scripts/publish-crates.sh and camel-cli features.
+```
 
-  ```txt
-  Verificar la nueva versión con el usuario si no la ha indicado (semver desde la versión actual en Cargo.toml raíz). Actualizar la versión en Cargo.toml raíz y regenerar Cargo.lock con cargo check. Buscar y actualizar cualquier fichero con versión hardcodeada: README.md raíz, bridges/jms/build.gradle.kts (fallback), y ejemplos aislados que no usen version.workspace. Verificar que compila con cargo build. Commit siguiendo el patrón de otros commits de release con body listando cambios desde la versión anterior. Crear git tag vX.Y.Z. NO hacer push ni publicar a crates.io.
-  ```
+## VERSION BUMP / RELEASE
+
+```
+Confirm version with user (semver from root Cargo.toml).
+Update root Cargo.toml → regenerate Cargo.lock with cargo check.
+Update hardcoded versions: root README.md, bridges/jms/build.gradle.kts, isolated examples.
+Verify: cargo build.
+Commit following release pattern + body with changes since previous version.
+Create git tag vX.Y.Z.
+NO push, NO publish to crates.io.
+```
 
 # context-mode — MANDATORY routing rules
 
