@@ -13,13 +13,14 @@
 ## NEW FEATURE WORKFLOW
 
 ```
-Use superpowers + worktree from main in ./.worktrees/ + ORCHESTRATE.
+Use superpowers + worktree from main in ./.worktrees/ + ORCHESTRATE and TDD where possible.
 Delegate implementation to workers (w_glm5.1 default, w_gpt5.3-codex or w_qwen3.6-pro as alternatives).
-Spec + code review always (requesting-code-review skill).
+IMPORTANT! force subagentes to read AGENTS.md.
+IMPORTANT! Spec + code review always (requesting-code-review skill).
 Don't advance tasks with critical/important issues unresolved.
 Minor issues: resolve if relevant.
 Escalate to experts (e_gpt5.5, e_opus4.7) only when workers are stuck after 2 attempts.
-If a subagent needs ULTRATHINK, tell it to read AGENTS.md.
+If a subagent needs ULTRATHINK
 ```
 
 ## MERGE TO MAIN

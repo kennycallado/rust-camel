@@ -2,7 +2,7 @@
 description: Escalation-only expert. Called when workers are stuck on hard problems.
 mode: subagent
 temperature: 0.2
-model: openai/gpt-5.5-pro
+model: openai/gpt-5.5
 tools:
   write: true
   edit: true
