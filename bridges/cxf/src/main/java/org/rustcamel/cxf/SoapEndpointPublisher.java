@@ -17,6 +17,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
+import org.apache.wss4j.common.ext.WSSecurityException;
 
 @ApplicationScoped
 public class SoapEndpointPublisher {
@@ -26,6 +27,8 @@ public class SoapEndpointPublisher {
   @Inject BridgeConfig bridgeConfig;
 
   @Inject CxfServerManager cxfServerManager;
+
+  @Inject WssSecurityProcessor wssProcessor;
 
   @Inject Vertx vertx;
 
@@ -91,6 +94,11 @@ public class SoapEndpointPublisher {
                       vertx.executeBlocking(
                           () -> {
                             String requestXml = body.toString(java.nio.charset.StandardCharsets.UTF_8);
+
+                            if (wssProcessor.canVerifyInbound()) {
+                              requestXml = wssProcessor.processInbound(requestXml);
+                            }
+
                             String requestBody = extractSoapBody(requestXml);
 
                             Map<String, String> headers = req.headers().entries().stream()
@@ -116,13 +124,21 @@ public class SoapEndpointPublisher {
                                     .handleSoapRequest(consumerRequest)
                                     .get(bridgeConfig.consumerTimeoutMs(), TimeUnit.MILLISECONDS);
 
+                            String responseXml;
                             if (response.getFault()) {
                               String faultBody =
                                   buildFaultBody(
                                       response.getFaultCode(), response.getFaultString(), soapVersion);
-                              return wrapEnvelope(faultBody, soapVersion);
+                              responseXml = wrapEnvelope(faultBody, soapVersion);
+                            } else {
+                              responseXml = wrapEnvelope(response.getPayload().toStringUtf8(), soapVersion);
                             }
-                            return wrapEnvelope(response.getPayload().toStringUtf8(), soapVersion);
+
+                            if (wssProcessor.canSignOutbound()) {
+                              responseXml = wssProcessor.processOutbound(responseXml);
+                            }
+
+                            return responseXml;
                           },
                           ar -> {
                             if (ar.succeeded()) {
@@ -131,12 +147,21 @@ public class SoapEndpointPublisher {
                                   .putHeader("content-type", "text/xml; charset=utf-8")
                                   .end((String) ar.result());
                             } else {
-                              LOG.log(Level.SEVERE, "SOAP consumer invoke failed", ar.cause());
+                              Throwable cause = ar.cause();
+                              LOG.log(Level.SEVERE, "SOAP request processing failed", cause);
+
+                              boolean isSecurityFailure = cause instanceof WSSecurityException
+                                  || (cause != null && cause.getCause() instanceof WSSecurityException);
+
+                              String faultCode = isSecurityFailure ? "soap:Client" : "soap:Server";
+                              String faultString = isSecurityFailure
+                                  ? "WS-Security processing failed: " + sanitize(cause.getMessage())
+                                  : "Internal server error";
+
                               req.response()
-                                  .setStatusCode(500)
+                                  .setStatusCode(isSecurityFailure ? 400 : 500)
                                   .putHeader("content-type", "text/xml; charset=utf-8")
-                                  .end(
-                                      "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"><soapenv:Header/><soapenv:Body><soapenv:Fault><faultcode>soap:Server</faultcode><faultstring>Internal error</faultstring></soapenv:Fault></soapenv:Body></soapenv:Envelope>");
+                                  .end(buildSoapFault(faultCode, faultString));
                             }
                           });
                     });
@@ -184,6 +209,19 @@ public class SoapEndpointPublisher {
       }
       LOG.info("SOAP endpoint stopped");
     }
+  }
+
+  private static String sanitize(String msg) {
+    if (msg == null) return "unknown";
+    return msg.length() > 200 ? msg.substring(0, 200) : msg;
+  }
+
+  private static String buildSoapFault(String faultCode, String faultString) {
+    return "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+        + "<soapenv:Header/><soapenv:Body><soapenv:Fault>"
+        + "<faultcode>" + escapeXml(faultCode) + "</faultcode>"
+        + "<faultstring>" + escapeXml(faultString) + "</faultstring>"
+        + "</soapenv:Fault></soapenv:Body></soapenv:Envelope>";
   }
 
   private static String extractSoapAction(Map<String, String> headers) {

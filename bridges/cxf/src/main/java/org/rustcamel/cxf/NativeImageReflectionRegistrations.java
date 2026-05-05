@@ -153,10 +153,27 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       "javax.wsdl.extensions.ExtensibilityElement",
 
       // --- WS-Security / WSS4J ---
-      "org.apache.wss4j.common.crypto.Merlin",
+      "org.apache.cxf.ws.security.wss4j.WSS4JInInterceptor",
+      "org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor",
+      "org.apache.wss4j.common.ConfigurationConstants",
+      "org.apache.wss4j.common.crypto.Crypto",
       "org.apache.wss4j.common.crypto.CryptoFactory",
+      "org.apache.wss4j.common.ext.WSPasswordCallback",
+      "org.apache.wss4j.dom.WSConstants",
       "org.apache.wss4j.dom.engine.WSSConfig",
+      "org.apache.wss4j.dom.engine.WSSecurityEngine",
+      "org.apache.wss4j.dom.handler.RequestData",
       "org.apache.wss4j.dom.handler.WSHandlerConstants",
-      "org.apache.wss4j.common.ext.WSPasswordCallback"
+      "org.apache.wss4j.dom.message.WSSecHeader",
+      "org.apache.wss4j.dom.message.WSSecSignature",
+      "org.apache.wss4j.common.crypto.Merlin",
+      "org.apache.wss4j.dom.processor.SignatureProcessor",
+      "org.apache.wss4j.dom.processor.TimestampProcessor",
+      "org.apache.wss4j.dom.processor.EncryptedKeyProcessor",
+      "org.apache.wss4j.dom.processor.ReferenceListProcessor",
+      "org.apache.wss4j.dom.message.WSSecEncrypt",
+      "org.apache.wss4j.dom.message.WSSecBase",
+      "org.apache.wss4j.dom.validate.SignatureTrustValidator",
+      "org.rustcamel.cxf.WssSecurityProcessor"
     })
 public class NativeImageReflectionRegistrations {}

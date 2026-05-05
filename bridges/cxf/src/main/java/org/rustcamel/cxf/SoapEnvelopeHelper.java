@@ -150,6 +150,11 @@ public final class SoapEnvelopeHelper {
     return "";
   }
 
+  /** Converts a Source to String omitting the XML declaration. */
+  public static String sourceToString(Source source) throws Exception {
+    return sourceToString(source, true);
+  }
+
   private static Document parseSource(Source source) throws Exception {
     byte[] bytes = sourceToBytes(source);
     DocumentBuilderFactory dbf = SECURE_DBF.get();
@@ -164,7 +169,7 @@ public final class SoapEnvelopeHelper {
     return out.toByteArray();
   }
 
-  private static String sourceToString(Source source, boolean omitDecl) throws Exception {
+  public static String sourceToString(Source source, boolean omitDecl) throws Exception {
     ByteArrayOutputStream out = new ByteArrayOutputStream();
     Transformer transformer = TransformerFactory.newInstance().newTransformer();
     transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, omitDecl ? "yes" : "no");

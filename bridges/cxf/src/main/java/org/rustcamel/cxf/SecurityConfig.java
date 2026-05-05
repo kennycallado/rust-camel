@@ -25,6 +25,10 @@ public class SecurityConfig {
 
   @Inject BridgeConfig bridgeConfig;
 
+  SecurityConfig(BridgeConfig config) {
+    this.bridgeConfig = config;
+  }
+
   public boolean hasSecurity() {
     return hasText(bridgeConfig.securityUsername())
         || hasText(bridgeConfig.keystorePath())
@@ -55,26 +59,32 @@ public class SecurityConfig {
 
     if (hasText(bridgeConfig.keystorePath())) {
       hasX509 = true;
-      actions.add(WSHandlerConstants.SIGNATURE);
-      actions.add(WSHandlerConstants.ENCRYPT);
-      props.put(
-          ConfigurationConstants.SIG_PROP_REF_ID,
-          createCryptoProperties(bridgeConfig.keystorePath(), bridgeConfig.keystorePassword()));
-      props.put(
-          ConfigurationConstants.ENC_PROP_REF_ID,
-          createCryptoProperties(
-              resolveTruststorePathForEncryption(), resolveTruststorePasswordForEncryption()));
-      String signatureUser =
-          hasText(bridgeConfig.securityUsername())
-              ? bridgeConfig.securityUsername()
-              : bridgeConfig.sigUsername();
-      props.put(WSHandlerConstants.USER, signatureUser);
-      props.put(ConfigurationConstants.ENCRYPTION_USER, bridgeConfig.encUsername());
-      props.put(WSHandlerConstants.SIG_KEY_ID, "DirectReference");
-      props.put(
-          WSHandlerConstants.ENC_KEY_TRANSPORT,
-          "http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p");
-      props.put(WSHandlerConstants.ENC_SYM_ALGO, "http://www.w3.org/2001/04/xmlenc#aes256-cbc");
+      String outActions = resolveActionsOut();
+
+      if (containsAction(outActions, "Signature")) {
+        actions.add(WSHandlerConstants.SIGNATURE);
+        props.put(
+            ConfigurationConstants.SIG_PROP_REF_ID,
+            createCryptoProperties(bridgeConfig.keystorePath(), bridgeConfig.keystorePassword()));
+        String signatureUser =
+            hasText(bridgeConfig.securityUsername())
+                ? bridgeConfig.securityUsername()
+                : bridgeConfig.sigUsername();
+        props.put(WSHandlerConstants.USER, signatureUser);
+        props.put(WSHandlerConstants.SIG_KEY_ID, "DirectReference");
+      }
+      if (containsAction(outActions, "Encrypt")) {
+        actions.add(WSHandlerConstants.ENCRYPT);
+        props.put(
+            ConfigurationConstants.ENC_PROP_REF_ID,
+            createCryptoProperties(
+                resolveTruststorePathForEncryption(), resolveTruststorePasswordForEncryption()));
+        props.put(ConfigurationConstants.ENCRYPTION_USER, bridgeConfig.encUsername());
+        props.put(
+            WSHandlerConstants.ENC_KEY_TRANSPORT,
+            "http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p");
+        props.put(WSHandlerConstants.ENC_SYM_ALGO, "http://www.w3.org/2001/04/xmlenc#aes128-cbc");
+      }
     }
 
     if (actions.isEmpty()) {
@@ -103,17 +113,23 @@ public class SecurityConfig {
 
     if (hasText(bridgeConfig.truststorePath())) {
       hasX509 = true;
-      actions.add(WSHandlerConstants.SIGNATURE);
-      props.put(
-          ConfigurationConstants.SIG_PROP_REF_ID,
-          createCryptoProperties(bridgeConfig.truststorePath(), bridgeConfig.truststorePassword()));
-      actions.add(WSHandlerConstants.ENCRYPT);
-      props.put(
-          ConfigurationConstants.DEC_PROP_REF_ID,
-          createCryptoProperties(bridgeConfig.keystorePath(), bridgeConfig.keystorePassword()));
-      props.put(
-          WSHandlerConstants.PW_CALLBACK_REF,
-          callbackWithPassword(bridgeConfig.keystorePassword()));
+      String inActions = resolveActionsIn();
+
+      if (containsAction(inActions, "Signature")) {
+        actions.add(WSHandlerConstants.SIGNATURE);
+        props.put(
+            ConfigurationConstants.SIG_PROP_REF_ID,
+            createCryptoProperties(bridgeConfig.truststorePath(), bridgeConfig.truststorePassword()));
+      }
+      if (containsAction(inActions, "Encrypt")) {
+        actions.add(WSHandlerConstants.ENCRYPT);
+        props.put(
+            ConfigurationConstants.DEC_PROP_REF_ID,
+            createCryptoProperties(bridgeConfig.keystorePath(), bridgeConfig.keystorePassword()));
+        props.put(
+            WSHandlerConstants.PW_CALLBACK_REF,
+            callbackWithPassword(bridgeConfig.keystorePassword()));
+      }
     }
 
     if (actions.isEmpty()) {
@@ -151,7 +167,7 @@ public class SecurityConfig {
     };
   }
 
-  private static Properties createCryptoProperties(String path, String password) {
+  static Properties createCryptoProperties(String path, String password) {
     Properties crypto = new Properties();
     if (!hasText(path)) {
       return crypto;
@@ -165,7 +181,33 @@ public class SecurityConfig {
     return crypto;
   }
 
+  /**
+   * Resolves the WSS4J action string for outbound messages.
+   * Defaults to "Signature" when no explicit actions are configured.
+   */
+  public String resolveActionsOut() {
+    String actions = bridgeConfig.securityActionsOut();
+    return (actions != null && !actions.isBlank()) ? actions : "Signature";
+  }
+
+  /**
+   * Resolves the WSS4J action string for inbound messages.
+   * Defaults to "Signature" when no explicit actions are configured.
+   */
+  public String resolveActionsIn() {
+    String actions = bridgeConfig.securityActionsIn();
+    return (actions != null && !actions.isBlank()) ? actions : "Signature";
+  }
+
   private static boolean hasText(String value) {
     return value != null && !value.isBlank();
+  }
+
+  private static boolean containsAction(String actions, String token) {
+    if (actions == null || actions.isBlank()) return false;
+    for (String part : actions.split("\\s+")) {
+      if (part.equalsIgnoreCase(token)) return true;
+    }
+    return false;
   }
 }
