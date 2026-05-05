@@ -41,6 +41,7 @@ pub const MAX_LOOP_ITERATIONS: usize = 10_000;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use super::*;
 
     fn always_true() -> FilterPredicate {
