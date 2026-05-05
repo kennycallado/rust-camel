@@ -55,5 +55,5 @@ pub const CXF_BRIDGE: BridgeSpec = BridgeSpec {
     release_tag_prefix: "cxf-bridge-v",
     default_version: env!("CARGO_PKG_VERSION"),
     log_file_template: "cxf-bridge-{pid}.log",
-    macos_supported: true,
+    macos_supported: false,
 };
