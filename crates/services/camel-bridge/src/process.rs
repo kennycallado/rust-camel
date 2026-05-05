@@ -54,6 +54,87 @@ impl std::str::FromStr for BrokerType {
     }
 }
 
+/// Environment variables for a single CXF profile, used by the bridge Java side.
+pub struct CxfProfileEnvVars {
+    pub name: String,
+    pub wsdl_path: String,
+    pub service_name: String,
+    pub port_name: String,
+    pub address: Option<String>,
+    pub keystore_path: Option<String>,
+    pub keystore_password: Option<String>,
+    pub truststore_path: Option<String>,
+    pub truststore_password: Option<String>,
+    pub sig_username: Option<String>,
+    pub sig_password: Option<String>,
+    pub enc_username: Option<String>,
+    pub security_actions_out: Option<String>,
+    pub security_actions_in: Option<String>,
+    pub signature_algorithm: Option<String>,
+    pub signature_digest_algorithm: Option<String>,
+    pub signature_c14n_algorithm: Option<String>,
+    pub signature_parts: Option<String>,
+}
+
+impl CxfProfileEnvVars {
+    pub fn to_env_vars(&self) -> Vec<(String, String)> {
+        let prefix = format!("CXF_PROFILE_{}_", self.name.to_uppercase());
+        let mut vars = vec![
+            (format!("{}WSDL_PATH", prefix), self.wsdl_path.clone()),
+            (
+                format!("{}SERVICE_NAME", prefix),
+                self.service_name.clone(),
+            ),
+            (format!("{}PORT_NAME", prefix), self.port_name.clone()),
+        ];
+
+        if let Some(ref v) = self.address {
+            vars.push((format!("{}ADDRESS", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.keystore_path {
+            vars.push((format!("{}KEYSTORE_PATH", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.keystore_password {
+            vars.push((format!("{}KEYSTORE_PASSWORD", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.truststore_path {
+            vars.push((format!("{}TRUSTSTORE_PATH", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.truststore_password {
+            vars.push((format!("{}TRUSTSTORE_PASSWORD", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.sig_username {
+            vars.push((format!("{}SIG_USERNAME", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.sig_password {
+            vars.push((format!("{}SIG_PASSWORD", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.enc_username {
+            vars.push((format!("{}ENC_USERNAME", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.security_actions_out {
+            vars.push((format!("{}SECURITY_ACTIONS_OUT", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.security_actions_in {
+            vars.push((format!("{}SECURITY_ACTIONS_IN", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.signature_algorithm {
+            vars.push((format!("{}SIGNATURE_ALGORITHM", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.signature_digest_algorithm {
+            vars.push((format!("{}SIGNATURE_DIGEST_ALGORITHM", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.signature_c14n_algorithm {
+            vars.push((format!("{}SIGNATURE_C14N_ALGORITHM", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.signature_parts {
+            vars.push((format!("{}SIGNATURE_PARTS", prefix), v.clone()));
+        }
+
+        vars
+    }
+}
+
 pub struct BridgeProcessConfig {
     pub spec: &'static BridgeSpec,
     pub binary_path: PathBuf,
@@ -114,44 +195,21 @@ impl BridgeProcessConfig {
         }
     }
 
-    /// Constructor for the CXF bridge.
-    #[allow(clippy::too_many_arguments)]
-    pub fn cxf(
+    /// Constructor for the CXF bridge with multi-profile support.
+    /// Generates `CXF_PROFILES=list` env var plus per-profile env vars.
+    pub fn cxf_profiles(
         binary_path: PathBuf,
-        wsdl: String,
-        service: String,
-        port: String,
-        security_username: Option<String>,
-        security_password: Option<String>,
-        keystore_path: Option<String>,
-        keystore_password: Option<String>,
-        truststore_path: Option<String>,
-        truststore_password: Option<String>,
+        profiles: &[CxfProfileEnvVars],
         start_timeout_ms: u64,
     ) -> Self {
-        let mut env_vars = vec![
-            ("CXF_WSDL_PATH".to_string(), wsdl),
-            ("CXF_SERVICE_NAME".to_string(), service),
-            ("CXF_PORT_NAME".to_string(), port),
-        ];
+        let profile_names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
+        let mut env_vars = vec![(
+            "CXF_PROFILES".to_string(),
+            profile_names.join(","),
+        )];
 
-        if let Some(v) = security_username {
-            env_vars.push(("CXF_SECURITY_USERNAME".to_string(), v));
-        }
-        if let Some(v) = security_password {
-            env_vars.push(("CXF_SECURITY_PASSWORD".to_string(), v));
-        }
-        if let Some(v) = keystore_path {
-            env_vars.push(("CXF_KEYSTORE_PATH".to_string(), v));
-        }
-        if let Some(v) = keystore_password {
-            env_vars.push(("CXF_KEYSTORE_PASSWORD".to_string(), v));
-        }
-        if let Some(v) = truststore_path {
-            env_vars.push(("CXF_TRUSTSTORE_PATH".to_string(), v));
-        }
-        if let Some(v) = truststore_password {
-            env_vars.push(("CXF_TRUSTSTORE_PASSWORD".to_string(), v));
+        for profile in profiles {
+            env_vars.extend(profile.to_env_vars());
         }
 
         Self {
@@ -374,61 +432,194 @@ mod tests {
     }
 
     #[test]
-    fn cxf_constructor_uses_cxf_spec() {
-        let cfg = BridgeProcessConfig::cxf(
-            PathBuf::from("/tmp/cxf-bridge"),
-            "service.wsdl".into(),
-            "{http://example.com}Service".into(),
-            "{http://example.com}Port".into(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            15_000,
-        );
+    fn cxf_profiles_generates_cxf_profiles_env_var() {
+        let profiles = vec![
+            CxfProfileEnvVars {
+                name: "baleares".to_string(),
+                wsdl_path: "/a.wsdl".to_string(),
+                service_name: "Svc".to_string(),
+                port_name: "Port".to_string(),
+                address: None,
+                keystore_path: None,
+                keystore_password: None,
+                truststore_path: None,
+                truststore_password: None,
+                sig_username: None,
+                sig_password: None,
+                enc_username: None,
+                security_actions_out: None,
+                security_actions_in: None,
+                signature_algorithm: None,
+                signature_digest_algorithm: None,
+                signature_c14n_algorithm: None,
+                signature_parts: None,
+            },
+            CxfProfileEnvVars {
+                name: "extremadura".to_string(),
+                wsdl_path: "/b.wsdl".to_string(),
+                service_name: "Svc2".to_string(),
+                port_name: "Port2".to_string(),
+                address: Some("http://host:9090/ws".to_string()),
+                keystore_path: Some("/b.jks".to_string()),
+                keystore_password: Some("pass".to_string()),
+                truststore_path: None,
+                truststore_password: None,
+                sig_username: Some("cert".to_string()),
+                sig_password: Some("sig_pass".to_string()),
+                enc_username: None,
+                security_actions_out: Some("Timestamp Signature".to_string()),
+                security_actions_in: Some("Timestamp Signature".to_string()),
+                signature_algorithm: None,
+                signature_digest_algorithm: None,
+                signature_c14n_algorithm: None,
+                signature_parts: None,
+            },
+        ];
+
+        let cfg =
+            BridgeProcessConfig::cxf_profiles(PathBuf::from("/tmp/cxf-bridge"), &profiles, 15_000);
+
         assert_eq!(cfg.spec.name, "cxf-bridge");
         assert!(cfg.broker_url.is_empty());
         assert_eq!(cfg.broker_type, BrokerType::Generic);
         assert!(cfg.username.is_none());
         assert!(cfg.password.is_none());
-        assert_eq!(cfg.env_vars.len(), 3);
-        assert_eq!(cfg.env_vars[0].0, "CXF_WSDL_PATH");
-        assert_eq!(cfg.env_vars[0].1, "service.wsdl");
-        assert_eq!(cfg.env_vars[1].0, "CXF_SERVICE_NAME");
-        assert_eq!(cfg.env_vars[1].1, "{http://example.com}Service");
-        assert_eq!(cfg.env_vars[2].0, "CXF_PORT_NAME");
-        assert_eq!(cfg.env_vars[2].1, "{http://example.com}Port");
+
+        // Find CXF_PROFILES env var
+        let profiles_var = cfg
+            .env_vars
+            .iter()
+            .find(|(k, _)| k == "CXF_PROFILES")
+            .expect("CXF_PROFILES env var must exist");
+        assert_eq!(profiles_var.1, "baleares,extremadura");
+
+        // Check baleares profile vars (no security)
+        assert!(cfg
+            .env_vars
+            .iter()
+            .any(|(k, v)| k == "CXF_PROFILE_BALEARES_WSDL_PATH" && v == "/a.wsdl"));
+        assert!(cfg
+            .env_vars
+            .iter()
+            .any(|(k, v)| k == "CXF_PROFILE_BALEARES_SERVICE_NAME" && v == "Svc"));
+        assert!(cfg
+            .env_vars
+            .iter()
+            .any(|(k, v)| k == "CXF_PROFILE_BALEARES_PORT_NAME" && v == "Port"));
+        assert!(!cfg
+            .env_vars
+            .iter()
+            .any(|(k, _)| k == "CXF_PROFILE_BALEARES_ADDRESS"));
+
+        // Check extremadura profile vars (with security)
+        assert!(cfg
+            .env_vars
+            .iter()
+            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_WSDL_PATH" && v == "/b.wsdl"));
+        assert!(cfg
+            .env_vars
+            .iter()
+            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_ADDRESS" && v == "http://host:9090/ws"));
+        assert!(cfg
+            .env_vars
+            .iter()
+            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_KEYSTORE_PATH" && v == "/b.jks"));
+        assert!(cfg
+            .env_vars
+            .iter()
+            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_KEYSTORE_PASSWORD" && v == "pass"));
+        assert!(cfg
+            .env_vars
+            .iter()
+            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_SIG_USERNAME" && v == "cert"));
+        assert!(cfg
+            .env_vars
+            .iter()
+            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_SIG_PASSWORD" && v == "sig_pass"));
+        assert!(cfg.env_vars.iter().any(
+           |(k, v)| k == "CXF_PROFILE_EXTREMADURA_SECURITY_ACTIONS_OUT"
+                && v == "Timestamp Signature"
+        ));
     }
 
     #[test]
-    fn cxf_constructor_passes_security_env_vars() {
-        let cfg = BridgeProcessConfig::cxf(
-            PathBuf::from("/tmp/cxf-bridge"),
-            "svc.wsdl".into(),
-            "Svc".into(),
-            "Port".into(),
-            Some("alice".into()),
-            Some("secret".into()),
-            Some("/keys/keystore.jks".into()),
-            Some("ksPass".into()),
-            Some("/keys/truststore.jks".into()),
-            Some("tsPass".into()),
-            15_000,
-        );
-        assert_eq!(cfg.env_vars.len(), 9);
-        assert_eq!(cfg.env_vars[3].0, "CXF_SECURITY_USERNAME");
-        assert_eq!(cfg.env_vars[3].1, "alice");
-        assert_eq!(cfg.env_vars[4].0, "CXF_SECURITY_PASSWORD");
-        assert_eq!(cfg.env_vars[4].1, "secret");
-        assert_eq!(cfg.env_vars[5].0, "CXF_KEYSTORE_PATH");
-        assert_eq!(cfg.env_vars[5].1, "/keys/keystore.jks");
-        assert_eq!(cfg.env_vars[6].0, "CXF_KEYSTORE_PASSWORD");
-        assert_eq!(cfg.env_vars[6].1, "ksPass");
-        assert_eq!(cfg.env_vars[7].0, "CXF_TRUSTSTORE_PATH");
-        assert_eq!(cfg.env_vars[7].1, "/keys/truststore.jks");
-        assert_eq!(cfg.env_vars[8].0, "CXF_TRUSTSTORE_PASSWORD");
-        assert_eq!(cfg.env_vars[8].1, "tsPass");
+    fn cxf_profiles_single_profile_no_security() {
+        let profiles = vec![CxfProfileEnvVars {
+            name: "test".to_string(),
+            wsdl_path: "service.wsdl".to_string(),
+            service_name: "{http://example.com}Service".to_string(),
+            port_name: "{http://example.com}Port".to_string(),
+            address: None,
+            keystore_path: None,
+            keystore_password: None,
+            truststore_path: None,
+            truststore_password: None,
+            sig_username: None,
+            sig_password: None,
+            enc_username: None,
+            security_actions_out: None,
+            security_actions_in: None,
+            signature_algorithm: None,
+            signature_digest_algorithm: None,
+            signature_c14n_algorithm: None,
+            signature_parts: None,
+        }];
+
+        let cfg =
+            BridgeProcessConfig::cxf_profiles(PathBuf::from("/tmp/cxf-bridge"), &profiles, 15_000);
+
+        assert_eq!(cfg.spec.name, "cxf-bridge");
+        // CXF_PROFILES + 3 required vars (WSDL_PATH, SERVICE_NAME, PORT_NAME)
+        assert_eq!(cfg.env_vars.len(), 4);
+        assert_eq!(cfg.env_vars[0].0, "CXF_PROFILES");
+        assert_eq!(cfg.env_vars[0].1, "test");
+        assert_eq!(cfg.env_vars[1].0, "CXF_PROFILE_TEST_WSDL_PATH");
+        assert_eq!(cfg.env_vars[1].1, "service.wsdl");
+        assert_eq!(cfg.env_vars[2].0, "CXF_PROFILE_TEST_SERVICE_NAME");
+        assert_eq!(cfg.env_vars[2].1, "{http://example.com}Service");
+        assert_eq!(cfg.env_vars[3].0, "CXF_PROFILE_TEST_PORT_NAME");
+        assert_eq!(cfg.env_vars[3].1, "{http://example.com}Port");
+    }
+
+    #[test]
+    fn profile_env_vars_to_env_vars_includes_all_fields() {
+        let vars = CxfProfileEnvVars {
+            name: "full".to_string(),
+            wsdl_path: "/wsdl".to_string(),
+            service_name: "Svc".to_string(),
+            port_name: "Port".to_string(),
+            address: Some("http://host:8080".to_string()),
+            keystore_path: Some("/ks.jks".to_string()),
+            keystore_password: Some("ks_pass".to_string()),
+            truststore_path: Some("/ts.jks".to_string()),
+            truststore_password: Some("ts_pass".to_string()),
+            sig_username: Some("user".to_string()),
+            sig_password: Some("sig_pass".to_string()),
+            enc_username: None,
+            security_actions_out: Some("Timestamp Signature".to_string()),
+            security_actions_in: Some("Timestamp".to_string()),
+            signature_algorithm: None,
+            signature_digest_algorithm: None,
+            signature_c14n_algorithm: None,
+            signature_parts: None,
+        };
+
+        let env = vars.to_env_vars();
+        // 3 required + 1 address + 8 security = 12
+        assert_eq!(env.len(), 12);
+
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"CXF_PROFILE_FULL_WSDL_PATH"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_SERVICE_NAME"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_PORT_NAME"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_ADDRESS"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_KEYSTORE_PATH"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_KEYSTORE_PASSWORD"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_TRUSTSTORE_PATH"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_TRUSTSTORE_PASSWORD"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_SIG_USERNAME"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_SIG_PASSWORD"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_SECURITY_ACTIONS_OUT"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_SECURITY_ACTIONS_IN"));
     }
 }

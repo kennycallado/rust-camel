@@ -45,7 +45,7 @@ echo ""
 # Invoke Gradle via the wrapper jar directly (avoids JAVA_HOME lookup issues
 # when bash is used as --entrypoint in the Mandrel container).
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
-    build -Pquarkus.package.type=native -Pversion="${VERSION}" --no-daemon
+    build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true -Pversion="${VERSION}" --no-daemon
 
 # Locate the native runner (resilient to Quarkus naming changes)
 RUNNER=$(find build -maxdepth 1 -name '*-runner' -not -name '*.jar' -type f 2>/dev/null | head -1)

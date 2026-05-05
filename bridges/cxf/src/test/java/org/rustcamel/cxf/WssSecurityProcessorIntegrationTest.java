@@ -119,17 +119,15 @@ class WssSecurityProcessorIntegrationTest {
 
   @Test
   void disabled_processor_passesThrough() throws Exception {
-    BridgeConfig config = mock(BridgeConfig.class);
-    when(config.keystorePath()).thenReturn(null);
-    when(config.truststorePath()).thenReturn(null);
-
-    WssSecurityProcessor processor = new WssSecurityProcessor(config);
+    SecurityProfile profile = SecurityProfile.builder("test").build();
+    WssSecurityProcessor processor = new WssSecurityProcessor(profile);
 
     String soapXml = "<soap:Envelope><soap:Body><test/></soap:Envelope>";
 
     assertEquals(soapXml, processor.processOutbound(soapXml));
     assertEquals(soapXml, processor.processInbound(soapXml));
-    assertFalse(processor.isEnabled());
+    assertFalse(processor.canSignOutbound());
+    assertFalse(processor.canVerifyInbound());
   }
 
   @Test
@@ -150,7 +148,6 @@ class WssSecurityProcessorIntegrationTest {
 
   @Test
   void processInbound_rejectsUnsignedMessage_whenSignatureRequired() throws Exception {
-    // Processor with keystore (canVerifyInbound=true) and Signature required
     WssSecurityProcessor processor =
         createProcessorWithActions(
             keystorePath, "changeit", "alice", "changeit", "alice", "Signature", "Signature");
@@ -229,8 +226,7 @@ class WssSecurityProcessorIntegrationTest {
     assertTrue(withKs.canSignOutbound(), "Should be able to sign with keystore");
 
     // Without keystore → canSignOutbound = false
-    BridgeConfig noKs = mock(BridgeConfig.class);
-    when(noKs.keystorePath()).thenReturn(null);
+    SecurityProfile noKs = SecurityProfile.builder("test").build();
     WssSecurityProcessor withoutKs = new WssSecurityProcessor(noKs);
     assertFalse(withoutKs.canSignOutbound(), "Should not be able to sign without keystore");
   }
@@ -238,25 +234,19 @@ class WssSecurityProcessorIntegrationTest {
   @Test
   void capabilities_verifyInbound_requires_truststore_or_keystore() {
     // With truststore → canVerifyInbound = true
-    BridgeConfig withTs = mock(BridgeConfig.class);
-    when(withTs.truststorePath()).thenReturn(keystorePath.toString());
-    when(withTs.truststorePassword()).thenReturn("changeit");
-    when(withTs.keystorePath()).thenReturn(null);
+    SecurityProfile withTs =
+        SecurityProfile.builder("test").truststore(keystorePath.toString(), "changeit").build();
     WssSecurityProcessor withTruststore = new WssSecurityProcessor(withTs);
     assertTrue(withTruststore.canVerifyInbound(), "Should verify with truststore");
 
     // With keystore only → canVerifyInbound = true
-    BridgeConfig withKsOnly = mock(BridgeConfig.class);
-    when(withKsOnly.keystorePath()).thenReturn(keystorePath.toString());
-    when(withKsOnly.keystorePassword()).thenReturn("changeit");
-    when(withKsOnly.truststorePath()).thenReturn(null);
+    SecurityProfile withKsOnly =
+        SecurityProfile.builder("test").keystore(keystorePath.toString(), "changeit").build();
     WssSecurityProcessor withKeystoreOnly = new WssSecurityProcessor(withKsOnly);
     assertTrue(withKeystoreOnly.canVerifyInbound(), "Should verify with keystore only");
 
     // With neither → canVerifyInbound = false
-    BridgeConfig withNeither = mock(BridgeConfig.class);
-    when(withNeither.keystorePath()).thenReturn(null);
-    when(withNeither.truststorePath()).thenReturn(null);
+    SecurityProfile withNeither = SecurityProfile.builder("test").build();
     WssSecurityProcessor withNeitherStore = new WssSecurityProcessor(withNeither);
     assertFalse(withNeitherStore.canVerifyInbound(), "Should not verify without any store");
   }
@@ -272,41 +262,25 @@ class WssSecurityProcessorIntegrationTest {
       String encUser,
       String actionsOut,
       String actionsIn) {
-    BridgeConfig config = mock(BridgeConfig.class);
-    when(config.keystorePath()).thenReturn(ksPath.toString());
-    when(config.keystorePassword()).thenReturn(ksPass);
-    when(config.truststorePath()).thenReturn(ksPath.toString());
-    when(config.truststorePassword()).thenReturn(ksPass);
-    when(config.sigUsername()).thenReturn(sigUser);
-    when(config.sigPassword()).thenReturn(sigPass);
-    when(config.encUsername()).thenReturn(encUser);
-    when(config.securityActionsOut()).thenReturn(actionsOut);
-    when(config.securityActionsIn()).thenReturn(actionsIn);
-
-    SecurityConfig secConfig = mock(SecurityConfig.class);
-    when(secConfig.resolveActionsOut()).thenReturn(actionsOut);
-    when(secConfig.resolveActionsIn()).thenReturn(actionsIn);
-
-    return new WssSecurityProcessor(config, secConfig);
+    SecurityProfile profile =
+        SecurityProfile.builder("test")
+            .keystore(ksPath.toString(), ksPass)
+            .truststore(ksPath.toString(), ksPass)
+            .sigUser(sigUser, sigPass)
+            .encUser(encUser)
+            .actionsOut(actionsOut)
+            .actionsIn(actionsIn)
+            .build();
+    return new WssSecurityProcessor(profile);
   }
 
   private WssSecurityProcessor createProcessor() {
-    BridgeConfig config = mock(BridgeConfig.class);
-    when(config.keystorePath()).thenReturn(keystorePath.toString());
-    when(config.keystorePassword()).thenReturn("changeit");
-    when(config.sigUsername()).thenReturn("alice");
-    when(config.truststorePath()).thenReturn(null);
-    when(config.truststorePassword()).thenReturn(null);
-    when(config.encUsername()).thenReturn("serverkey");
-    when(config.securityActionsOut()).thenReturn("");
-    when(config.securityActionsIn()).thenReturn("");
-
-    SecurityConfig secConfig = mock(SecurityConfig.class);
-    when(secConfig.resolveActionsOut()).thenReturn("Signature");
-    when(secConfig.resolveActionsIn()).thenReturn("Signature");
-
-    WssSecurityProcessor processor = new WssSecurityProcessor(config);
-    processor.securityConfig = secConfig;
-    return processor;
+    SecurityProfile profile =
+        SecurityProfile.builder("test")
+            .keystore(keystorePath.toString(), "changeit")
+            .sigUser("alice", "changeit")
+            .encUser("serverkey")
+            .build();
+    return new WssSecurityProcessor(profile);
   }
 }

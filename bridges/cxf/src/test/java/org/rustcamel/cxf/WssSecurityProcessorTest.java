@@ -1,137 +1,103 @@
 package org.rustcamel.cxf;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
 
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 
 class WssSecurityProcessorTest {
 
-  @Mock BridgeConfig config;
-
-  WssSecurityProcessor processor;
-
-  @BeforeEach
-  void setUp() {
-    MockitoAnnotations.openMocks(this);
-    processor = new WssSecurityProcessor();
-    processor.config = config;
+  private WssSecurityProcessor withProfile(SecurityProfile profile) {
+    return new WssSecurityProcessor(profile);
   }
 
   // --- canSignOutbound ---
 
   @Test
   void canSignOutbound_returnsFalse_whenKeystorePathIsNull() {
-    when(config.keystorePath()).thenReturn(null);
-    assertFalse(processor.canSignOutbound());
+    SecurityProfile profile = SecurityProfile.builder("test").build();
+    assertFalse(withProfile(profile).canSignOutbound());
   }
 
   @Test
   void canSignOutbound_returnsFalse_whenKeystorePathIsEmpty() {
-    when(config.keystorePath()).thenReturn("");
-    assertFalse(processor.canSignOutbound());
+    SecurityProfile profile = SecurityProfile.builder("test").keystore("", "pass").build();
+    assertFalse(withProfile(profile).canSignOutbound());
   }
 
   @Test
   void canSignOutbound_returnsFalse_whenKeystorePathIsBlank() {
-    when(config.keystorePath()).thenReturn("   ");
-    assertFalse(processor.canSignOutbound());
+    SecurityProfile profile = SecurityProfile.builder("test").keystore("   ", "pass").build();
+    assertFalse(withProfile(profile).canSignOutbound());
   }
 
   @Test
   void canSignOutbound_returnsTrue_whenKeystorePathIsSet() {
-    when(config.keystorePath()).thenReturn("/path/to/keystore.jks");
-    assertTrue(processor.canSignOutbound());
+    SecurityProfile profile =
+        SecurityProfile.builder("test").keystore("/path/to/keystore.jks", "pass").build();
+    assertTrue(withProfile(profile).canSignOutbound());
   }
 
   // --- canVerifyInbound ---
 
   @Test
   void canVerifyInbound_returnsFalse_whenNeitherKeystoreNorTruststoreSet() {
-    when(config.keystorePath()).thenReturn(null);
-    when(config.truststorePath()).thenReturn(null);
-    assertFalse(processor.canVerifyInbound());
+    SecurityProfile profile = SecurityProfile.builder("test").build();
+    assertFalse(withProfile(profile).canVerifyInbound());
   }
 
   @Test
   void canVerifyInbound_returnsTrue_whenTruststorePathIsSet() {
-    when(config.truststorePath()).thenReturn("/path/to/truststore.jks");
-    when(config.keystorePath()).thenReturn(null);
-    assertTrue(processor.canVerifyInbound());
+    SecurityProfile profile =
+        SecurityProfile.builder("test").truststore("/path/to/truststore.jks", "pass").build();
+    assertTrue(withProfile(profile).canVerifyInbound());
   }
 
   @Test
   void canVerifyInbound_returnsTrue_whenKeystorePathIsSet() {
-    when(config.keystorePath()).thenReturn("/path/to/keystore.jks");
-    when(config.truststorePath()).thenReturn(null);
-    assertTrue(processor.canVerifyInbound());
-  }
-
-  // --- isEnabled (backward compat) ---
-
-  @Test
-  void isEnabled_returnsFalse_whenNeitherKeystoreNorTruststoreSet() {
-    when(config.keystorePath()).thenReturn(null);
-    when(config.truststorePath()).thenReturn(null);
-    assertFalse(processor.isEnabled());
-  }
-
-  @Test
-  void isEnabled_returnsTrue_whenKeystorePathIsSet() {
-    when(config.keystorePath()).thenReturn("/path/to/keystore.jks");
-    assertTrue(processor.isEnabled());
-  }
-
-  @Test
-  void isEnabled_returnsTrue_whenTruststorePathIsSet() {
-    when(config.truststorePath()).thenReturn("/path/to/truststore.jks");
-    when(config.keystorePath()).thenReturn(null);
-    assertTrue(processor.isEnabled());
+    SecurityProfile profile =
+        SecurityProfile.builder("test").keystore("/path/to/keystore.jks", "pass").build();
+    assertTrue(withProfile(profile).canVerifyInbound());
   }
 
   // --- processOutbound / processInbound passthrough when disabled ---
 
   @Test
   void processOutbound_returnsInput_whenDisabled() throws Exception {
-    when(config.keystorePath()).thenReturn(null);
+    SecurityProfile profile = SecurityProfile.builder("test").build();
     String input =
         "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><test/></soap:Body></soap:Envelope>";
-    assertEquals(input, processor.processOutbound(input));
+    assertEquals(input, withProfile(profile).processOutbound(input));
   }
 
   @Test
   void processInbound_returnsInput_whenDisabled() throws Exception {
-    when(config.keystorePath()).thenReturn(null);
-    when(config.truststorePath()).thenReturn(null);
+    SecurityProfile profile = SecurityProfile.builder("test").build();
     String input =
         "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><test/></soap:Body></soap:Envelope>";
-    assertEquals(input, processor.processInbound(input));
+    assertEquals(input, withProfile(profile).processInbound(input));
   }
 
   @Test
   void processOutbound_returnsNull_whenInputIsNull() throws Exception {
-    when(config.keystorePath()).thenReturn(null);
-    assertNull(processor.processOutbound(null));
+    SecurityProfile profile = SecurityProfile.builder("test").build();
+    assertNull(withProfile(profile).processOutbound(null));
   }
 
   @Test
   void processInbound_returnsNull_whenInputIsNull() throws Exception {
-    when(config.keystorePath()).thenReturn(null);
-    assertNull(processor.processInbound(null));
+    SecurityProfile profile = SecurityProfile.builder("test").build();
+    assertNull(withProfile(profile).processInbound(null));
   }
 
   @Test
   void processOutbound_returnsBlank_whenInputIsBlank() throws Exception {
-    when(config.keystorePath()).thenReturn(null);
-    assertEquals("", processor.processOutbound(""));
+    SecurityProfile profile = SecurityProfile.builder("test").build();
+    assertEquals("", withProfile(profile).processOutbound(""));
   }
 
   @Test
   void processInbound_returnsBlank_whenInputIsBlank() throws Exception {
-    when(config.keystorePath()).thenReturn(null);
-    assertEquals("", processor.processInbound(""));
+    SecurityProfile profile = SecurityProfile.builder("test").build();
+    assertEquals("", withProfile(profile).processInbound(""));
   }
 }

@@ -45,7 +45,7 @@ echo ""
 # Invoke Gradle via the wrapper jar directly (avoids JAVA_HOME lookup issues
 # when bash is used as --entrypoint in the Mandrel container).
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
-    build -Pquarkus.package.type=native -Pversion="${VERSION}" --no-daemon || {
+    build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true -Pversion="${VERSION}" --no-daemon || {
     # On failure, show GraalVM error report if present
     ERR_LOG=$(find build -name 'svm_err_b_*.md' -o -name '*.log' 2>/dev/null | head -3)
     for f in $ERR_LOG; do

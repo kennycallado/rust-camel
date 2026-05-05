@@ -16,7 +16,6 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       "org.rustcamel.cxf.CxfBridgeService",
       "org.rustcamel.cxf.CxfClientManager",
       "org.rustcamel.cxf.CxfServerManager",
-      "org.rustcamel.cxf.SecurityConfig",
       "org.rustcamel.cxf.SoapEnvelopeHelper",
 
       // --- gRPC generated service/proto classes ---

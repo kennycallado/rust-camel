@@ -3,7 +3,7 @@ mod support;
 use std::sync::Arc;
 
 use camel_component_api::{Body, Exchange, Message};
-use camel_component_cxf::config::{CxfPoolConfig, CxfServiceConfig};
+use camel_component_cxf::config::CxfPoolConfig;
 use camel_component_cxf::producer::CxfProducer;
 use camel_component_cxf::{BridgeSlot, CxfBridgePool};
 use support::mock_bridge::{MockState, spawn_mock_bridge};
@@ -21,19 +21,19 @@ async fn make_producer() -> (CxfProducer, MockState) {
         .await
         .expect("connect");
 
-    let config = CxfServiceConfig {
-        address: Some("http://localhost:8080/ws".to_string()),
-        wsdl_path: "service.wsdl".to_string(),
-        service_name: "TestService".to_string(),
-        port_name: "TestPort".to_string(),
-        security: Default::default(),
-    };
-
-    let producer = CxfProducer::from_channel(channel, config, "defaultOperation".to_string());
+    let producer = CxfProducer::from_channel(
+        channel,
+        "test".to_string(),
+        "service.wsdl".to_string(),
+        "TestService".to_string(),
+        "TestPort".to_string(),
+        Some("http://localhost:8080/ws".to_string()),
+        "defaultOperation".to_string(),
+    );
     (producer, state)
 }
 
-async fn make_pool_with_ready_slot() -> (Arc<CxfBridgePool>, MockState, CxfServiceConfig) {
+async fn make_pool_with_ready_slot() -> (Arc<CxfBridgePool>, MockState) {
     let (port, state) = spawn_mock_bridge().await.expect("mock bridge");
     let channel = Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
         .expect("endpoint")
@@ -41,25 +41,17 @@ async fn make_pool_with_ready_slot() -> (Arc<CxfBridgePool>, MockState, CxfServi
         .await
         .expect("connect");
 
-    let service = CxfServiceConfig {
-        address: Some(format!("http://127.0.0.1:{port}")),
-        wsdl_path: "classpath:test.wsdl".to_string(),
-        service_name: "TestService".to_string(),
-        port_name: "TestPort".to_string(),
-        security: Default::default(),
-    };
-    let key = CxfBridgePool::slot_key(&service);
-
+    let key = CxfBridgePool::slot_key();
     let slot = BridgeSlot::new_ready_for_test(channel);
 
     let pool_config = CxfPoolConfig {
-        services: vec![service.clone()],
+        profiles: vec![],
         ..CxfPoolConfig::default()
     };
     let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("valid config"));
     pool.insert_slot_for_test(key, slot);
 
-    (pool, state, service)
+    (pool, state)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -103,17 +95,16 @@ async fn test_producer_20_serial_invocations_succeed() {
 /// Verify all succeed and return a valid channel.
 #[tokio::test]
 async fn test_pool_get_channel_concurrent_access() {
-    let (pool, _state, service) = make_pool_with_ready_slot().await;
+    let (pool, _state) = make_pool_with_ready_slot().await;
 
     let num_tasks = 20;
     let mut handles = Vec::with_capacity(num_tasks);
 
     for i in 0..num_tasks {
         let pool = Arc::clone(&pool);
-        let service = service.clone();
         let handle = tokio::spawn(async move {
             let channel = pool
-                .get_channel(&service)
+                .get_channel()
                 .await
                 .expect("get_channel should succeed");
             // Verify the channel is usable by creating a client and calling health
@@ -143,8 +134,8 @@ async fn test_pool_get_channel_concurrent_access() {
 /// Note: no requests are in flight during restart — this just verifies no panic.
 #[tokio::test]
 async fn test_pool_restart_slot_no_panic() {
-    let (pool, _state, service) = make_pool_with_ready_slot().await;
-    let key = CxfBridgePool::slot_key(&service);
+    let (pool, _state) = make_pool_with_ready_slot().await;
+    let key = CxfBridgePool::slot_key();
 
     // Call restart_slot — should not panic
     pool.restart_slot(&key);

@@ -12,22 +12,24 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
-use crate::config::CxfServiceConfig;
 use crate::pool::{BridgeState, CxfBridgePool};
 use crate::proto::{ConsumerRequest, ConsumerResponse, cxf_bridge_client::CxfBridgeClient};
 
 pub struct CxfConsumer {
     pool: Arc<CxfBridgePool>,
-    service_config: CxfServiceConfig,
+    /// Profile name — used for debugging/logging; the bridge sends security_profile
+    /// via ConsumerRequest so the consumer doesn't need to send it explicitly.
+    #[allow(dead_code)]
+    profile_name: String,
     cancel_token: Option<CancellationToken>,
     task_handle: Option<JoinHandle<()>>,
 }
 
 impl CxfConsumer {
-    pub fn new(pool: Arc<CxfBridgePool>, service_config: CxfServiceConfig) -> Self {
+    pub fn new(pool: Arc<CxfBridgePool>, profile_name: String) -> Self {
         Self {
             pool,
-            service_config,
+            profile_name,
             cancel_token: None,
             task_handle: None,
         }
@@ -61,6 +63,12 @@ fn build_exchange(req: &ConsumerRequest) -> Exchange {
         exchange
             .input
             .set_header("CxfSoapAction", Value::String(req.soap_action.clone()));
+    }
+    if !req.security_profile.is_empty() {
+        exchange.input.set_header(
+            "CxfSecurityProfile",
+            Value::String(req.security_profile.clone()),
+        );
     }
     for (k, v) in &req.headers {
         exchange.input.set_header(k, Value::String(v.clone()));
@@ -97,11 +105,10 @@ fn reconnect_delay(attempt: u32) -> Duration {
 
 async fn await_ready_channel(
     pool: Arc<CxfBridgePool>,
-    service: &CxfServiceConfig,
 ) -> Result<Channel, CamelError> {
-    let key = CxfBridgePool::slot_key(service);
+    let key = CxfBridgePool::slot_key();
     let slot = pool
-        .get_or_create_slot(&key, service)
+        .get_or_create_slot(&key)
         .await
         .map_err(|e| CamelError::ProcessorError(format!("CXF slot error: {e}")))?;
     let mut rx = slot.state_rx.clone();
@@ -131,7 +138,6 @@ async fn await_ready_channel(
 impl Consumer for CxfConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
         let pool = Arc::clone(&self.pool);
-        let service_config = self.service_config.clone();
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
 
@@ -148,7 +154,7 @@ impl Consumer for CxfConsumer {
                         info!("CXF consumer context cancelled");
                         break;
                     }
-                    result = await_ready_channel(Arc::clone(&pool), &service_config) => {
+                    result = await_ready_channel(Arc::clone(&pool)) => {
                         match result {
                             Ok(channel) => channel,
                             Err(e) => {
@@ -188,7 +194,7 @@ impl Consumer for CxfConsumer {
                                     failures = consecutive_transport_failures,
                                     "CXF stream transport failures exceeded threshold; refreshing channel"
                                 );
-                                let key = CxfBridgePool::slot_key(&service_config);
+                                let key = CxfBridgePool::slot_key();
                                 if let Err(refresh_err) = pool.refresh_slot_channel(&key).await {
                                     warn!(error = %refresh_err, "CXF channel refresh failed; requesting bridge restart");
                                     pool.restart_slot(&key);
@@ -225,6 +231,7 @@ impl Consumer for CxfConsumer {
                                 Ok(Some(req)) => {
                                     let exchange = build_exchange(&req);
                                     let request_id = req.request_id.clone();
+                                    let security_profile = req.security_profile.clone();
 
                                     let result = ctx.send_and_wait(exchange).await;
 
@@ -237,6 +244,7 @@ impl Consumer for CxfConsumer {
                                                 fault: false,
                                                 fault_code: String::new(),
                                                 fault_string: String::new(),
+                                                security_profile,
                                             }
                                         }
                                         Err(e) => {
@@ -247,6 +255,7 @@ impl Consumer for CxfConsumer {
                                                 fault: true,
                                                 fault_code: "soap:Server".to_string(),
                                                 fault_string: e.to_string(),
+                                                security_profile,
                                             }
                                         }
                                     };
@@ -268,7 +277,7 @@ impl Consumer for CxfConsumer {
                                                 failures = consecutive_transport_failures,
                                                 "CXF stream transport failures exceeded threshold; refreshing channel"
                                             );
-                                            let key = CxfBridgePool::slot_key(&service_config);
+                                            let key = CxfBridgePool::slot_key();
                                             if let Err(refresh_err) = pool.refresh_slot_channel(&key).await {
                                                 warn!(error = %refresh_err, "CXF channel refresh failed; requesting bridge restart");
                                                 pool.restart_slot(&key);
@@ -324,24 +333,15 @@ mod tests {
     use super::*;
     use crate::config::CxfPoolConfig;
 
-    fn test_service_config() -> CxfServiceConfig {
-        CxfServiceConfig {
-            address: Some("http://localhost:8080/service".to_string()),
-            wsdl_path: "/wsdl/hello.wsdl".to_string(),
-            service_name: "HelloService".to_string(),
-            port_name: "HelloPort".to_string(),
-            security: Default::default(),
-        }
-    }
-
     fn test_pool() -> Arc<CxfBridgePool> {
         let pool_config = CxfPoolConfig {
-            services: vec![],
+            profiles: vec![],
             max_bridges: 1,
             bridge_start_timeout_ms: 5_000,
             health_check_interval_ms: 5_000,
             bridge_cache_dir: None,
             version: "0.1.0".to_string(),
+            bind_address: None,
         };
         Arc::new(CxfBridgePool::from_config(pool_config).unwrap())
     }
@@ -349,10 +349,10 @@ mod tests {
     #[test]
     fn consumer_new() {
         let pool = test_pool();
-        let service_config = test_service_config();
-        let consumer = CxfConsumer::new(pool, service_config);
+        let consumer = CxfConsumer::new(pool, "baleares".to_string());
         assert!(consumer.cancel_token.is_none());
         assert!(consumer.task_handle.is_none());
+        assert_eq!(consumer.profile_name, "baleares");
     }
 
     #[test]
@@ -365,6 +365,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             soap_action: "urn:sayHello".to_string(),
+            security_profile: "baleares".to_string(),
         };
 
         let exchange = build_exchange(&req);
@@ -397,6 +398,13 @@ mod tests {
         assert_eq!(
             exchange
                 .input
+                .header("CxfSecurityProfile")
+                .and_then(|v| v.as_str()),
+            Some("baleares")
+        );
+        assert_eq!(
+            exchange
+                .input
                 .header("CustomHeader")
                 .and_then(|v| v.as_str()),
             Some("custom-value")
@@ -411,6 +419,7 @@ mod tests {
             payload: vec![],
             headers: Default::default(),
             soap_action: String::new(),
+            security_profile: String::new(),
         };
 
         let exchange = build_exchange(&req);
@@ -428,8 +437,7 @@ mod tests {
     #[tokio::test]
     async fn stop_without_start_is_noop() {
         let pool = test_pool();
-        let service_config = test_service_config();
-        let mut consumer = CxfConsumer::new(pool, service_config);
+        let mut consumer = CxfConsumer::new(pool, "test".to_string());
         assert!(consumer.stop().await.is_ok());
     }
 
@@ -497,6 +505,7 @@ mod tests {
             payload: b"<hello/>".to_vec(),
             headers: Default::default(),
             soap_action: String::new(),
+            security_profile: String::new(),
         };
         let exchange = build_exchange(&req);
         assert_eq!(

@@ -15,15 +15,12 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
@@ -32,7 +29,7 @@ class SoapEndpointPublisherTest {
 
   @Mock BridgeConfig bridgeConfig;
   @Mock CxfServerManager cxfServerManager;
-  @Mock WssSecurityProcessor wssProcessor;
+  @Mock SecurityProfileStore profileStore;
   @Mock io.vertx.core.Vertx vertx;
   @Mock HttpServer httpServer;
   @Mock HttpServerRequest httpRequest;
@@ -42,7 +39,7 @@ class SoapEndpointPublisherTest {
 
   SoapEndpointPublisher publisher;
 
-  @TempDir Path tempDir;
+  private static final String TEST_PROFILE_NAME = "test_profile";
 
   @BeforeEach
   void setUp() throws Exception {
@@ -51,20 +48,20 @@ class SoapEndpointPublisherTest {
     publisher = new SoapEndpointPublisher();
     publisher.bridgeConfig = bridgeConfig;
     publisher.cxfServerManager = cxfServerManager;
-    publisher.wssProcessor = wssProcessor;
+    publisher.profileStore = profileStore;
     publisher.vertx = vertx;
 
-    Path wsdlFile = tempDir.resolve("test.wsdl");
-    Files.writeString(wsdlFile, "<definitions/>");
-
-    when(bridgeConfig.wsdlPath()).thenReturn(wsdlFile.toString());
     when(bridgeConfig.address()).thenReturn("http://0.0.0.0:9000/cxf");
     when(bridgeConfig.connectionTimeoutMs()).thenReturn(5000);
     when(bridgeConfig.consumerTimeoutMs()).thenReturn(5000);
 
+    // Default profile — no security
+    SecurityProfile testProfile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
+    when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(testProfile);
+
     when(vertx.createHttpServer(any())).thenReturn(httpServer);
     when(httpServer.requestHandler(any())).thenReturn(httpServer);
-    when(httpRequest.path()).thenReturn("/cxf");
+    when(httpRequest.path()).thenReturn("/cxf/" + TEST_PROFILE_NAME);
     when(httpRequest.method()).thenReturn(HttpMethod.POST);
     when(httpRequest.headers()).thenReturn(headers);
     when(httpRequest.response()).thenReturn(httpResponse);
@@ -72,18 +69,9 @@ class SoapEndpointPublisherTest {
     when(httpResponse.putHeader(anyString(), anyString())).thenReturn(httpResponse);
   }
 
-  /**
-   * Triggers the request handling flow by publishing the endpoint, simulating an HTTP POST request,
-   * and executing the captured executeBlocking callable. Returns the response XML.
-   */
   private String triggerRequestFlow(
-      String requestXml, boolean wssEnabled, ConsumerResponse response) throws Exception {
-    when(wssProcessor.canVerifyInbound()).thenReturn(wssEnabled);
-    when(wssProcessor.canSignOutbound()).thenReturn(wssEnabled);
-    if (wssEnabled) {
-      when(wssProcessor.processInbound(anyString())).thenAnswer(i -> i.getArgument(0));
-      when(wssProcessor.processOutbound(anyString())).thenAnswer(i -> i.getArgument(0));
-    }
+      String requestXml, SecurityProfile profile, ConsumerResponse response) throws Exception {
+    when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(profile);
 
     CompletableFuture<ConsumerResponse> future = CompletableFuture.completedFuture(response);
     when(cxfServerManager.handleSoapRequest(any())).thenReturn(future);
@@ -154,7 +142,7 @@ class SoapEndpointPublisherTest {
   }
 
   @Test
-  void wssProcessor_notCalled_whenDisabled() throws Exception {
+  void noWssProcessing_whenProfileHasNoSecurity() throws Exception {
     String requestXml =
         "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
             + "<soapenv:Body><test/></soapenv:Body></soapenv:Envelope>";
@@ -163,79 +151,40 @@ class SoapEndpointPublisherTest {
         ConsumerResponse.newBuilder()
             .setRequestId("test-1")
             .setPayload(ByteString.copyFromUtf8("<result>ok</result>"))
+            .setSecurityProfile(TEST_PROFILE_NAME)
             .build();
 
-    triggerRequestFlow(requestXml, false, response);
-
-    verify(wssProcessor, never()).processInbound(anyString());
-    verify(wssProcessor, never()).processOutbound(anyString());
+    SecurityProfile profile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
+    String responseXml = triggerRequestFlow(requestXml, profile, response);
+    assertTrue(responseXml.contains("<result>ok</result>"));
   }
 
   @Test
-  void processInbound_calledWithRequestXml_whenWssEnabled() throws Exception {
-    String requestXml =
-        "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
-            + "<soapenv:Header><wsse:Security>...</wsse:Security></soapenv:Header>"
-            + "<soapenv:Body><test/></soapenv:Body></soapenv:Envelope>";
-
-    ConsumerResponse response =
-        ConsumerResponse.newBuilder()
-            .setRequestId("test-2")
-            .setPayload(ByteString.copyFromUtf8("<result>ok</result>"))
-            .build();
-
-    triggerRequestFlow(requestXml, true, response);
-
-    ArgumentCaptor<String> inboundCaptor = ArgumentCaptor.forClass(String.class);
-    verify(wssProcessor).processInbound(inboundCaptor.capture());
-    assertEquals(requestXml, inboundCaptor.getValue());
+  void extractProfileName_valid() {
+    assertEquals("baleares", SoapEndpointPublisher.extractProfileName("/cxf/baleares"));
+    assertEquals("baleares", SoapEndpointPublisher.extractProfileName("/cxf/baleares/"));
+    assertEquals("baleares", SoapEndpointPublisher.extractProfileName("/cxf/baleares/service"));
   }
 
   @Test
-  void processOutbound_calledWithResponseEnvelope_whenWssEnabled() throws Exception {
-    String requestXml =
-        "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
-            + "<soapenv:Body><test/></soapenv:Body></soapenv:Envelope>";
-
-    ConsumerResponse response =
-        ConsumerResponse.newBuilder()
-            .setRequestId("test-3")
-            .setPayload(ByteString.copyFromUtf8("<result>ok</result>"))
-            .build();
-
-    triggerRequestFlow(requestXml, true, response);
-
-    ArgumentCaptor<String> outboundCaptor = ArgumentCaptor.forClass(String.class);
-    verify(wssProcessor).processOutbound(outboundCaptor.capture());
-    String outboundXml = outboundCaptor.getValue();
-    assertTrue(outboundXml.contains("<result>ok</result>"));
-    assertTrue(outboundXml.contains("soapenv:Envelope"));
-    assertTrue(outboundXml.contains("soapenv:Body"));
+  void extractProfileName_noProfile_returnsNull() {
+    assertNull(SoapEndpointPublisher.extractProfileName("/cxf"));
+    assertNull(SoapEndpointPublisher.extractProfileName("/cxf/"));
+    assertNull(SoapEndpointPublisher.extractProfileName("/other/path"));
+    assertNull(SoapEndpointPublisher.extractProfileName(null));
   }
 
   @Test
-  void processInbound_and_processOutbound_bothCalled_whenWssEnabled() throws Exception {
-    String requestXml =
-        "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
-            + "<soapenv:Body><test/></soapenv:Body></soapenv:Envelope>";
-
-    ConsumerResponse response =
-        ConsumerResponse.newBuilder()
-            .setRequestId("test-4")
-            .setPayload(ByteString.copyFromUtf8("<result>ok</result>"))
-            .build();
-
-    triggerRequestFlow(requestXml, true, response);
-
-    verify(wssProcessor, times(1)).processInbound(anyString());
-    verify(wssProcessor, times(1)).processOutbound(anyString());
+  void extractProfileName_unknownProfile_returnsName() {
+    // extractProfileName doesn't validate — returns the segment
+    assertEquals("unknown", SoapEndpointPublisher.extractProfileName("/cxf/unknown"));
   }
 
   @Test
   void processInbound_exception_propagates() throws Exception {
-    when(wssProcessor.canVerifyInbound()).thenReturn(true);
-    when(wssProcessor.processInbound(anyString()))
-        .thenThrow(new RuntimeException("signature verification failed"));
+    SecurityProfile profile =
+        SecurityProfile.builder(TEST_PROFILE_NAME).keystore("/nonexistent.jks", "pass").build();
+    when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(profile);
 
     CompletableFuture<ConsumerResponse> future =
         CompletableFuture.completedFuture(
@@ -290,6 +239,6 @@ class SoapEndpointPublisherTest {
 
     @SuppressWarnings("unchecked")
     Callable<String> callable = callableCaptor.getValue();
-    assertThrows(RuntimeException.class, callable::call);
+    assertThrows(Exception.class, callable::call);
   }
 }

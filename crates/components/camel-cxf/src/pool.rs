@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use camel_bridge::channel::connect_channel;
 use camel_bridge::download::ensure_binary_for_spec;
 use camel_bridge::health::wait_for_health;
-use camel_bridge::process::{BridgeProcess, BridgeProcessConfig};
+use camel_bridge::process::{BridgeProcess, BridgeProcessConfig, CxfProfileEnvVars};
 use camel_bridge::spec::CXF_BRIDGE;
 use camel_component_api::CamelError;
 use dashmap::DashMap;
@@ -13,7 +13,7 @@ use tokio::sync::watch;
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
-use crate::config::{CxfPoolConfig, CxfSecurityConfig, CxfServiceConfig};
+use crate::config::{CxfPoolConfig, validate_profile_name};
 use crate::error::CxfError;
 use crate::proto::{HealthRequest, cxf_bridge_client::CxfBridgeClient};
 
@@ -32,7 +32,8 @@ pub enum BridgeState {
 
 pub struct BridgeSlot {
     pub key: String,
-    pub service_config: CxfServiceConfig,
+    pub configured_profiles: Vec<crate::config::CxfProfileConfig>,
+    pub bind_address: Option<String>,
     pub state_rx: watch::Receiver<BridgeState>,
     pub(crate) state_tx: watch::Sender<BridgeState>,
     pub process: Arc<tokio::sync::Mutex<Option<BridgeProcess>>>,
@@ -44,13 +45,8 @@ impl BridgeSlot {
         let (state_tx, state_rx) = watch::channel(BridgeState::Ready { channel });
         Self {
             key: "test-slot".to_string(),
-            service_config: CxfServiceConfig {
-                address: None,
-                wsdl_path: String::new(),
-                service_name: String::new(),
-                port_name: String::new(),
-                security: Default::default(),
-            },
+            configured_profiles: vec![],
+            bind_address: None,
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
@@ -76,15 +72,20 @@ pub struct CxfBridgePool {
     pub(crate) health_check_interval_ms: u64,
     pub(crate) bridge_version: String,
     pub(crate) bridge_cache_dir: PathBuf,
-    pub(crate) configured_services: Vec<CxfServiceConfig>,
+    pub(crate) configured_profiles: Vec<crate::config::CxfProfileConfig>,
+    pub(crate) bind_address: Option<String>,
 }
 
 impl CxfBridgePool {
     pub fn from_config(pool_config: CxfPoolConfig) -> Result<Self, CamelError> {
+        // Validate all profile names before any bridge is spawned.
+        for profile in &pool_config.profiles {
+            validate_profile_name(&profile.name)?;
+        }
         let bridge_cache_dir = pool_config
             .bridge_cache_dir
             .unwrap_or_else(|| camel_bridge::download::default_cache_dir_for_spec(&CXF_BRIDGE));
-        let configured_services = pool_config.services.clone();
+        let configured_profiles = pool_config.profiles.clone();
         Ok(Self {
             slots: DashMap::new(),
             max_bridges: pool_config.max_bridges,
@@ -92,32 +93,13 @@ impl CxfBridgePool {
             health_check_interval_ms: pool_config.health_check_interval_ms,
             bridge_version: pool_config.version,
             bridge_cache_dir,
-            configured_services,
+            configured_profiles,
+            bind_address: pool_config.bind_address,
         })
     }
 
-    pub fn find_security_config(
-        &self,
-        wsdl_path: &str,
-        service_name: &str,
-        port_name: &str,
-    ) -> CxfSecurityConfig {
-        self.configured_services
-            .iter()
-            .find(|s| {
-                s.wsdl_path == wsdl_path
-                    && s.service_name == service_name
-                    && s.port_name == port_name
-            })
-            .map(|s| s.security.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn slot_key(service: &CxfServiceConfig) -> String {
-        format!(
-            "{}#{}#{}",
-            service.wsdl_path, service.service_name, service.port_name
-        )
+    pub fn slot_key() -> String {
+        "cxf".to_string()
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -125,19 +107,15 @@ impl CxfBridgePool {
         self.slots.insert(key, Arc::new(slot));
     }
 
-    pub async fn get_channel(
-        self: &Arc<Self>,
-        service: &CxfServiceConfig,
-    ) -> Result<Channel, CxfError> {
-        let key = Self::slot_key(service);
-        let slot = self.get_or_create_slot(&key, service).await?;
+    pub async fn get_channel(self: &Arc<Self>) -> Result<Channel, CxfError> {
+        let key = Self::slot_key();
+        let slot = self.get_or_create_slot(&key).await?;
         self.await_ready_channel(&slot).await
     }
 
     pub async fn get_or_create_slot(
         self: &Arc<Self>,
         key: &str,
-        service: &CxfServiceConfig,
     ) -> Result<Arc<BridgeSlot>, CxfError> {
         if let Some(entry) = self.slots.get(key) {
             return Ok(Arc::clone(entry.value()));
@@ -150,11 +128,12 @@ impl CxfBridgePool {
             )));
         }
 
-        let svc_clone = service.clone();
         let key_owned = key.to_string();
         let start_timeout_ms = self.bridge_start_timeout_ms;
         let bridge_version = self.bridge_version.clone();
         let bridge_cache_dir = self.bridge_cache_dir.clone();
+        let profiles = self.configured_profiles.clone();
+        let bind_address = self.bind_address.clone();
 
         let slot = match self.slots.entry(key_owned.clone()) {
             dashmap::Entry::Occupied(existing) => {
@@ -164,7 +143,8 @@ impl CxfBridgePool {
                 let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
                 let slot = Arc::new(BridgeSlot {
                     key: key_owned,
-                    service_config: svc_clone,
+                    configured_profiles: profiles,
+                    bind_address,
                     state_rx,
                     state_tx,
                     process: Arc::new(tokio::sync::Mutex::new(None)),
@@ -204,13 +184,9 @@ impl CxfBridgePool {
         bridge_cache_dir: &Path,
         start_timeout_ms: u64,
     ) -> Result<(BridgeProcess, Channel), CxfError> {
-        let service = &slot.service_config;
         tracing::trace!(
             key = %slot.key,
-            service_address = ?service.address,
-            wsdl_path = %service.wsdl_path,
-            service_name = %service.service_name,
-            port_name = %service.port_name,
+            profile_count = slot.configured_profiles.len(),
             "starting CXF bridge slot"
         );
 
@@ -219,22 +195,38 @@ impl CxfBridgePool {
                 .await
                 .map_err(|e| CxfError::Bridge(e.to_string()))?;
 
-            let sec = &service.security;
-            let mut config = BridgeProcessConfig::cxf(
+            let profile_env_vars: Vec<CxfProfileEnvVars> = slot
+                .configured_profiles
+                .iter()
+                .map(|p| CxfProfileEnvVars {
+                    name: p.name.clone(),
+                    wsdl_path: p.wsdl_path.clone(),
+                    service_name: p.service_name.clone(),
+                    port_name: p.port_name.clone(),
+                    address: p.address.clone(),
+                    keystore_path: p.security.keystore_path.clone(),
+                    keystore_password: p.security.keystore_password.clone(),
+                    truststore_path: p.security.truststore_path.clone(),
+                    truststore_password: p.security.truststore_password.clone(),
+                    sig_username: p.security.sig_username.clone(),
+                    sig_password: p.security.sig_password.clone(),
+                    enc_username: p.security.enc_username.clone(),
+                    security_actions_out: p.security.security_actions_out.clone(),
+                    security_actions_in: p.security.security_actions_in.clone(),
+                    signature_algorithm: p.security.signature_algorithm.clone(),
+                    signature_digest_algorithm: p.security.signature_digest_algorithm.clone(),
+                    signature_c14n_algorithm: p.security.signature_c14n_algorithm.clone(),
+                    signature_parts: p.security.signature_parts.clone(),
+                })
+                .collect();
+
+            let config = BridgeProcessConfig::cxf_profiles(
                 binary_path,
-                service.wsdl_path.clone(),
-                service.service_name.clone(),
-                service.port_name.clone(),
-                sec.username.clone(),
-                sec.password.clone(),
-                sec.keystore_path.clone(),
-                sec.keystore_password.clone(),
-                sec.truststore_path.clone(),
-                sec.truststore_password.clone(),
+                &profile_env_vars,
                 start_timeout_ms,
             );
-
-            if let Some(ref addr) = service.address {
+            let mut config = config;
+            if let Some(addr) = slot.bind_address.as_ref() {
                 config
                     .env_vars
                     .push(("CXF_ADDRESS".to_string(), addr.clone()));
@@ -371,7 +363,7 @@ impl CxfBridgePool {
                         }
 
                         let start_result: Result<(BridgeProcess, Channel), CxfError> = async {
-                            let svc = &slot.service_config;
+                            let profiles = &slot.configured_profiles;
                             let binary_path = ensure_binary_for_spec(
                                 &CXF_BRIDGE,
                                 &bridge_version,
@@ -380,22 +372,37 @@ impl CxfBridgePool {
                             .await
                             .map_err(|e| CxfError::Bridge(e.to_string()))?;
 
-                            let sec = &svc.security;
-                            let mut config = BridgeProcessConfig::cxf(
+                            let profile_env_vars: Vec<CxfProfileEnvVars> = profiles
+                                .iter()
+                                .map(|p| CxfProfileEnvVars {
+                                    name: p.name.clone(),
+                                    wsdl_path: p.wsdl_path.clone(),
+                                    service_name: p.service_name.clone(),
+                                    port_name: p.port_name.clone(),
+                                    address: p.address.clone(),
+                                    keystore_path: p.security.keystore_path.clone(),
+                                    keystore_password: p.security.keystore_password.clone(),
+                                    truststore_path: p.security.truststore_path.clone(),
+                                    truststore_password: p.security.truststore_password.clone(),
+                                    sig_username: p.security.sig_username.clone(),
+                                    sig_password: p.security.sig_password.clone(),
+                                    enc_username: p.security.enc_username.clone(),
+                                    security_actions_out: p.security.security_actions_out.clone(),
+                                    security_actions_in: p.security.security_actions_in.clone(),
+                                    signature_algorithm: p.security.signature_algorithm.clone(),
+                                    signature_digest_algorithm: p.security.signature_digest_algorithm.clone(),
+                                    signature_c14n_algorithm: p.security.signature_c14n_algorithm.clone(),
+                                    signature_parts: p.security.signature_parts.clone(),
+                                })
+                                .collect();
+
+                            let config = BridgeProcessConfig::cxf_profiles(
                                 binary_path,
-                                svc.wsdl_path.clone(),
-                                svc.service_name.clone(),
-                                svc.port_name.clone(),
-                                sec.username.clone(),
-                                sec.password.clone(),
-                                sec.keystore_path.clone(),
-                                sec.keystore_password.clone(),
-                                sec.truststore_path.clone(),
-                                sec.truststore_password.clone(),
+                                &profile_env_vars,
                                 start_timeout_ms,
                             );
-
-                            if let Some(ref addr) = svc.address {
+                            let mut config = config;
+                            if let Some(addr) = slot.bind_address.as_ref() {
                                 config
                                     .env_vars
                                     .push(("CXF_ADDRESS".to_string(), addr.clone()));
@@ -533,69 +540,22 @@ impl CxfBridgePool {
 mod tests {
     use super::*;
 
-    fn test_service_config() -> CxfServiceConfig {
-        CxfServiceConfig {
-            address: Some("http://localhost:8080/service".to_string()),
-            wsdl_path: "/wsdl/hello.wsdl".to_string(),
-            service_name: "HelloService".to_string(),
-            port_name: "HelloPort".to_string(),
-            security: Default::default(),
-        }
-    }
-
     #[test]
-    fn slot_key_format() {
-        let svc = test_service_config();
-        let key = CxfBridgePool::slot_key(&svc);
-        assert_eq!(key, "/wsdl/hello.wsdl#HelloService#HelloPort");
-    }
-
-    #[test]
-    fn slot_key_omits_address() {
-        // slot_key is based on wsdl_path + service_name + port_name only;
-        // address is intentionally NOT part of the key.
-        let svc_with_addr = CxfServiceConfig {
-            address: Some("http://localhost:9090/ws".to_string()),
-            wsdl_path: "/wsdl/test.wsdl".to_string(),
-            service_name: "TestService".to_string(),
-            port_name: "TestPort".to_string(),
-            security: Default::default(),
-        };
-        let key = CxfBridgePool::slot_key(&svc_with_addr);
-        assert!(
-            !key.contains("localhost"),
-            "key should not contain address: {key}"
-        );
-        assert!(
-            !key.contains("9090"),
-            "key should not contain address port: {key}"
-        );
-        assert!(
-            key.contains("/wsdl/test.wsdl"),
-            "key should contain wsdl_path: {key}"
-        );
-
-        // Same wsdl/service/port with None address produces identical key
-        let svc_no_addr = CxfServiceConfig {
-            address: None,
-            ..svc_with_addr.clone()
-        };
-        assert_eq!(
-            CxfBridgePool::slot_key(&svc_with_addr),
-            CxfBridgePool::slot_key(&svc_no_addr),
-            "address presence should not affect slot_key"
-        );
+    fn slot_key_is_constant() {
+        let key = CxfBridgePool::slot_key();
+        assert_eq!(key, "cxf");
     }
 
     #[test]
     fn from_config_uses_defaults() {
         let pool_config = CxfPoolConfig {
-            services: vec![],
+            profiles: vec![],
             max_bridges: 2,
             bridge_start_timeout_ms: 15_000,
             health_check_interval_ms: 3_000,
             bridge_cache_dir: None,
             version: "0.1.0".to_string(),
+            bind_address: None,
         };
         let pool = CxfBridgePool::from_config(pool_config).expect("valid config");
         assert_eq!(pool.max_bridges, 2);
@@ -622,19 +582,21 @@ mod tests {
     #[test]
     fn restart_slot_updates_state() {
         let pool_config = CxfPoolConfig {
-            services: vec![],
+            profiles: vec![],
             max_bridges: 2,
             bridge_start_timeout_ms: 15_000,
             health_check_interval_ms: 3_000,
             bridge_cache_dir: None,
             version: "0.1.0".to_string(),
+            bind_address: None,
         };
         let pool = CxfBridgePool::from_config(pool_config).expect("valid config");
 
         let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
         let slot = Arc::new(BridgeSlot {
             key: "test-key".to_string(),
-            service_config: test_service_config(),
+            configured_profiles: vec![],
+            bind_address: None,
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
@@ -659,16 +621,17 @@ mod tests {
     #[test]
     fn max_bridges_enforced() {
         let pool_config = CxfPoolConfig {
-            services: vec![],
+            profiles: vec![],
             max_bridges: 0,
             bridge_start_timeout_ms: 15_000,
             health_check_interval_ms: 3_000,
             bridge_cache_dir: None,
             version: "0.1.0".to_string(),
+            bind_address: None,
         };
         let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("valid config"));
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(pool.get_or_create_slot("key", &test_service_config()));
+        let result = rt.block_on(pool.get_or_create_slot("key"));
         assert!(result.is_err(), "should fail when max_bridges is 0");
         let err = result.unwrap_err();
         assert!(err.to_string().contains("max_bridges"), "got: {err}");

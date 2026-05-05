@@ -8,7 +8,7 @@ pub mod producer;
 
 pub use bundle::CxfBundle;
 pub use component::CxfComponent;
-pub use config::CxfPoolConfig;
+pub use config::{CxfPoolConfig, CxfProfileConfig};
 pub use error::CxfError;
 pub use pool::{BridgeSlot, BridgeState, CxfBridgePool};
 

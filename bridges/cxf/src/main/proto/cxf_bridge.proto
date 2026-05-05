@@ -27,6 +27,7 @@ message SoapRequest {
   bytes payload = 5; // XML body (unwrapped — bridge handles envelope)
   map<string, string> headers = 6;
   int32 timeout_ms = 7; // per-request timeout (0 = use default 30s)
+  string security_profile = 9;
 }
 
 // Producer response
@@ -45,6 +46,7 @@ message ConsumerRequest {
   bytes payload = 3; // XML body
   map<string, string> headers = 4;
   string soap_action = 5;
+  string security_profile = 6;
 }
 
 // Rust → Bridge: route processing result (consumer mode)
@@ -54,6 +56,7 @@ message ConsumerResponse {
   bool fault = 3; // true = return SOAP fault
   string fault_code = 4;
   string fault_string = 5;
+  string security_profile = 6;
 }
 
 message HealthRequest {}

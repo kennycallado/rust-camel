@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{Router, routing::post};
-use camel_component_cxf::{CxfBridgePool, CxfComponent, CxfPoolConfig};
+use camel_component_cxf::{CxfBridgePool, CxfComponent, CxfPoolConfig, CxfProfileConfig};
 use camel_dsl::parse_yaml;
 use camel_test::CamelTestContext;
 use reqwest::StatusCode;
@@ -89,7 +89,30 @@ async fn start_mock_soap_fault_service() -> SocketAddr {
 }
 
 fn shared_cxf_component() -> CxfComponent {
-    let pool = Arc::new(CxfBridgePool::from_config(CxfPoolConfig::default()).unwrap());
+    cxf_component_with_bind(None)
+}
+
+fn cxf_component_with_bind(bind_port: Option<u16>) -> CxfComponent {
+    let wsdl_path = cxf_wsdl_path();
+    let pool = Arc::new(
+        CxfBridgePool::from_config(CxfPoolConfig {
+            profiles: vec![CxfProfileConfig {
+                name: "test_profile".to_string(),
+                address: Some("http://localhost:8080/service".to_string()),
+                wsdl_path,
+                service_name: "{http://example.com/hello}HelloService".to_string(),
+                port_name: "{http://example.com/hello}HelloPort".to_string(),
+                security: Default::default(),
+            }],
+            max_bridges: 4,
+            bridge_start_timeout_ms: 30_000,
+            health_check_interval_ms: 5_000,
+            bridge_cache_dir: None,
+            version: camel_component_cxf::BRIDGE_VERSION.to_string(),
+            bind_address: bind_port.map(|p| format!("http://127.0.0.1:{p}/cxf")),
+        })
+        .unwrap(),
+    );
     CxfComponent::new(pool)
 }
 
@@ -123,7 +146,7 @@ async fn cxf_producer_invokes_mock_soap_service() {
         .await;
 
     let yaml = format!(
-        "routes:\n  - id: cxf-producer-test\n    from: direct:start\n    steps:\n      - to: \"cxf://http://{addr}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello\"\n      - to: \"mock:done\"\n"
+        "routes:\n  - id: cxf-producer-test\n    from: direct:start\n    steps:\n      - to: \"cxf://http://{addr}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello&profile=test_profile\"\n      - to: \"mock:done\"\n"
     );
     for route in parse_yaml(&yaml).unwrap() {
         h.add_route(route).await.unwrap();
@@ -166,12 +189,12 @@ async fn cxf_consumer_receives_request_and_returns_response() {
     let h = CamelTestContext::builder()
         .with_direct()
         .with_mock()
-        .with_component(shared_cxf_component())
+        .with_component(cxf_component_with_bind(Some(port)))
         .build()
         .await;
 
     let yaml = format!(
-        "routes:\n  - id: cxf-consumer-test\n    from: \"cxf://http://127.0.0.1:{port}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort\"\n    steps:\n      - set_body:\n          constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
+        "routes:\n  - id: cxf-consumer-test\n    from: \"cxf://http://127.0.0.1:{port}/cxf/test_profile?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=test_profile\"\n    steps:\n      - set_body:\n          constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
     );
     for route in parse_yaml(&yaml).unwrap() {
         h.add_route(route).await.unwrap();
@@ -184,7 +207,7 @@ async fn cxf_consumer_receives_request_and_returns_response() {
         Duration::from_secs(10),
         Duration::from_millis(200),
         || {
-            let url = format!("http://127.0.0.1:{port}/service");
+            let url = format!("http://127.0.0.1:{port}/cxf/test_profile");
             async move {
                 match reqwest::Client::new().get(&url).send().await {
                     Ok(_) => Ok(true),
@@ -198,7 +221,7 @@ async fn cxf_consumer_receives_request_and_returns_response() {
 
     let client = reqwest::Client::new();
     let res = client
-        .post(format!("http://127.0.0.1:{port}/service"))
+        .post(format!("http://127.0.0.1:{port}/cxf/test_profile"))
         .header("content-type", "text/xml; charset=utf-8")
         .header("soapaction", "sayHello")
         .body(
@@ -241,10 +264,13 @@ async fn cxf_native_health_check_responds_within_5s() {
     init_tracing();
     let binary = require_cxf_bridge_binary();
 
+    let wsdl_path = cxf_wsdl_path();
+
     let mut child = Command::new(binary)
-        .env("CXF_WSDL_PATH", cxf_wsdl_path())
-        .env("CXF_SERVICE_NAME", "{http://example.com/hello}HelloService")
-        .env("CXF_PORT_NAME", "{http://example.com/hello}HelloPort")
+        .env("CXF_PROFILES", "test")
+        .env("CXF_PROFILE_TEST_WSDL_PATH", &wsdl_path)
+        .env("CXF_PROFILE_TEST_SERVICE_NAME", "{http://example.com/hello}HelloService")
+        .env("CXF_PROFILE_TEST_PORT_NAME", "{http://example.com/hello}HelloPort")
         .env("QUARKUS_HTTP_PORT", "0")
         .env("QUARKUS_GRPC_SERVER_PORT", "0")
         .stdout(std::process::Stdio::piped())
@@ -306,7 +332,7 @@ async fn cxf_producer_handles_soap_fault_response() {
         .await;
 
     let yaml = format!(
-        "routes:\n  - id: cxf-fault-test\n    from: direct:start\n    steps:\n      - to: \"cxf://http://{addr}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello\"\n      - to: \"mock:done\"\n"
+        "routes:\n  - id: cxf-fault-test\n    from: direct:start\n    steps:\n      - to: \"cxf://http://{addr}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello&profile=test_profile\"\n      - to: \"mock:done\"\n"
     );
     for route in parse_yaml(&yaml).unwrap() {
         h.add_route(route).await.unwrap();
@@ -374,7 +400,7 @@ async fn cxf_producer_multiple_sequential_invocations() {
         .await;
 
     let yaml = format!(
-        "routes:\n  - id: cxf-multi-test\n    from: direct:start\n    steps:\n      - to: \"cxf://http://{addr}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello\"\n      - to: \"mock:done\"\n"
+        "routes:\n  - id: cxf-multi-test\n    from: direct:start\n    steps:\n      - to: \"cxf://http://{addr}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello&profile=test_profile\"\n      - to: \"mock:done\"\n"
     );
     for route in parse_yaml(&yaml).unwrap() {
         h.add_route(route).await.unwrap();
@@ -425,12 +451,12 @@ async fn cxf_consumer_returns_health_check_on_get() {
     let h = CamelTestContext::builder()
         .with_direct()
         .with_mock()
-        .with_component(shared_cxf_component())
+        .with_component(cxf_component_with_bind(Some(port)))
         .build()
         .await;
 
     let yaml = format!(
-        "routes:\n  - id: cxf-health-test\n    from: \"cxf://http://127.0.0.1:{port}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort\"\n    steps:\n      - set_body:\n          constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
+        "routes:\n  - id: cxf-health-test\n    from: \"cxf://http://127.0.0.1:{port}/cxf/test_profile?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=test_profile\"\n    steps:\n      - set_body:\n          constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
     );
     for route in parse_yaml(&yaml).unwrap() {
         h.add_route(route).await.unwrap();
@@ -444,7 +470,7 @@ async fn cxf_consumer_returns_health_check_on_get() {
         Duration::from_secs(10),
         Duration::from_millis(200),
         || {
-            let url = format!("http://127.0.0.1:{port}/service");
+            let url = format!("http://127.0.0.1:{port}/cxf/test_profile");
             async move {
                 match reqwest::Client::new().get(&url).send().await {
                     Ok(_) => Ok(true),
@@ -459,7 +485,7 @@ async fn cxf_consumer_returns_health_check_on_get() {
     // Send GET request — should return health check (200 OK)
     let client = reqwest::Client::new();
     let res = client
-        .get(format!("http://127.0.0.1:{port}/service"))
+        .get(format!("http://127.0.0.1:{port}/cxf/test_profile"))
         .send()
         .await
         .unwrap();
@@ -478,12 +504,12 @@ async fn cxf_consumer_handles_malformed_soap() {
     let h = CamelTestContext::builder()
         .with_direct()
         .with_mock()
-        .with_component(shared_cxf_component())
+        .with_component(cxf_component_with_bind(Some(port)))
         .build()
         .await;
 
     let yaml = format!(
-        "routes:\n  - id: cxf-malformed-test\n    from: \"cxf://http://127.0.0.1:{port}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort\"\n    steps:\n      - set_body:\n          constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
+        "routes:\n  - id: cxf-malformed-test\n    from: \"cxf://http://127.0.0.1:{port}/cxf/test_profile?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=test_profile\"\n    steps:\n      - set_body:\n          constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
     );
     for route in parse_yaml(&yaml).unwrap() {
         h.add_route(route).await.unwrap();
@@ -497,7 +523,7 @@ async fn cxf_consumer_handles_malformed_soap() {
         Duration::from_secs(10),
         Duration::from_millis(200),
         || {
-            let url = format!("http://127.0.0.1:{port}/service");
+            let url = format!("http://127.0.0.1:{port}/cxf/test_profile");
             async move {
                 match reqwest::Client::new().get(&url).send().await {
                     Ok(_) => Ok(true),
@@ -512,7 +538,7 @@ async fn cxf_consumer_handles_malformed_soap() {
     // Send POST with malformed XML body — bridge should handle gracefully, not crash
     let client = reqwest::Client::new();
     let res = client
-        .post(format!("http://127.0.0.1:{port}/service"))
+        .post(format!("http://127.0.0.1:{port}/cxf/test_profile"))
         .header("content-type", "text/xml; charset=utf-8")
         .body("this is not valid XML at all <><><>")
         .send()
@@ -539,12 +565,12 @@ async fn cxf_consumer_concurrent_requests() {
     let h = CamelTestContext::builder()
         .with_direct()
         .with_mock()
-        .with_component(shared_cxf_component())
+        .with_component(cxf_component_with_bind(Some(port)))
         .build()
         .await;
 
     let yaml = format!(
-        "routes:\n  - id: cxf-concurrent-test\n    from: \"cxf://http://127.0.0.1:{port}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort\"\n    steps:\n      - set_body:\n          constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
+        "routes:\n  - id: cxf-concurrent-test\n    from: \"cxf://http://127.0.0.1:{port}/cxf/test_profile?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=test_profile\"\n    steps:\n      - set_body:\n          constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
     );
     for route in parse_yaml(&yaml).unwrap() {
         h.add_route(route).await.unwrap();
@@ -558,7 +584,7 @@ async fn cxf_consumer_concurrent_requests() {
         Duration::from_secs(10),
         Duration::from_millis(200),
         || {
-            let url = format!("http://127.0.0.1:{port}/service");
+            let url = format!("http://127.0.0.1:{port}/cxf/test_profile");
             async move {
                 match reqwest::Client::new().get(&url).send().await {
                     Ok(_) => Ok(true),
@@ -585,7 +611,7 @@ async fn cxf_consumer_concurrent_requests() {
     let mut handles = Vec::new();
     for _ in 0..10 {
         let client = client.clone();
-        let url = format!("http://127.0.0.1:{port}/service");
+        let url = format!("http://127.0.0.1:{port}/cxf/test_profile");
         let body = soap_request.to_string();
         let handle = tokio::spawn(async move {
             let res = client
@@ -649,4 +675,245 @@ async fn cxf_consumer_concurrent_requests() {
     );
 
     h.stop().await;
+}
+
+// ── Multi-Profile Tests ──────────────────────────────────────────────────────
+
+/// Helper that creates a CxfComponent with two profiles: "community_a" and "community_b".
+/// Each profile has a distinct address (different ports).
+fn multi_profile_cxf_component(port_a: u16, port_b: u16) -> CxfComponent {
+    let wsdl_path = cxf_wsdl_path();
+    let pool = Arc::new(
+        CxfBridgePool::from_config(CxfPoolConfig {
+            profiles: vec![
+                CxfProfileConfig {
+                    name: "community_a".to_string(),
+                    address: Some(format!("http://127.0.0.1:{port_a}/service")),
+                    wsdl_path: wsdl_path.clone(),
+                    service_name: "{http://example.com/hello}HelloService".to_string(),
+                    port_name: "{http://example.com/hello}HelloPort".to_string(),
+                    security: Default::default(),
+                },
+                CxfProfileConfig {
+                    name: "community_b".to_string(),
+                    address: Some(format!("http://127.0.0.1:{port_b}/service")),
+                    wsdl_path: wsdl_path,
+                    service_name: "{http://example.com/hello}HelloService".to_string(),
+                    port_name: "{http://example.com/hello}HelloPort".to_string(),
+                    security: Default::default(),
+                },
+            ],
+            max_bridges: 4,
+            bridge_start_timeout_ms: 30_000,
+            health_check_interval_ms: 5_000,
+            bridge_cache_dir: None,
+            version: camel_component_cxf::BRIDGE_VERSION.to_string(),
+            bind_address: None,
+        })
+        .unwrap(),
+    );
+    CxfComponent::new(pool)
+}
+
+/// Starts a mock SOAP service that returns a custom response body inside a SOAP envelope.
+async fn start_mock_soap_service_with_response(response_body: &'static str) -> SocketAddr {
+    let app = Router::new().route(
+        "/service",
+        post(move |_body: String| async move {
+            (
+                [("content-type", "text/xml; charset=utf-8")],
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:hel="http://example.com/hello">
+  <soapenv:Header/>
+  <soapenv:Body>
+    {response_body}
+  </soapenv:Body>
+</soapenv:Envelope>"#,
+                ),
+            )
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    addr
+}
+
+/// Verifies that two profiles coexist in one pool and that each profile's producer
+/// routes to the correct backend (profile A → mock A, profile B → mock B).
+#[tokio::test]
+async fn cxf_multi_profile_producer_routes_to_correct_backend() {
+    init_tracing();
+    let _binary = require_cxf_bridge_binary();
+
+    // Start two separate mock SOAP services with distinct responses
+    let addr_a = start_mock_soap_service_with_response(
+        "<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>community_a_pong</return></hel:sayHelloResponse>",
+    )
+    .await;
+    let addr_b = start_mock_soap_service_with_response(
+        "<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>community_b_pong</return></hel:sayHelloResponse>",
+    )
+    .await;
+
+    let component = multi_profile_cxf_component(addr_a.port(), addr_b.port());
+    let wsdl_path = cxf_wsdl_path();
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(component)
+        .build()
+        .await;
+
+    // Route for profile community_a → sends to mock on addr_a
+    let yaml_a = format!(
+        "routes:\n  - id: profile-a-route\n    from: direct:start_a\n    steps:\n      - to: \"cxf://http://{addr_a}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello&profile=community_a\"\n      - to: \"mock:done_a\"\n"
+    );
+    for route in parse_yaml(&yaml_a).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+
+    // Route for profile community_b → sends to mock on addr_b
+    let yaml_b = format!(
+        "routes:\n  - id: profile-b-route\n    from: direct:start_b\n    steps:\n      - to: \"cxf://http://{addr_b}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello&profile=community_b\"\n      - to: \"mock:done_b\"\n"
+    );
+    for route in parse_yaml(&yaml_b).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    // Send request via profile A
+    let exchange_a = Exchange::new(Message::new(Body::Text(
+        r#"<hel:sayHello xmlns:hel="http://example.com/hello"><name>a</name></hel:sayHello>"#
+            .to_string(),
+    )));
+    let _ = send_to_direct(&h, "direct:start_a", exchange_a).await.unwrap();
+
+    // Send request via profile B
+    let exchange_b = Exchange::new(Message::new(Body::Text(
+        r#"<hel:sayHello xmlns:hel="http://example.com/hello"><name>b</name></hel:sayHello>"#
+            .to_string(),
+    )));
+    let _ = send_to_direct(&h, "direct:start_b", exchange_b).await.unwrap();
+
+    // Verify profile A response arrived
+    let endpoint_a = h.mock().get_endpoint("done_a").unwrap();
+    wait_until(
+        "profile A delivery",
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+        || {
+            let endpoint_a = endpoint_a.clone();
+            async move { Ok(!endpoint_a.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
+    // Verify profile B response arrived
+    let endpoint_b = h.mock().get_endpoint("done_b").unwrap();
+    wait_until(
+        "profile B delivery",
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+        || {
+            let endpoint_b = endpoint_b.clone();
+            async move { Ok(!endpoint_b.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
+    // Verify profile A response contains community_a_pong
+    let exchanges_a = endpoint_a.get_received_exchanges().await;
+    assert_eq!(exchanges_a.len(), 1);
+    let body_a = exchanges_a[0].body_as::<String>().unwrap_or_default();
+    assert!(
+        body_a.contains("community_a_pong"),
+        "Profile A response should contain 'community_a_pong', got: {body_a}"
+    );
+
+    // Verify profile B response contains community_b_pong
+    let exchanges_b = endpoint_b.get_received_exchanges().await;
+    assert_eq!(exchanges_b.len(), 1);
+    let body_b = exchanges_b[0].body_as::<String>().unwrap_or_default();
+    assert!(
+        body_b.contains("community_b_pong"),
+        "Profile B response should contain 'community_b_pong', got: {body_b}"
+    );
+
+    h.stop().await;
+}
+
+/// Verifies that a URI without `profile=` parameter is rejected at endpoint creation.
+#[tokio::test]
+async fn cxf_multi_profile_rejects_uri_without_profile() {
+    init_tracing();
+
+    let component = multi_profile_cxf_component(9090, 9091);
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(component)
+        .build()
+        .await;
+
+    // Route without profile= parameter — should fail during route building
+    let wsdl_path = cxf_wsdl_path();
+    let yaml = format!(
+        "routes:\n  - id: no-profile-route\n    from: direct:start\n    steps:\n      - to: \"cxf://http://127.0.0.1:9090/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello\"\n      - to: \"mock:done\"\n"
+    );
+
+    let routes = parse_yaml(&yaml).unwrap();
+    let result = h.add_route(routes.into_iter().next().unwrap()).await;
+
+    assert!(
+        result.is_err(),
+        "Route without profile= should be rejected, but it succeeded"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("profile"),
+        "Error should mention 'profile', got: {err_msg}"
+    );
+}
+
+/// Verifies that a URI referencing an unknown profile name is rejected.
+#[tokio::test]
+async fn cxf_multi_profile_rejects_unknown_profile() {
+    init_tracing();
+
+    let component = multi_profile_cxf_component(9090, 9091);
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(component)
+        .build()
+        .await;
+
+    let wsdl_path = cxf_wsdl_path();
+    let yaml = format!(
+        "routes:\n  - id: unknown-profile-route\n    from: direct:start\n    steps:\n      - to: \"cxf://http://127.0.0.1:9090/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello&profile=nonexistent\"\n      - to: \"mock:done\"\n"
+    );
+
+    let routes = parse_yaml(&yaml).unwrap();
+    let result = h.add_route(routes.into_iter().next().unwrap()).await;
+
+    assert!(
+        result.is_err(),
+        "Route with unknown profile should be rejected, but it succeeded"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("unknown profile"),
+        "Error should mention 'unknown profile', got: {err_msg}"
+    );
 }

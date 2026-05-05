@@ -1,9 +1,6 @@
 package org.rustcamel.cxf;
 
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
 import java.io.ByteArrayInputStream;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.NoSuchAlgorithmException;
 import java.util.HashSet;
@@ -11,18 +8,11 @@ import java.util.List;
 import java.util.Set;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
-import javax.security.auth.callback.Callback;
-import javax.security.auth.callback.CallbackHandler;
-import javax.security.auth.callback.UnsupportedCallbackException;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.transform.dom.DOMSource;
-import org.apache.wss4j.common.crypto.Crypto;
-import org.apache.wss4j.common.crypto.CryptoFactory;
-import org.apache.wss4j.common.ext.WSPasswordCallback;
 import org.apache.wss4j.common.ext.WSSecurityException;
 import org.apache.wss4j.dom.WSConstants;
-import org.apache.wss4j.dom.engine.WSSConfig;
 import org.apache.wss4j.dom.engine.WSSecurityEngine;
 import org.apache.wss4j.dom.engine.WSSecurityEngineResult;
 import org.apache.wss4j.dom.handler.RequestData;
@@ -33,103 +23,25 @@ import org.apache.wss4j.dom.message.WSSecSignature;
 import org.w3c.dom.Document;
 
 /**
- * Applies WS-Security processing to SOAP envelopes using WSS4J DOM engine directly. Does NOT use
- * Jetty or CXF transport layer — safe for GraalVM native-image.
+ * Applies WS-Security processing to SOAP envelopes using WSS4J DOM engine directly. Plain class
+ * (not CDI). Takes a {@link SecurityProfile} per instance. Safe for GraalVM native-image.
  */
-@ApplicationScoped
 public class WssSecurityProcessor {
 
-  @Inject BridgeConfig config;
+  private final SecurityProfile profile;
 
-  @Inject SecurityConfig securityConfig;
-
-  /** Default constructor for CDI injection. */
-  public WssSecurityProcessor() {}
-
-  /** Package-private constructor for testing. */
-  WssSecurityProcessor(BridgeConfig config) {
-    this.config = config;
-  }
-
-  /** Package-private constructor for testing with explicit SecurityConfig. */
-  WssSecurityProcessor(BridgeConfig config, SecurityConfig securityConfig) {
-    this.config = config;
-    this.securityConfig = securityConfig;
-  }
-
-  // Cached Crypto instances (lazy, thread-safe)
-  private volatile Crypto signatureCrypto;
-  private volatile Crypto verificationCrypto;
-  private volatile Crypto decryptionCrypto;
-  private final Object cryptoLock = new Object();
-
-  static {
-    WSSConfig.init();
+  public WssSecurityProcessor(SecurityProfile profile) {
+    this.profile = profile;
   }
 
   /** Returns true if outbound signing is possible (keystore configured). */
   public boolean canSignOutbound() {
-    return hasText(config.keystorePath());
+    return profile.canSignOutbound();
   }
 
   /** Returns true if inbound verification is possible (truststore or keystore configured). */
   public boolean canVerifyInbound() {
-    return hasText(config.truststorePath()) || hasText(config.keystorePath());
-  }
-
-  /**
-   * Returns true if WS-Security is configured (keystore or truststore present). Backward compat.
-   */
-  public boolean isEnabled() {
-    return canSignOutbound() || canVerifyInbound();
-  }
-
-  // --- Crypto lazy initialization (double-checked locking) ---
-
-  private Crypto getSignatureCrypto() throws WSSecurityException {
-    if (signatureCrypto == null) {
-      synchronized (cryptoLock) {
-        if (signatureCrypto == null) {
-          signatureCrypto =
-              CryptoFactory.getInstance(
-                  SecurityConfig.createCryptoProperties(
-                      config.keystorePath(), config.keystorePassword()));
-        }
-      }
-    }
-    return signatureCrypto;
-  }
-
-  private Crypto getVerificationCrypto() throws WSSecurityException {
-    if (verificationCrypto == null) {
-      synchronized (cryptoLock) {
-        if (verificationCrypto == null) {
-          String path =
-              hasText(config.truststorePath()) ? config.truststorePath() : config.keystorePath();
-          String password =
-              hasText(config.truststorePassword())
-                  ? config.truststorePassword()
-                  : config.keystorePassword();
-          verificationCrypto =
-              CryptoFactory.getInstance(SecurityConfig.createCryptoProperties(path, password));
-        }
-      }
-    }
-    return verificationCrypto;
-  }
-
-  private Crypto getDecryptionCrypto() throws WSSecurityException {
-    if (decryptionCrypto == null) {
-      synchronized (cryptoLock) {
-        if (decryptionCrypto == null) {
-          decryptionCrypto =
-              CryptoFactory.getInstance(
-                  SecurityConfig.createCryptoProperties(
-                      config.keystorePath(), config.keystorePassword()));
-        }
-      }
-    }
-    return decryptionCrypto;
+    return profile.canVerifyInbound();
   }
 
   // --- Outbound processing (action-driven) ---
@@ -140,7 +52,7 @@ public class WssSecurityProcessor {
       return soapXml;
     }
 
-    String actions = resolveActionsOut();
+    String actions = profile.resolveActionsOut();
     Document doc = parseXml(soapXml);
     WSSecHeader secHeader = new WSSecHeader(doc);
     secHeader.insertSecurityHeader();
@@ -148,19 +60,19 @@ public class WssSecurityProcessor {
     if (containsAction(actions, "Signature")) {
       WSSecSignature sign = new WSSecSignature(secHeader);
       String keyPass =
-          hasText(config.sigPassword()) ? config.sigPassword() : config.keystorePassword();
-      sign.setUserInfo(config.sigUsername(), keyPass);
+          hasText(profile.sigPassword()) ? profile.sigPassword() : profile.keystorePassword();
+      sign.setUserInfo(profile.sigUsername(), keyPass);
       sign.setKeyIdentifierType(WSConstants.BST_DIRECT_REFERENCE);
-      sign.build(getSignatureCrypto());
+      sign.build(profile.getSignatureCrypto());
     }
 
     if (containsAction(actions, "Encrypt")) {
       WSSecEncrypt encrypt = new WSSecEncrypt(secHeader);
-      encrypt.setUserInfo(config.encUsername());
+      encrypt.setUserInfo(profile.encUsername());
       encrypt.setKeyIdentifierType(WSConstants.X509_KEY_IDENTIFIER);
       encrypt.setSymmetricEncAlgorithm(WSConstants.AES_128);
       encrypt.setKeyEncAlgo(WSConstants.KEYTRANSPORT_RSAOAEP);
-      encrypt.build(getVerificationCrypto(), generateSymmetricKey());
+      encrypt.build(profile.getVerificationCrypto(), generateSymmetricKey());
     }
 
     return domToString(doc);
@@ -178,30 +90,22 @@ public class WssSecurityProcessor {
 
     WSSecurityEngine engine = new WSSecurityEngine();
     RequestData requestData = new RequestData();
-    requestData.setSigVerCrypto(getVerificationCrypto());
-    requestData.setDecCrypto(getDecryptionCrypto());
-    requestData.setCallbackHandler(new PasswordCallbackHandler(config));
+    requestData.setSigVerCrypto(profile.getVerificationCrypto());
+    requestData.setDecCrypto(profile.getSignatureCrypto());
+    requestData.setCallbackHandler(profile.createPasswordCallback());
 
     WSHandlerResult handlerResult = engine.processSecurityHeader(doc, requestData);
     List<WSSecurityEngineResult> results =
         handlerResult != null ? handlerResult.getResults() : null;
 
     // Enforce required actions
-    String requiredActions = resolveActionsIn();
+    String requiredActions = profile.resolveActionsIn();
     enforceRequiredActions(results, requiredActions);
 
     return domToString(doc);
   }
 
   // --- Helpers ---
-
-  private String resolveActionsOut() {
-    return securityConfig.resolveActionsOut();
-  }
-
-  private String resolveActionsIn() {
-    return securityConfig.resolveActionsIn();
-  }
 
   private void enforceRequiredActions(List<WSSecurityEngineResult> results, String requiredActions)
       throws WSSecurityException {
@@ -248,7 +152,7 @@ public class WssSecurityProcessor {
 
   private static SecretKey generateSymmetricKey() throws NoSuchAlgorithmException {
     KeyGenerator keyGen = KeyGenerator.getInstance("AES");
-    keyGen.init(128); // Must match symmetric algorithm declared on WSSecEncrypt (AES-128-CBC)
+    keyGen.init(128);
     return keyGen.generateKey();
   }
 
@@ -271,33 +175,5 @@ public class WssSecurityProcessor {
 
   private static boolean hasText(String value) {
     return value != null && !value.isBlank();
-  }
-
-  /** Password callback handler for WSS4J inbound verification. */
-  private static class PasswordCallbackHandler implements CallbackHandler {
-
-    private final BridgeConfig config;
-
-    PasswordCallbackHandler(BridgeConfig config) {
-      this.config = config;
-    }
-
-    @Override
-    public void handle(Callback[] callbacks) throws IOException, UnsupportedCallbackException {
-      for (Callback cb : callbacks) {
-        if (cb instanceof WSPasswordCallback pc) {
-          String pass;
-          if (pc.getUsage() == WSPasswordCallback.SIGNATURE) {
-            pass = hasText(config.sigPassword()) ? config.sigPassword() : config.keystorePassword();
-          } else {
-            pass = config.keystorePassword();
-          }
-          if (pass != null) pc.setPassword(pass);
-        } else {
-          throw new UnsupportedCallbackException(
-              cb, "Unrecognized callback type: " + cb.getClass().getName());
-        }
-      }
-    }
   }
 }

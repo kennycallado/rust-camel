@@ -4,7 +4,6 @@
   {"name": "org.rustcamel.cxf.CxfBridgeService"},
   {"name": "org.rustcamel.cxf.CxfClientManager"},
   {"name": "org.rustcamel.cxf.CxfServerManager"},
-  {"name": "org.rustcamel.cxf.SecurityConfig"},
   {"name": "org.rustcamel.cxf.SoapEnvelopeHelper"},
   {"name": "org.rustcamel.cxf.NativeImageReflectionRegistrations"},
   {"name": "cxf_bridge.CxfBridgeGrpc$CxfBridgeImplBase"},

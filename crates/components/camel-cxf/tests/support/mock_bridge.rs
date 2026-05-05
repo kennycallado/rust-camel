@@ -13,6 +13,7 @@ use camel_component_cxf::proto::{
 };
 
 #[derive(Clone, Default)]
+#[allow(clippy::type_complexity)]
 pub struct MockState {
     pub last_invoke: Arc<Mutex<Option<SoapRequest>>>,
     pub invoke_fault: Arc<Mutex<Option<(String, String)>>>,

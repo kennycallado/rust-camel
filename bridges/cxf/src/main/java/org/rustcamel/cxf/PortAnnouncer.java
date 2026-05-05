@@ -12,15 +12,19 @@ public class PortAnnouncer {
   @ConfigProperty(name = "quarkus.grpc.server.port", defaultValue = "9090")
   int grpcPort;
 
-  @Inject WssSecurityProcessor wssProcessor;
+  @Inject SecurityProfileStore profileStore;
 
   void onStart(@Observes StartupEvent ev) {
     System.out.println("{\"status\":\"ready\",\"port\":" + grpcPort + "}");
     System.out.flush();
-    if (wssProcessor.isEnabled()) {
-      System.out.println("WS-Security: ENABLED (signing/verification active)");
+    if (!profileStore.isEmpty()) {
+      System.out.println(
+          "WS-Security: "
+              + profileStore.profiles().size()
+              + " profile(s) loaded: "
+              + profileStore.profiles().keySet());
     } else {
-      System.out.println("WS-Security: DISABLED (no keystore configured)");
+      System.out.println("WS-Security: DISABLED (no security profiles configured)");
     }
     System.out.flush();
   }

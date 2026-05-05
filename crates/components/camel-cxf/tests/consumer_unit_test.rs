@@ -63,6 +63,39 @@ async fn wait_for_recorded_responses(
     Err("timed out waiting for recorded responses".into())
 }
 
+fn test_consumer_request(
+    request_id: &str,
+    operation: &str,
+    payload: &[u8],
+    soap_action: &str,
+) -> ConsumerRequest {
+    ConsumerRequest {
+        request_id: request_id.to_string(),
+        operation: operation.to_string(),
+        payload: payload.to_vec(),
+        headers: HashMap::new(),
+        soap_action: soap_action.to_string(),
+        security_profile: String::new(),
+    }
+}
+
+fn test_consumer_response(
+    request_id: &str,
+    payload: Vec<u8>,
+    fault: bool,
+    fault_code: &str,
+    fault_string: &str,
+) -> ConsumerResponse {
+    ConsumerResponse {
+        request_id: request_id.to_string(),
+        payload,
+        fault,
+        fault_code: fault_code.to_string(),
+        fault_string: fault_string.to_string(),
+        security_profile: String::new(),
+    }
+}
+
 #[tokio::test]
 async fn test_consumer_receives_request_from_bridge()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -70,13 +103,12 @@ async fn test_consumer_receives_request_from_bridge()
     let requests_tx = wait_for_consumer_request_sender(&state).await?;
 
     requests_tx
-        .send(Ok(ConsumerRequest {
-            request_id: "req-1".to_string(),
-            operation: "sayHello".to_string(),
-            payload: b"<hello>world</hello>".to_vec(),
-            headers: HashMap::new(),
-            soap_action: "urn:sayHello".to_string(),
-        }))
+        .send(Ok(test_consumer_request(
+            "req-1",
+            "sayHello",
+            b"<hello>world</hello>",
+            "urn:sayHello",
+        )))
         .await?;
 
     let received = inbound
@@ -98,13 +130,7 @@ async fn test_consumer_sends_response_matched_by_request_id()
     let requests_tx = wait_for_consumer_request_sender(&state).await?;
 
     requests_tx
-        .send(Ok(ConsumerRequest {
-            request_id: "req-2".to_string(),
-            operation: "op".to_string(),
-            payload: b"<in/>".to_vec(),
-            headers: HashMap::new(),
-            soap_action: "urn:op".to_string(),
-        }))
+        .send(Ok(test_consumer_request("req-2", "op", b"<in/>", "urn:op")))
         .await?;
 
     let req = inbound
@@ -112,13 +138,7 @@ async fn test_consumer_sends_response_matched_by_request_id()
         .await?
         .ok_or("expected consumer request")?;
     response_tx
-        .send(ConsumerResponse {
-            request_id: req.request_id.clone(),
-            payload: b"<ok/>".to_vec(),
-            fault: false,
-            fault_code: String::new(),
-            fault_string: String::new(),
-        })
+        .send(test_consumer_response(&req.request_id, b"<ok/>".to_vec(), false, "", ""))
         .await?;
 
     let recorded = wait_for_recorded_responses(&state, 1).await?;
@@ -137,13 +157,7 @@ async fn test_consumer_fault_on_route_error() -> Result<(), Box<dyn std::error::
     let requests_tx = wait_for_consumer_request_sender(&state).await?;
 
     requests_tx
-        .send(Ok(ConsumerRequest {
-            request_id: "req-3".to_string(),
-            operation: "op".to_string(),
-            payload: b"<in/>".to_vec(),
-            headers: HashMap::new(),
-            soap_action: "urn:op".to_string(),
-        }))
+        .send(Ok(test_consumer_request("req-3", "op", b"<in/>", "urn:op")))
         .await?;
 
     let req = inbound
@@ -151,13 +165,13 @@ async fn test_consumer_fault_on_route_error() -> Result<(), Box<dyn std::error::
         .await?
         .ok_or("expected consumer request")?;
     response_tx
-        .send(ConsumerResponse {
-            request_id: req.request_id,
-            payload: Vec::new(),
-            fault: true,
-            fault_code: "soap:Server".to_string(),
-            fault_string: "route error".to_string(),
-        })
+        .send(test_consumer_response(
+            &req.request_id,
+            Vec::new(),
+            true,
+            "soap:Server",
+            "route error",
+        ))
         .await?;
 
     let recorded = wait_for_recorded_responses(&state, 1).await?;
@@ -183,6 +197,7 @@ async fn test_request_id_correlation_multiple_concurrent()
                 payload: format!("<in>{i}</in>").into_bytes(),
                 headers: HashMap::new(),
                 soap_action: "urn:bulk".to_string(),
+                security_profile: String::new(),
             }))
             .await?;
     }
@@ -204,6 +219,7 @@ async fn test_request_id_correlation_multiple_concurrent()
                 fault: false,
                 fault_code: String::new(),
                 fault_string: String::new(),
+                security_profile: String::new(),
             })
             .await?;
     }
@@ -233,6 +249,7 @@ async fn test_consumer_receives_headers_from_request()
             payload: b"<in/>".to_vec(),
             headers: headers.clone(),
             soap_action: "urn:withHeaders".to_string(),
+            security_profile: String::new(),
         }))
         .await?;
 
@@ -259,13 +276,12 @@ async fn test_consumer_request_with_empty_payload()
     let requests_tx = wait_for_consumer_request_sender(&state).await?;
 
     requests_tx
-        .send(Ok(ConsumerRequest {
-            request_id: "req-empty".to_string(),
-            operation: "emptyOp".to_string(),
-            payload: Vec::new(),
-            headers: HashMap::new(),
-            soap_action: "urn:emptyOp".to_string(),
-        }))
+        .send(Ok(test_consumer_request(
+            "req-empty",
+            "emptyOp",
+            &[],
+            "urn:emptyOp",
+        )))
         .await?;
 
     let received = inbound
@@ -287,13 +303,12 @@ async fn test_consumer_response_with_empty_payload()
     let requests_tx = wait_for_consumer_request_sender(&state).await?;
 
     requests_tx
-        .send(Ok(ConsumerRequest {
-            request_id: "req-resp-empty".to_string(),
-            operation: "respEmpty".to_string(),
-            payload: b"<in/>".to_vec(),
-            headers: HashMap::new(),
-            soap_action: "urn:respEmpty".to_string(),
-        }))
+        .send(Ok(test_consumer_request(
+            "req-resp-empty",
+            "respEmpty",
+            b"<in/>",
+            "urn:respEmpty",
+        )))
         .await?;
 
     let req = inbound
@@ -301,13 +316,7 @@ async fn test_consumer_response_with_empty_payload()
         .await?
         .ok_or("expected consumer request")?;
     response_tx
-        .send(ConsumerResponse {
-            request_id: req.request_id.clone(),
-            payload: Vec::new(),
-            fault: false,
-            fault_code: String::new(),
-            fault_string: String::new(),
-        })
+        .send(test_consumer_response(&req.request_id, Vec::new(), false, "", ""))
         .await?;
 
     let recorded = wait_for_recorded_responses(&state, 1).await?;
@@ -341,6 +350,7 @@ async fn test_consumer_multiple_headers_preserved()
             payload: b"<in/>".to_vec(),
             headers: headers.clone(),
             soap_action: "urn:multiHeaders".to_string(),
+            security_profile: String::new(),
         }))
         .await?;
 
@@ -404,6 +414,7 @@ async fn test_consumer_50_concurrent_requests_correlated()
                 payload: format!("<payload>{i}</payload>").into_bytes(),
                 headers: HashMap::new(),
                 soap_action: "urn:concurrent".to_string(),
+                security_profile: String::new(),
             }))
             .await?;
     }
@@ -427,6 +438,7 @@ async fn test_consumer_50_concurrent_requests_correlated()
                 fault: false,
                 fault_code: String::new(),
                 fault_string: String::new(),
+                security_profile: String::new(),
             })
             .await?;
     }

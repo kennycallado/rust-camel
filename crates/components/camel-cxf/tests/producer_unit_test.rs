@@ -3,7 +3,6 @@ mod support;
 use std::time::Duration;
 
 use camel_component_api::{Body, Exchange, Message, Value};
-use camel_component_cxf::config::CxfServiceConfig;
 use camel_component_cxf::producer::CxfProducer;
 use support::mock_bridge::{MockState, spawn_mock_bridge};
 use tonic::transport::{Channel, Endpoint};
@@ -17,15 +16,15 @@ async fn make_producer() -> (CxfProducer, MockState) {
         .await
         .expect("connect");
 
-    let config = CxfServiceConfig {
-        address: Some("http://localhost:8080/ws".to_string()),
-        wsdl_path: "service.wsdl".to_string(),
-        service_name: "TestService".to_string(),
-        port_name: "TestPort".to_string(),
-        security: Default::default(),
-    };
-
-    let producer = CxfProducer::from_channel(channel, config, "defaultOperation".to_string());
+    let producer = CxfProducer::from_channel(
+        channel,
+        "test".to_string(),
+        "service.wsdl".to_string(),
+        "TestService".to_string(),
+        "TestPort".to_string(),
+        Some("http://localhost:8080/ws".to_string()),
+        "defaultOperation".to_string(),
+    );
     (producer, state)
 }
 
@@ -61,14 +60,15 @@ async fn test_invoke_timeout_returns_transport_error() {
         .connect_timeout(Duration::from_millis(100))
         .timeout(Duration::from_millis(100))
         .connect_lazy();
-    let config = CxfServiceConfig {
-        address: Some("http://localhost:8080/ws".to_string()),
-        wsdl_path: "service.wsdl".to_string(),
-        service_name: "TestService".to_string(),
-        port_name: "TestPort".to_string(),
-        security: Default::default(),
-    };
-    let mut producer = CxfProducer::from_channel(channel, config, "defaultOperation".to_string());
+    let mut producer = CxfProducer::from_channel(
+        channel,
+        "test".to_string(),
+        "service.wsdl".to_string(),
+        "TestService".to_string(),
+        "TestPort".to_string(),
+        Some("http://localhost:8080/ws".to_string()),
+        "defaultOperation".to_string(),
+    );
 
     let exchange = Exchange::new(Message::new(Body::Text("request".to_string())));
     let err = producer.call(exchange).await.expect_err("transport error");
@@ -196,4 +196,13 @@ async fn test_invoke_json_body_converted_to_bytes() {
     let req = state.last_invoke.lock().await.clone().expect("last invoke");
     let parsed: serde_json::Value = serde_json::from_slice(&req.payload).unwrap();
     assert_eq!(parsed["key"], "value");
+}
+
+#[tokio::test]
+async fn test_invoke_sends_security_profile() {
+    let (mut producer, state) = make_producer().await;
+    let exchange = Exchange::new(Message::new(Body::Text("req".to_string())));
+    let _ = producer.call(exchange).await;
+    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    assert_eq!(req.security_profile, "test");
 }

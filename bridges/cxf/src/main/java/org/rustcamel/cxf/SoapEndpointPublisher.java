@@ -10,7 +10,6 @@ import io.vertx.core.http.HttpServerOptions;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import java.io.File;
 import java.net.URI;
 import java.util.Map;
 import java.util.UUID;
@@ -26,9 +25,9 @@ public class SoapEndpointPublisher {
 
   @Inject BridgeConfig bridgeConfig;
 
-  @Inject CxfServerManager cxfServerManager;
+  @Inject SecurityProfileStore profileStore;
 
-  @Inject WssSecurityProcessor wssProcessor;
+  @Inject CxfServerManager cxfServerManager;
 
   @Inject Vertx vertx;
 
@@ -40,16 +39,6 @@ public class SoapEndpointPublisher {
     }
 
     try {
-      String wsdlPath = bridgeConfig.wsdlPath();
-      if (wsdlPath == null || wsdlPath.isBlank()) {
-        LOG.info("skipping endpoint publication (producer-only mode)");
-        return;
-      }
-      File wsdlFile = new File(wsdlPath);
-      if (!wsdlFile.exists()) {
-        throw new IllegalStateException("WSDL file not found: " + wsdlPath);
-      }
-
       String configuredAddress = bridgeConfig.address();
       String address =
           configuredAddress != null && !configuredAddress.isBlank()
@@ -58,22 +47,26 @@ public class SoapEndpointPublisher {
       URI uri = URI.create(address);
       String host = uri.getHost();
       int port = uri.getPort();
-      String path = uri.getPath();
       if (host == null || host.isBlank()) {
         throw new IllegalStateException("CXF address must include host: " + address);
       }
       if (port <= 0) {
         throw new IllegalStateException("CXF address must include explicit port: " + address);
       }
-      if (path == null || path.isBlank()) {
-        path = "/";
-      }
 
-      String finalPath = path;
       HttpServer httpServer = vertx.createHttpServer(new HttpServerOptions());
       httpServer.requestHandler(
           req -> {
-            if (!finalPath.equals(req.path())) {
+            String profileName = extractProfileName(req.path());
+            if (profileName == null) {
+              req.response().setStatusCode(404).end();
+              return;
+            }
+
+            SecurityProfile profile;
+            try {
+              profile = profileStore.getProfile(profileName);
+            } catch (IllegalArgumentException e) {
               req.response().setStatusCode(404).end();
               return;
             }
@@ -87,6 +80,8 @@ public class SoapEndpointPublisher {
               req.response().setStatusCode(405).end();
               return;
             }
+
+            WssSecurityProcessor wssProcessor = new WssSecurityProcessor(profile);
 
             req.bodyHandler(
                 body -> {
@@ -118,12 +113,21 @@ public class SoapEndpointPublisher {
                                 .setPayload(ByteString.copyFromUtf8(requestBody))
                                 .putAllHeaders(headers)
                                 .setSoapAction(soapAction)
+                                .setSecurityProfile(profileName)
                                 .build();
 
                         ConsumerResponse response =
                             cxfServerManager
                                 .handleSoapRequest(consumerRequest)
                                 .get(bridgeConfig.consumerTimeoutMs(), TimeUnit.MILLISECONDS);
+
+                        // Defense in depth: assert profile echo matches
+                        if (!profileName.equals(response.getSecurityProfile())) {
+                          LOG.log(
+                              Level.WARNING,
+                              "Security profile mismatch: expected={0}, got={1}",
+                              new Object[] {profileName, response.getSecurityProfile()});
+                        }
 
                         String responseXml;
                         if (response.getFault()) {
@@ -136,6 +140,7 @@ public class SoapEndpointPublisher {
                               wrapEnvelope(response.getPayload().toStringUtf8(), soapVersion);
                         }
 
+                        // Sign with the closure-captured profile (defense in depth)
                         if (wssProcessor.canSignOutbound()) {
                           responseXml = wssProcessor.processOutbound(responseXml);
                         }
@@ -215,6 +220,23 @@ public class SoapEndpointPublisher {
       }
       LOG.info("SOAP endpoint stopped");
     }
+  }
+
+  /**
+   * Extracts profile name from URL path. Path format: /cxf/&lt;profile_name&gt;/... Returns null
+   * for /cxf, /cxf/, non-matching paths, or null path.
+   */
+  static String extractProfileName(String path) {
+    if (path == null) return null;
+    if (!path.startsWith("/cxf")) return null;
+    String after = path.substring("/cxf".length());
+    if (after.isEmpty()) return null;
+    if (!after.startsWith("/")) return null;
+    String rest = after.substring(1);
+    if (rest.isEmpty()) return null;
+    int slash = rest.indexOf('/');
+    String segment = slash >= 0 ? rest.substring(0, slash) : rest;
+    return segment.isEmpty() ? null : segment;
   }
 
   private static String sanitize(String msg) {
