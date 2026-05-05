@@ -35,17 +35,17 @@ public class BridgeConfig {
   @ConfigProperty(name = "cxf.truststore.password")
   java.util.Optional<String> truststorePassword;
 
-  @ConfigProperty(name = "cxf.security.actions.out", defaultValue = "")
-  String securityActionsOut;
+  @ConfigProperty(name = "cxf.security.actions.out")
+  java.util.Optional<String> securityActionsOut;
 
-  @ConfigProperty(name = "cxf.security.actions.in", defaultValue = "")
-  String securityActionsIn;
+  @ConfigProperty(name = "cxf.security.actions.in")
+  java.util.Optional<String> securityActionsIn;
 
   @ConfigProperty(name = "cxf.sig.username", defaultValue = "clientkey")
   String sigUsername;
 
-  @ConfigProperty(name = "cxf.sig.password", defaultValue = "")
-  String sigPassword;
+  @ConfigProperty(name = "cxf.sig.password")
+  java.util.Optional<String> sigPassword;
 
   @ConfigProperty(name = "cxf.enc.username", defaultValue = "serverkey")
   String encUsername;
@@ -104,7 +104,7 @@ public class BridgeConfig {
   }
 
   public String sigPassword() {
-    return sigPassword;
+    return sigPassword.orElse(null);
   }
 
   public String encUsername() {
@@ -120,11 +120,11 @@ public class BridgeConfig {
   }
 
   public String securityActionsOut() {
-    return securityActionsOut;
+    return securityActionsOut.orElse(null);
   }
 
   public String securityActionsIn() {
-    return securityActionsIn;
+    return securityActionsIn.orElse(null);
   }
 
   public int consumerTimeoutMs() {

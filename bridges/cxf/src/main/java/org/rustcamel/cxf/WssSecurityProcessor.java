@@ -6,11 +6,10 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.NoSuchAlgorithmException;
-import javax.crypto.KeyGenerator;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Properties;
 import java.util.Set;
+import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.CallbackHandler;
@@ -34,8 +33,8 @@ import org.apache.wss4j.dom.message.WSSecSignature;
 import org.w3c.dom.Document;
 
 /**
- * Applies WS-Security processing to SOAP envelopes using WSS4J DOM engine directly.
- * Does NOT use Jetty or CXF transport layer — safe for GraalVM native-image.
+ * Applies WS-Security processing to SOAP envelopes using WSS4J DOM engine directly. Does NOT use
+ * Jetty or CXF transport layer — safe for GraalVM native-image.
  */
 @ApplicationScoped
 public class WssSecurityProcessor {
@@ -78,7 +77,9 @@ public class WssSecurityProcessor {
     return hasText(config.truststorePath()) || hasText(config.keystorePath());
   }
 
-  /** Returns true if WS-Security is configured (keystore or truststore present). Backward compat. */
+  /**
+   * Returns true if WS-Security is configured (keystore or truststore present). Backward compat.
+   */
   public boolean isEnabled() {
     return canSignOutbound() || canVerifyInbound();
   }
@@ -89,8 +90,10 @@ public class WssSecurityProcessor {
     if (signatureCrypto == null) {
       synchronized (cryptoLock) {
         if (signatureCrypto == null) {
-          signatureCrypto = CryptoFactory.getInstance(
-              SecurityConfig.createCryptoProperties(config.keystorePath(), config.keystorePassword()));
+          signatureCrypto =
+              CryptoFactory.getInstance(
+                  SecurityConfig.createCryptoProperties(
+                      config.keystorePath(), config.keystorePassword()));
         }
       }
     }
@@ -101,10 +104,14 @@ public class WssSecurityProcessor {
     if (verificationCrypto == null) {
       synchronized (cryptoLock) {
         if (verificationCrypto == null) {
-          String path = hasText(config.truststorePath()) ? config.truststorePath() : config.keystorePath();
-          String password = hasText(config.truststorePassword()) ? config.truststorePassword() : config.keystorePassword();
-          verificationCrypto = CryptoFactory.getInstance(
-              SecurityConfig.createCryptoProperties(path, password));
+          String path =
+              hasText(config.truststorePath()) ? config.truststorePath() : config.keystorePath();
+          String password =
+              hasText(config.truststorePassword())
+                  ? config.truststorePassword()
+                  : config.keystorePassword();
+          verificationCrypto =
+              CryptoFactory.getInstance(SecurityConfig.createCryptoProperties(path, password));
         }
       }
     }
@@ -115,8 +122,10 @@ public class WssSecurityProcessor {
     if (decryptionCrypto == null) {
       synchronized (cryptoLock) {
         if (decryptionCrypto == null) {
-          decryptionCrypto = CryptoFactory.getInstance(
-              SecurityConfig.createCryptoProperties(config.keystorePath(), config.keystorePassword()));
+          decryptionCrypto =
+              CryptoFactory.getInstance(
+                  SecurityConfig.createCryptoProperties(
+                      config.keystorePath(), config.keystorePassword()));
         }
       }
     }
@@ -138,7 +147,8 @@ public class WssSecurityProcessor {
 
     if (containsAction(actions, "Signature")) {
       WSSecSignature sign = new WSSecSignature(secHeader);
-      String keyPass = hasText(config.sigPassword()) ? config.sigPassword() : config.keystorePassword();
+      String keyPass =
+          hasText(config.sigPassword()) ? config.sigPassword() : config.keystorePassword();
       sign.setUserInfo(config.sigUsername(), keyPass);
       sign.setKeyIdentifierType(WSConstants.BST_DIRECT_REFERENCE);
       sign.build(getSignatureCrypto());
@@ -199,7 +209,7 @@ public class WssSecurityProcessor {
       throw new WSSecurityException(
           WSSecurityException.ErrorCode.SECURITY_ERROR,
           "noSecurity",
-          new Object[]{"No WS-Security header found in message"});
+          new Object[] {"No WS-Security header found in message"});
     }
 
     Set<Integer> foundActions = new HashSet<>();
@@ -214,7 +224,7 @@ public class WssSecurityProcessor {
         throw new WSSecurityException(
             WSSecurityException.ErrorCode.FAILED_CHECK,
             "noSecurity",
-            new Object[]{"Required Signature action not found in message"});
+            new Object[] {"Required Signature action not found in message"});
       }
     }
     if (containsAction(requiredActions, "Encrypt")) {
@@ -223,7 +233,7 @@ public class WssSecurityProcessor {
         throw new WSSecurityException(
             WSSecurityException.ErrorCode.FAILED_CHECK,
             "noSecurity",
-            new Object[]{"Required Encrypt action not found in message"});
+            new Object[] {"Required Encrypt action not found in message"});
       }
     }
   }
@@ -284,7 +294,8 @@ public class WssSecurityProcessor {
           }
           if (pass != null) pc.setPassword(pass);
         } else {
-          throw new UnsupportedCallbackException(cb, "Unrecognized callback type: " + cb.getClass().getName());
+          throw new UnsupportedCallbackException(
+              cb, "Unrecognized callback type: " + cb.getClass().getName());
         }
       }
     }

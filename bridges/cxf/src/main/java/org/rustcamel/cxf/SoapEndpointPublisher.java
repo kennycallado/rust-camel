@@ -3,6 +3,10 @@ package org.rustcamel.cxf;
 import com.google.protobuf.ByteString;
 import cxf_bridge.ConsumerRequest;
 import cxf_bridge.ConsumerResponse;
+import io.vertx.core.Vertx;
+import io.vertx.core.http.HttpMethod;
+import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.HttpServerOptions;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -13,10 +17,6 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import io.vertx.core.Vertx;
-import io.vertx.core.http.HttpMethod;
-import io.vertx.core.http.HttpServer;
-import io.vertx.core.http.HttpServerOptions;
 import org.apache.wss4j.common.ext.WSSecurityException;
 
 @ApplicationScoped
@@ -71,104 +71,110 @@ public class SoapEndpointPublisher {
 
       String finalPath = path;
       HttpServer httpServer = vertx.createHttpServer(new HttpServerOptions());
-      httpServer
-          .requestHandler(
-              req -> {
-                if (!finalPath.equals(req.path())) {
-                  req.response().setStatusCode(404).end();
-                  return;
-                }
+      httpServer.requestHandler(
+          req -> {
+            if (!finalPath.equals(req.path())) {
+              req.response().setStatusCode(404).end();
+              return;
+            }
 
-                if (req.method() == HttpMethod.GET || req.method() == HttpMethod.HEAD) {
-                  req.response().setStatusCode(200).putHeader("content-type", "text/plain").end("ok");
-                  return;
-                }
+            if (req.method() == HttpMethod.GET || req.method() == HttpMethod.HEAD) {
+              req.response().setStatusCode(200).putHeader("content-type", "text/plain").end("ok");
+              return;
+            }
 
-                if (req.method() != HttpMethod.POST) {
-                  req.response().setStatusCode(405).end();
-                  return;
-                }
+            if (req.method() != HttpMethod.POST) {
+              req.response().setStatusCode(405).end();
+              return;
+            }
 
-                req.bodyHandler(
-                    body -> {
-                      vertx.executeBlocking(
-                          () -> {
-                            String requestXml = body.toString(java.nio.charset.StandardCharsets.UTF_8);
+            req.bodyHandler(
+                body -> {
+                  vertx.executeBlocking(
+                      () -> {
+                        String requestXml = body.toString(java.nio.charset.StandardCharsets.UTF_8);
 
-                            if (wssProcessor.canVerifyInbound()) {
-                              requestXml = wssProcessor.processInbound(requestXml);
-                            }
+                        if (wssProcessor.canVerifyInbound()) {
+                          requestXml = wssProcessor.processInbound(requestXml);
+                        }
 
-                            String requestBody = extractSoapBody(requestXml);
+                        String requestBody = extractSoapBody(requestXml);
 
-                            Map<String, String> headers = req.headers().entries().stream()
-                                .collect(java.util.stream.Collectors.toMap(
-                                    h -> h.getKey().toLowerCase(),
-                                    Map.Entry::getValue,
-                                    (a, b) -> a));
+                        Map<String, String> headers =
+                            req.headers().entries().stream()
+                                .collect(
+                                    java.util.stream.Collectors.toMap(
+                                        h -> h.getKey().toLowerCase(),
+                                        Map.Entry::getValue,
+                                        (a, b) -> a));
 
-                            String soapAction = extractSoapAction(headers);
-                            String soapVersion = detectSoapVersion(headers);
+                        String soapAction = extractSoapAction(headers);
+                        String soapVersion = detectSoapVersion(headers);
 
-                            ConsumerRequest consumerRequest =
-                                ConsumerRequest.newBuilder()
-                                    .setRequestId(UUID.randomUUID().toString())
-                                    .setOperation(soapAction)
-                                    .setPayload(ByteString.copyFromUtf8(requestBody))
-                                    .putAllHeaders(headers)
-                                    .setSoapAction(soapAction)
-                                    .build();
+                        ConsumerRequest consumerRequest =
+                            ConsumerRequest.newBuilder()
+                                .setRequestId(UUID.randomUUID().toString())
+                                .setOperation(soapAction)
+                                .setPayload(ByteString.copyFromUtf8(requestBody))
+                                .putAllHeaders(headers)
+                                .setSoapAction(soapAction)
+                                .build();
 
-                            ConsumerResponse response =
-                                cxfServerManager
-                                    .handleSoapRequest(consumerRequest)
-                                    .get(bridgeConfig.consumerTimeoutMs(), TimeUnit.MILLISECONDS);
+                        ConsumerResponse response =
+                            cxfServerManager
+                                .handleSoapRequest(consumerRequest)
+                                .get(bridgeConfig.consumerTimeoutMs(), TimeUnit.MILLISECONDS);
 
-                            String responseXml;
-                            if (response.getFault()) {
-                              String faultBody =
-                                  buildFaultBody(
-                                      response.getFaultCode(), response.getFaultString(), soapVersion);
-                              responseXml = wrapEnvelope(faultBody, soapVersion);
-                            } else {
-                              responseXml = wrapEnvelope(response.getPayload().toStringUtf8(), soapVersion);
-                            }
+                        String responseXml;
+                        if (response.getFault()) {
+                          String faultBody =
+                              buildFaultBody(
+                                  response.getFaultCode(), response.getFaultString(), soapVersion);
+                          responseXml = wrapEnvelope(faultBody, soapVersion);
+                        } else {
+                          responseXml =
+                              wrapEnvelope(response.getPayload().toStringUtf8(), soapVersion);
+                        }
 
-                            if (wssProcessor.canSignOutbound()) {
-                              responseXml = wssProcessor.processOutbound(responseXml);
-                            }
+                        if (wssProcessor.canSignOutbound()) {
+                          responseXml = wssProcessor.processOutbound(responseXml);
+                        }
 
-                            return responseXml;
-                          },
-                          ar -> {
-                            if (ar.succeeded()) {
-                              req.response()
-                                  .setStatusCode(200)
-                                  .putHeader("content-type", "text/xml; charset=utf-8")
-                                  .end((String) ar.result());
-                            } else {
-                              Throwable cause = ar.cause();
-                              LOG.log(Level.SEVERE, "SOAP request processing failed", cause);
+                        return responseXml;
+                      },
+                      ar -> {
+                        if (ar.succeeded()) {
+                          req.response()
+                              .setStatusCode(200)
+                              .putHeader("content-type", "text/xml; charset=utf-8")
+                              .end((String) ar.result());
+                        } else {
+                          Throwable cause = ar.cause();
+                          LOG.log(Level.SEVERE, "SOAP request processing failed", cause);
 
-                              boolean isSecurityFailure = cause instanceof WSSecurityException
-                                  || (cause != null && cause.getCause() instanceof WSSecurityException);
+                          boolean isSecurityFailure =
+                              cause instanceof WSSecurityException
+                                  || (cause != null
+                                      && cause.getCause() instanceof WSSecurityException);
 
-                              String faultCode = isSecurityFailure ? "soap:Client" : "soap:Server";
-                              String faultString = isSecurityFailure
+                          String faultCode = isSecurityFailure ? "soap:Client" : "soap:Server";
+                          String faultString =
+                              isSecurityFailure
                                   ? "WS-Security processing failed: " + sanitize(cause.getMessage())
                                   : "Internal server error";
 
-                              req.response()
-                                  .setStatusCode(isSecurityFailure ? 400 : 500)
-                                  .putHeader("content-type", "text/xml; charset=utf-8")
-                                  .end(buildSoapFault(faultCode, faultString));
-                            }
-                          });
-                    });
-              });
+                          req.response()
+                              .setStatusCode(isSecurityFailure ? 400 : 500)
+                              .putHeader("content-type", "text/xml; charset=utf-8")
+                              .end(buildSoapFault(faultCode, faultString));
+                        }
+                      });
+                });
+          });
 
       java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
-      java.util.concurrent.atomic.AtomicReference<Throwable> listenError = new java.util.concurrent.atomic.AtomicReference<>();
+      java.util.concurrent.atomic.AtomicReference<Throwable> listenError =
+          new java.util.concurrent.atomic.AtomicReference<>();
       httpServer.listen(
           port,
           host,
@@ -219,8 +225,12 @@ public class SoapEndpointPublisher {
   private static String buildSoapFault(String faultCode, String faultString) {
     return "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
         + "<soapenv:Header/><soapenv:Body><soapenv:Fault>"
-        + "<faultcode>" + escapeXml(faultCode) + "</faultcode>"
-        + "<faultstring>" + escapeXml(faultString) + "</faultstring>"
+        + "<faultcode>"
+        + escapeXml(faultCode)
+        + "</faultcode>"
+        + "<faultstring>"
+        + escapeXml(faultString)
+        + "</faultstring>"
         + "</soapenv:Fault></soapenv:Body></soapenv:Envelope>";
   }
 

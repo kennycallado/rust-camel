@@ -15,7 +15,7 @@ fn default_health_check_interval_ms() -> u64 {
     5_000
 }
 
-#[derive(Clone, serde::Deserialize)]
+#[derive(Clone, Default, serde::Deserialize)]
 pub struct CxfSecurityConfig {
     pub username: Option<String>,
     pub password: Option<String>,
@@ -41,19 +41,6 @@ impl fmt::Debug for CxfSecurityConfig {
                 &self.truststore_password.as_ref().map(|_| "<redacted>"),
             )
             .finish()
-    }
-}
-
-impl Default for CxfSecurityConfig {
-    fn default() -> Self {
-        Self {
-            username: None,
-            password: None,
-            keystore_path: None,
-            keystore_password: None,
-            truststore_path: None,
-            truststore_password: None,
-        }
     }
 }
 

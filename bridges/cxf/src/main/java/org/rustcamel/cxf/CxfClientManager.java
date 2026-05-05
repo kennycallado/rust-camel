@@ -48,14 +48,11 @@ public class CxfClientManager {
       String wsdl, String address, String service, String port, String operation) throws Exception {
     String key = wsdl + "#" + address + "#" + service + "#" + port;
     try {
-      Dispatch<Source> dispatch = dispatches.computeIfAbsent(key, k -> createDispatch(wsdl, address, service, port));
+      Dispatch<Source> dispatch =
+          dispatches.computeIfAbsent(key, k -> createDispatch(wsdl, address, service, port));
       if (operation != null && !operation.isBlank()) {
-        dispatch
-            .getRequestContext()
-            .put("jakarta.xml.ws.soap.http.soapaction.use", Boolean.TRUE);
-        dispatch
-            .getRequestContext()
-            .put("jakarta.xml.ws.soap.http.soapaction.uri", operation);
+        dispatch.getRequestContext().put("jakarta.xml.ws.soap.http.soapaction.use", Boolean.TRUE);
+        dispatch.getRequestContext().put("jakarta.xml.ws.soap.http.soapaction.uri", operation);
       }
       return dispatch;
     } catch (RuntimeException ex) {
@@ -66,7 +63,8 @@ public class CxfClientManager {
     }
   }
 
-  private Dispatch<Source> createDispatch(String wsdl, String address, String service, String port) {
+  private Dispatch<Source> createDispatch(
+      String wsdl, String address, String service, String port) {
     try {
       QName serviceQName = service.startsWith("{") ? QName.valueOf(service) : new QName(service);
       QName portQName = port.startsWith("{") ? QName.valueOf(port) : new QName(port);

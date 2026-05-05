@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::filter::FilterPredicate;
 
 /// How the loop terminates.

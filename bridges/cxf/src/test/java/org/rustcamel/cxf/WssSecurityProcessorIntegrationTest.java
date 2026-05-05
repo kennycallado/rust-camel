@@ -10,8 +10,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /**
- * Integration tests for WssSecurityProcessor using a real JKS keystore.
- * Exercises the actual WSS4J signing and verification code path — no mocks for crypto.
+ * Integration tests for WssSecurityProcessor using a real JKS keystore. Exercises the actual WSS4J
+ * signing and verification code path — no mocks for crypto.
  */
 class WssSecurityProcessorIntegrationTest {
 
@@ -53,8 +53,7 @@ class WssSecurityProcessorIntegrationTest {
     assertTrue(
         signed.contains("BinarySecurityToken") || signed.contains("X509"),
         "Signed envelope should contain X509 certificate reference");
-    assertTrue(
-        signed.contains("SignatureValue"), "Signed envelope should contain SignatureValue");
+    assertTrue(signed.contains("SignatureValue"), "Signed envelope should contain SignatureValue");
     assertTrue(
         signed.contains("SignatureMethod"), "Signed envelope should contain SignatureMethod");
 
@@ -152,9 +151,9 @@ class WssSecurityProcessorIntegrationTest {
   @Test
   void processInbound_rejectsUnsignedMessage_whenSignatureRequired() throws Exception {
     // Processor with keystore (canVerifyInbound=true) and Signature required
-    WssSecurityProcessor processor = createProcessorWithActions(
-        keystorePath, "changeit", "alice", "changeit", "alice",
-        "Signature", "Signature");
+    WssSecurityProcessor processor =
+        createProcessorWithActions(
+            keystorePath, "changeit", "alice", "changeit", "alice", "Signature", "Signature");
 
     String plainSoap =
         """
@@ -172,9 +171,9 @@ class WssSecurityProcessorIntegrationTest {
 
   @Test
   void processOutbound_signatureOnly_whenActionsIsSignature() throws Exception {
-    WssSecurityProcessor processor = createProcessorWithActions(
-        keystorePath, "changeit", "alice", "changeit", "alice",
-        "Signature", "Signature");
+    WssSecurityProcessor processor =
+        createProcessorWithActions(
+            keystorePath, "changeit", "alice", "changeit", "alice", "Signature", "Signature");
 
     String soapXml =
         """
@@ -186,18 +185,22 @@ class WssSecurityProcessorIntegrationTest {
 
     String signed = processor.processOutbound(soapXml);
 
-    assertTrue(
-        signed.contains("SignatureValue"), "Should contain digital signature");
+    assertTrue(signed.contains("SignatureValue"), "Should contain digital signature");
     assertFalse(
-        signed.contains("EncryptedData"),
-        "Should not encrypt when action is Signature only");
+        signed.contains("EncryptedData"), "Should not encrypt when action is Signature only");
   }
 
   @Test
   void signEncrypt_roundTrip() throws Exception {
-    WssSecurityProcessor encProcessor = createProcessorWithActions(
-        keystorePath, "changeit", "alice", "changeit", "alice",
-        "Signature Encrypt", "Signature Encrypt");
+    WssSecurityProcessor encProcessor =
+        createProcessorWithActions(
+            keystorePath,
+            "changeit",
+            "alice",
+            "changeit",
+            "alice",
+            "Signature Encrypt",
+            "Signature Encrypt");
 
     String soapXml =
         """
@@ -220,9 +223,9 @@ class WssSecurityProcessorIntegrationTest {
   @Test
   void capabilities_signOutbound_requires_keystore() {
     // With keystore → canSignOutbound = true
-    WssSecurityProcessor withKs = createProcessorWithActions(
-        keystorePath, "changeit", "alice", "changeit", "alice",
-        "Signature", "Signature");
+    WssSecurityProcessor withKs =
+        createProcessorWithActions(
+            keystorePath, "changeit", "alice", "changeit", "alice", "Signature", "Signature");
     assertTrue(withKs.canSignOutbound(), "Should be able to sign with keystore");
 
     // Without keystore → canSignOutbound = false

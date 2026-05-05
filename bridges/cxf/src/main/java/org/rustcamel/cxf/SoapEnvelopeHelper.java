@@ -28,7 +28,8 @@ public final class SoapEnvelopeHelper {
               dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
               dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
               dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-              dbf.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+              dbf.setFeature(
+                  "http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
               dbf.setXIncludeAware(false);
             } catch (ParserConfigurationException ignored) {
             }
@@ -41,7 +42,8 @@ public final class SoapEnvelopeHelper {
   public static Document parseResponse(String xml) throws Exception {
     DocumentBuilderFactory dbf = SECURE_DBF.get();
     DocumentBuilder db = dbf.newDocumentBuilder();
-    return db.parse(new ByteArrayInputStream(xml.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    return db.parse(
+        new ByteArrayInputStream(xml.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
   }
 
   public static String wrapInEnvelope(String xmlBody, String soapVersion) throws Exception {
@@ -58,7 +60,9 @@ public final class SoapEnvelopeHelper {
     envelope.appendChild(header);
     envelope.appendChild(body);
 
-    Document payloadDoc = db.parse(new ByteArrayInputStream(xmlBody.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    Document payloadDoc =
+        db.parse(
+            new ByteArrayInputStream(xmlBody.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     Node imported = envelopeDoc.importNode(payloadDoc.getDocumentElement(), true);
     body.appendChild(imported);
 

@@ -7,6 +7,7 @@ quarkus:
   native:
     resources:
       includes:
+        - application.yml
         - META-INF/services/jakarta.xml.ws.spi.Provider
         - META-INF/services/jakarta.activation.spi.MailcapRegistryProvider
         - META-INF/services/jakarta.activation.spi.MimeTypeRegistryProvider
@@ -37,15 +38,29 @@ cxf:
   security:
     username: ${CXF_SECURITY_USERNAME:}
     password: ${CXF_SECURITY_PASSWORD:}
+    signature:
+      algorithm: ${CXF_SECURITY_SIGNATURE_ALGORITHM:}
+      digest:
+        algorithm: ${CXF_SECURITY_SIGNATURE_DIGEST_ALGORITHM:}
+      c14n:
+        algorithm: ${CXF_SECURITY_SIGNATURE_C14N_ALGORITHM:}
+      parts: ${CXF_SECURITY_SIGNATURE_PARTS:}
   keystore:
     path: ${CXF_KEYSTORE_PATH:}
     password: ${CXF_KEYSTORE_PASSWORD:}
   truststore:
     path: ${CXF_TRUSTSTORE_PATH:}
     password: ${CXF_TRUSTSTORE_PASSWORD:}
+  sig:
+    username: ${CXF_SIG_USERNAME:clientkey}
+  enc:
+    username: ${CXF_ENC_USERNAME:serverkey}
   connection:
     timeout:
       ms: ${CXF_CONNECTION_TIMEOUT_MS:30000}
   max:
     concurrent:
       requests: ${CXF_MAX_CONCURRENT_REQUESTS:100}
+  consumer:
+    timeout:
+      ms: ${CXF_CONSUMER_TIMEOUT_MS:60000}

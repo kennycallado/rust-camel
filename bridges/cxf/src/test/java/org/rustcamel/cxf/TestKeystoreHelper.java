@@ -5,9 +5,9 @@ import java.nio.file.Path;
 import java.util.List;
 
 /**
- * Generates a self-signed JKS keystore for integration testing using keytool.
- * Avoids BouncyCastle to ensure full JCA provider compatibility (no BadPaddingException
- * when using RSA/OAEP key transport with WSS4J).
+ * Generates a self-signed JKS keystore for integration testing using keytool. Avoids BouncyCastle
+ * to ensure full JCA provider compatibility (no BadPaddingException when using RSA/OAEP key
+ * transport with WSS4J).
  */
 class TestKeystoreHelper {
 
@@ -15,8 +15,8 @@ class TestKeystoreHelper {
   static final String KEY_ALIAS = "alice";
 
   /**
-   * Creates a temporary JKS keystore with a self-signed RSA 2048 keypair via keytool.
-   * The file is marked for deletion on JVM exit.
+   * Creates a temporary JKS keystore with a self-signed RSA 2048 keypair via keytool. The file is
+   * marked for deletion on JVM exit.
    *
    * @return path to the generated keystore file
    */
@@ -27,20 +27,29 @@ class TestKeystoreHelper {
 
     // Generate the keystore using the standard JDK keytool (resolve via java.home for portability)
     String keytool = Path.of(System.getProperty("java.home"), "bin", "keytool").toString();
-    List<String> cmd = List.of(
-        keytool,
-        "-genkeypair",
-        "-alias", KEY_ALIAS,
-        "-keyalg", "RSA",
-        "-keysize", "2048",
-        "-validity", "365",
-        "-dname", "CN=test-alice, O=RustCamel Test",
-        "-keystore", ksPath.toAbsolutePath().toString(),
-        "-storetype", "JKS",
-        "-storepass", KEYSTORE_PASSWORD,
-        "-keypass", KEYSTORE_PASSWORD,
-        "-noprompt"
-    );
+    List<String> cmd =
+        List.of(
+            keytool,
+            "-genkeypair",
+            "-alias",
+            KEY_ALIAS,
+            "-keyalg",
+            "RSA",
+            "-keysize",
+            "2048",
+            "-validity",
+            "365",
+            "-dname",
+            "CN=test-alice, O=RustCamel Test",
+            "-keystore",
+            ksPath.toAbsolutePath().toString(),
+            "-storetype",
+            "JKS",
+            "-storepass",
+            KEYSTORE_PASSWORD,
+            "-keypass",
+            KEYSTORE_PASSWORD,
+            "-noprompt");
 
     ProcessBuilder pb = new ProcessBuilder(cmd);
     pb.redirectErrorStream(true);

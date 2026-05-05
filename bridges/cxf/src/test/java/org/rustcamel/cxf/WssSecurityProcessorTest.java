@@ -97,7 +97,8 @@ class WssSecurityProcessorTest {
   @Test
   void processOutbound_returnsInput_whenDisabled() throws Exception {
     when(config.keystorePath()).thenReturn(null);
-    String input = "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><test/></soap:Body></soap:Envelope>";
+    String input =
+        "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><test/></soap:Body></soap:Envelope>";
     assertEquals(input, processor.processOutbound(input));
   }
 
@@ -105,7 +106,8 @@ class WssSecurityProcessorTest {
   void processInbound_returnsInput_whenDisabled() throws Exception {
     when(config.keystorePath()).thenReturn(null);
     when(config.truststorePath()).thenReturn(null);
-    String input = "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><test/></soap:Body></soap:Envelope>";
+    String input =
+        "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><test/></soap:Body></soap:Envelope>";
     assertEquals(input, processor.processInbound(input));
   }
 

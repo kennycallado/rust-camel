@@ -92,11 +92,7 @@ public class SecurityConfig {
     }
 
     props.put(WSHandlerConstants.ACTION, String.join(" ", actions));
-    LOG.info(
-        "WS-Security enabled: UsernameToken="
-            + hasUsernameToken
-            + ", X509="
-            + hasX509);
+    LOG.info("WS-Security enabled: UsernameToken=" + hasUsernameToken + ", X509=" + hasX509);
     return new WSS4JOutInterceptor(props);
   }
 
@@ -119,7 +115,8 @@ public class SecurityConfig {
         actions.add(WSHandlerConstants.SIGNATURE);
         props.put(
             ConfigurationConstants.SIG_PROP_REF_ID,
-            createCryptoProperties(bridgeConfig.truststorePath(), bridgeConfig.truststorePassword()));
+            createCryptoProperties(
+                bridgeConfig.truststorePath(), bridgeConfig.truststorePassword()));
       }
       if (containsAction(inActions, "Encrypt")) {
         actions.add(WSHandlerConstants.ENCRYPT);
@@ -137,11 +134,7 @@ public class SecurityConfig {
     }
 
     props.put(WSHandlerConstants.ACTION, String.join(" ", actions));
-    LOG.info(
-        "WS-Security enabled: UsernameToken="
-            + false
-            + ", X509="
-            + hasX509);
+    LOG.info("WS-Security enabled: UsernameToken=" + false + ", X509=" + hasX509);
     return new WSS4JInInterceptor(props);
   }
 
@@ -182,8 +175,8 @@ public class SecurityConfig {
   }
 
   /**
-   * Resolves the WSS4J action string for outbound messages.
-   * Defaults to "Signature" when no explicit actions are configured.
+   * Resolves the WSS4J action string for outbound messages. Defaults to "Signature" when no
+   * explicit actions are configured.
    */
   public String resolveActionsOut() {
     String actions = bridgeConfig.securityActionsOut();
@@ -191,8 +184,8 @@ public class SecurityConfig {
   }
 
   /**
-   * Resolves the WSS4J action string for inbound messages.
-   * Defaults to "Signature" when no explicit actions are configured.
+   * Resolves the WSS4J action string for inbound messages. Defaults to "Signature" when no explicit
+   * actions are configured.
    */
   public String resolveActionsIn() {
     String actions = bridgeConfig.securityActionsIn();

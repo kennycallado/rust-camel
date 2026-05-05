@@ -12,8 +12,7 @@ public class PortAnnouncer {
   @ConfigProperty(name = "quarkus.grpc.server.port", defaultValue = "9090")
   int grpcPort;
 
-  @Inject
-  WssSecurityProcessor wssProcessor;
+  @Inject WssSecurityProcessor wssProcessor;
 
   void onStart(@Observes StartupEvent ev) {
     System.out.println("{\"status\":\"ready\",\"port\":" + grpcPort + "}");

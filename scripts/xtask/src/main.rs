@@ -16,6 +16,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::enum_variant_names)]
 enum Commands {
     /// Build the JMS bridge native binary using Docker (Mandrel)
     BuildJmsBridge {

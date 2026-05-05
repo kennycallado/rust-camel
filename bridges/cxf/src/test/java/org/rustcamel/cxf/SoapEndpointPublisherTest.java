@@ -3,8 +3,8 @@ package org.rustcamel.cxf;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-import cxf_bridge.ConsumerResponse;
 import com.google.protobuf.ByteString;
+import cxf_bridge.ConsumerResponse;
 import io.vertx.core.AsyncResult;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
@@ -76,8 +76,8 @@ class SoapEndpointPublisherTest {
    * Triggers the request handling flow by publishing the endpoint, simulating an HTTP POST request,
    * and executing the captured executeBlocking callable. Returns the response XML.
    */
-  private String triggerRequestFlow(String requestXml, boolean wssEnabled, ConsumerResponse response)
-      throws Exception {
+  private String triggerRequestFlow(
+      String requestXml, boolean wssEnabled, ConsumerResponse response) throws Exception {
     when(wssProcessor.canVerifyInbound()).thenReturn(wssEnabled);
     when(wssProcessor.canSignOutbound()).thenReturn(wssEnabled);
     if (wssEnabled) {
@@ -88,9 +88,11 @@ class SoapEndpointPublisherTest {
     CompletableFuture<ConsumerResponse> future = CompletableFuture.completedFuture(response);
     when(cxfServerManager.handleSoapRequest(any())).thenReturn(future);
 
-    when(headers.entries()).thenReturn(List.of(
-        Map.entry("content-type", "text/xml"),
-        Map.entry("soapaction", "\"urn:test:Operation\"")));
+    when(headers.entries())
+        .thenReturn(
+            List.of(
+                Map.entry("content-type", "text/xml"),
+                Map.entry("soapaction", "\"urn:test:Operation\"")));
 
     when(bodyBuffer.toString(StandardCharsets.UTF_8)).thenReturn(requestXml);
 
@@ -104,12 +106,13 @@ class SoapEndpointPublisherTest {
         .executeBlocking(callableCaptor.capture(), resultHandlerCaptor.capture());
 
     // Simulate successful listen
-    doAnswer(invocation -> {
-          @SuppressWarnings("unchecked")
-          Handler<AsyncResult<HttpServer>> handler = invocation.getArgument(2);
-          handler.handle(Future.succeededFuture(httpServer));
-          return null;
-        })
+    doAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Handler<AsyncResult<HttpServer>> handler = invocation.getArgument(2);
+              handler.handle(Future.succeededFuture(httpServer));
+              return null;
+            })
         .when(httpServer)
         .listen(anyInt(), anyString(), any());
 
@@ -234,16 +237,19 @@ class SoapEndpointPublisherTest {
     when(wssProcessor.processInbound(anyString()))
         .thenThrow(new RuntimeException("signature verification failed"));
 
-    CompletableFuture<ConsumerResponse> future = CompletableFuture.completedFuture(
-        ConsumerResponse.newBuilder()
-            .setRequestId("test-5")
-            .setPayload(ByteString.copyFromUtf8("<result>ok</result>"))
-            .build());
+    CompletableFuture<ConsumerResponse> future =
+        CompletableFuture.completedFuture(
+            ConsumerResponse.newBuilder()
+                .setRequestId("test-5")
+                .setPayload(ByteString.copyFromUtf8("<result>ok</result>"))
+                .build());
     when(cxfServerManager.handleSoapRequest(any())).thenReturn(future);
 
-    when(headers.entries()).thenReturn(List.of(
-        Map.entry("content-type", "text/xml"),
-        Map.entry("soapaction", "\"urn:test:Operation\"")));
+    when(headers.entries())
+        .thenReturn(
+            List.of(
+                Map.entry("content-type", "text/xml"),
+                Map.entry("soapaction", "\"urn:test:Operation\"")));
 
     String requestXml =
         "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
@@ -258,12 +264,13 @@ class SoapEndpointPublisherTest {
         .when(vertx)
         .executeBlocking(callableCaptor.capture(), resultHandlerCaptor.capture());
 
-    doAnswer(invocation -> {
-          @SuppressWarnings("unchecked")
-          Handler<AsyncResult<HttpServer>> handler = invocation.getArgument(2);
-          handler.handle(Future.succeededFuture(httpServer));
-          return null;
-        })
+    doAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Handler<AsyncResult<HttpServer>> handler = invocation.getArgument(2);
+              handler.handle(Future.succeededFuture(httpServer));
+              return null;
+            })
         .when(httpServer)
         .listen(anyInt(), anyString(), any());
 

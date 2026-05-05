@@ -1,7 +1,7 @@
 package org.rustcamel.cxf;
 
-import cxf_bridge.*;
 import com.google.protobuf.ByteString;
+import cxf_bridge.*;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.quarkus.grpc.GrpcService;
@@ -21,6 +21,7 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
   static {
     System.setProperty("jakarta.xml.ws.spi.Provider", "org.apache.cxf.jaxws.spi.ProviderImpl");
   }
+
   private static final Logger LOG = Logger.getLogger(CxfBridgeService.class.getName());
 
   @Inject BridgeConfig bridgeConfig;
@@ -32,16 +33,27 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
   @Override
   public void invoke(SoapRequest request, StreamObserver<SoapResponse> responseObserver) {
     try {
-      String wsdl = request.getWsdlPath().isBlank() ? bridgeConfig.wsdlPath() : request.getWsdlPath();
+      String wsdl =
+          request.getWsdlPath().isBlank() ? bridgeConfig.wsdlPath() : request.getWsdlPath();
       String service =
-          request.getServiceName().isBlank() ? bridgeConfig.serviceName() : request.getServiceName();
-      String port = request.getPortName().isBlank() ? bridgeConfig.portName() : request.getPortName();
+          request.getServiceName().isBlank()
+              ? bridgeConfig.serviceName()
+              : request.getServiceName();
+      String port =
+          request.getPortName().isBlank() ? bridgeConfig.portName() : request.getPortName();
 
-      var dispatch = clientManager.getDispatch(wsdl, request.getAddress(), service, port, request.getOperation());
+      var dispatch =
+          clientManager.getDispatch(
+              wsdl, request.getAddress(), service, port, request.getOperation());
 
-      int timeout = request.getTimeoutMs() > 0 ? request.getTimeoutMs() : bridgeConfig.connectionTimeoutMs();
-      dispatch.getRequestContext().put("jakarta.xml.ws.client.connectionTimeout", String.valueOf(timeout));
-      dispatch.getRequestContext().put("jakarta.xml.ws.client.receiveTimeout", String.valueOf(timeout));
+      int timeout =
+          request.getTimeoutMs() > 0 ? request.getTimeoutMs() : bridgeConfig.connectionTimeoutMs();
+      dispatch
+          .getRequestContext()
+          .put("jakarta.xml.ws.client.connectionTimeout", String.valueOf(timeout));
+      dispatch
+          .getRequestContext()
+          .put("jakarta.xml.ws.client.receiveTimeout", String.valueOf(timeout));
 
       String payload = request.getPayload().toStringUtf8();
       String soapVersion = request.getHeadersOrDefault("soap-version", "1.1");
@@ -62,7 +74,10 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
             .setFaultString(SoapEnvelopeHelper.extractFaultString(doc));
       }
 
-      LOG.log(Level.FINE, "SOAP invoke completed: {0}/{1}, fault={2}", new Object[] {service, port, fault});
+      LOG.log(
+          Level.FINE,
+          "SOAP invoke completed: {0}/{1}, fault={2}",
+          new Object[] {service, port, fault});
 
       responseObserver.onNext(builder.build());
       responseObserver.onCompleted();
@@ -75,7 +90,8 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
         Throwable next = null;
         if (root instanceof ExceptionInInitializerError eiie && eiie.getException() != null) {
           next = eiie.getException();
-        } else if (root instanceof UndeclaredThrowableException ute && ute.getUndeclaredThrowable() != null) {
+        } else if (root instanceof UndeclaredThrowableException ute
+            && ute.getUndeclaredThrowable() != null) {
           next = ute.getUndeclaredThrowable();
         } else if (root.getCause() != null && root.getCause() != root) {
           next = root.getCause();
@@ -86,7 +102,10 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
         root = next;
       }
       String msg = root.getClass().getName() + ": " + root.getMessage();
-      LOG.log(Level.SEVERE, "SOAP invoke failed for {0}/{1}", new Object[] {request.getServiceName(), request.getPortName()});
+      LOG.log(
+          Level.SEVERE,
+          "SOAP invoke failed for {0}/{1}",
+          new Object[] {request.getServiceName(), request.getPortName()});
       LOG.log(Level.SEVERE, "Full exception: ", e);
       responseObserver.onError(Status.INTERNAL.withDescription(msg).withCause(e).asException());
     }
@@ -116,7 +135,8 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
 
   @Override
   public void health(HealthRequest request, StreamObserver<HealthResponse> responseObserver) {
-    responseObserver.onNext(HealthResponse.newBuilder().setHealthy(true).setMessage("SERVING").build());
+    responseObserver.onNext(
+        HealthResponse.newBuilder().setHealthy(true).setMessage("SERVING").build());
     responseObserver.onCompleted();
   }
 

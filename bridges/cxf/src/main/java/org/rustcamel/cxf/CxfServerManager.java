@@ -28,7 +28,8 @@ public class CxfServerManager {
     final CompletableFuture<ConsumerResponse> future;
     final Instant createdAt;
 
-    PendingRequest(String requestId, CompletableFuture<ConsumerResponse> future, Instant createdAt) {
+    PendingRequest(
+        String requestId, CompletableFuture<ConsumerResponse> future, Instant createdAt) {
       this.requestId = requestId;
       this.future = future;
       this.createdAt = createdAt;
@@ -92,7 +93,9 @@ public class CxfServerManager {
     try {
       observer.onNext(request);
     } catch (Exception e) {
-      LOG.log(Level.WARNING, "Failed to dispatch consumer request {0}: {1}",
+      LOG.log(
+          Level.WARNING,
+          "Failed to dispatch consumer request {0}: {1}",
           new Object[] {requestId, e.getMessage()});
       future.completeExceptionally(new IllegalStateException("503: failed to dispatch request", e));
     }
@@ -117,7 +120,8 @@ public class CxfServerManager {
       return;
     }
     for (PendingRequest pending : pendingRequests.values()) {
-      pending.future.completeExceptionally(new IllegalStateException("503: consumer stream closed"));
+      pending.future.completeExceptionally(
+          new IllegalStateException("503: consumer stream closed"));
     }
     pendingRequests.clear();
     consumerRequestObserver = null;
