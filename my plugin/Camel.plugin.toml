@@ -1,4 +1,0 @@
-name = "my plugin"
-version = "0.1.0"
-type = "processor"
-entry = "my plugin.wasm"
