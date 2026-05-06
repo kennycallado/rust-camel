@@ -1,15 +1,21 @@
 pub mod bindings;
 pub mod bundle;
+pub mod config;
 pub mod endpoint;
+pub mod epoch;
 pub mod error;
 pub mod host_functions;
 pub mod producer;
 pub mod runtime;
 pub mod serde_bridge;
+pub mod state_store;
 
 pub use bundle::WasmBundle;
+pub use config::WasmConfig;
 pub use endpoint::WasmEndpoint;
-pub use error::WasmError;
+pub use epoch::EpochTicker;
+pub use error::{TrapReason, WasmError};
+pub use state_store::StateStore;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -80,18 +86,19 @@ impl Component for WasmComponent {
             CamelError::InvalidUri(format!("WASM URI must start with 'wasm:': {uri}"))
         })?;
 
-        let path_part = uri_without_scheme.split('?').next().unwrap_or_default();
+        let (path_part, wasm_config) = crate::config::WasmConfig::from_uri(uri_without_scheme);
         if path_part.is_empty() {
             return Err(CamelError::InvalidUri(
                 "WASM URI must include a module path".to_string(),
             ));
         }
 
-        let module_path = self.validate_and_resolve_path(path_part)?;
+        let module_path = self.validate_and_resolve_path(&path_part)?;
         Ok(Box::new(WasmEndpoint::new(
             uri.to_string(),
             module_path,
             self.registry.clone(),
+            wasm_config,
         )))
     }
 }

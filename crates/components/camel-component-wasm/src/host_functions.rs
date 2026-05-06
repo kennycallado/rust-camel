@@ -41,9 +41,9 @@ impl Host for WasmHostState {
                 }
 
                 let component = {
-                    let guard = registry.lock().map_err(|e| {
-                        WasmError::Io(format!("registry lock poisoned: {}", e))
-                    })?;
+                    let guard = registry
+                        .lock()
+                        .map_err(|e| WasmError::Io(format!("registry lock poisoned: {}", e)))?;
                     guard.get(&scheme).ok_or_else(|| {
                         WasmError::ProcessorError(format!(
                             "component not found for scheme: {}",
@@ -54,28 +54,29 @@ impl Host for WasmHostState {
 
                 let endpoint = component
                     .create_endpoint(&uri, &camel_component_api::NoOpComponentContext)
-                    .map_err(|e| WasmError::ProcessorError(format!("create_endpoint failed: {}", e)))?;
+                    .map_err(|e| {
+                        WasmError::ProcessorError(format!("create_endpoint failed: {}", e))
+                    })?;
 
                 let producer = endpoint
                     .create_producer(&camel_api::ProducerContext::new())
-                    .map_err(|e| WasmError::ProcessorError(format!("create_producer failed: {}", e)))?;
+                    .map_err(|e| {
+                        WasmError::ProcessorError(format!("create_producer failed: {}", e))
+                    })?;
 
                 let exchange = camel_api::Exchange::new(camel_api::Message::new(
                     camel_api::Body::Text(payload),
                 ));
 
-                let result = producer
-                    .oneshot(exchange)
-                    .await
-                    .map_err(|e| WasmError::ProcessorError(format!("endpoint call failed: {}", e)))?;
+                let result = producer.oneshot(exchange).await.map_err(|e| {
+                    WasmError::ProcessorError(format!("endpoint call failed: {}", e))
+                })?;
 
                 let body_str = match &result.output {
                     Some(msg) => match &msg.body {
                         camel_api::Body::Text(s) => s.clone(),
                         camel_api::Body::Json(v) => v.to_string(),
-                        camel_api::Body::Bytes(b) => {
-                            String::from_utf8_lossy(b).to_string()
-                        }
+                        camel_api::Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
                         camel_api::Body::Xml(s) => s.clone(),
                         camel_api::Body::Empty => String::new(),
                         camel_api::Body::Stream(_) => "<stream>".to_string(),
@@ -83,9 +84,7 @@ impl Host for WasmHostState {
                     None => match &result.input.body {
                         camel_api::Body::Text(s) => s.clone(),
                         camel_api::Body::Json(v) => v.to_string(),
-                        camel_api::Body::Bytes(b) => {
-                            String::from_utf8_lossy(b).to_string()
-                        }
+                        camel_api::Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
                         camel_api::Body::Xml(s) => s.clone(),
                         camel_api::Body::Empty => String::new(),
                         camel_api::Body::Stream(_) => "<stream>".to_string(),
@@ -93,7 +92,8 @@ impl Host for WasmHostState {
                 };
 
                 Ok(body_str)
-            }.await;
+            }
+            .await;
 
             NESTING_DEPTH.fetch_sub(1, Ordering::Relaxed);
             result
@@ -120,29 +120,48 @@ impl Host for WasmHostState {
         self.properties.insert(key, parsed);
         async {}
     }
+
+    fn host_store(
+        &mut self,
+        key: String,
+        value: String,
+    ) -> impl std::future::Future<Output = Result<(), WasmError>> + Send {
+        let state_store = self.state_store.clone();
+        async move { state_store.store(&key, &value).map_err(WasmError::Io) }
+    }
+
+    fn host_load(
+        &mut self,
+        key: String,
+    ) -> impl std::future::Future<Output = Result<Option<String>, WasmError>> + Send {
+        let state_store = self.state_store.clone();
+        async move { state_store.load(&key).map_err(WasmError::Io) }
+    }
 }
 
 pub fn add_to_linker(linker: &mut Linker<WasmHostState>) -> Result<(), wasmtime::Error> {
-    crate::bindings::camel::plugin::host::add_to_linker(linker, |state: &mut WasmHostState| {
-        state
-    })
+    crate::bindings::camel::plugin::host::add_to_linker(linker, |state: &mut WasmHostState| state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime::WasmHostState;
+    use camel_core::Registry;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use camel_core::Registry;
 
     fn make_state(call_depth: u32) -> WasmHostState {
         WasmHostState {
             table: wasmtime::component::ResourceTable::new(),
-            wasi: wasmtime_wasi::WasiCtxBuilder::new().inherit_stderr().build(),
+            wasi: wasmtime_wasi::WasiCtxBuilder::new()
+                .inherit_stderr()
+                .build(),
             properties: HashMap::new(),
             registry: Arc::new(std::sync::Mutex::new(Registry::new())),
             call_depth,
+            limits: wasmtime::StoreLimits::default(),
+            state_store: crate::state_store::StateStore::new(),
         }
     }
 
@@ -180,10 +199,8 @@ mod tests {
     #[test]
     fn test_set_property_json_value() {
         let mut state = make_state(0);
-        let parsed =
-            serde_json::from_str::<Value>("{\"nested\":true}").unwrap_or(Value::String(
-                "{\"nested\":true}".to_string(),
-            ));
+        let parsed = serde_json::from_str::<Value>("{\"nested\":true}")
+            .unwrap_or(Value::String("{\"nested\":true}".to_string()));
         state.properties.insert("json_key".to_string(), parsed);
         assert!(state.properties.get("json_key").unwrap().is_object());
     }

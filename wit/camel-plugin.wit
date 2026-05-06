@@ -60,6 +60,14 @@ interface host {
 
     /// Write a property to the host Exchange.
     set-property: func(key: string, value: string);
+
+    /// Store a value that persists across process() calls for this route endpoint.
+    /// State is scoped per endpoint — different routes using the same plugin
+    /// get independent state stores.
+    host-store: func(key: string, value: string) -> result<_, wasm-error>;
+
+    /// Load a previously stored value. Returns none if the key has not been stored.
+    host-load: func(key: string) -> result<option<string>, wasm-error>;
 }
 
 /// The guest (plugin) world.

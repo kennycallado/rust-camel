@@ -6,12 +6,14 @@ WASM plugin component for rust-camel — loads and executes WASM modules as rout
 
 - **WASM Component Model**: Loads WASM modules compiled for `wasm32-wasip2` target
 - **Wasmtime v31**: Latest runtime with async support and component-model features
-- **Host Functions**: `camel_call()`, `get_property()`, `set_property()` for guest-host communication
+- **Host Functions**: `camel_call()`, `get_property()`, `set_property()`, `host_store()`, `host_load()` for guest-host communication
 - **URI-Based Routing**: `wasm:path/to/module.wasm` format for easy integration
 - **Path Validation**: Prevents directory traversal and escapes from project root
 - **Recursion Guard**: Blocks nested WASM calls to prevent infinite loops
 - **Tower Service**: Implements `Service<Exchange>` for async processing
 - **Exchange Properties**: Per-request properties accessible from WASM via host functions
+- **Persistent State**: `host_store`/`host_load` for per-endpoint state that survives across `process()` calls
+- **Production Hardening**: Epoch-based timeouts, memory limits, structured trap classification, automatic recovery
 
 ## Installation
 
@@ -25,13 +27,29 @@ camel-component-wasm.workspace = true
 ## URI Format
 
 ```
-wasm:path/to/module.wasm
+wasm:path/to/module.wasm[?timeout=<secs>&max-memory=<bytes>]
 ```
 
 - Must be relative path (no leading `/`)
 - No `..` components allowed
 - Resolved against configured base directory
-- Example: `wasm:plugins/transform.wasm`
+
+### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `timeout` | `u64` (seconds) | `30` | Max wall-clock time per guest call. Enforced via epoch interruption. |
+| `max-memory` | `u64` (bytes) | `52428800` (50 MB) | Max linear memory the guest can allocate. |
+
+Zero or invalid values are silently ignored and the default is used.
+
+### Examples
+
+```
+wasm:plugins/transform.wasm
+wasm:plugins/transform.wasm?timeout=5
+wasm:plugins/transform.wasm?timeout=10&max-memory=10485760
+```
 
 ## Host Functions
 
@@ -67,6 +85,34 @@ Sets an exchange property. Value can be JSON string for structured data.
 Host::set_property("timestamp".to_string(), "2024-01-01T00:00:00Z".to_string()).await;
 Host::set_property("metadata".to_string(), r#"{"source":"wasm"}"#.to_string()).await;
 ```
+
+### `host_store(key: String, value: String) -> Result<()>`
+
+Stores a key-value pair that persists across `process()` calls for this route endpoint.
+
+```rust
+use camel_wasm_sdk::state_helpers;
+
+// Store config loaded in init()
+state_helpers::store("api-key", "secret-123")?;
+
+// Store structured data as JSON
+state_helpers::store_json("config", &my_config)?;
+```
+
+### `host_load(key: String) -> Result<Option<String>>`
+
+Loads a previously stored value. Returns `None` if the key has not been stored.
+
+```rust
+// Load a string value
+let api_key = state_helpers::load("api-key")?;
+
+// Load and deserialize JSON
+let config: Option<MyConfig> = state_helpers::load_json("config")?;
+```
+
+> **Scope:** State is scoped per route endpoint. Different routes using the same `.wasm` file maintain independent state stores.
 
 ## Usage
 
@@ -164,6 +210,42 @@ RouteBuilder::from("direct:chain")
 - Prevents infinite recursion and stack overflow
 - Returns error: `recursive wasm calls not supported`
 
+## Production Configuration
+
+Phase 4 hardening adds epoch-based timeouts, memory limits, and structured trap classification to every plugin call.
+
+### Timeout enforcement
+
+Every guest call (`init` and `process`) sets an epoch deadline before invocation. A background thread (`EpochTicker`) increments the wasmtime engine epoch every 10 ms. If the deadline is exceeded, the call is interrupted and returns `WasmError::Timeout`.
+
+```rust
+// 5-second timeout
+let uri = "wasm:plugins/slow.wasm?timeout=5";
+```
+
+### Memory limits
+
+`StoreLimits` is installed in every `Store`. If the guest exceeds `max-memory`, the next allocation fails and returns `WasmError::OutOfMemory`.
+
+```rust
+// 10 MB limit
+let uri = "wasm:plugins/heavy.wasm?max-memory=10485760";
+```
+
+### Error variants
+
+| Variant | When raised |
+|---------|-------------|
+| `WasmError::Timeout { plugin, timeout_secs }` | Epoch deadline exceeded |
+| `WasmError::OutOfMemory { plugin, max_memory_bytes }` | Guest exceeded memory limit |
+| `WasmError::Trap { plugin, reason }` | Guest hit unreachable/stack-overflow/other trap |
+| `WasmError::GuestPanic(msg)` | Guest panicked with a message |
+| `WasmError::Unhealthy(msg)` | Plugin failed health check |
+
+### Recovery
+
+After a `Timeout`, `Trap`, or `OutOfMemory`, the plugin runtime is automatically reset on the next call. No manual intervention required.
+
 ## Architecture
 
 ```
@@ -195,6 +277,7 @@ RouteBuilder::from("direct:chain")
 │  WasmHostState  │
 │  (registry,     │
 │   properties,   │
+│   state_store,  │
 │   call_depth)   │
 └─────────────────┘
 ```
@@ -216,6 +299,8 @@ pub struct WasmHostState {
     pub properties: HashMap<String, Value>, // Exchange properties
     pub registry: Arc<Mutex<Registry>>, // Component registry
     pub call_depth: u32,                // Recursion guard (0 = allowed)
+    pub state_store: StateStore,        // Per-endpoint persistent state
+    pub limits: StoreLimits,            // Memory allocation limits
 }
 ```
 
@@ -226,10 +311,11 @@ Each request gets a new `WasmHostState` with:
 
 ## Testing
 
-Unit tests verify path validation, recursion guard, and host functions:
+Unit tests verify path validation, recursion guard, host functions, state persistence, hardening (epoch timeout, memory limits, trap recovery), and performance benchmarks:
 
 ```bash
 cargo test -p camel-component-wasm
+# 81 tests: 50 unit + 10 hardening + 14 integration + 6 state + 1 perf
 ```
 
 Integration tests require a compiled WASM module:

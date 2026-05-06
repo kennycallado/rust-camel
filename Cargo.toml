@@ -65,6 +65,7 @@ members = [
     "examples/multicast",
     "examples/http-server",
     "examples/ws-server",
+    "examples/wasm-example",
     "examples/http-streaming",
     "examples/file-streaming",
     "examples/pipeline-concurrency",
@@ -140,7 +141,7 @@ categories = ["network-programming", "asynchronous", "development-tools"]
 # below to match using: sed -i 's/version = "=OLD"/version = "=NEW"/g' Cargo.toml
 # Exact pinning (=) ensures cargo publish verifies against the exact version
 # being released, not an older one already on crates.io.
- camel-api = { path = "crates/camel-api", version = "=0.7.8" }
+camel-api = { path = "crates/camel-api", version = "=0.7.8" }
 camel-bean = { path = "crates/camel-bean", version = "=0.7.8" }
 camel-bean-macros = { path = "crates/camel-bean-macros", version = "=0.7.8" }
 camel-cli = { path = "crates/camel-cli", version = "=0.7.8" }

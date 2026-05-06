@@ -148,7 +148,9 @@ fn round_trip_text_uppercase() {
 
 #[test]
 fn round_trip_json_field_extract() {
-    let ex = WasmExchange::new(WasmMessage::new(WasmBody::json(r#"{"name":"test","value":42}"#)));
+    let ex = WasmExchange::new(WasmMessage::new(WasmBody::json(
+        r#"{"name":"test","value":42}"#,
+    )));
 
     let json = ex.body().as_json().unwrap();
     assert!(json.contains("name"));

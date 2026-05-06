@@ -216,7 +216,10 @@ mod tests {
         let mut out = Exchange::new(Message::default());
         wasm_to_exchange(wasm, &mut out);
 
-        assert_eq!(out.input.headers.get("s"), Some(&Value::String("abc".into())));
+        assert_eq!(
+            out.input.headers.get("s"),
+            Some(&Value::String("abc".into()))
+        );
         assert_eq!(out.input.headers.get("n"), Some(&json!(42)));
         assert_eq!(out.input.headers.get("b"), Some(&Value::Bool(true)));
         assert_eq!(out.input.headers.get("o"), Some(&json!({"k":"v"})));

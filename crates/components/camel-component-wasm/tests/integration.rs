@@ -4,13 +4,16 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use camel_api::{Body, CamelError, Exchange, ExchangePattern, Message, ProducerContext, Value};
-use camel_component_api::{Component, ComponentBundle, ComponentRegistrar, Endpoint, NoOpComponentContext};
+use camel_component_api::{
+    Component, ComponentBundle, ComponentRegistrar, Endpoint, NoOpComponentContext,
+};
+use camel_component_wasm::WasmComponent;
+use camel_component_wasm::WasmConfig;
 use camel_component_wasm::bindings::camel::plugin::types::WasmBody;
 use camel_component_wasm::bundle::WasmBundle;
 use camel_component_wasm::endpoint::WasmEndpoint;
 use camel_component_wasm::producer::WasmProducer;
 use camel_component_wasm::serde_bridge::{exchange_to_wasm, wasm_to_exchange};
-use camel_component_wasm::WasmComponent;
 use camel_core::Registry;
 use serde_json::json;
 use tempfile::tempdir;
@@ -43,7 +46,9 @@ async fn wasm_component_rejects_parent_dir_paths() {
     let base = tempdir().unwrap();
     let component = WasmComponent::new(make_registry(), base.path().to_path_buf());
     let result = component.create_endpoint("wasm:../plugin.wasm", &NoOpComponentContext);
-    assert!(matches!(result, Err(CamelError::InvalidUri(msg)) if msg.contains("must not contain '..'")));
+    assert!(
+        matches!(result, Err(CamelError::InvalidUri(msg)) if msg.contains("must not contain '..'"))
+    );
 }
 
 #[tokio::test]
@@ -51,7 +56,9 @@ async fn wasm_component_rejects_nonexistent_paths() {
     let base = tempdir().unwrap();
     let component = WasmComponent::new(make_registry(), base.path().to_path_buf());
     let result = component.create_endpoint("wasm:missing/plugin.wasm", &NoOpComponentContext);
-    assert!(matches!(result, Err(CamelError::ComponentNotFound(msg)) if msg.contains("WASM module not found")));
+    assert!(
+        matches!(result, Err(CamelError::ComponentNotFound(msg)) if msg.contains("WASM module not found"))
+    );
 }
 
 #[tokio::test]
@@ -64,7 +71,9 @@ async fn wasm_component_rejects_symlink_escape_paths() {
     std::os::unix::fs::symlink(&outside_file, &escape).unwrap();
     let component = WasmComponent::new(make_registry(), base.path().to_path_buf());
     let result = component.create_endpoint("wasm:escape.wasm", &NoOpComponentContext);
-    assert!(matches!(result, Err(CamelError::InvalidUri(msg)) if msg.contains("escapes project root")));
+    assert!(
+        matches!(result, Err(CamelError::InvalidUri(msg)) if msg.contains("escapes project root"))
+    );
 }
 
 #[tokio::test]
@@ -92,12 +101,18 @@ fn wasm_bundle_registers_wasm_scheme_in_integration() {
 fn wasm_bundle_from_toml_returns_error_in_integration() {
     let value: toml::Value = toml::from_str("").unwrap();
     let result = WasmBundle::from_toml(value);
-    assert!(matches!(result, Err(CamelError::Config(msg)) if msg.contains("WasmBundle requires registry and base_dir")));
+    assert!(
+        matches!(result, Err(CamelError::Config(msg)) if msg.contains("WasmBundle requires registry and base_dir"))
+    );
 }
 
 #[tokio::test]
 async fn wasm_producer_constructor_creates_instance() {
-    let producer = WasmProducer::new(PathBuf::from("missing-module.wasm"), make_registry());
+    let producer = WasmProducer::new(
+        PathBuf::from("missing-module.wasm"),
+        make_registry(),
+        WasmConfig::default(),
+    );
     let exchange = Exchange::new(Message::new("hello"));
     let result = producer.clone().oneshot(exchange).await;
     assert!(matches!(result, Err(CamelError::ComponentNotFound(_))));
@@ -108,10 +123,12 @@ async fn wasm_producer_returns_component_not_found_for_invalid_module_file() {
     let base = tempdir().unwrap();
     let invalid = base.path().join("invalid.wasm");
     std::fs::write(&invalid, b"this-is-not-a-wasm-component").unwrap();
-    let producer = WasmProducer::new(invalid, make_registry());
+    let producer = WasmProducer::new(invalid, make_registry(), WasmConfig::default());
     let exchange = Exchange::new(Message::new("hello"));
     let result = producer.clone().oneshot(exchange).await;
-    assert!(matches!(result, Err(CamelError::ComponentNotFound(msg)) if msg.contains("Failed to load WASM module")));
+    assert!(
+        matches!(result, Err(CamelError::ComponentNotFound(msg)) if msg.contains("Failed to load WASM module"))
+    );
 }
 
 #[test]
@@ -120,10 +137,13 @@ fn wasm_endpoint_creation_flow_uri_and_consumer_producer_behavior() {
         "wasm:plugins/worker.wasm".to_string(),
         PathBuf::from("plugins/worker.wasm"),
         make_registry(),
+        WasmConfig::default(),
     );
     assert_eq!(endpoint.uri(), "wasm:plugins/worker.wasm");
     let consumer = endpoint.create_consumer();
-    assert!(matches!(consumer, Err(CamelError::EndpointCreationFailed(msg)) if msg.contains("not supported in v1")));
+    assert!(
+        matches!(consumer, Err(CamelError::EndpointCreationFailed(msg)) if msg.contains("not supported in v1"))
+    );
     let producer = endpoint.create_producer(&ProducerContext::new());
     assert!(producer.is_ok());
 }
@@ -190,16 +210,31 @@ fn serde_bridge_round_trip_complex_properties_and_headers() {
     wasm_to_exchange(wasm, &mut out);
 
     assert!(matches!(out.input.body, Body::Json(_)));
-    assert_eq!(out.input.headers.get("s"), Some(&Value::String("abc".to_string())));
+    assert_eq!(
+        out.input.headers.get("s"),
+        Some(&Value::String("abc".to_string()))
+    );
     assert_eq!(out.input.headers.get("n"), Some(&json!(42)));
     assert_eq!(out.input.headers.get("b"), Some(&Value::Bool(true)));
     assert_eq!(out.input.headers.get("o"), Some(&json!({"nested":{"x":1}})));
-    assert_eq!(out.input.headers.get("a"), Some(&json!([1, {"y":2}, false])));
-    assert_eq!(out.properties.get("p_string"), Some(&Value::String("v".to_string())));
+    assert_eq!(
+        out.input.headers.get("a"),
+        Some(&json!([1, {"y":2}, false]))
+    );
+    assert_eq!(
+        out.properties.get("p_string"),
+        Some(&Value::String("v".to_string()))
+    );
     assert_eq!(out.properties.get("p_num"), Some(&json!(99)));
     assert_eq!(out.properties.get("p_bool"), Some(&Value::Bool(false)));
-    assert_eq!(out.properties.get("p_obj"), Some(&json!({"k":"v","n":[1,2]})));
-    assert_eq!(out.properties.get("p_arr"), Some(&json!([{"z":1}, null, true])));
+    assert_eq!(
+        out.properties.get("p_obj"),
+        Some(&json!({"k":"v","n":[1,2]}))
+    );
+    assert_eq!(
+        out.properties.get("p_arr"),
+        Some(&json!([{"z":1}, null, true]))
+    );
     assert_eq!(out.pattern, ExchangePattern::InOut);
     assert_eq!(out.output.unwrap().body.as_text(), Some("out"));
     assert_ne!(original_correlation_id, String::new());

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use camel_component_api::{CamelError, ComponentBundle, ComponentRegistrar};
-    use camel_core::Registry;
+use camel_core::Registry;
 
 use crate::WasmComponent;
 
@@ -37,7 +37,7 @@ impl ComponentBundle for WasmBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
-use camel_core::Registry;
+    use camel_core::Registry;
 
     struct TestRegistrar {
         schemes: Vec<String>,

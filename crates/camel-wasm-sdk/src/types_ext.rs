@@ -452,12 +452,7 @@ mod tests {
         let ex = WasmExchange::new(WasmMessage::new(WasmBody::text("input")));
         let result = WasmExchange {
             input: WasmMessage {
-                body: WasmBody::text(
-                    ex.body()
-                        .as_text()
-                        .unwrap()
-                        .to_uppercase(),
-                ),
+                body: WasmBody::text(ex.body().as_text().unwrap().to_uppercase()),
                 ..ex.input
             },
             ..ex

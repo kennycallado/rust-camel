@@ -1250,6 +1250,7 @@ dependencies = [
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
+ "wat",
 ]
 
 [[package]]
@@ -1677,6 +1678,8 @@ dependencies = [
 name = "camel-wasm-sdk"
 version = "0.7.8"
 dependencies = [
+ "serde",
+ "serde_json",
  "wit-bindgen 0.57.1",
 ]
 
@@ -8728,6 +8731,20 @@ checksum = "ac92cf547bc18d27ecc521015c08c353b4f18b84ab388bb6d1b6b682c620d9b6"
 dependencies = [
  "leb128fmt",
  "wasmparser 0.248.0",
+]
+
+[[package]]
+name = "wasm-example"
+version = "0.7.8"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-component-wasm",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

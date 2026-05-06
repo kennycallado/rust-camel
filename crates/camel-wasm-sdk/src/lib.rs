@@ -84,15 +84,17 @@ mod bindings {
 }
 
 mod plugin;
+mod state_helpers;
 mod types_ext;
 
+pub use bindings::Guest;
 pub use bindings::camel::plugin::host;
 pub use bindings::camel::plugin::types::{
     WasmBody, WasmError, WasmExchange, WasmMessage, WasmPattern,
 };
 pub use bindings::export;
-pub use bindings::Guest;
 pub use plugin::Plugin;
 pub use state::GuestState;
+pub use state_helpers::{load, load_json, store, store_json};
 
 pub mod state;

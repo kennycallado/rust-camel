@@ -23,18 +23,27 @@ pub struct WasmProducer {
     module_path: PathBuf,
     registry: Arc<std::sync::Mutex<Registry>>,
     runtime: Arc<std::sync::Mutex<Option<Arc<WasmRuntime>>>>,
+    config: crate::config::WasmConfig,
+    state_store: crate::state_store::StateStore,
 }
 
 impl WasmProducer {
     pub fn new(
         module_path: PathBuf,
         registry: Arc<std::sync::Mutex<Registry>>,
+        config: crate::config::WasmConfig,
     ) -> Self {
         Self {
             module_path,
             registry,
             runtime: Arc::new(std::sync::Mutex::new(None)),
+            config,
+            state_store: crate::state_store::StateStore::new(),
         }
+    }
+
+    pub fn config(&self) -> &crate::config::WasmConfig {
+        &self.config
     }
 
     async fn ensure_runtime(&self) -> Result<Arc<WasmRuntime>, CamelError> {
@@ -45,12 +54,15 @@ impl WasmProducer {
             }
         }
 
-        let runtime = Arc::new(WasmRuntime::new(&self.module_path).await?);
+        let runtime = Arc::new(WasmRuntime::new(&self.module_path, self.config.clone()).await?);
 
-        let host_state =
-            WasmRuntime::create_host_state(self.registry.clone(), HashMap::new());
-
-        runtime.call_init_once(host_state).await?;
+        runtime
+            .call_init_once(
+                self.registry.clone(),
+                HashMap::new(),
+                self.state_store.clone(),
+            )
+            .await?;
 
         {
             let mut guard = self.runtime.lock().map_err(poisoned)?;
@@ -88,12 +100,15 @@ impl Service<Exchange> for WasmProducer {
             };
 
             let wasm_exchange = exchange_to_wasm(&exchange);
-            let host_state = WasmRuntime::create_host_state(
-                this.registry.clone(),
-                exchange.properties.clone(),
-            );
 
-            let result = runtime.call_process(host_state, wasm_exchange).await;
+            let result = runtime
+                .call_process(
+                    this.registry.clone(),
+                    exchange.properties.clone(),
+                    this.state_store.clone(),
+                    wasm_exchange,
+                )
+                .await;
 
             match result {
                 Ok(wasm_result) => {
@@ -115,5 +130,37 @@ impl Service<Exchange> for WasmProducer {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WasmConfig;
+
+    #[test]
+    fn test_producer_stores_config() {
+        let config = WasmConfig {
+            timeout_secs: 5,
+            max_memory_bytes: 1024,
+        };
+        let producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            config,
+        );
+        assert_eq!(producer.config().timeout_secs, 5);
+        assert_eq!(producer.config().max_memory_bytes, 1024);
+    }
+
+    #[test]
+    fn test_producer_is_clone() {
+        let config = WasmConfig::default();
+        let producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            config,
+        );
+        let _cloned = producer.clone();
     }
 }
