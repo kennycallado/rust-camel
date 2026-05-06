@@ -23,25 +23,26 @@ Subagents    = Hands (implementing, testing, fixing)
 
 ### Workers — implementation tier
 
-| Agent                  | Model                  | Use For                                                           |
-| ---------------------- | ---------------------- | ----------------------------------------------------------------- |
-| `w_glm5.1`             | zhipuai/glm-5.1       | Default choice. Complex logic, multi-file changes, refactoring    |
-| `w_gpt5.3-codex`       | openai/gpt-5.3-codex  | Alternative default. Good for Rust idioms and architecture work   |
-| `w_qwen3.6-pro`        | qwen/qwen3.6-plus      | Third option. Multi-file reasoning, spec-driven implementation    |
-| `w_glm4.7`             | zhipuai/glm-4.7       | Lightweight. Renames, formatting, boilerplate, single-file edits  |
+| Agent            | Model                | Use For                                                          |
+| ---------------- | -------------------- | ---------------------------------------------------------------- |
+| `w_glm5.1`       | zhipuai/glm-5.1      | Default choice. Complex logic, multi-file changes, refactoring   |
+| `w_gpt5.3-codex` | openai/gpt-5.3-codex | Alternative default. Good for Rust idioms and architecture work  |
+| `w_qwen3.6-pro`  | qwen/qwen3.6-plus    | Third option. Multi-file reasoning, spec-driven implementation   |
+| `w_mini`         | ollama/qwen3.6:27b   | Lightweight. Renames, formatting, boilerplate, single-file edits |
+| `w_glm4.7`       | zhipuai/glm-4.7      | Lightweight. Renames, formatting, boilerplate, single-file edits |
 
 ### Experts — escalation tier (use sparingly)
 
-| Agent          | Model                     | Use For                                                      |
-| -------------- | ------------------------- | ------------------------------------------------------------ |
-| `e_gpt5.5`     | openai/gpt-5.5-pro        | Worker stuck after 2 attempts. Hard trait/lifetime puzzles.  |
-| `e_opus4.7`    | copilot/claude-opus-4.7   | Worker stuck after 2 attempts. Cross-crate arch conflicts.   |
+| Agent       | Model                   | Use For                                                     |
+| ----------- | ----------------------- | ----------------------------------------------------------- |
+| `e_gpt5.5`  | openai/gpt-5.5-pro      | Worker stuck after 2 attempts. Hard trait/lifetime puzzles. |
+| `e_opus4.7` | copilot/claude-opus-4.7 | Worker stuck after 2 attempts. Cross-crate arch conflicts.  |
 
 ### Agent Selection Rules
 
 1. **Default to `w_glm5.1`** — most balanced for implementation tasks
 2. **Rotate workers** — if workload is heavy, distribute across `w_gpt5.3-codex` and `w_qwen3.6-pro`
-3. **`w_glm4.7` for simple tasks only** — renames, formatting, boilerplate, single-file mechanical changes. It will self-report if a task is too complex.
+3. **`w_mini` for simple tasks only** — renames, formatting, boilerplate, single-file mechanical changes. It will self-report if a task is too complex.
 4. **Experts (`e_*`) are escalation-only** — never assign as first attempt
 5. **Escalation path:** worker (attempt 1) → same/different worker (attempt 2) → expert (attempt 3) → stop and report to user
 
@@ -242,12 +243,12 @@ After each subagent returns:
 
 ### Escalation Path
 
-| Attempt | Action                                                      |
-| ------- | ----------------------------------------------------------- |
-| 1st fail | Re-dispatch same worker with error context and hints       |
-| 2nd fail | Try different worker + ULTRATHINK                          |
-| 3rd fail | Escalate to expert (`e_gpt5.5` or `e_opus4.7`)            |
-| 4th fail | Stop, report to user with full diagnosis                   |
+| Attempt  | Action                                               |
+| -------- | ---------------------------------------------------- |
+| 1st fail | Re-dispatch same worker with error context and hints |
+| 2nd fail | Try different worker + ULTRATHINK                    |
+| 3rd fail | Escalate to expert (`e_gpt5.5` or `e_opus4.7`)       |
+| 4th fail | Stop, report to user with full diagnosis             |
 
 ## STEP 4: PROGRESS REPORTING
 
