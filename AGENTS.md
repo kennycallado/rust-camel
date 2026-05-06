@@ -16,11 +16,11 @@
 Use superpowers + worktree from main in ./.worktrees/ + ORCHESTRATE and TDD where possible.
 Delegate implementation to workers (w_glm5.1 default, w_gpt5.3-codex or w_qwen3.6-pro as alternatives).
 IMPORTANT! force subagentes to read AGENTS.md.
-IMPORTANT! Spec + code review always (requesting-code-review skill).
+CRITICAL! Spec + code review always after a task (requesting-code-review skill).
 Don't advance tasks with critical/important issues unresolved.
 Minor issues: resolve if relevant.
 Escalate to experts (e_gpt5.5, e_opus4.7) only when workers are stuck after 2 attempts.
-If a subagent needs ULTRATHINK
+If a subagent needs ULTRATHINK instructions are in .opencode/instructions/ultrathink.md
 ```
 
 ## MERGE TO MAIN
