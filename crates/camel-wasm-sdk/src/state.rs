@@ -20,6 +20,12 @@ impl<T> GuestState<T> {
     }
 }
 
+impl<T> Default for GuestState<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

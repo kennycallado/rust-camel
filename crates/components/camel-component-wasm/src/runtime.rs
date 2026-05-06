@@ -23,15 +23,12 @@ pub struct WasmHostState {
     pub state_store: crate::state_store::StateStore,
 }
 
-impl wasmtime_wasi::IoView for WasmHostState {
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
-    }
-}
-
 impl wasmtime_wasi::WasiView for WasmHostState {
-    fn ctx(&mut self) -> &mut wasmtime_wasi::WasiCtx {
-        &mut self.wasi
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        wasmtime_wasi::WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -53,7 +50,6 @@ impl WasmRuntime {
         let module_path = module_path.as_ref().to_path_buf();
 
         let mut config = Config::new();
-        config.async_support(true);
         config.wasm_component_model(true);
         config.epoch_interruption(true);
 
@@ -70,7 +66,7 @@ impl WasmRuntime {
 
         let mut linker: Linker<WasmHostState> = Linker::new(&engine);
 
-        wasmtime_wasi::add_to_linker_async(&mut linker)
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
             .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
         crate::host_functions::add_to_linker(&mut linker)
@@ -239,7 +235,6 @@ mod tests {
         let mut config = wasmtime::Config::new();
         config.epoch_interruption(true);
         config.wasm_component_model(true);
-        config.async_support(true);
         let engine = Engine::new(&config).unwrap();
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let host_state = WasmRuntime::create_host_state(
@@ -260,7 +255,6 @@ mod tests {
         let mut config = wasmtime::Config::new();
         config.epoch_interruption(true);
         config.wasm_component_model(true);
-        config.async_support(true);
         let engine = Engine::new(&config).unwrap();
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let mut host_state = WasmRuntime::create_host_state(

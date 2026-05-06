@@ -100,6 +100,7 @@ impl WasmBody {
     }
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for WasmBody {
     fn default() -> Self {
         WasmBody::Empty

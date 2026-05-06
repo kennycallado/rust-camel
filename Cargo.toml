@@ -252,8 +252,8 @@ toml = "1"
 
 # WASM dependencies
 wit-bindgen = "0.57"
-wasmtime = { version = "31", features = ["component-model"] }
-wasmtime-wasi = "31"
+wasmtime = { version = "44", features = ["component-model"] }
+wasmtime-wasi = "44"
 
 # OpenTelemetry dependencies
 opentelemetry = { version = "0.31", features = ["trace", "logs", "metrics"] }

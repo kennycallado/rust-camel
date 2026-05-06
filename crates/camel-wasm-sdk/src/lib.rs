@@ -75,6 +75,7 @@
 //! export!(StatefulProcessor);
 //! ```
 
+#[allow(clippy::too_many_arguments)]
 mod bindings {
     wit_bindgen::generate!({
         world: "plugin",
