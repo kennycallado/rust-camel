@@ -63,6 +63,12 @@ enum Commands {
 
     /// Scaffold a new Camel project
     New(commands::new::NewArgs),
+
+    /// Manage WASM processor plugins
+    Plugin {
+        #[command(subcommand)]
+        action: commands::plugin::PluginAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -116,6 +122,9 @@ async fn main() {
         },
         Commands::New(args) => {
             commands::new::run_new(args);
+        }
+        Commands::Plugin { action } => {
+            commands::plugin::run_plugin(action);
         }
     }
 }
@@ -293,6 +302,19 @@ async fn run(
     register_bundle!(ctx, camel_config, camel_component_sql::SqlBundle);
     #[cfg(feature = "grpc")]
     register_bundle!(ctx, camel_config, camel_component_grpc::GrpcBundle);
+
+    #[cfg(feature = "wasm")]
+    {
+        let base_dir = std::path::Path::new(&config_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        let wasm_bundle = camel_component_wasm::WasmBundle::new(ctx.registry_arc(), base_dir);
+        <camel_component_wasm::WasmBundle as camel_component_api::ComponentBundle>::register_all(
+            wasm_bundle,
+            &mut ctx,
+        );
+    }
 
     // Register language plugins bundled in camel-cli.
     // These languages are optional in core, so the CLI wires them explicitly.

@@ -41,6 +41,9 @@
             "rust-src"
             "rust-analyzer"
           ];
+          targets = [
+            "wasm32-wasip2"
+          ];
         };
 
         src = craneLib.cleanCargoSource ./.;

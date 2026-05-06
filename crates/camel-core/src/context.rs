@@ -347,6 +347,11 @@ impl CamelContext {
             .expect("mutex poisoned: another thread panicked while holding this lock")
     }
 
+    /// Access the shared component registry Arc.
+    pub fn registry_arc(&self) -> Arc<std::sync::Mutex<Registry>> {
+        Arc::clone(&self.registry)
+    }
+
     /// Get runtime execution handle for file-watcher integrations.
     pub fn runtime_execution_handle(&self) -> RuntimeExecutionHandle {
         RuntimeExecutionHandle {

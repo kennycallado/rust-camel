@@ -1,0 +1,4 @@
+name = "my_plugin"
+version = "0.1.0"
+type = "processor"
+entry = "my_plugin.wasm"

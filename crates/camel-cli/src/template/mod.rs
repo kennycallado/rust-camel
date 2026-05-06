@@ -1,4 +1,5 @@
 pub mod embedded;
+pub mod processor;
 
 use std::fmt;
 

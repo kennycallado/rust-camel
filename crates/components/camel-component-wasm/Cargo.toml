@@ -1,0 +1,31 @@
+[package]
+name = "camel-component-wasm"
+description = "WASM plugin component for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-component-wasm"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-component-api.workspace = true
+camel-core.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tower.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+bytes.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

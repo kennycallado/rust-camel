@@ -116,7 +116,9 @@ members = [
     "crates/platforms/camel-platform-kubernetes",
     "crates/services/camel-proto-compiler",
     "crates/dataformats/camel-dataformat-protobuf",
+    "crates/components/camel-component-wasm",
     "crates/components/camel-component-grpc",
+    "crates/camel-wasm-sdk",
 ]
 
 [workspace.metadata.crane]
@@ -138,7 +140,7 @@ categories = ["network-programming", "asynchronous", "development-tools"]
 # below to match using: sed -i 's/version = "=OLD"/version = "=NEW"/g' Cargo.toml
 # Exact pinning (=) ensures cargo publish verifies against the exact version
 # being released, not an older one already on crates.io.
-camel-api = { path = "crates/camel-api", version = "=0.7.8" }
+ camel-api = { path = "crates/camel-api", version = "=0.7.8" }
 camel-bean = { path = "crates/camel-bean", version = "=0.7.8" }
 camel-bean-macros = { path = "crates/camel-bean-macros", version = "=0.7.8" }
 camel-cli = { path = "crates/camel-cli", version = "=0.7.8" }
@@ -186,7 +188,9 @@ camel-config = { path = "crates/camel-config", version = "=0.7.8" }
 camel-platform-kubernetes = { path = "crates/platforms/camel-platform-kubernetes", version = "=0.7.8" }
 camel-proto-compiler = { path = "crates/services/camel-proto-compiler", version = "=0.7.8" }
 camel-dataformat-protobuf = { path = "crates/dataformats/camel-dataformat-protobuf", version = "=0.7.8" }
-camel-component-grpc = { path = "crates/components/camel-component-grpc", version = "=0.7.8" }
+ camel-component-grpc = { path = "crates/components/camel-component-grpc", version = "=0.7.8" }
+ camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.7.8" }
+ camel-wasm-sdk = { path = "crates/camel-wasm-sdk", version = "=0.7.8" }
 
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14" }
@@ -244,6 +248,11 @@ sxd-document = "0.3"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
 serde_yml = "0.0.12"
 toml = "1"
+
+# WASM dependencies
+wit-bindgen = "0.57"
+wasmtime = { version = "31", features = ["component-model"] }
+wasmtime-wasi = "31"
 
 # OpenTelemetry dependencies
 opentelemetry = { version = "0.31", features = ["trace", "logs", "metrics"] }

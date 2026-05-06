@@ -1,0 +1,79 @@
+package camel:plugin;
+
+/// Simplified exchange types crossing the WASM boundary.
+///
+/// These types mirror the host's Exchange/Message/Body but exclude
+/// non-serializable fields (streams, Arc<dyn Any>, OpenTelemetry Context).
+interface types {
+    /// Body content variants crossing the WASM boundary.
+    variant wasm-body {
+        empty,
+        text(string),
+        bytes(list<u8>),
+        json(string),
+        xml(string),
+    }
+
+    /// Exchange pattern: fire-and-forget or request-reply.
+    enum wasm-pattern {
+        in-only,
+        in-out,
+    }
+
+    /// Message with headers and body.
+    record wasm-message {
+        headers: list<tuple<string, string>>,
+        body: wasm-body,
+    }
+
+    /// Simplified exchange crossing the WASM boundary.
+    record wasm-exchange {
+        input: wasm-message,
+        output: option<wasm-message>,
+        properties: list<tuple<string, string>>,
+        pattern: wasm-pattern,
+        correlation-id: string,
+    }
+
+    /// Error variants from guest processing.
+    variant wasm-error {
+        processor-error(string),
+        type-conversion(string),
+        io(string),
+        timeout,
+    }
+}
+
+/// Host functions imported by the guest plugin.
+///
+/// These are implemented by the host runtime (Phase 2) and allow
+/// the guest to call back into Camel infrastructure.
+interface host {
+    use types.{wasm-error};
+
+    /// Invoke any Camel endpoint synchronously.
+    /// Returns the response body as a string (JSON-encoded for structured data).
+    camel-call: func(uri: string, payload: string) -> result<string, wasm-error>;
+
+    /// Read a property from the host Exchange.
+    get-property: func(key: string) -> option<string>;
+
+    /// Write a property to the host Exchange.
+    set-property: func(key: string, value: string);
+}
+
+/// The guest (plugin) world.
+///
+/// Plugins implement the `Guest` trait and export `process` (required)
+/// and `init` (optional initialization hook).
+world plugin {
+    import host;
+
+    use types.{wasm-exchange, wasm-error};
+
+    /// Process an exchange. Called for each message passing through the route.
+    export process: func(exchange: wasm-exchange) -> result<wasm-exchange, wasm-error>;
+
+    /// Initialization hook. Called once when the WASM module is instantiated.
+    export init: func() -> result<_, string>;
+}
