@@ -22,13 +22,14 @@ pub fn validate_profile_name(name: &str) -> Result<(), camel_component_api::Came
             "profile name must not be empty".to_string(),
         ));
     }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-        return Err(camel_component_api::CamelError::ProcessorError(
-            format!(
-                "profile name '{}' must contain only lowercase letters, digits, and underscores",
-                name
-            ),
-        ));
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(camel_component_api::CamelError::ProcessorError(format!(
+            "profile name '{}' must contain only lowercase letters, digits, and underscores",
+            name
+        )));
     }
     Ok(())
 }
@@ -337,10 +338,7 @@ mod tests {
             p.security.keystore_path,
             Some("/etc/112/baleares/keystore.jks".to_string())
         );
-        assert_eq!(
-            p.security.sig_username,
-            Some("baleares_cert".to_string())
-        );
+        assert_eq!(p.security.sig_username, Some("baleares_cert".to_string()));
     }
 
     #[test]

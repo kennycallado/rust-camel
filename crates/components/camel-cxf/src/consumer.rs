@@ -103,9 +103,7 @@ fn reconnect_delay(attempt: u32) -> Duration {
     Duration::from_millis(delay_ms.min(30_000))
 }
 
-async fn await_ready_channel(
-    pool: Arc<CxfBridgePool>,
-) -> Result<Channel, CamelError> {
+async fn await_ready_channel(pool: Arc<CxfBridgePool>) -> Result<Channel, CamelError> {
     let key = CxfBridgePool::slot_key();
     let slot = pool
         .get_or_create_slot(&key)

@@ -138,7 +138,13 @@ async fn test_consumer_sends_response_matched_by_request_id()
         .await?
         .ok_or("expected consumer request")?;
     response_tx
-        .send(test_consumer_response(&req.request_id, b"<ok/>".to_vec(), false, "", ""))
+        .send(test_consumer_response(
+            &req.request_id,
+            b"<ok/>".to_vec(),
+            false,
+            "",
+            "",
+        ))
         .await?;
 
     let recorded = wait_for_recorded_responses(&state, 1).await?;
@@ -316,7 +322,13 @@ async fn test_consumer_response_with_empty_payload()
         .await?
         .ok_or("expected consumer request")?;
     response_tx
-        .send(test_consumer_response(&req.request_id, Vec::new(), false, "", ""))
+        .send(test_consumer_response(
+            &req.request_id,
+            Vec::new(),
+            false,
+            "",
+            "",
+        ))
         .await?;
 
     let recorded = wait_for_recorded_responses(&state, 1).await?;

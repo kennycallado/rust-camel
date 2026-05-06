@@ -269,8 +269,14 @@ async fn cxf_native_health_check_responds_within_5s() {
     let mut child = Command::new(binary)
         .env("CXF_PROFILES", "test")
         .env("CXF_PROFILE_TEST_WSDL_PATH", &wsdl_path)
-        .env("CXF_PROFILE_TEST_SERVICE_NAME", "{http://example.com/hello}HelloService")
-        .env("CXF_PROFILE_TEST_PORT_NAME", "{http://example.com/hello}HelloPort")
+        .env(
+            "CXF_PROFILE_TEST_SERVICE_NAME",
+            "{http://example.com/hello}HelloService",
+        )
+        .env(
+            "CXF_PROFILE_TEST_PORT_NAME",
+            "{http://example.com/hello}HelloPort",
+        )
         .env("QUARKUS_HTTP_PORT", "0")
         .env("QUARKUS_GRPC_SERVER_PORT", "0")
         .stdout(std::process::Stdio::piped())
@@ -735,9 +741,7 @@ async fn start_mock_soap_service_with_response(response_body: &'static str) -> S
         }),
     );
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -795,14 +799,18 @@ async fn cxf_multi_profile_producer_routes_to_correct_backend() {
         r#"<hel:sayHello xmlns:hel="http://example.com/hello"><name>a</name></hel:sayHello>"#
             .to_string(),
     )));
-    let _ = send_to_direct(&h, "direct:start_a", exchange_a).await.unwrap();
+    let _ = send_to_direct(&h, "direct:start_a", exchange_a)
+        .await
+        .unwrap();
 
     // Send request via profile B
     let exchange_b = Exchange::new(Message::new(Body::Text(
         r#"<hel:sayHello xmlns:hel="http://example.com/hello"><name>b</name></hel:sayHello>"#
             .to_string(),
     )));
-    let _ = send_to_direct(&h, "direct:start_b", exchange_b).await.unwrap();
+    let _ = send_to_direct(&h, "direct:start_b", exchange_b)
+        .await
+        .unwrap();
 
     // Verify profile A response arrived
     let endpoint_a = h.mock().get_endpoint("done_a").unwrap();

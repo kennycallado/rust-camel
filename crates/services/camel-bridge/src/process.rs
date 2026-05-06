@@ -81,10 +81,7 @@ impl CxfProfileEnvVars {
         let prefix = format!("CXF_PROFILE_{}_", self.name.to_uppercase());
         let mut vars = vec![
             (format!("{}WSDL_PATH", prefix), self.wsdl_path.clone()),
-            (
-                format!("{}SERVICE_NAME", prefix),
-                self.service_name.clone(),
-            ),
+            (format!("{}SERVICE_NAME", prefix), self.service_name.clone()),
             (format!("{}PORT_NAME", prefix), self.port_name.clone()),
         ];
 
@@ -203,10 +200,7 @@ impl BridgeProcessConfig {
         start_timeout_ms: u64,
     ) -> Self {
         let profile_names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
-        let mut env_vars = vec![(
-            "CXF_PROFILES".to_string(),
-            profile_names.join(","),
-        )];
+        let mut env_vars = vec![("CXF_PROFILES".to_string(), profile_names.join(","))];
 
         for profile in profiles {
             env_vars.extend(profile.to_env_vars());
@@ -494,52 +488,64 @@ mod tests {
         assert_eq!(profiles_var.1, "baleares,extremadura");
 
         // Check baleares profile vars (no security)
-        assert!(cfg
-            .env_vars
-            .iter()
-            .any(|(k, v)| k == "CXF_PROFILE_BALEARES_WSDL_PATH" && v == "/a.wsdl"));
-        assert!(cfg
-            .env_vars
-            .iter()
-            .any(|(k, v)| k == "CXF_PROFILE_BALEARES_SERVICE_NAME" && v == "Svc"));
-        assert!(cfg
-            .env_vars
-            .iter()
-            .any(|(k, v)| k == "CXF_PROFILE_BALEARES_PORT_NAME" && v == "Port"));
-        assert!(!cfg
-            .env_vars
-            .iter()
-            .any(|(k, _)| k == "CXF_PROFILE_BALEARES_ADDRESS"));
+        assert!(
+            cfg.env_vars
+                .iter()
+                .any(|(k, v)| k == "CXF_PROFILE_BALEARES_WSDL_PATH" && v == "/a.wsdl")
+        );
+        assert!(
+            cfg.env_vars
+                .iter()
+                .any(|(k, v)| k == "CXF_PROFILE_BALEARES_SERVICE_NAME" && v == "Svc")
+        );
+        assert!(
+            cfg.env_vars
+                .iter()
+                .any(|(k, v)| k == "CXF_PROFILE_BALEARES_PORT_NAME" && v == "Port")
+        );
+        assert!(
+            !cfg.env_vars
+                .iter()
+                .any(|(k, _)| k == "CXF_PROFILE_BALEARES_ADDRESS")
+        );
 
         // Check extremadura profile vars (with security)
-        assert!(cfg
-            .env_vars
-            .iter()
-            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_WSDL_PATH" && v == "/b.wsdl"));
-        assert!(cfg
-            .env_vars
-            .iter()
-            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_ADDRESS" && v == "http://host:9090/ws"));
-        assert!(cfg
-            .env_vars
-            .iter()
-            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_KEYSTORE_PATH" && v == "/b.jks"));
-        assert!(cfg
-            .env_vars
-            .iter()
-            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_KEYSTORE_PASSWORD" && v == "pass"));
-        assert!(cfg
-            .env_vars
-            .iter()
-            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_SIG_USERNAME" && v == "cert"));
-        assert!(cfg
-            .env_vars
-            .iter()
-            .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_SIG_PASSWORD" && v == "sig_pass"));
-        assert!(cfg.env_vars.iter().any(
-           |(k, v)| k == "CXF_PROFILE_EXTREMADURA_SECURITY_ACTIONS_OUT"
-                && v == "Timestamp Signature"
-        ));
+        assert!(
+            cfg.env_vars
+                .iter()
+                .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_WSDL_PATH" && v == "/b.wsdl")
+        );
+        assert!(
+            cfg.env_vars
+                .iter()
+                .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_ADDRESS" && v == "http://host:9090/ws")
+        );
+        assert!(
+            cfg.env_vars
+                .iter()
+                .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_KEYSTORE_PATH" && v == "/b.jks")
+        );
+        assert!(
+            cfg.env_vars
+                .iter()
+                .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_KEYSTORE_PASSWORD" && v == "pass")
+        );
+        assert!(
+            cfg.env_vars
+                .iter()
+                .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_SIG_USERNAME" && v == "cert")
+        );
+        assert!(
+            cfg.env_vars
+                .iter()
+                .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_SIG_PASSWORD" && v == "sig_pass")
+        );
+        assert!(
+            cfg.env_vars
+                .iter()
+                .any(|(k, v)| k == "CXF_PROFILE_EXTREMADURA_SECURITY_ACTIONS_OUT"
+                    && v == "Timestamp Signature")
+        );
     }
 
     #[test]

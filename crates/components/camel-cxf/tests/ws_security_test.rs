@@ -4,19 +4,14 @@ use std::sync::Arc;
 
 use camel_component_api::{Body, Exchange, Message, Value};
 use camel_component_cxf::{
-    BridgeSlot, CxfBridgePool,
-    config::CxfPoolConfig,
-    producer::CxfProducer,
+    BridgeSlot, CxfBridgePool, config::CxfPoolConfig, producer::CxfProducer,
 };
 use tonic::transport::Channel;
 use tower::Service;
 
 use crate::support::mock_bridge::spawn_mock_bridge;
 
-async fn prepare_ready_slot(
-    pool: &Arc<CxfBridgePool>,
-    channel: Channel,
-) {
+async fn prepare_ready_slot(pool: &Arc<CxfBridgePool>, channel: Channel) {
     let key = CxfBridgePool::slot_key();
     let slot = BridgeSlot::new_ready_for_test(channel);
     pool.insert_slot_for_test(key, slot);

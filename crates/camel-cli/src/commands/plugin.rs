@@ -36,7 +36,9 @@ fn run_plugin_new(args: PluginNewArgs) {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        eprintln!("Error: plugin name must contain only alphanumeric characters, hyphens, or underscores");
+        eprintln!(
+            "Error: plugin name must contain only alphanumeric characters, hyphens, or underscores"
+        );
         std::process::exit(1);
     }
 
@@ -87,12 +89,20 @@ fn run_plugin_build(args: PluginBuildArgs) {
 
     let cargo_toml_path = cwd.join("Cargo.toml");
     let cargo_toml = std::fs::read_to_string(&cargo_toml_path).unwrap_or_else(|e| {
-        eprintln!("Error: failed to read '{}': {}", cargo_toml_path.display(), e);
+        eprintln!(
+            "Error: failed to read '{}': {}",
+            cargo_toml_path.display(),
+            e
+        );
         std::process::exit(1);
     });
 
     let parsed: toml::Value = toml::from_str(&cargo_toml).unwrap_or_else(|e| {
-        eprintln!("Error: failed to parse '{}': {}", cargo_toml_path.display(), e);
+        eprintln!(
+            "Error: failed to parse '{}': {}",
+            cargo_toml_path.display(),
+            e
+        );
         std::process::exit(1);
     });
 
@@ -110,9 +120,7 @@ fn run_plugin_build(args: PluginBuildArgs) {
         });
 
     let mut cmd = Command::new("cargo");
-    cmd.arg("build")
-        .arg("--target")
-        .arg("wasm32-wasip2");
+    cmd.arg("build").arg("--target").arg("wasm32-wasip2");
 
     if !args.debug {
         cmd.arg("--release");
@@ -130,10 +138,7 @@ fn run_plugin_build(args: PluginBuildArgs) {
 
     let built_wasm = build_output_path(&cwd, &plugin_name, args.debug);
     if !built_wasm.exists() {
-        eprintln!(
-            "Error: built wasm not found at '{}'",
-            built_wasm.display()
-        );
+        eprintln!("Error: built wasm not found at '{}'", built_wasm.display());
         std::process::exit(1);
     }
 
@@ -175,13 +180,8 @@ pub fn find_camel_root(start: &Path) -> Result<PathBuf, String> {
         }
         let workspace_cargo = dir.join("Cargo.toml");
         if workspace_cargo.exists() {
-            let contents = std::fs::read_to_string(&workspace_cargo).map_err(|e| {
-                format!(
-                    "failed to read '{}': {}",
-                    workspace_cargo.display(),
-                    e
-                )
-            })?;
+            let contents = std::fs::read_to_string(&workspace_cargo)
+                .map_err(|e| format!("failed to read '{}': {}", workspace_cargo.display(), e))?;
             let parsed: toml::Value = toml::from_str(&contents)
                 .map_err(|e| format!("failed to parse '{}': {}", workspace_cargo.display(), e))?;
             if parsed.get("workspace").is_some() {
@@ -232,8 +232,8 @@ mod tests {
 
     #[test]
     fn plugin_action_parses_build_debug() {
-        let cli = TestCli::try_parse_from(["test", "build", "--debug"])
-            .expect("expected parse success");
+        let cli =
+            TestCli::try_parse_from(["test", "build", "--debug"]).expect("expected parse success");
         match cli.action {
             PluginAction::Build(args) => {
                 assert!(args.debug);
@@ -262,8 +262,11 @@ mod tests {
     #[test]
     fn find_camel_root_finds_workspace_cargo_toml() {
         let root = tempdir().expect("tempdir");
-        std::fs::write(root.path().join("Cargo.toml"), "[workspace]\nmembers = []\n")
-            .expect("write");
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("write");
         let nested = root.path().join("x").join("y");
         std::fs::create_dir_all(&nested).expect("mkdir");
 

@@ -220,11 +220,8 @@ impl CxfBridgePool {
                 })
                 .collect();
 
-            let config = BridgeProcessConfig::cxf_profiles(
-                binary_path,
-                &profile_env_vars,
-                start_timeout_ms,
-            );
+            let config =
+                BridgeProcessConfig::cxf_profiles(binary_path, &profile_env_vars, start_timeout_ms);
             let mut config = config;
             if let Some(addr) = slot.bind_address.as_ref() {
                 config
@@ -390,8 +387,14 @@ impl CxfBridgePool {
                                     security_actions_out: p.security.security_actions_out.clone(),
                                     security_actions_in: p.security.security_actions_in.clone(),
                                     signature_algorithm: p.security.signature_algorithm.clone(),
-                                    signature_digest_algorithm: p.security.signature_digest_algorithm.clone(),
-                                    signature_c14n_algorithm: p.security.signature_c14n_algorithm.clone(),
+                                    signature_digest_algorithm: p
+                                        .security
+                                        .signature_digest_algorithm
+                                        .clone(),
+                                    signature_c14n_algorithm: p
+                                        .security
+                                        .signature_c14n_algorithm
+                                        .clone(),
                                     signature_parts: p.security.signature_parts.clone(),
                                 })
                                 .collect();
