@@ -2,7 +2,7 @@
 dir = "routes"
 
 [components.cxf]
-version = "0.8.0"
+version = "0.8.1"
 
 [[components.cxf.services]]
 wsdl_path = "wsdl/hello.wsdl"
