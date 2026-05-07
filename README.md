@@ -2,7 +2,7 @@
 
 A Rust-native, Tower-native integration framework inspired by [Apache Camel](https://camel.apache.org/), built for async pipelines, EIP patterns, and production observability.
 
-> **Status:** Pre-release (`0.8.1`). APIs will change.
+> **Status:** Pre-release (`0.8.2`). APIs will change.
 
 ## Overview
 
@@ -170,6 +170,7 @@ cargo run
 | `camel-processor`           | EIP processors: `Filter`, `Choice`, `Splitter`, `Aggregator`, `WireTap`, `Multicast`, `SetHeader`, `MapBody`, `Marshal`/`Unmarshal` + Tower `Layer` types                         |
 | `camel-endpoint`            | Endpoint URI parsing utilities; `UriConfig` derive macro for typed component config                                                                                               |
 | `camel-endpoint-macros`     | Proc-macro crate backing `#[derive(UriConfig)]`                                                                                                                                   |
+| `camel-wit`                 | WIT interface definitions crate for camel plugins                                                                                                                                  |
 | `camel-bean`                | Bean/Registry system for dependency injection and business logic integration                                                                                                      |
 | `camel-bean-macros`         | Proc-macro crate for `#[bean]` attribute                                                                                                                                          |
 | `camel-dsl`                 | YAML DSL: load and run routes from `.yaml` files                                                                                                                                  |
