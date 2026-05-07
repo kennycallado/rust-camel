@@ -166,6 +166,9 @@ publish_crate "camel-bridge" "crates/services/camel-bridge"
 
 publish_crate "camel-component-grpc" "crates/components/camel-component-grpc"
 
+# WIT definitions (no dependencies)
+publish_crate "camel-wit" "crates/camel-wit"
+
 # WASM component (depends on camel-api/camel-core)
 publish_crate "camel-component-wasm" "crates/components/camel-component-wasm"
 

@@ -898,6 +898,7 @@ dependencies = [
  "camel-language-xpath",
  "camel-master",
  "camel-proto-compiler",
+ "camel-wit",
  "camel-xj",
  "camel-xslt",
  "chrono",
@@ -1667,6 +1668,10 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
 ]
+
+[[package]]
+name = "camel-wit"
+version = "0.8.1"
 
 [[package]]
 name = "camel-xj"

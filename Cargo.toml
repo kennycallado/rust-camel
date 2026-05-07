@@ -43,6 +43,7 @@ members = [
     "crates/languages/camel-language-jsonpath",
     "crates/languages/camel-language-xpath",
     "crates/camel-bench",
+    "crates/camel-wit",
     "examples/hello-world",
     "examples/kafka-example",
     "examples/redis-example",
@@ -191,6 +192,7 @@ camel-platform-kubernetes = { path = "crates/platforms/camel-platform-kubernetes
 camel-proto-compiler = { path = "crates/services/camel-proto-compiler", version = "=0.8.1" }
 camel-dataformat-protobuf = { path = "crates/dataformats/camel-dataformat-protobuf", version = "=0.8.1" }
  camel-component-grpc = { path = "crates/components/camel-component-grpc", version = "=0.8.1" }
+  camel-wit = { path = "crates/camel-wit", version = "=0.8.1" }
   camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.8.1" }
 
 tokio = { version = "1", features = ["full"] }

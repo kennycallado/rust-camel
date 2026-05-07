@@ -62,6 +62,7 @@ camel-language-js.workspace = true
 camel-language-jsonpath.workspace = true
 camel-language-rhai.workspace = true
 camel-language-xpath.workspace = true
+camel-wit.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

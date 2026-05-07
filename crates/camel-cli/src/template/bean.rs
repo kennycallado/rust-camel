@@ -63,11 +63,11 @@ fn gitignore() -> &'static str {
 }
 
 fn camel_bean_wit() -> &'static str {
-    include_str!("../../../../wit/camel-bean.wit")
+    camel_wit::BEAN_WIT
 }
 
 fn camel_plugin_wit() -> &'static str {
-    include_str!("../../../../wit/camel-plugin.wit")
+    camel_wit::PLUGIN_WIT
 }
 
 fn to_pascal_case(name: &str) -> String {

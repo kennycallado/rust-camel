@@ -24,7 +24,7 @@ pub fn processor_files(plugin_name: &str) -> Vec<TemplateFile> {
         },
         TemplateFile {
             path: "wit/camel-plugin.wit".to_string(),
-            content: include_str!("../../../../wit/camel-plugin.wit").to_string(),
+            content: camel_wit::PLUGIN_WIT.to_string(),
         },
     ]
 }

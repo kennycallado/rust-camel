@@ -1,0 +1,15 @@
+[package]
+name = "camel-wit"
+description = "WIT interface definitions for rust-camel WASM plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/camel-wit"
+readme = "README.md"
+include = ["src/**/*", "wit/**/*", "README.md", "Cargo.toml"]
+
+[dependencies]

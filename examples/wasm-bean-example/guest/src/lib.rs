@@ -5,7 +5,7 @@ use bindings::Guest;
 mod bindings {
     wit_bindgen::generate!({
         world: "bean",
-        path: "../../../wit",
+        path: "../wit",
     });
 }
 
