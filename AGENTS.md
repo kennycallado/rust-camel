@@ -32,6 +32,7 @@ Update implementation doc + postmortem if applicable.
 Clean up branch + worktree.
 Verify README/s are up to date.
 Update docs/roadmap.md and docs/status.md (don't track docs/ in git).
+After that you should clean docs/superpowers/ moving related files to docs/superpowers/archived
 Check ./scripts/publish-crates.sh and camel-cli features.
 ```
 
