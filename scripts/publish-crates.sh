@@ -163,8 +163,7 @@ publish_crate "camel-bridge" "crates/services/camel-bridge"
 
 publish_crate "camel-component-grpc" "crates/components/camel-component-grpc"
 
-# WASM plugin crates (SDK has no host deps, component depends on camel-api/camel-core)
-publish_crate "camel-wasm-sdk" "crates/camel-wasm-sdk"
+# WASM component (depends on camel-api/camel-core)
 publish_crate "camel-component-wasm" "crates/components/camel-component-wasm"
 
 # Component crates (needed by camel-config which has optional deps on most of them)
