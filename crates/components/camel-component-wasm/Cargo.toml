@@ -8,6 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/camel-component-wasm"
 readme = "README.md"
+include = ["src/**/*", "wit/**/*", "README.md", "Cargo.toml"]
 keywords.workspace = true
 categories.workspace = true
 

@@ -1,5 +1,5 @@
 wasmtime::component::bindgen!({
-    path: "../../../wit",
+    path: "wit",
     world: "bean",
     exports: {
         default: async,
