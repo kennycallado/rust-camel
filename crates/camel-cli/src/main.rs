@@ -1,3 +1,4 @@
+use camel_bean::BeanProcessor;
 use camel_cli::commands;
 use camel_language_js::JsLanguage;
 use camel_language_jsonpath::JsonPathLanguage;
@@ -185,45 +186,87 @@ async fn run(
 
     // 2. Build context with beans registry (also initialises tracing subscriber)
     let beans_registry = {
-        let registry = std::sync::Arc::new(std::sync::Mutex::new(camel_bean::BeanRegistry::new()));
-        for (bean_name, bean_cfg) in &camel_config.beans {
-            tracing::info!(bean = %bean_name, plugin = %bean_cfg.plugin, "registering WASM bean");
-            #[cfg(feature = "wasm")]
-            {
-                let wasm_bean = camel_component_wasm::bean::WasmBean::new_stub(vec![format!(
-                    "{}.placeholder",
-                    bean_cfg.plugin
-                )]);
-                registry
-                    .lock()
-                    .expect("beans registry lock")
-                    .register(bean_name, wasm_bean)
-                    .unwrap_or_else(|e| {
-                        eprintln!("Bean registration failed for '{}': {}", bean_name, e);
-                        std::process::exit(1);
-                    });
-            }
-            #[cfg(not(feature = "wasm"))]
-            {
-                let _ = (bean_name, bean_cfg);
-            }
-        }
+        let bean_reg = std::sync::Arc::new(std::sync::Mutex::new(camel_bean::BeanRegistry::new()));
         if camel_config.beans.is_empty() {
             None
         } else {
-            Some(registry)
+            Some(bean_reg)
         }
     };
 
     let mut ctx = camel_config::config::CamelConfig::configure_context_with_beans(
         &camel_config,
-        beans_registry,
+        beans_registry.clone(),
     )
     .await
     .unwrap_or_else(|e| {
         eprintln!("Failed to configure CamelContext: {e}");
         std::process::exit(1);
     });
+
+    // Load WASM beans after context is created (needs component registry)
+    #[cfg(feature = "wasm")]
+    if let Some(ref bean_reg) = beans_registry {
+        let component_registry = ctx.registry_arc();
+        let plugins_dir = std::path::PathBuf::from("plugins");
+        for (bean_name, bean_cfg) in &camel_config.beans {
+            tracing::info!(bean = %bean_name, plugin = %bean_cfg.plugin, "registering WASM bean");
+
+            if !bean_cfg
+                .plugin
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                eprintln!(
+                    "Invalid bean plugin name '{}': must be alphanumeric with - or _",
+                    bean_cfg.plugin
+                );
+                std::process::exit(1);
+            }
+
+            let wasm_path = plugins_dir.join(format!("{}.wasm", bean_cfg.plugin));
+            let canonical_plugins = plugins_dir.canonicalize().unwrap_or_else(|_| {
+                eprintln!("Plugins directory not found: {}", plugins_dir.display());
+                std::process::exit(1);
+            });
+            let canonical_path = wasm_path.canonicalize().unwrap_or_else(|_| {
+                eprintln!("WASM bean plugin not found: {}", wasm_path.display());
+                std::process::exit(1);
+            });
+            if !canonical_path.starts_with(&canonical_plugins) {
+                eprintln!(
+                    "Bean plugin path escapes plugins directory: {}",
+                    bean_cfg.plugin
+                );
+                std::process::exit(1);
+            }
+            let wasm_config = camel_component_wasm::config::WasmConfig::default();
+            let wasm_bean = camel_component_wasm::bean::WasmBean::new(
+                &wasm_path,
+                wasm_config,
+                component_registry.clone(),
+            )
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to load WASM bean '{}': {}", bean_name, e);
+                std::process::exit(1);
+            });
+            tracing::info!(
+                bean = %bean_name,
+                plugin = %bean_cfg.plugin,
+                methods = ?wasm_bean.methods(),
+                "WASM bean loaded"
+            );
+            bean_reg
+                .lock()
+                .expect("beans registry lock")
+                .register(bean_name, wasm_bean)
+                .unwrap_or_else(|e| {
+                    eprintln!("Bean registration failed for '{}': {}", bean_name, e);
+                    std::process::exit(1);
+                });
+        }
+    }
 
     // 3. Determine route patterns
     let patterns: Vec<String> = if let Some(p) = routes_override {

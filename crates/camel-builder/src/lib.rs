@@ -269,6 +269,14 @@ pub trait StepAccumulator: Sized {
         });
         self
     }
+
+    fn bean(mut self, name: impl Into<String>, method: impl Into<String>) -> Self {
+        self.steps_mut().push(BuilderStep::Bean {
+            name: name.into(),
+            method: method.into(),
+        });
+        self
+    }
 }
 
 /// A fluent builder for constructing routes.

@@ -442,9 +442,9 @@ async fn test_bean_handler_methods_only() {
     let service = OrderService;
     let methods = service.methods();
 
-    assert!(methods.contains(&"process"));
-    assert!(methods.contains(&"validate"));
-    assert!(!methods.contains(&"helper")); // Non-handler method
+    assert!(methods.contains(&String::from("process")));
+    assert!(methods.contains(&String::from("validate")));
+    assert!(!methods.contains(&String::from("helper")));
 }
 
 // ============================================================================

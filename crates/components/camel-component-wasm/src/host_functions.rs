@@ -110,6 +110,51 @@ pub fn add_to_linker(linker: &mut Linker<WasmHostState>) -> Result<(), wasmtime:
     crate::bindings::camel::plugin::host::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
 }
 
+pub fn add_bean_to_linker(linker: &mut Linker<WasmHostState>) -> Result<(), wasmtime::Error> {
+    crate::bean_bindings::camel::plugin::host::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
+}
+
+use crate::bean_bindings::camel::plugin::host::Host as BeanHost;
+use crate::bean_bindings::camel::plugin::types::WasmError as BeanWasmError;
+
+impl BeanHost for WasmHostState {
+    fn camel_call(&mut self, uri: String, payload: String) -> Result<String, BeanWasmError> {
+        let host = self as &mut dyn Host;
+        host.camel_call(uri, payload).map_err(|e| match e {
+            WasmError::ProcessorError(s) => BeanWasmError::ProcessorError(s),
+            WasmError::TypeConversion(s) => BeanWasmError::TypeConversion(s),
+            WasmError::Io(s) => BeanWasmError::Io(s),
+            WasmError::Timeout => BeanWasmError::Timeout,
+        })
+    }
+
+    fn get_property(&mut self, key: String) -> Option<String> {
+        let host = self as &mut dyn Host;
+        host.get_property(key)
+    }
+
+    fn set_property(&mut self, key: String, value: String) {
+        let host = self as &mut dyn Host;
+        host.set_property(key, value)
+    }
+
+    fn host_store(&mut self, key: String, value: String) -> Result<(), BeanWasmError> {
+        let host = self as &mut dyn Host;
+        host.host_store(key, value).map_err(|e| match e {
+            WasmError::Io(s) => BeanWasmError::Io(s),
+            other => BeanWasmError::Io(other.to_string()),
+        })
+    }
+
+    fn host_load(&mut self, key: String) -> Result<Option<String>, BeanWasmError> {
+        let host = self as &mut dyn Host;
+        host.host_load(key).map_err(|e| match e {
+            WasmError::Io(s) => BeanWasmError::Io(s),
+            other => BeanWasmError::Io(other.to_string()),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

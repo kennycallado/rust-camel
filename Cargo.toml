@@ -119,8 +119,9 @@ members = [
     "crates/dataformats/camel-dataformat-protobuf",
     "crates/components/camel-component-wasm",
     "crates/components/camel-component-grpc",
-    "crates/camel-wasm-sdk",
+    "examples/wasm-bean-example",
 ]
+exclude = ["examples/wasm-bean-example/guest"]
 
 [workspace.metadata.crane]
 name = "rust-camel"
@@ -190,8 +191,7 @@ camel-platform-kubernetes = { path = "crates/platforms/camel-platform-kubernetes
 camel-proto-compiler = { path = "crates/services/camel-proto-compiler", version = "=0.8.0" }
 camel-dataformat-protobuf = { path = "crates/dataformats/camel-dataformat-protobuf", version = "=0.8.0" }
  camel-component-grpc = { path = "crates/components/camel-component-grpc", version = "=0.8.0" }
- camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.8.0" }
- camel-wasm-sdk = { path = "crates/camel-wasm-sdk", version = "=0.8.0" }
+  camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.8.0" }
 
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14" }

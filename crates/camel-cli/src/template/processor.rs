@@ -22,17 +22,21 @@ pub fn processor_files(plugin_name: &str) -> Vec<TemplateFile> {
             path: ".gitignore".to_string(),
             content: gitignore().to_string(),
         },
+        TemplateFile {
+            path: "wit/camel-plugin.wit".to_string(),
+            content: include_str!("../../../../wit/camel-plugin.wit").to_string(),
+        },
     ]
 }
 
 fn cargo_toml(plugin_name: &str) -> String {
     format!(
-        "[package]\nname = \"{plugin_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\ncamel-wasm-sdk = {{ path = \"../../crates/camel-wasm-sdk\" }}\n"
+        "[package]\nname = \"{plugin_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwit-bindgen = \"0.57\"\n"
     )
 }
 
 fn lib_rs() -> &'static str {
-    "use camel_wasm_sdk::{export, Guest, WasmBody, WasmError, WasmExchange};\n\nstruct Processor;\n\nimpl Guest for Processor {\n    fn init() -> Result<(), String> {\n        Ok(())\n    }\n\n    fn process(mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {\n        exchange.input.body = match &exchange.input.body {\n            WasmBody::Text(s) => WasmBody::Text(format!(\"processed: {s}\")),\n            other => other.clone(),\n        };\n        Ok(exchange)\n    }\n}\n\nexport!(Processor);\n"
+    "use bindings::camel::plugin::types::{WasmBody, WasmError, WasmExchange};\nuse bindings::Guest;\n\n#[allow(clippy::too_many_arguments)]\nmod bindings {\n    wit_bindgen::generate!({\n        world: \"plugin\",\n        path: \"../wit\",\n    });\n}\n\nstruct Processor;\n\nimpl Guest for Processor {\n    fn init() -> Result<(), String> {\n        Ok(())\n    }\n\n    fn process(mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {\n        exchange.input.body = match &exchange.input.body {\n            WasmBody::Text(s) => WasmBody::Text(format!(\"processed: {s}\")),\n            other => other.clone(),\n        };\n        Ok(exchange);\n    }\n}\n\nbindings::export!(Processor with_types_in bindings);\n"
 }
 
 fn plugin_toml(plugin_name: &str) -> String {
@@ -60,12 +64,13 @@ mod tests {
         let files = processor_files("acme-processor");
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
 
-        assert_eq!(files.len(), 5);
+        assert_eq!(files.len(), 6);
         assert!(paths.contains(&"Cargo.toml"));
         assert!(paths.contains(&"src/lib.rs"));
         assert!(paths.contains(&"Camel.plugin.toml"));
         assert!(paths.contains(&"README.md"));
         assert!(paths.contains(&".gitignore"));
+        assert!(paths.contains(&"wit/camel-plugin.wit"));
     }
 
     #[test]
@@ -74,22 +79,22 @@ mod tests {
 
         assert!(cargo.contains("name = \"acme-processor\""));
         assert!(cargo.contains("crate-type = [\"cdylib\"]"));
-        assert!(cargo.contains("camel-wasm-sdk"));
-        assert!(cargo.contains("edition = \"2021\""));
-        assert!(!cargo.contains("wit-bindgen"));
+        assert!(cargo.contains("wit-bindgen = \"0.57\""));
+        assert!(cargo.contains("[workspace]"));
+        assert!(!cargo.contains("camel-wasm-sdk"));
     }
 
     #[test]
-    fn lib_template_uses_sdk_directly() {
+    fn lib_template_generates_bindings() {
         let lib = lib_rs();
 
-        assert!(lib.contains("use camel_wasm_sdk::{"));
-        assert!(lib.contains("export!(Processor)"));
+        assert!(lib.contains("use bindings::Guest;"));
+        assert!(lib.contains("bindings::export!(Processor with_types_in bindings);"));
         assert!(lib.contains("impl Guest for Processor"));
         assert!(lib.contains("fn process("));
         assert!(lib.contains("fn init()"));
-        assert!(!lib.contains("wit_bindgen::generate!"));
-        assert!(!lib.contains("mod bindings"));
+        assert!(lib.contains("wit_bindgen::generate!"));
+        assert!(lib.contains("mod bindings"));
     }
 
     #[test]

@@ -6,6 +6,95 @@ use crate::bindings::camel::plugin::types::{
     WasmBody, WasmError, WasmExchange, WasmMessage, WasmPattern,
 };
 
+use crate::bean_bindings::camel::plugin::types::{
+    WasmBody as BeanWasmBody, WasmExchange as BeanWasmExchange, WasmMessage as BeanWasmMessage,
+    WasmPattern as BeanWasmPattern,
+};
+
+impl From<WasmExchange> for BeanWasmExchange {
+    fn from(v: WasmExchange) -> Self {
+        BeanWasmExchange {
+            input: v.input.into(),
+            output: v.output.map(Into::into),
+            properties: v.properties,
+            pattern: v.pattern.into(),
+            correlation_id: v.correlation_id,
+        }
+    }
+}
+
+impl From<BeanWasmExchange> for WasmExchange {
+    fn from(v: BeanWasmExchange) -> Self {
+        WasmExchange {
+            input: v.input.into(),
+            output: v.output.map(Into::into),
+            properties: v.properties,
+            pattern: v.pattern.into(),
+            correlation_id: v.correlation_id,
+        }
+    }
+}
+
+impl From<WasmMessage> for BeanWasmMessage {
+    fn from(v: WasmMessage) -> Self {
+        BeanWasmMessage {
+            headers: v.headers,
+            body: v.body.into(),
+        }
+    }
+}
+
+impl From<BeanWasmMessage> for WasmMessage {
+    fn from(v: BeanWasmMessage) -> Self {
+        WasmMessage {
+            headers: v.headers,
+            body: v.body.into(),
+        }
+    }
+}
+
+impl From<WasmBody> for BeanWasmBody {
+    fn from(v: WasmBody) -> Self {
+        match v {
+            WasmBody::Empty => BeanWasmBody::Empty,
+            WasmBody::Text(s) => BeanWasmBody::Text(s),
+            WasmBody::Bytes(b) => BeanWasmBody::Bytes(b),
+            WasmBody::Json(s) => BeanWasmBody::Json(s),
+            WasmBody::Xml(s) => BeanWasmBody::Xml(s),
+        }
+    }
+}
+
+impl From<BeanWasmBody> for WasmBody {
+    fn from(v: BeanWasmBody) -> Self {
+        match v {
+            BeanWasmBody::Empty => WasmBody::Empty,
+            BeanWasmBody::Text(s) => WasmBody::Text(s),
+            BeanWasmBody::Bytes(b) => WasmBody::Bytes(b),
+            BeanWasmBody::Json(s) => WasmBody::Json(s),
+            BeanWasmBody::Xml(s) => WasmBody::Xml(s),
+        }
+    }
+}
+
+impl From<WasmPattern> for BeanWasmPattern {
+    fn from(v: WasmPattern) -> Self {
+        match v {
+            WasmPattern::InOnly => BeanWasmPattern::InOnly,
+            WasmPattern::InOut => BeanWasmPattern::InOut,
+        }
+    }
+}
+
+impl From<BeanWasmPattern> for WasmPattern {
+    fn from(v: BeanWasmPattern) -> Self {
+        match v {
+            BeanWasmPattern::InOnly => WasmPattern::InOnly,
+            BeanWasmPattern::InOut => WasmPattern::InOut,
+        }
+    }
+}
+
 pub fn exchange_to_wasm(exchange: &Exchange) -> WasmExchange {
     let input = message_to_wasm(&exchange.input);
     let output = exchange.output.as_ref().map(message_to_wasm);

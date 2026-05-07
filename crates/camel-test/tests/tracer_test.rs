@@ -99,6 +99,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
         supervision: None,
         platform: PlatformCamelConfig::Noop,
         stream_caching: Default::default(),
+        beans: Default::default(),
     };
 
     // configure_context should propagate the file-open error

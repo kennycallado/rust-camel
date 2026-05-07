@@ -1,0 +1,17 @@
+[package]
+name = "wasm-bean-example"
+description = "WASM bean example — text-utils bean with host_store across two routes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-bean.workspace = true
+camel-builder.workspace = true
+camel-component-wasm.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+camel-core = { workspace = true, features = ["lang-js"] }
+tokio.workspace = true
+tracing-subscriber.workspace = true

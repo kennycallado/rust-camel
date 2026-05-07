@@ -1,0 +1,13 @@
+[package]
+name = "text-utils-bean"
+description = "WASM bean plugin example — text transformation with state"
+version = "0.8.0"
+edition = "2024"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57"
