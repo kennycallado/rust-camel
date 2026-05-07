@@ -39,6 +39,7 @@ pub struct CamelContextBuilder {
     supervision_config: Option<SupervisionConfig>,
     runtime_store: Option<crate::lifecycle::adapters::InMemoryRuntimeStore>,
     shutdown_timeout: std::time::Duration,
+    beans: Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>,
 }
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
@@ -634,6 +635,7 @@ impl CamelContextBuilder {
             supervision_config: None,
             runtime_store: None,
             shutdown_timeout: std::time::Duration::from_secs(30),
+            beans: None,
         }
     }
 
@@ -676,6 +678,12 @@ impl CamelContextBuilder {
         self
     }
 
+    /// Inject a shared `BeanRegistry` for bean resolution across routes.
+    pub fn beans(mut self, beans: Arc<std::sync::Mutex<camel_bean::BeanRegistry>>) -> Self {
+        self.beans = Some(beans);
+        self
+    }
+
     pub async fn build(self) -> Result<CamelContext, CamelError> {
         let registry = self
             .registry
@@ -706,11 +714,20 @@ impl CamelContextBuilder {
         let (controller, actor_join, supervision_join) =
             if let Some(config) = self.supervision_config {
                 let (crash_tx, crash_rx) = tokio::sync::mpsc::channel(64);
-                let mut controller_impl = DefaultRouteController::with_languages(
-                    Arc::clone(&registry),
-                    Arc::clone(&languages),
-                    Arc::clone(&platform_service),
-                );
+                let mut controller_impl = if let Some(ref beans) = self.beans {
+                    DefaultRouteController::with_languages_and_beans(
+                        Arc::clone(&registry),
+                        Arc::clone(&languages),
+                        Arc::clone(&platform_service),
+                        Arc::clone(beans),
+                    )
+                } else {
+                    DefaultRouteController::with_languages(
+                        Arc::clone(&registry),
+                        Arc::clone(&languages),
+                        Arc::clone(&platform_service),
+                    )
+                };
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 let supervision_join = spawn_supervision_task(
@@ -721,11 +738,20 @@ impl CamelContextBuilder {
                 );
                 (controller, actor_join, Some(supervision_join))
             } else {
-                let controller_impl = DefaultRouteController::with_languages(
-                    Arc::clone(&registry),
-                    Arc::clone(&languages),
-                    Arc::clone(&platform_service),
-                );
+                let controller_impl = if let Some(ref beans) = self.beans {
+                    DefaultRouteController::with_languages_and_beans(
+                        Arc::clone(&registry),
+                        Arc::clone(&languages),
+                        Arc::clone(&platform_service),
+                        Arc::clone(beans),
+                    )
+                } else {
+                    DefaultRouteController::with_languages(
+                        Arc::clone(&registry),
+                        Arc::clone(&languages),
+                        Arc::clone(&platform_service),
+                    )
+                };
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)
             };

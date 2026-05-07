@@ -869,6 +869,7 @@ name = "camel-cli"
 version = "0.8.0"
 dependencies = [
  "camel-api",
+ "camel-bean",
  "camel-component-api",
  "camel-component-container",
  "camel-component-controlbus",
@@ -1229,6 +1230,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "camel-api",
+ "camel-bean",
  "camel-component-api",
  "camel-core",
  "serde",
@@ -1277,6 +1279,7 @@ name = "camel-config"
 version = "0.8.0"
 dependencies = [
  "camel-api",
+ "camel-bean",
  "camel-component-log",
  "camel-component-timer",
  "camel-core",

@@ -41,7 +41,7 @@ impl OrderService {
 #[tokio::test]
 async fn test_bean_registration() {
     let mut registry = BeanRegistry::new();
-    registry.register("orderService", OrderService);
+    registry.register("orderService", OrderService).unwrap();
 
     assert!(registry.get("orderService").is_some());
 }
@@ -51,15 +51,15 @@ async fn test_bean_methods() {
     let service = OrderService;
     let methods = service.methods();
 
-    assert!(methods.contains(&"process"));
-    assert!(methods.contains(&"validate"));
-    assert!(!methods.contains(&"helper"));
+    assert!(methods.contains(&"process".to_string()));
+    assert!(methods.contains(&"validate".to_string()));
+    assert!(!methods.contains(&"helper".to_string()));
 }
 
 #[tokio::test]
 async fn test_invoke_process_method() {
     let mut registry = BeanRegistry::new();
-    registry.register("orderService", OrderService);
+    registry.register("orderService", OrderService).unwrap();
 
     let order = Order {
         id: "123".to_string(),
@@ -91,7 +91,7 @@ async fn test_invoke_process_method() {
 #[tokio::test]
 async fn test_invoke_validate_method() {
     let mut registry = BeanRegistry::new();
-    registry.register("orderService", OrderService);
+    registry.register("orderService", OrderService).unwrap();
 
     let order = Order {
         id: "456".to_string(),
@@ -122,7 +122,7 @@ async fn test_invoke_validate_method() {
 #[tokio::test]
 async fn test_invoke_unknown_method() {
     let mut registry = BeanRegistry::new();
-    registry.register("orderService", OrderService);
+    registry.register("orderService", OrderService).unwrap();
 
     let order = Order {
         id: "789".to_string(),

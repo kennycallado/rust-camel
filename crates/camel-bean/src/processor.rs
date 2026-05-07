@@ -5,5 +5,5 @@ use camel_api::{CamelError, Exchange};
 pub trait BeanProcessor: Send + Sync {
     async fn call(&self, method: &str, exchange: &mut Exchange) -> Result<(), CamelError>;
 
-    fn methods(&self) -> Vec<&'static str>;
+    fn methods(&self) -> Vec<String>;
 }

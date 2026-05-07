@@ -75,8 +75,8 @@ use camel_bean::{BeanRegistry, BeanProcessor};
 
 let mut registry = BeanRegistry::new();
 
-// Register a bean
-registry.register("myBean", MyService);
+// Register a bean (returns Result<(), BeanError> — rejects duplicates)
+registry.register("myBean", MyService)?;
 
 // Get a bean
 if let Some(bean) = registry.get("myBean") {
@@ -104,7 +104,7 @@ use camel_bean::BeanProcessor;
 pub trait BeanProcessor: Send + Sync {
     async fn call(&self, method: &str, exchange: &mut Exchange) -> Result<(), CamelError>;
 
-    fn methods(&self) -> Vec<&'static str>;
+    fn methods(&self) -> Vec<String>;
 }
 ```
 
@@ -188,8 +188,13 @@ pub enum BeanError {
 
     #[error("Handler execution failed: {0}")]
     ExecutionFailed(String),
+
+    #[error("Duplicate bean name: {0}")]
+    DuplicateName(String),
 }
 ```
+
+> **Note:** `DuplicateName` is returned when `register()` is called with a name already present in the registry.
 
 ### Error Conversion
 
@@ -224,7 +229,7 @@ let mut ctx = CamelContext::builder().build().await?;
 let bean_registry = Arc::new(BeanRegistry::new());
 
 // Register beans
-bean_registry.register("myService", MyService);
+bean_registry.register("myService", MyService)?;
 
 // Set in context
 ctx.set_bean_registry(bean_registry);

@@ -13,6 +13,9 @@ pub enum BeanError {
 
     #[error("Handler execution failed: {0}")]
     ExecutionFailed(String),
+
+    #[error("Bean already registered: {0}")]
+    DuplicateName(String),
 }
 
 impl From<BeanError> for camel_api::CamelError {

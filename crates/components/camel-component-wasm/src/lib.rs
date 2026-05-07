@@ -1,3 +1,5 @@
+pub mod bean;
+pub mod bean_bindings;
 pub mod bindings;
 pub mod bundle;
 pub mod config;

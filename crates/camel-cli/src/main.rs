@@ -64,7 +64,7 @@ enum Commands {
     /// Scaffold a new Camel project
     New(commands::new::NewArgs),
 
-    /// Manage WASM processor plugins
+    /// Manage WASM plugins (processors and beans)
     Plugin {
         #[command(subcommand)]
         action: commands::plugin::PluginAction,
@@ -183,13 +183,47 @@ async fn run(
         health_cfg.port = port;
     }
 
-    // 2. Build context (also initialises tracing subscriber)
-    let mut ctx = camel_config::config::CamelConfig::configure_context(&camel_config)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to configure CamelContext: {e}");
-            std::process::exit(1);
-        });
+    // 2. Build context with beans registry (also initialises tracing subscriber)
+    let beans_registry = {
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(camel_bean::BeanRegistry::new()));
+        for (bean_name, bean_cfg) in &camel_config.beans {
+            tracing::info!(bean = %bean_name, plugin = %bean_cfg.plugin, "registering WASM bean");
+            #[cfg(feature = "wasm")]
+            {
+                let wasm_bean = camel_component_wasm::bean::WasmBean::new_stub(vec![format!(
+                    "{}.placeholder",
+                    bean_cfg.plugin
+                )]);
+                registry
+                    .lock()
+                    .expect("beans registry lock")
+                    .register(bean_name, wasm_bean)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Bean registration failed for '{}': {}", bean_name, e);
+                        std::process::exit(1);
+                    });
+            }
+            #[cfg(not(feature = "wasm"))]
+            {
+                let _ = (bean_name, bean_cfg);
+            }
+        }
+        if camel_config.beans.is_empty() {
+            None
+        } else {
+            Some(registry)
+        }
+    };
+
+    let mut ctx = camel_config::config::CamelConfig::configure_context_with_beans(
+        &camel_config,
+        beans_registry,
+    )
+    .await
+    .unwrap_or_else(|e| {
+        eprintln!("Failed to configure CamelContext: {e}");
+        std::process::exit(1);
+    });
 
     // 3. Determine route patterns
     let patterns: Vec<String> = if let Some(p) = routes_override {

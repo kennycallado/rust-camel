@@ -3,6 +3,7 @@ use camel_config::config::{
     CamelConfig, JournalConfig, ObservabilityConfig, OtelCamelConfig, PlatformCamelConfig,
     StreamCachingConfig,
 };
+use std::collections::HashMap;
 use std::fs;
 use tempfile::tempdir;
 
@@ -95,6 +96,7 @@ async fn test_configure_context_with_supervision() {
         }),
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
+        beans: HashMap::new(),
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -119,6 +121,7 @@ async fn test_configure_context_sets_shutdown_timeout() {
         supervision: None,
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
+        beans: HashMap::new(),
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -147,6 +150,7 @@ async fn test_configure_context_with_valid_log_level() {
         supervision: None,
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
+        beans: HashMap::new(),
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -171,6 +175,7 @@ async fn test_configure_context_with_invalid_log_level() {
         supervision: None,
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
+        beans: HashMap::new(),
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -205,6 +210,7 @@ async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
         supervision: None,
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
+        beans: HashMap::new(),
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -235,6 +241,7 @@ async fn test_configure_context_without_otel_no_lifecycle() {
         supervision: None,
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
+        beans: HashMap::new(),
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -271,6 +278,7 @@ async fn test_configure_context_uses_runtime_journal_from_config() {
         supervision: None,
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
+        beans: HashMap::new(),
     };
 
     let mut ctx = CamelConfig::configure_context(&config)

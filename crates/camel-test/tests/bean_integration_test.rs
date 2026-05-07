@@ -120,8 +120,12 @@ async fn test_bean_registration_and_lookup() {
     let mut bean_registry = BeanRegistry::new();
 
     // Register beans
-    bean_registry.register("orderService", OrderService);
-    bean_registry.register("auditService", AuditService);
+    bean_registry
+        .register("orderService", OrderService)
+        .unwrap();
+    bean_registry
+        .register("auditService", AuditService)
+        .unwrap();
 
     // Verify registration
     assert!(bean_registry.get("orderService").is_some());
@@ -133,7 +137,9 @@ async fn test_bean_registration_and_lookup() {
 async fn test_simple_bean_route() {
     // Setup registries
     let mut bean_registry = BeanRegistry::new();
-    bean_registry.register("orderService", OrderService);
+    bean_registry
+        .register("orderService", OrderService)
+        .unwrap();
 
     let controller = create_test_controller(bean_registry);
 
@@ -191,8 +197,12 @@ async fn test_simple_bean_route() {
 async fn test_multi_step_bean_route() {
     // Setup registries
     let mut bean_registry = BeanRegistry::new();
-    bean_registry.register("orderService", OrderService);
-    bean_registry.register("auditService", AuditService);
+    bean_registry
+        .register("orderService", OrderService)
+        .unwrap();
+    bean_registry
+        .register("auditService", AuditService)
+        .unwrap();
 
     let controller = create_test_controller(bean_registry);
 
@@ -250,7 +260,9 @@ async fn test_multi_step_bean_route() {
 async fn test_bean_with_validation() {
     // Setup registries
     let mut bean_registry = BeanRegistry::new();
-    bean_registry.register("orderService", OrderService);
+    bean_registry
+        .register("orderService", OrderService)
+        .unwrap();
 
     let controller = create_test_controller(bean_registry);
 
@@ -327,7 +339,9 @@ async fn test_bean_with_validation() {
 async fn test_bean_route_with_other_steps() {
     // Setup registries
     let mut bean_registry = BeanRegistry::new();
-    bean_registry.register("orderService", OrderService);
+    bean_registry
+        .register("orderService", OrderService)
+        .unwrap();
 
     // For this test, we need to register the mock component
     use camel_component_mock::MockComponent;
@@ -443,7 +457,9 @@ async fn test_yaml_to_bean_execution() {
 
     // Setup registries
     let mut bean_registry = BeanRegistry::new();
-    bean_registry.register("orderService", OrderService);
+    bean_registry
+        .register("orderService", OrderService)
+        .unwrap();
 
     let controller = create_test_controller(bean_registry);
 

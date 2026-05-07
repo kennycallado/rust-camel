@@ -368,6 +368,27 @@ impl DefaultRouteController {
         }
     }
 
+    pub fn with_languages_and_beans(
+        registry: Arc<std::sync::Mutex<Registry>>,
+        languages: SharedLanguageRegistry,
+        platform_service: Arc<dyn PlatformService>,
+        beans: Arc<std::sync::Mutex<BeanRegistry>>,
+    ) -> Self {
+        Self {
+            routes: HashMap::new(),
+            registry,
+            languages,
+            beans,
+            runtime: None,
+            global_error_handler: None,
+            crash_notifier: None,
+            tracing_enabled: false,
+            tracer_detail_level: DetailLevel::Minimal,
+            tracer_metrics: None,
+            platform_service,
+        }
+    }
+
     /// Set runtime handle for ProducerContext creation.
     pub fn set_runtime_handle(&mut self, runtime: Arc<dyn RuntimeHandle>) {
         self.runtime = Some(Arc::downgrade(&runtime));

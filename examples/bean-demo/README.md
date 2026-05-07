@@ -1,68 +1,123 @@
 # Bean Demo Example
 
-This example demonstrates the bean/registry system in rust-camel, showing how to define, register, and invoke beans in integration routes.
+Demonstrates native beans in rust-camel — multi-method components registered in a `BeanRegistry` and invoked from routes or directly.
+
+## What Are Beans?
+
+Beans are **multi-method components** — unlike processors (single `process()` method), a bean exposes multiple named handlers on one struct. Think of it as a service object with several entry points, each callable independently from routes.
+
+| | Processor | Bean |
+|---|---|---|
+| Methods | One (`process`) | Many (`#[handler]` per method) |
+| Use case | Transform/filter a message | Service with multiple operations (validate, process, stats) |
+| Invocation | `to: "bean:name"` | `bean: { name, method }` or `registry.invoke(name, method)` |
 
 ## What This Example Demonstrates
 
-- **Bean Definition**: Creating a service with `#[bean_impl]` and `#[handler]` attributes
-- **Bean Registration**: Using `BeanRegistry` to register and manage beans
-- **Method Invocation**: Calling bean methods from Camel routes
-- **Parameter Handling**: Different types of method parameters (body, headers)
-- **Return Value Processing**: Handling different return types from bean methods
+- **`#[bean_impl]`** — attribute macro on an `impl` block that generates `BeanProcessor`
+- **`#[handler]`** — marks individual methods as callable bean handlers
+- **`BeanRegistry`** — register beans by name, invoke by `(name, method)` pair
+- **Typed parameters** — body deserialized from JSON, headers, or full exchange access
+- **Typed returns** — return values serialized back into the exchange body
 
-## Key Concepts
+## Quick Start
 
-### Bean Definition
+```bash
+cargo run --example bean-demo
+```
 
-Beans are defined using the `#[bean_impl]` attribute on an `impl` block, with individual methods marked as handlers using `#[handler]`:
+## Defining a Bean
 
 ```rust
+use camel_bean::{bean_impl, handler};
+
+pub struct OrderService;
+
 #[bean_impl]
 impl OrderService {
     #[handler]
-    pub async fn process(&self, order: Order) -> Result<ProcessedOrder, String> {
-        // Business logic here
+    pub async fn process(&self, body: Order) -> Result<ProcessedOrder, String> {
+        // body is deserialized from exchange.input.body (JSON)
+        // return value is serialized back into exchange.input.body
+        Ok(ProcessedOrder { .. })
     }
-    
+
     #[handler]
-    pub async fn validate(&self, order: Order) -> Result<ValidationResult, String> {
-        // Validation logic here
+    pub async fn validate(&self, body: Order) -> Result<Order, String> {
+        // validation logic
+        Ok(body)
     }
-    
+
     #[handler]
-    pub async fn get_stats(&self, headers: Value) -> Result<String, String> {
-        // Statistics logic here
+    pub async fn get_stats(&self) -> Result<String, String> {
+        // no body parameter — handler reads nothing from exchange
+        Ok("stats...".to_string())
     }
 }
 ```
 
-### Bean Registration
+The `#[bean_impl]` macro generates a `BeanProcessor` impl that:
+- Dispatches `call(method, exchange)` to the correct `#[handler]` via match
+- Deserializes the exchange body into the handler's body parameter type
+- Serializes the handler's return value back into the exchange body
+- Exposes `methods()` listing all handler names
 
-Beans are registered in a `BeanRegistry`:
-
-```rust
-let mut bean_registry = BeanRegistry::new();
-bean_registry.register("orderService", OrderService);
-```
-
-### Route Integration
-
-Bean methods are invoked from routes using the registry:
+## Registering Beans
 
 ```rust
-.process(move |mut exchange| {
-    let registry = bean_registry.clone();
-    async move {
-        // Validate the order first
-        registry.invoke("orderService", "validate", &mut exchange).await?;
-        
-        // Then process the order
-        registry.invoke("orderService", "process", &mut exchange).await?;
-        
-        Ok(exchange)
-    }
-})
+use camel_bean::BeanRegistry;
+
+let mut registry = BeanRegistry::new();
+registry.register("orderService", OrderService).expect("register");
+
+// Invoke by name + method
+registry.invoke("orderService", "validate", &mut exchange).await?;
+registry.invoke("orderService", "process", &mut exchange).await?;
 ```
+
+## Configuring Beans in Camel.toml
+
+For WASM bean plugins, add a `[beans]` section:
+
+```toml
+[beans.orderService]
+plugin = "order-service-bean"
+
+[beans.auth]
+plugin = "my-auth"
+```
+
+Each entry maps a bean name to a WASM plugin file (without `.wasm` extension). The plugin is loaded at startup and registered under the given name.
+
+## Using Beans in YAML Routes
+
+```yaml
+routes:
+  - id: "order-processing"
+    from: "direct:start"
+    steps:
+      - bean:
+          name: "orderService"
+          method: "validate"
+      - bean:
+          name: "orderService"
+          method: "process"
+      - to: "log:processed"
+```
+
+The `bean:` step invokes the named bean's method, passing the current exchange. The method's return value replaces the exchange body.
+
+## Handler Parameter Types
+
+Handlers support three parameter patterns (detected automatically by `#[bean_impl]`):
+
+| Signature | Behavior |
+|---|---|
+| `fn(&self, body: T) -> Result<R, E>` | Deserializes exchange body as `T`, serializes `R` back |
+| `fn(&self) -> Result<R, E>` | No body input, serializes `R` back |
+| `fn(&self, exchange: &mut Exchange) -> Result<(), E>` | Full exchange access, manages body manually |
+
+Headers can also be accessed via a `headers` parameter (type `serde_json::Value`).
 
 ## Running the Example
 
@@ -70,81 +125,57 @@ Bean methods are invoked from routes using the registry:
 cargo run --example bean-demo
 ```
 
-## Expected Output
+Output shows five demos:
+1. **Valid order validation** — passes all checks
+2. **Invalid order validation** — catches missing fields, negative total
+3. **High-value order processing** — applies 10% discount (>$1000)
+4. **Statistics retrieval** — handler with no body parameter
+5. **Regular order processing** — no discount applied
 
-When you run the example, you'll see:
+## Next Steps: WASM Bean Plugins
 
-1. **Startup messages** showing bean registration
-2. **Timer-triggered order processing** every 3 seconds (3 times)
-3. **Order validation** with detailed results
-4. **Order processing** with business logic (discounts, timestamps)
-5. **Statistics requests** every 5 seconds (2 times)
+This example uses **native beans** (compiled into your binary). For runtime-loadable beans, use WASM plugins:
 
-Sample output:
-```
-🚀 Starting Bean Demo Example
-📋 This example demonstrates bean registration and invocation in rust-camel
+```bash
+# Create a WASM bean plugin project
+camel plugin new my-bean --type bean
 
-📝 Registered 1 beans:
-   - orderService (with handlers: process, validate, get_stats)
-
-🌟 Bean demo is running!
-📊 Watch for order processing and statistics in the logs
-⏹️  Press Ctrl+C to stop
-
-🔄 Processing order ORD-1646675123 for customer Demo Customer
-✅ Order validation passed
-✅ Order processed successfully
-📊 Getting order stats
-📈 Stats: Order Statistics: Total Orders: 1,234 | Pending: 45 | Completed: 1,189 | Revenue: $123,456.78
+# Build and install
+cd my-bean
+camel plugin build
 ```
 
-## Implementation Details
+WASM beans implement `BeanPlugin` instead of `Guest`:
 
-### OrderService Bean
+```rust
+use camel_wasm_sdk::{export_bean, BeanPlugin, WasmExchange, WasmError};
 
-The example includes a realistic `OrderService` with three handlers:
+struct MyBean;
 
-1. **`process`**: Applies business logic to orders (discounts, timestamps)
-2. **`validate`**: Validates order data and returns validation results
-3. **`get_stats`**: Demonstrates header parameter handling
+impl BeanPlugin for MyBean {
+    fn methods() -> Vec<&'static str> {
+        vec!["validate", "transform"]
+    }
 
-### Data Structures
+    fn invoke(method: &str, exchange: WasmExchange) -> Result<WasmExchange, WasmError> {
+        match method {
+            "validate" => Ok(exchange),
+            "transform" => Ok(exchange),
+            _ => Err(WasmError::ProcessorError(format!("unknown method: {method}"))),
+        }
+    }
+}
 
-The example uses realistic data structures with serde serialization:
-- `Order`: Represents a customer order
-- `OrderItem`: Items within an order
-- `ProcessedOrder`: Order with processing metadata
-- `ValidationResult`: Validation output with errors and warnings
+export_bean!(MyBean);
+```
 
-### Route Structure
+See `camel-wasm-sdk` README for full WASM bean documentation.
 
-Two routes demonstrate different patterns:
+## Related Crates
 
-1. **Order Processing Route**: Sequential bean method calls (validate → process)
-2. **Statistics Route**: Simple bean method call with headers
-
-## Learning Points
-
-1. **Bean Isolation**: Each bean is independent and can be tested separately
-2. **Type Safety**: Strong typing ensures data consistency
-3. **Error Handling**: Results are properly propagated through the Camel system
-4. **Flexibility**: Beans can have different parameter and return types
-5. **Integration**: Beans integrate seamlessly with existing Camel components
-
-## Extending the Example
-
-You can extend this example by:
-
-1. Adding more beans (PaymentService, InventoryService)
-2. Creating more complex routes with conditional logic
-3. Adding database persistence
-4. Implementing error handling strategies
-5. Adding metrics and monitoring
-
-## Related Components
-
-- `camel-bean`: Core bean functionality
-- `camel-bean-macros`: Macros for bean definition
-- `camel-api`: Exchange and message handling
-- `camel-builder`: Route building DSL
+| Crate | Purpose |
+|---|---|
+| `camel-bean` | BeanRegistry, BeanProcessor trait |
+| `camel-bean-macros` | `#[bean_impl]`, `#[handler]` proc macros |
+| `camel-wasm-sdk` | WASM plugin SDK (`BeanPlugin`, `export_bean!`) |
+| `camel-config` | Camel.toml parsing including `[beans]` section |

@@ -35,6 +35,7 @@ async fn main() -> Result<(), CamelError> {
         supervision: None,
         platform: Default::default(),
         stream_caching: Default::default(),
+        beans: Default::default(),
     };
 
     let mut ctx = CamelConfig::configure_context(&config).await?;

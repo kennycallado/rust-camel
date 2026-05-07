@@ -1,3 +1,4 @@
+pub mod bean;
 pub mod embedded;
 pub mod processor;
 

@@ -1,16 +1,16 @@
 //! # camel-wasm-sdk
 //!
 //! WASM SDK for building Camel guest plugins. Provides types and utilities
-//! to write processors that run inside the Camel WASM runtime.
+//! to write processors and beans that run inside the Camel WASM runtime.
 //!
-//! ## Quick Start
+//! ## Quick Start — Processor Plugin
 //!
 //! ```ignore
-//! use camel_wasm_sdk::{export, Plugin, WasmExchange, WasmBody, WasmError};
+//! use camel_wasm_sdk::{export, ProcessorPlugin, WasmExchange, WasmBody, WasmError};
 //!
 //! struct MyProcessor;
 //!
-//! impl Plugin for MyProcessor {
+//! impl ProcessorPlugin for MyProcessor {
 //!     fn process(mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {
 //!         let transformed = match &exchange.input.body {
 //!             WasmBody::Text(s) => WasmBody::Text(s.to_uppercase()),
@@ -24,14 +24,40 @@
 //! export!(MyProcessor);
 //! ```
 //!
+//! ## Quick Start — Bean Plugin
+//!
+//! Beans are multi-method WASM components:
+//!
+//! ```ignore
+//! use camel_wasm_sdk::{export_bean, BeanPlugin, WasmExchange, WasmError};
+//!
+//! struct MyBean;
+//!
+//! impl BeanPlugin for MyBean {
+//!     fn methods() -> Vec<&'static str> {
+//!         vec!["validate", "transform"]
+//!     }
+//!
+//!     fn invoke(method: &str, exchange: WasmExchange) -> Result<WasmExchange, WasmError> {
+//!         match method {
+//!             "validate" => Ok(exchange),
+//!             "transform" => Ok(exchange),
+//!             _ => Err(WasmError::ProcessorError(format!("unknown method: {method}"))),
+//!         }
+//!     }
+//! }
+//!
+//! export_bean!(MyBean);
+//! ```
+//!
 //! ## Plugin with Init Hook
 //!
 //! ```ignore
-//! use camel_wasm_sdk::{export, Plugin, WasmExchange, WasmError};
+//! use camel_wasm_sdk::{export, ProcessorPlugin, WasmExchange, WasmError};
 //!
 //! struct MyProcessor;
 //!
-//! impl Plugin for MyProcessor {
+//! impl ProcessorPlugin for MyProcessor {
 //!     fn init() -> Result<(), String> {
 //!         // one-time setup
 //!         Ok(())
@@ -48,7 +74,7 @@
 //! ## Plugin Example with State
 //!
 //! ```ignore
-//! use camel_wasm_sdk::{export, Plugin, GuestState, WasmExchange, WasmBody, WasmError};
+//! use camel_wasm_sdk::{export, ProcessorPlugin, GuestState, WasmExchange, WasmBody, WasmError};
 //!
 //! struct Config {
 //!     prefix: String,
@@ -58,7 +84,7 @@
 //!
 //! struct StatefulProcessor;
 //!
-//! impl Plugin for StatefulProcessor {
+//! impl ProcessorPlugin for StatefulProcessor {
 //!     fn process(mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {
 //!         let config = STATE.get_or_init(|| Config {
 //!             prefix: "[camel] ".to_string(),
@@ -84,17 +110,29 @@ mod bindings {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+mod bean_bindings {
+    wit_bindgen::generate!({
+        world: "bean",
+        path: "../../wit",
+        pub_export_macro: true,
+    });
+}
+
+mod bean_plugin;
 mod plugin;
 mod state_helpers;
 mod types_ext;
 
+pub use bean_bindings::export as export_bean;
+pub use bean_plugin::BeanPlugin;
 pub use bindings::Guest;
 pub use bindings::camel::plugin::host;
 pub use bindings::camel::plugin::types::{
     WasmBody, WasmError, WasmExchange, WasmMessage, WasmPattern,
 };
 pub use bindings::export;
-pub use plugin::Plugin;
+pub use plugin::ProcessorPlugin;
 pub use state::GuestState;
 pub use state_helpers::{load, load_json, store, store_json};
 

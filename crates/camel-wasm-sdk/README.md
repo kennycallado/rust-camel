@@ -115,3 +115,41 @@ cargo build --target wasm32-wasip2 --release
 ## License
 
 Apache-2.0
+
+## Bean Plugins
+
+Beans are multi-method WASM components. Use `--type bean` when creating:
+
+```bash
+camel plugin new my-bean --type bean
+```
+
+Implement `BeanPlugin` instead of `ProcessorPlugin`:
+
+```rust
+use camel_wasm_sdk::{export_bean, BeanPlugin, WasmBody, WasmError, WasmExchange};
+
+struct MyBean;
+
+impl BeanPlugin for MyBean {
+    fn methods() -> Vec<&'static str> {
+        vec!["validate", "transform"]
+    }
+
+    fn invoke(method: &str, exchange: WasmExchange) -> Result<WasmExchange, WasmError> {
+        match method {
+            "validate" => { /* ... */ }
+            "transform" => { /* ... */ }
+            _ => Err(WasmError::ProcessorError(format!("unknown method: {method}")))
+        }
+    }
+}
+
+export_bean!(MyBean);
+```
+
+Add to `Camel.toml`:
+```toml
+[beans.my-bean]
+plugin = "my-bean"
+```

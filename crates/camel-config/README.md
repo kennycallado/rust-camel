@@ -117,6 +117,7 @@ allow_private_ips = true  # Allow internal services in dev
 - **`[<profile>]`** - Profile-specific overrides (merged with default)
 - **`[<profile>.supervision]`** - Profile-specific supervision overrides
 - **`[<profile>.components.<name>]`** - Profile-specific component overrides
+- **`[beans.<name>]`** - WASM bean plugin registrations
 
 ## Core Fields
 
@@ -228,6 +229,15 @@ write_timeout_ms = 30000       # Write timeout (default: 30000)
 [default.components.container]
 docker_host = "unix:///var/run/docker.sock"  # Docker daemon socket (default)
 ```
+
+### Beans
+
+```toml
+[beans.auth]
+plugin = "my-auth-bean"
+```
+
+WASM bean plugins registered at startup. Each entry creates an isolated WASM instance.
 
 ## Profile Selection
 

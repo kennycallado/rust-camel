@@ -5,6 +5,7 @@ use camel_config::config::{
     StreamCachingConfig,
 };
 use camel_core::{DetailLevel, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs};
+use std::collections::HashMap;
 
 fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> CamelConfig {
     CamelConfig {
@@ -46,6 +47,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
         supervision: None,
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
+        beans: HashMap::new(),
     }
 }
 

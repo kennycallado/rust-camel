@@ -28,6 +28,7 @@ crates/camel-core/src/
 ## Features
 
 - **CamelContext**: Central context for managing routes and components
+- **CamelContextBuilder**: Fluent builder with `beans()` method for WASM bean plugin registration
 - **DDD Aggregate**: `RouteRuntimeAggregate` with state machine and optimistic locking
 - **CQRS Runtime Bus**: Separate command/query paths with projection-backed reads
 - **Event Sourcing**: Optional durable journal (redb v2) for crash recovery

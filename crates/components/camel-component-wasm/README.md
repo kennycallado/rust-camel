@@ -337,6 +337,61 @@ See `crates/camel-wasm-sdk/README.md` for plugin development:
 - `Exchange` and `Body` types for data access
 - `Host` trait for calling host functions
 
+## Bean Support
+
+The WASM component also supports **bean plugins** — multi-method WASM components that expose several callable methods from a single module.
+
+### `WasmBean` Adapter
+
+`WasmBean` is the host-side adapter that loads a WASM bean module and dispatches method calls to the correct guest function. It uses the `bean` WIT world (distinct from the `processor` world) to communicate with the guest.
+
+### Configuration
+
+Register beans in `Camel.toml`:
+
+```toml
+[beans.auth]
+plugin = "my-auth-bean"
+```
+
+Each bean entry creates an isolated WASM instance. Methods are invoked by name from YAML DSL or Rust routes:
+
+```yaml
+routes:
+  - id: "auth-route"
+    from: "direct:auth"
+    steps:
+      - bean:
+          name: "auth"
+          method: "validate"
+```
+
+### Building Bean Plugins
+
+Use the SDK's `BeanPlugin` trait and `export_bean!` macro:
+
+```rust
+use camel_wasm_sdk::{export_bean, BeanPlugin, WasmExchange, WasmError};
+
+struct AuthBean;
+
+impl BeanPlugin for AuthBean {
+    fn methods() -> Vec<&'static str> {
+        vec!["validate", "refresh"]
+    }
+
+    fn invoke(method: &str, exchange: WasmExchange) -> Result<WasmExchange, WasmError> {
+        match method {
+            "validate" => Ok(exchange),
+            "refresh" => Ok(exchange),
+            _ => Err(WasmError::ProcessorError(format!("unknown method: {method}"))),
+        }
+    }
+}
+
+export_bean!(AuthBean);
+```
+
 ## Documentation
 
 - [API Documentation](https://docs.rs/camel-component-wasm)

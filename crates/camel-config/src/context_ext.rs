@@ -46,6 +46,13 @@ impl CamelConfig {
     /// When OTel is enabled, the OtelService is created *before* the subscriber
     /// so the LoggerProvider can be wired into the tracing bridge for log export.
     pub async fn configure_context(config: &CamelConfig) -> Result<CamelContext, CamelError> {
+        Self::configure_context_with_beans(config, None).await
+    }
+
+    pub async fn configure_context_with_beans(
+        config: &CamelConfig,
+        beans: Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>,
+    ) -> Result<CamelContext, CamelError> {
         let otel_enabled = config
             .observability
             .otel
@@ -71,6 +78,10 @@ impl CamelConfig {
         let platform_service: Arc<dyn PlatformServiceTrait> =
             Self::build_platform_service(&config.platform).await?;
         builder = builder.platform_service(platform_service);
+
+        if let Some(beans) = beans {
+            builder = builder.beans(beans);
+        }
 
         let mut ctx = builder.build().await?;
 

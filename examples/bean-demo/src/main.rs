@@ -164,7 +164,9 @@ async fn main() -> Result<(), CamelError> {
     let mut bean_registry = BeanRegistry::new();
 
     // Register our OrderService bean
-    bean_registry.register("orderService", OrderService);
+    bean_registry
+        .register("orderService", OrderService)
+        .expect("register bean");
 
     println!("Registered {} beans:", bean_registry.len());
     println!("   - orderService (with handlers: process, validate, get_stats)\n");

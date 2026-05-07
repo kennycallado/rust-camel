@@ -1,7 +1,7 @@
 use crate::bindings::Guest;
 use crate::{WasmError, WasmExchange};
 
-pub trait Plugin: Sized {
+pub trait ProcessorPlugin: Sized {
     fn process(exchange: WasmExchange) -> Result<WasmExchange, WasmError>;
 
     fn init() -> Result<(), String> {
@@ -9,12 +9,12 @@ pub trait Plugin: Sized {
     }
 }
 
-impl<T: Plugin> Guest for T {
+impl<T: ProcessorPlugin> Guest for T {
     fn process(exchange: WasmExchange) -> Result<WasmExchange, WasmError> {
-        <T as Plugin>::process(exchange)
+        <T as ProcessorPlugin>::process(exchange)
     }
 
     fn init() -> Result<(), String> {
-        <T as Plugin>::init()
+        <T as ProcessorPlugin>::init()
     }
 }

@@ -1,7 +1,22 @@
-use crate::template::processor::processor_files;
 use clap::{Args, Subcommand};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[derive(Clone, Debug, clap::ValueEnum, PartialEq)]
+pub enum PluginType {
+    Processor,
+    Bean,
+}
+
+impl fmt::Display for PluginType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PluginType::Processor => write!(f, "processor"),
+            PluginType::Bean => write!(f, "bean"),
+        }
+    }
+}
 
 #[derive(Subcommand, Debug)]
 pub enum PluginAction {
@@ -12,6 +27,8 @@ pub enum PluginAction {
 #[derive(Args, Debug)]
 pub struct PluginNewArgs {
     pub name: String,
+    #[arg(long, value_name = "TYPE", default_value_t = PluginType::Processor)]
+    pub r#type: PluginType,
     #[arg(long)]
     pub force: bool,
 }
@@ -30,7 +47,11 @@ pub fn run_plugin(action: PluginAction) {
 }
 
 fn run_plugin_new(args: PluginNewArgs) {
-    let PluginNewArgs { name, force } = args;
+    let PluginNewArgs {
+        name,
+        force,
+        r#type: plugin_type,
+    } = args;
 
     if !name
         .chars()
@@ -42,7 +63,10 @@ fn run_plugin_new(args: PluginNewArgs) {
         std::process::exit(1);
     }
 
-    let files = processor_files(&name);
+    let files = match plugin_type {
+        PluginType::Bean => crate::template::bean::bean_files(&name),
+        PluginType::Processor => crate::template::processor::processor_files(&name),
+    };
     let target = Path::new(&name);
 
     if target.exists() && !force {
@@ -75,7 +99,11 @@ fn run_plugin_new(args: PluginNewArgs) {
         });
     }
 
-    println!("Created camel processor plugin '{}'\n", name);
+    let type_label = match plugin_type {
+        PluginType::Bean => "bean",
+        PluginType::Processor => "processor",
+    };
+    println!("Created camel {} plugin '{}'\n", type_label, name);
     println!("Next steps:");
     println!("  cd {}", name);
     println!("  camel plugin build");
@@ -225,6 +253,33 @@ mod tests {
             PluginAction::New(args) => {
                 assert_eq!(args.name, "my-plugin");
                 assert!(args.force);
+                assert_eq!(args.r#type, PluginType::Processor);
+            }
+            _ => panic!("expected PluginAction::New"),
+        }
+    }
+
+    #[test]
+    fn plugin_action_parses_new_bean_type() {
+        let cli = TestCli::try_parse_from(["test", "new", "my-bean", "--type", "bean"])
+            .expect("expected parse success");
+        match cli.action {
+            PluginAction::New(args) => {
+                assert_eq!(args.name, "my-bean");
+                assert_eq!(args.r#type, PluginType::Bean);
+            }
+            _ => panic!("expected PluginAction::New"),
+        }
+    }
+
+    #[test]
+    fn plugin_action_default_type_is_processor() {
+        let cli =
+            TestCli::try_parse_from(["test", "new", "my-proc"]).expect("expected parse success");
+        match cli.action {
+            PluginAction::New(args) => {
+                assert_eq!(args.name, "my-proc");
+                assert_eq!(args.r#type, PluginType::Processor);
             }
             _ => panic!("expected PluginAction::New"),
         }

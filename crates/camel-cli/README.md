@@ -215,3 +215,29 @@ project layout with a `Camel.toml` and example routes.
 ## License
 
 Apache-2.0
+
+## `camel plugin`
+
+Manage WASM plugins for the Camel runtime.
+
+### `camel plugin new`
+
+```bash
+# Create a processor plugin (default)
+camel plugin new my-processor
+
+# Create a bean plugin
+camel plugin new my-bean --type bean
+
+# Force overwrite existing directory
+camel plugin new my-plugin --force
+```
+
+### `camel plugin build`
+
+Compiles the plugin to `wasm32-wasip2`:
+
+```bash
+cd my-plugin
+camel plugin build
+```

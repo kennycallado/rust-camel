@@ -25,7 +25,7 @@ pub fn derive_bean(input: TokenStream) -> TokenStream {
                 unimplemented!("Bean derive macro requires impl block with #[handler] methods")
             }
 
-            fn methods(&self) -> Vec<&'static str> {
+            fn methods(&self) -> Vec<String> {
                 vec![]
             }
         }
@@ -130,8 +130,8 @@ fn bean_impl_gen(item: ItemImpl) -> Result<TokenStream, syn::Error> {
                 }
             }
 
-            fn methods(&self) -> Vec<&'static str> {
-                vec![#(#method_names),*]
+            fn methods(&self) -> Vec<String> {
+                vec![#(#method_names.to_string()),*]
             }
         }
     };

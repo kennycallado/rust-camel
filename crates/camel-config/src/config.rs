@@ -47,6 +47,9 @@ pub struct CamelConfig {
 
     #[serde(default)]
     pub stream_caching: StreamCachingConfig,
+
+    #[serde(default)]
+    pub beans: HashMap<String, BeanConfig>,
 }
 
 /// Platform selection for leader election, readiness, and identity.
@@ -337,6 +340,11 @@ impl Default for StreamCachingConfig {
             threshold: default_stream_cache_threshold(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct BeanConfig {
+    pub plugin: String,
 }
 
 impl From<&JournalConfig> for camel_core::RedbJournalOptions {
@@ -1003,5 +1011,31 @@ watch = false
         )
         .unwrap_err();
         assert!(err.to_string().contains("Unknown profile: missing"));
+    }
+}
+
+#[cfg(test)]
+mod beans_config_tests {
+    use super::*;
+
+    #[test]
+    fn beans_default_empty() {
+        let config: CamelConfig = toml::from_str("").unwrap();
+        assert!(config.beans.is_empty());
+    }
+
+    #[test]
+    fn beans_parsed_from_config() {
+        let toml_str = r#"
+[beans.auth]
+plugin = "my-auth"
+
+[beans.cache]
+plugin = "my-cache"
+"#;
+        let config: CamelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.beans.len(), 2);
+        assert_eq!(config.beans.get("auth").unwrap().plugin, "my-auth");
+        assert_eq!(config.beans.get("cache").unwrap().plugin, "my-cache");
     }
 }

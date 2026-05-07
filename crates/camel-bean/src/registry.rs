@@ -14,11 +14,16 @@ impl BeanRegistry {
         }
     }
 
-    pub fn register<B>(&mut self, name: impl Into<String>, bean: B)
+    pub fn register<B>(&mut self, name: impl Into<String>, bean: B) -> Result<(), BeanError>
     where
         B: BeanProcessor + 'static,
     {
-        self.beans.insert(name.into(), Arc::new(bean));
+        let name = name.into();
+        if self.beans.contains_key(&name) {
+            return Err(BeanError::DuplicateName(name));
+        }
+        self.beans.insert(name, Arc::new(bean));
+        Ok(())
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn BeanProcessor>> {
@@ -35,7 +40,7 @@ impl BeanRegistry {
             .get(bean_name)
             .ok_or_else(|| BeanError::NotFound(bean_name.to_string()))?;
 
-        if !bean.methods().contains(&method) {
+        if !bean.methods().iter().any(|m| m == method) {
             return Err(BeanError::MethodNotFound(method.to_string()).into());
         }
 
@@ -76,8 +81,8 @@ mod tests {
             }
         }
 
-        fn methods(&self) -> Vec<&'static str> {
-            vec!["process"]
+        fn methods(&self) -> Vec<String> {
+            vec!["process".to_string()]
         }
     }
 
@@ -87,8 +92,8 @@ mod tests {
             Err(CamelError::ProcessorError("boom".to_string()))
         }
 
-        fn methods(&self) -> Vec<&'static str> {
-            vec!["process"]
+        fn methods(&self) -> Vec<String> {
+            vec!["process".to_string()]
         }
     }
 
@@ -102,7 +107,7 @@ mod tests {
     #[test]
     fn test_register_and_get() {
         let mut registry = BeanRegistry::new();
-        registry.register("mock", MockBean);
+        registry.register("mock", MockBean).unwrap();
 
         assert!(registry.get("mock").is_some());
         assert!(registry.get("nonexistent").is_none());
@@ -113,23 +118,32 @@ mod tests {
         let mut registry = BeanRegistry::new();
         assert!(registry.is_empty());
 
-        registry.register("mock", MockBean);
+        registry.register("mock", MockBean).unwrap();
         assert_eq!(registry.len(), 1);
         assert!(!registry.is_empty());
     }
 
     #[test]
-    fn test_register_same_name_overwrites() {
+    fn test_register_same_name_rejects() {
         let mut registry = BeanRegistry::new();
-        registry.register("dup", MockBean);
-        registry.register("dup", ErrorBean);
+        registry.register("dup", MockBean).unwrap();
+        let result = registry.register("dup", ErrorBean);
+        assert!(result.is_err());
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn test_register_duplicate_returns_error() {
+        let mut registry = BeanRegistry::new();
+        registry.register("dup", MockBean).unwrap();
+        let err = registry.register("dup", ErrorBean).unwrap_err();
+        assert!(matches!(err, BeanError::DuplicateName(_)));
     }
 
     #[tokio::test]
     async fn test_invoke_success() {
         let mut registry = BeanRegistry::new();
-        registry.register("mock", MockBean);
+        registry.register("mock", MockBean).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         let result = registry.invoke("mock", "process", &mut exchange).await;
@@ -151,7 +165,7 @@ mod tests {
     #[tokio::test]
     async fn test_invoke_method_not_found() {
         let mut registry = BeanRegistry::new();
-        registry.register("mock", MockBean);
+        registry.register("mock", MockBean).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         let result = registry.invoke("mock", "unknown", &mut exchange).await;
@@ -162,7 +176,7 @@ mod tests {
     #[tokio::test]
     async fn test_invoke_propagates_bean_error() {
         let mut registry = BeanRegistry::new();
-        registry.register("err", ErrorBean);
+        registry.register("err", ErrorBean).unwrap();
 
         let mut exchange = Exchange::new(Message::default());
         let result = registry.invoke("err", "process", &mut exchange).await;
