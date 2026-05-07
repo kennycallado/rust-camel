@@ -4,6 +4,9 @@
 
 set -e
 
+# Ensure cargo is available when script runs outside a login shell
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+
 DRY_RUN=""
 if [ "$1" == "--dry-run" ]; then
   DRY_RUN="--dry-run"
