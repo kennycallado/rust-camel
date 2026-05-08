@@ -170,6 +170,44 @@ pub struct LoopWhileExpr {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct AiClassifyStep {
+    pub ai_classify: AiClassifyData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct AiClassifyData {
+    pub model: String,
+    pub labels: Vec<String>,
+    #[serde(default = "default_ai_classify_header")]
+    pub output_header: String,
+}
+
+fn default_ai_classify_header() -> String {
+    "CamelAiCategory".into()
+}
+
+#[derive(Deserialize, Debug)]
+pub struct AiExtractStep {
+    pub ai_extract: AiExtractData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct AiExtractData {
+    pub model: String,
+    pub schema: String,
+    #[serde(default = "default_ai_extract_header")]
+    pub output_header: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+fn default_ai_extract_header() -> String {
+    "CamelAiExtracted".into()
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum YamlStep {
     To(ToStep),
@@ -197,6 +235,8 @@ pub enum YamlStep {
     Unmarshal(UnmarshalStep),
     Delay(DelayStep),
     Loop(LoopStep),
+    AiClassify(AiClassifyStep),
+    AiExtract(AiExtractStep),
     Validate(ValidateStep),
 }
 

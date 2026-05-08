@@ -15,6 +15,7 @@ categories.workspace = true
 camel-api.workspace = true
 camel-core.workspace = true
 camel-processor.workspace = true
+camel-ai.workspace = true
 camel-dataformat-protobuf = { workspace = true, optional = true }
 camel-proto-compiler = { workspace = true, optional = true }
 serde.workspace = true

@@ -11,8 +11,9 @@ use crate::compile::{
 };
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
-    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
+    AggregateStepDef, AggregateStrategyDef, AiClassifyStepDef, AiExtractStepDef, BeanStepDef,
+    BodyTypeDef, ChoiceStepDef, DataFormatDef, DeclarativeCircuitBreaker, DeclarativeConcurrency,
+    DeclarativeErrorHandler,
     DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep,
     DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
     LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
@@ -21,14 +22,15 @@ use crate::model::{
     ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
-    AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
-    DelayStep, DynamicRouterData, DynamicRouterStep, FilterStep, LoadBalanceData, LoadBalanceStep,
-    LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep,
-    PredicateBlock, RecipientListData, RecipientListStep, RoutingSlipData, RoutingSlipStep,
-    ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep,
-    SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody,
-    StreamCacheConfig, StreamCacheStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
-    UnmarshalStep, ValidateStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
+    AggregateData, AggregateStep, AiClassifyStep, AiExtractStep, BeanStep, BeanStepData,
+    ChoiceData, ChoiceStep, DelayBody, DelayStep, DynamicRouterData, DynamicRouterStep, FilterStep,
+    LoadBalanceData, LoadBalanceStep, LogConfig, LogMessageData, LogMessageExpr, LogStep,
+    MarshalStep, MulticastData, MulticastStep, PredicateBlock, RecipientListData,
+    RecipientListStep, RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig,
+    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitExpressionConfig,
+    SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep,
+    ThrottleData, ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
+    YamlRoute, YamlRoutes, YamlStep,
 };
 use crate::yaml_ast::{LoopData, LoopStep, LoopWhileExpr};
 
@@ -311,6 +313,21 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 )?,
             };
             Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
+        }
+        YamlStep::AiClassify(AiClassifyStep { ai_classify }) => {
+            Ok(DeclarativeStep::AiClassify(AiClassifyStepDef {
+                model_uri: ai_classify.model,
+                labels: ai_classify.labels,
+                output_header: ai_classify.output_header,
+            }))
+        }
+        YamlStep::AiExtract(AiExtractStep { ai_extract }) => {
+            Ok(DeclarativeStep::AiExtract(AiExtractStepDef {
+                model_uri: ai_extract.model,
+                schema: ai_extract.schema,
+                output_header: ai_extract.output_header,
+                prompt: ai_extract.prompt,
+            }))
         }
         YamlStep::Script(ScriptStep {
             script: ScriptData { language, source },
@@ -1750,5 +1767,37 @@ routes:
             msg.contains("stream_cache: false"),
             "expected rejection message, got: {msg}"
         );
+    }
+
+    #[test]
+    fn parse_ai_classify_step() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "direct:in"
+    steps:
+      - ai_classify:
+          model: "llm:ollama?model=qwen3.5:4b"
+          labels: ["billing", "technical"]
+          output_header: "category"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert!(matches!(&routes[0].steps[0], DeclarativeStep::AiClassify(_)));
+    }
+
+    #[test]
+    fn parse_ai_extract_step() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "direct:in"
+    steps:
+      - ai_extract:
+          model: "llm:ollama?model=qwen3.5:4b"
+          schema: '{"type":"object"}'
+          output_header: "result"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert!(matches!(&routes[0].steps[0], DeclarativeStep::AiExtract(_)));
     }
 }

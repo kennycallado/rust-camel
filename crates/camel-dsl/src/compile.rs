@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use camel_api::aggregator::{AggregationStrategy as AggregatorStrategy, AggregatorConfig};
@@ -22,17 +23,19 @@ use camel_component_api::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{
     ConvertBodyTo, LogLevel, MarshalService, StopService, StreamCacheService, UnmarshalService,
+    ai::{AiClassifyService, AiExtractService},
     builtin_data_format,
 };
 
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
-    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
-    DeclarativeStep, DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
-    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
-    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
-    SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef,
-    ThrottleStrategyDef, ToStepDef, ValueSourceDef, WireTapStepDef,
+    AggregateStepDef, AggregateStrategyDef, AiClassifyStepDef, AiExtractStepDef, BeanStepDef,
+    BodyTypeDef, ChoiceStepDef, DataFormatDef, DeclarativeCircuitBreaker, DeclarativeConcurrency,
+    DeclarativeErrorHandler, DeclarativeRoute, DeclarativeStep, DelayStepDef, DynamicRouterStepDef,
+    LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef,
+    LoopStepDef, MulticastAggregationDef, MulticastStepDef, RecipientListStepDef,
+    RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
+    SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
+    ValueSourceDef, WireTapStepDef,
 };
 
 pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinition, CamelError> {
@@ -434,6 +437,36 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::Bean(BeanStepDef { name, method }) => {
             Ok(BuilderStep::Bean { name, method })
         }
+        DeclarativeStep::AiClassify(AiClassifyStepDef {
+            model_uri,
+            labels,
+            output_header,
+        }) => {
+            let model = resolve_chat_model(&model_uri)?;
+            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
+                AiClassifyService {
+                    model,
+                    labels,
+                    output_header,
+                },
+            )))
+        }
+        DeclarativeStep::AiExtract(AiExtractStepDef {
+            model_uri,
+            schema,
+            output_header,
+            prompt,
+        }) => {
+            let model = resolve_chat_model(&model_uri)?;
+            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
+                AiExtractService {
+                    model,
+                    schema,
+                    output_header,
+                    prompt,
+                },
+            )))
+        }
         DeclarativeStep::Marshal(DataFormatDef { format }) => {
             let df = if format.strip_prefix("protobuf:").is_some() {
                 #[cfg(feature = "protobuf")]
@@ -602,6 +635,9 @@ fn compile_declarative_step_to_canonical(
                 "canonical v1 does not support step `loop`: {detail}"
             )))
         }
+        DeclarativeStep::AiClassify(_) | DeclarativeStep::AiExtract(_) => {
+            Err(CamelError::RouteError("ai steps are not canonical".into()))
+        }
         other => {
             let step_name = declarative_step_name(&other);
             let detail = canonical_contract_rejection_reason(step_name)
@@ -714,7 +750,39 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Unmarshal(_) => "unmarshal",
         DeclarativeStep::Delay(_) => "delay",
         DeclarativeStep::Loop(_) => "loop",
+        DeclarativeStep::AiClassify(_) => "ai_classify",
+        DeclarativeStep::AiExtract(_) => "ai_extract",
     }
+}
+
+fn resolve_chat_model(model_uri: &str) -> Result<Arc<dyn camel_ai::ChatModel>, CamelError> {
+    use camel_ai::{OpenAiCompatible, OpenAiCompatibleConfig};
+
+    let (_, query) = model_uri.split_once('?').unwrap_or((model_uri, ""));
+    let params: std::collections::HashMap<String, String> = query
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            let k = parts.next()?.to_string();
+            let v = parts.next().unwrap_or("").to_string();
+            if k.is_empty() { None } else { Some((k, v)) }
+        })
+        .collect();
+
+    let base_url = params
+        .get("base_url")
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:11434".into());
+    let model_name = params
+        .get("model")
+        .cloned()
+        .unwrap_or_else(|| "qwen3.5:4b".into());
+
+    Ok(Arc::new(OpenAiCompatible::new(OpenAiCompatibleConfig {
+        base_url,
+        model: model_name,
+        api_key: params.get("api_key").cloned(),
+    })))
 }
 
 fn compile_split_step(

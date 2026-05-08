@@ -27,6 +27,8 @@ pub enum DeclarativeStepKind {
     SetBodyFn,
     SetHeaderFn,
     StreamCache,
+    AiClassify,
+    AiExtract,
 }
 
 pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 22] = [
