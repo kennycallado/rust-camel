@@ -12,6 +12,9 @@ use crate::traits::VectorStore;
 use crate::types::{VectorHit, VectorItem};
 
 /// Configuration for connecting to a Qdrant instance.
+///
+/// `url` must point to the **gRPC** port (default: `http://localhost:6334`).
+/// The REST port (6333) is NOT supported — qdrant-client uses gRPC transport.
 #[derive(Debug, Clone)]
 pub struct QdrantConfig {
     pub url: String,

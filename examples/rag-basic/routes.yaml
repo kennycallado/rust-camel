@@ -5,7 +5,7 @@ routes:
       - set_body:
           value: "rust-camel is a Rust integration framework with AI support"
       - to: "embedding:create?base_url=http://localhost:11434&model=embeddinggemma"
-      - to: "vector:upsert?url=http://localhost:6333&collection=docs"
+      - to: "vector:upsert?url=http://localhost:6334&collection=docs"
       - log:
           message: "Ingested sample document"
 
@@ -15,7 +15,7 @@ routes:
       - set_body:
           value: "What is rust-camel?"
       - to: "embedding:create?base_url=http://localhost:11434&model=embeddinggemma"
-      - to: "vector:search?url=http://localhost:6333&collection=docs&top_k=3"
+      - to: "vector:search?url=http://localhost:6334&collection=docs&top_k=3"
       - ai_extract:
           model: "llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b"
           schema: '{"type":"object","properties":{"answer":{"type":"string"}}}'
