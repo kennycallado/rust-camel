@@ -14,6 +14,7 @@ camel-api.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-reqwest = { workspace = true, features = ["json"] }
 tokio = { workspace = true }
 qdrant-client = { workspace = true }
+ollama-rs = { version = "0.3.4", default-features = false, features = ["rustls"] }
+async-openai = { version = "0.38.0", features = ["chat-completion", "embedding"] }
