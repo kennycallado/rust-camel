@@ -1,0 +1,12 @@
+routes:
+  - id: "ticket-classifier"
+    from: "timer:tick?period=5000&repeatCount=1"
+    steps:
+      - set_body:
+          constant: "I can't log into my account, my billing is wrong"
+      - ai_classify:
+          model: "llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b"
+          labels: ["billing", "technical", "legal", "spam"]
+          output_header: "category"
+      - log:
+          message: "Ticket classified"

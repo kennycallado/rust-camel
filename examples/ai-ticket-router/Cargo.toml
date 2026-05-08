@@ -1,0 +1,15 @@
+[package]
+name = "ai-ticket-router"
+description = "AI-powered ticket classification example for rust-camel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-core.workspace = true
+camel-dsl.workspace = true
+camel-component-llm.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber.workspace = true
