@@ -45,6 +45,7 @@ impl Component for LlmComponent {
             base_url,
             model,
             api_key,
+            use_ollama_api: false,
         }));
 
         Ok(Box::new(LlmEndpoint {

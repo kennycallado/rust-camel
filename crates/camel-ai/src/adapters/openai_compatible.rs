@@ -12,6 +12,9 @@ pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
+    /// Use Ollama-native `/api/chat` instead of `/v1/chat/completions`.
+    /// Enables `think: false` support for reasoning models (qwen3, etc).
+    pub use_ollama_api: bool,
 }
 
 pub struct OpenAiCompatible {
@@ -51,6 +54,38 @@ struct OaiChatRequest<'a> {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     think: Option<bool>,
+}
+
+// ── Ollama-native wire types (/api/chat) ─────────────────────────────────────
+
+#[derive(Serialize)]
+struct OllamaChatRequest<'a> {
+    model: &'a str,
+    messages: &'a [OaiMessage],
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
+}
+
+#[derive(Serialize)]
+struct OllamaOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_predict: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct OllamaChatResponse {
+    message: OllamaMessage,
+}
+
+#[derive(Deserialize)]
+struct OllamaMessage {
+    #[serde(default)]
+    content: String,
 }
 
 #[derive(Serialize)]
@@ -117,6 +152,42 @@ impl ChatModel for OpenAiCompatible {
             })
             .collect();
 
+        if self.config.use_ollama_api {
+            // Ollama-native /api/chat — supports think:false correctly
+            let options = if req.temperature.is_some() || req.max_tokens.is_some() {
+                Some(OllamaOptions {
+                    temperature: req.temperature,
+                    num_predict: req.max_tokens,
+                })
+            } else {
+                None
+            };
+            let body = OllamaChatRequest {
+                model: &self.config.model,
+                messages: &messages,
+                stream: false,
+                think: req.think,
+                options,
+            };
+            let resp = self
+                .authenticated_post(format!("{}/api/chat", self.config.base_url))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| CamelError::RouteError(format!("HTTP error: {e}")))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(CamelError::RouteError(format!("Ollama API error {status}: {body}")));
+            }
+            let parsed: OllamaChatResponse = resp
+                .json()
+                .await
+                .map_err(|e| CamelError::RouteError(format!("Ollama JSON parse: {e}")))?;
+            return Ok(ChatResponse { content: parsed.message.content, usage: None });
+        }
+
+        // OpenAI-compatible /v1/chat/completions
         let body = OaiChatRequest {
             model: &self.config.model,
             messages: &messages,
@@ -202,6 +273,7 @@ mod tests {
             base_url: "http://localhost:11434".into(),
             model: "qwen3.5:4b".into(),
             api_key: None,
+            use_ollama_api: false,
         };
         let adapter = OpenAiCompatible::new(cfg);
         assert_eq!(adapter.config.model, "qwen3.5:4b");
@@ -213,6 +285,7 @@ mod tests {
             base_url: "http://localhost:11434".into(),
             model: "qwen3.5:4b".into(),
             api_key: None,
+            use_ollama_api: false,
         };
         let adapter = OpenAiCompatible::new(cfg);
         assert_eq!(adapter.config.base_url, "http://localhost:11434");

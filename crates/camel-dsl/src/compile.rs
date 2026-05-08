@@ -758,9 +758,13 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
 fn resolve_chat_model(model_uri: &str) -> Result<Arc<dyn camel_ai::ChatModel>, CamelError> {
     use camel_ai::{OpenAiCompatible, OpenAiCompatibleConfig};
 
-    let (scheme, _) = model_uri.split_once(':').unwrap_or(("llm", model_uri));
+    let (scheme, rest) = model_uri.split_once(':').unwrap_or(("llm", model_uri));
     tracing::debug!(scheme, "resolve_chat_model: scheme portion (full registry routing deferred to Phase 2)");
-    let (_, query) = model_uri.split_once('?').unwrap_or((model_uri, ""));
+    // model_uri format: "llm:ollama?..." or "llm:openai?..." or "llm:..."
+    // detect ollama variant from second segment
+    let (variant, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let use_ollama_api = variant.trim_start_matches('/') == "ollama";
+    let _ = scheme; // used for debug above
     let params: std::collections::HashMap<String, String> = query
         .split('&')
         .filter_map(|pair| {
@@ -784,6 +788,7 @@ fn resolve_chat_model(model_uri: &str) -> Result<Arc<dyn camel_ai::ChatModel>, C
         base_url,
         model: model_name,
         api_key: params.get("api_key").cloned(),
+        use_ollama_api,
     })))
 }
 
