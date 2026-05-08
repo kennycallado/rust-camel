@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use camel_api::CamelError;
 use ollama_rs::{
+    Ollama,
     generation::{
         chat::request::ChatMessageRequest,
         embeddings::request::{EmbeddingsInput, GenerateEmbeddingsRequest},
         parameters::ThinkType,
     },
     models::ModelOptions,
-    Ollama,
 };
 
 use crate::traits::{ChatModel, EmbeddingModel};
@@ -80,17 +80,14 @@ impl ChatModel for OllamaAdapter {
                 ChatRole::System => {
                     ollama_rs::generation::chat::ChatMessage::system(m.content.clone())
                 }
-                ChatRole::User => {
-                    ollama_rs::generation::chat::ChatMessage::user(m.content.clone())
-                }
+                ChatRole::User => ollama_rs::generation::chat::ChatMessage::user(m.content.clone()),
                 ChatRole::Assistant => {
                     ollama_rs::generation::chat::ChatMessage::assistant(m.content.clone())
                 }
             })
             .collect();
 
-        let mut chat_req =
-            ChatMessageRequest::new(self.config.model.clone(), messages);
+        let mut chat_req = ChatMessageRequest::new(self.config.model.clone(), messages);
 
         // Apply think flag
         if let Some(think) = req.think {
@@ -109,7 +106,8 @@ impl ChatModel for OllamaAdapter {
             chat_req = chat_req.options(opts);
         }
 
-        let response = self.client
+        let response = self
+            .client
             .send_chat_messages(chat_req)
             .await
             .map_err(|e| CamelError::RouteError(e.to_string()))?;
@@ -136,7 +134,8 @@ impl EmbeddingModel for OllamaAdapter {
                 self.config.model.clone(),
                 EmbeddingsInput::Single(texts.into_iter().next().unwrap()),
             );
-            let resp = self.client
+            let resp = self
+                .client
                 .generate_embeddings(req)
                 .await
                 .map_err(|e| CamelError::RouteError(e.to_string()))?;
@@ -148,7 +147,8 @@ impl EmbeddingModel for OllamaAdapter {
             self.config.model.clone(),
             EmbeddingsInput::Multiple(texts),
         );
-        let resp = self.client
+        let resp = self
+            .client
             .generate_embeddings(req)
             .await
             .map_err(|e| CamelError::RouteError(e.to_string()))?;

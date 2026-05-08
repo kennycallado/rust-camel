@@ -175,9 +175,8 @@ fn qdrant_value_to_json(v: qdrant_client::qdrant::Value) -> serde_json::Value {
         None | Some(Kind::NullValue(_)) => serde_json::Value::Null,
         Some(Kind::BoolValue(b)) => serde_json::Value::Bool(b),
         Some(Kind::IntegerValue(i)) => serde_json::Value::Number(i.into()),
-        Some(Kind::DoubleValue(f)) => {
-            serde_json::Number::from_f64(f).map_or(serde_json::Value::Null, serde_json::Value::Number)
-        }
+        Some(Kind::DoubleValue(f)) => serde_json::Number::from_f64(f)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
         Some(Kind::StringValue(s)) => serde_json::Value::String(s),
         Some(Kind::ListValue(l)) => {
             serde_json::Value::Array(l.values.into_iter().map(qdrant_value_to_json).collect())

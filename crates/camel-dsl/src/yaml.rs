@@ -13,9 +13,8 @@ use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, AiClassifyStepDef, AiExtractStepDef, BeanStepDef,
     BodyTypeDef, ChoiceStepDef, DataFormatDef, DeclarativeCircuitBreaker, DeclarativeConcurrency,
-    DeclarativeErrorHandler,
-    DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep,
-    DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
+    DeclarativeErrorHandler, DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
+    DeclarativeStep, DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
     LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
     MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
     SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef,
@@ -1782,7 +1781,10 @@ routes:
           output_header: "category"
 "#;
         let routes = parse_yaml_to_declarative(yaml).unwrap();
-        assert!(matches!(&routes[0].steps[0], DeclarativeStep::AiClassify(_)));
+        assert!(matches!(
+            &routes[0].steps[0],
+            DeclarativeStep::AiClassify(_)
+        ));
     }
 
     #[test]

@@ -33,10 +33,7 @@ mod tests {
     }
 
     impl ComponentRegistrar for TestRegistrar {
-        fn register_component_dyn(
-            &mut self,
-            component: Arc<dyn camel_component_api::Component>,
-        ) {
+        fn register_component_dyn(&mut self, component: Arc<dyn camel_component_api::Component>) {
             self.schemes.push(component.scheme().to_string());
         }
     }

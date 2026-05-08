@@ -7,12 +7,15 @@ use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 use crate::endpoint::EmbeddingEndpoint;
 
 pub fn parse_query(query: &str) -> HashMap<String, String> {
-    query.split('&').filter_map(|pair| {
-        let mut parts = pair.splitn(2, '=');
-        let k = parts.next()?.to_string();
-        let v = parts.next().unwrap_or("").to_string();
-        if k.is_empty() { None } else { Some((k, v)) }
-    }).collect()
+    query
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            let k = parts.next()?.to_string();
+            let v = parts.next().unwrap_or("").to_string();
+            if k.is_empty() { None } else { Some((k, v)) }
+        })
+        .collect()
 }
 
 #[derive(Default)]

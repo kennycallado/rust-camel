@@ -41,7 +41,11 @@ mod tests {
     fn llm_bundle_from_toml_valid() {
         let value: toml::Value = toml::from_str("").expect("valid toml");
         let result = LlmBundle::from_toml(value);
-        assert!(result.is_ok(), "valid LLM toml must parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "valid LLM toml must parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]
