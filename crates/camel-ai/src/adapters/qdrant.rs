@@ -25,6 +25,7 @@ pub struct QdrantStore {
 }
 
 impl QdrantStore {
+    /// M4 note: panics on client build failure. Phase 2: change to Result.
     pub fn new(config: QdrantConfig) -> Self {
         let client = Qdrant::from_url(&config.url)
             .build()
@@ -40,13 +41,24 @@ impl QdrantStore {
             .map_err(|e| CamelError::RouteError(format!("Qdrant error: {e}")))?;
 
         if !exists {
-            self.client
+            match self
+                .client
                 .create_collection(
                     CreateCollectionBuilder::new(&self.config.collection)
                         .vectors_config(VectorParamsBuilder::new(vector_size, Distance::Cosine)),
                 )
                 .await
-                .map_err(|e| CamelError::RouteError(format!("Qdrant create collection: {e}")))?;
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    let msg = e.to_string().to_lowercase();
+                    if !msg.contains("already exists") {
+                        return Err(CamelError::RouteError(format!(
+                            "Qdrant create collection: {e}"
+                        )));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -110,7 +122,7 @@ impl VectorStore for QdrantStore {
                         Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(s)) => Some(s),
                         None => None,
                     })
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| "unknown".to_string()),
                 score: hit.score,
                 payload: qdrant_payload_to_json(hit.payload),
             })
@@ -214,6 +226,24 @@ mod tests {
             Some(qdrant_client::qdrant::value::Kind::IntegerValue(i)) => assert_eq!(i, 42),
             _ => panic!("expected IntegerValue"),
         }
+    }
+
+    #[test]
+    fn json_to_qdrant_null() {
+        let qv = json_to_qdrant(&serde_json::Value::Null);
+        assert!(matches!(
+            qv.kind,
+            Some(qdrant_client::qdrant::value::Kind::NullValue(_))
+        ));
+    }
+
+    #[test]
+    fn json_to_qdrant_bool() {
+        let qv = json_to_qdrant(&serde_json::Value::Bool(true));
+        assert!(matches!(
+            qv.kind,
+            Some(qdrant_client::qdrant::value::Kind::BoolValue(true))
+        ));
     }
 
     #[test]
