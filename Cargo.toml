@@ -26,6 +26,7 @@ members = [
     "crates/components/camel-direct",
     "crates/components/camel-mock",
     "crates/components/camel-http",
+    "crates/components/camel-embedding",
     "crates/components/camel-ws",
     "crates/components/camel-redis",
     "crates/components/camel-kafka",
@@ -121,6 +122,7 @@ members = [
     "crates/dataformats/camel-dataformat-protobuf",
     "crates/components/camel-component-wasm",
     "crates/components/camel-component-grpc",
+    "crates/components/camel-llm",
     "examples/wasm-bean-example",
 ]
 exclude = ["examples/wasm-bean-example/guest"]
@@ -167,6 +169,7 @@ camel-component-file = { path = "crates/components/camel-file", version = "=0.8.
 camel-component-direct = { path = "crates/components/camel-direct", version = "=0.8.2" }
 camel-component-mock = { path = "crates/components/camel-mock", version = "=0.8.2" }
 camel-component-http = { path = "crates/components/camel-http", version = "=0.8.2" }
+camel-component-embedding = { path = "crates/components/camel-embedding", version = "=0.8.2" }
 camel-component-ws = { path = "crates/components/camel-ws", version = "=0.8.2" }
 camel-component-redis = { path = "crates/components/camel-redis", version = "=0.8.2" }
 camel-component-kafka = { path = "crates/components/camel-kafka", version = "=0.8.2" }
@@ -193,9 +196,10 @@ camel-config = { path = "crates/camel-config", version = "=0.8.2" }
 camel-platform-kubernetes = { path = "crates/platforms/camel-platform-kubernetes", version = "=0.8.2" }
 camel-proto-compiler = { path = "crates/services/camel-proto-compiler", version = "=0.8.2" }
 camel-dataformat-protobuf = { path = "crates/dataformats/camel-dataformat-protobuf", version = "=0.8.2" }
- camel-component-grpc = { path = "crates/components/camel-component-grpc", version = "=0.8.2" }
-  camel-wit = { path = "crates/camel-wit", version = "=0.8.2" }
-  camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.8.2" }
+camel-component-grpc = { path = "crates/components/camel-component-grpc", version = "=0.8.2" }
+camel-component-llm = { path = "crates/components/camel-llm", version = "=0.8.2" }
+   camel-wit = { path = "crates/camel-wit", version = "=0.8.2" }
+   camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.8.2" }
 
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14" }
