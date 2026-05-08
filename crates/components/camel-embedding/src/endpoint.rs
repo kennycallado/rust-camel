@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use camel_ai::{EmbeddingModel, HEADER_CAMEL_AI_EMBEDDING};
-use camel_component_api::{BoxProcessor, CamelError, Consumer, Endpoint, Exchange, ProducerContext};
+use camel_component_api::{
+    BoxProcessor, CamelError, Consumer, Endpoint, Exchange, ProducerContext,
+};
 use tower::Service;
 
 pub struct EmbeddingEndpoint {

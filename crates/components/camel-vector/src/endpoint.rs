@@ -3,8 +3,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use camel_ai::{VectorItem, VectorStore, HEADER_CAMEL_AI_EMBEDDING};
-use camel_component_api::{Body, BoxProcessor, CamelError, Consumer, Endpoint, Exchange, ProducerContext};
+use camel_ai::{HEADER_CAMEL_AI_EMBEDDING, VectorItem, VectorStore};
+use camel_component_api::{
+    Body, BoxProcessor, CamelError, Consumer, Endpoint, Exchange, ProducerContext,
+};
 use tower::Service;
 
 pub struct VectorEndpoint {

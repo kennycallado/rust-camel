@@ -756,11 +756,14 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
 }
 
 fn resolve_chat_model(model_uri: &str) -> Result<Arc<dyn camel_ai::ChatModel>, CamelError> {
-    use camel_ai::{OpenAiAdapter, OllamaAdapter};
-    use camel_ai::{OpenAiConfig, OllamaConfig};
+    use camel_ai::{OllamaAdapter, OpenAiAdapter};
+    use camel_ai::{OllamaConfig, OpenAiConfig};
 
     let (scheme, rest) = model_uri.split_once(':').unwrap_or(("llm", model_uri));
-    tracing::debug!(scheme, "resolve_chat_model: scheme portion (full registry routing deferred to Phase 2)");
+    tracing::debug!(
+        scheme,
+        "resolve_chat_model: scheme portion (full registry routing deferred to Phase 2)"
+    );
     // model_uri format: "llm:ollama?..." or "llm:openai?..." or "llm:..."
     // detect ollama variant from second segment
     let (variant, query) = rest.split_once('?').unwrap_or((rest, ""));
@@ -791,7 +794,9 @@ fn resolve_chat_model(model_uri: &str) -> Result<Arc<dyn camel_ai::ChatModel>, C
             model: model_name,
         })))
     } else {
-        let api_key = params.get("api_key").cloned()
+        let api_key = params
+            .get("api_key")
+            .cloned()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok());
         let base_url = if base_url == "http://localhost:11434" {
             None

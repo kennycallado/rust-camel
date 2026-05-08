@@ -63,10 +63,10 @@ impl Service<Exchange> for AiClassifyService {
                     category
                 });
 
-            exchange.input.headers.insert(
-                output_header,
-                serde_json::Value::String(matched),
-            );
+            exchange
+                .input
+                .headers
+                .insert(output_header, serde_json::Value::String(matched));
             Ok(exchange)
         })
     }
@@ -109,7 +109,7 @@ impl Service<Exchange> for AiExtractService {
                     "Extract structured data from following text according to this JSON schema:\n\
                      {schema}\n\
                      Respond with ONLY valid JSON matching schema, nothing else.\n\nText: {body_str}"
-                )
+                ),
             };
 
             let req = ChatRequest {
@@ -123,8 +123,10 @@ impl Service<Exchange> for AiExtractService {
             };
 
             let resp = model.complete(req).await?;
-            let json_val: serde_json::Value = serde_json::from_str(resp.content.trim())
-                .map_err(|e| CamelError::RouteError(format!("AI extract: invalid JSON response: {e}")))?;
+            let json_val: serde_json::Value =
+                serde_json::from_str(resp.content.trim()).map_err(|e| {
+                    CamelError::RouteError(format!("AI extract: invalid JSON response: {e}"))
+                })?;
 
             exchange.input.headers.insert(output_header, json_val);
             Ok(exchange)

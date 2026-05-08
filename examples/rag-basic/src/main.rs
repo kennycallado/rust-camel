@@ -1,16 +1,14 @@
-use camel_core::CamelError;
 use camel_component_embedding::EmbeddingComponent;
 use camel_component_llm::LlmComponent;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_component_vector::VectorComponent;
 use camel_core::CamelContext;
+use camel_core::CamelError;
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     let yaml = include_str!("../routes.yaml");
 

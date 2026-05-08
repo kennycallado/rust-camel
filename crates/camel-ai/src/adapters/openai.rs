@@ -116,7 +116,9 @@ impl EmbeddingModel for OpenAiAdapter {
             .model(&self.config.model)
             .input(async_openai::types::embeddings::EmbeddingInput::StringArray(texts))
             .build()
-            .map_err(|e| CamelError::RouteError(format!("OpenAI embedding request build error: {e}")))?;
+            .map_err(|e| {
+                CamelError::RouteError(format!("OpenAI embedding request build error: {e}"))
+            })?;
 
         let mut response = self
             .client()
@@ -128,9 +130,10 @@ impl EmbeddingModel for OpenAiAdapter {
         response.data.sort_by_key(|d| d.index);
         for (i, d) in response.data.iter().enumerate() {
             if d.index as usize != i {
-                return Err(CamelError::RouteError(
-                    format!("embedding response has non-contiguous indices at position {i}: got {}", d.index)
-                ));
+                return Err(CamelError::RouteError(format!(
+                    "embedding response has non-contiguous indices at position {i}: got {}",
+                    d.index
+                )));
             }
         }
         Ok(response.data.into_iter().map(|d| d.embedding).collect())

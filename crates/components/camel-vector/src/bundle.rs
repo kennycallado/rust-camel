@@ -33,10 +33,7 @@ mod tests {
     }
 
     impl ComponentRegistrar for TestRegistrar {
-        fn register_component_dyn(
-            &mut self,
-            component: Arc<dyn camel_component_api::Component>,
-        ) {
+        fn register_component_dyn(&mut self, component: Arc<dyn camel_component_api::Component>) {
             self.schemes.push(component.scheme().to_string());
         }
     }
@@ -55,8 +52,7 @@ mod tests {
 
     #[test]
     fn vector_bundle_registers_expected_scheme() {
-        let bundle =
-            VectorBundle::from_toml(toml::Value::Table(toml::map::Map::new())).unwrap();
+        let bundle = VectorBundle::from_toml(toml::Value::Table(toml::map::Map::new())).unwrap();
         let mut registrar = TestRegistrar { schemes: vec![] };
 
         bundle.register_all(&mut registrar);

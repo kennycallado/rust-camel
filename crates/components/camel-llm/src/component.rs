@@ -53,10 +53,7 @@ impl Component for LlmComponent {
         });
 
         let adapter: Arc<dyn ChatModel> = if is_ollama {
-            Arc::new(OllamaAdapter::new(OllamaConfig {
-                base_url,
-                model,
-            }))
+            Arc::new(OllamaAdapter::new(OllamaConfig { base_url, model }))
         } else {
             Arc::new(OpenAiAdapter::new(OpenAiConfig {
                 api_key: api_key.or_else(|| std::env::var("OPENAI_API_KEY").ok()),
