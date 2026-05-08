@@ -758,6 +758,8 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
 fn resolve_chat_model(model_uri: &str) -> Result<Arc<dyn camel_ai::ChatModel>, CamelError> {
     use camel_ai::{OpenAiCompatible, OpenAiCompatibleConfig};
 
+    let (scheme, _) = model_uri.split_once(':').unwrap_or(("llm", model_uri));
+    tracing::debug!(scheme, "resolve_chat_model: scheme portion (full registry routing deferred to Phase 2)");
     let (_, query) = model_uri.split_once('?').unwrap_or((model_uri, ""));
     let params: std::collections::HashMap<String, String> = query
         .split('&')
