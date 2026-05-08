@@ -335,8 +335,7 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
                 let mut table = tx
                     .open_table(EVENTS_TABLE)
                     .map_err(|e| CamelError::Io(format!("redb open events: {e}")))?;
-                let mut next_seq = Self::next_seq(&table)?;
-                for event in events {
+                for (next_seq, event) in (Self::next_seq(&table)?..).zip(events) {
                     let entry = JournalEntry {
                         seq: next_seq,
                         timestamp_ms: now_ms,
@@ -347,7 +346,6 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
                     table
                         .insert(&next_seq, bytes.as_slice())
                         .map_err(|e| CamelError::Io(format!("redb insert: {e}")))?;
-                    next_seq += 1;
                 }
             }
             tx.commit()

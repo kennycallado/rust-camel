@@ -25,16 +25,15 @@ pub fn validate_xml(input: &str) -> Result<(), CamelError> {
                 }
                 depth += 1;
             }
-            Ok(Event::Empty(_)) => {
-                if depth == 0 {
-                    root_count += 1;
-                    if root_count > 1 {
-                        return Err(CamelError::TypeConversionFailed(
-                            "multiple root elements found".into(),
-                        ));
-                    }
+            Ok(Event::Empty(_)) if depth == 0 => {
+                root_count += 1;
+                if root_count > 1 {
+                    return Err(CamelError::TypeConversionFailed(
+                        "multiple root elements found".into(),
+                    ));
                 }
             }
+            Ok(Event::Empty(_)) => {}
             Ok(Event::End(_)) => {
                 depth = depth.saturating_sub(1);
             }
