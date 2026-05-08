@@ -126,6 +126,7 @@ members = [
     "crates/components/camel-vector",
     "examples/wasm-bean-example",
     "examples/ai-ticket-router",
+    "examples/rag-basic",
 ]
 exclude = ["examples/wasm-bean-example/guest"]
 

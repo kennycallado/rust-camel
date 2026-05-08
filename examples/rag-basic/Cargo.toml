@@ -1,0 +1,16 @@
+[package]
+name = "rag-basic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-core.workspace = true
+camel-dsl.workspace = true
+camel-component-llm.workspace = true
+camel-component-embedding.workspace = true
+camel-component-vector.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber.workspace = true
