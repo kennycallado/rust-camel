@@ -776,9 +776,10 @@ version = "0.8.2"
 dependencies = [
  "async-trait",
  "camel-api",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -6427,6 +6428,8 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
