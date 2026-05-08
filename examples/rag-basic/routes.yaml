@@ -10,7 +10,7 @@ routes:
           message: "Ingested sample document"
 
   - id: "rag-query"
-    from: "timer:tick?period=65000&repeatCount=1"
+    from: "timer:tick?period=75000&repeatCount=1"
     steps:
       - set_body:
           value: "What is rust-camel?"
