@@ -57,7 +57,10 @@ impl Service<Exchange> for AiClassifyService {
                 .iter()
                 .find(|l| l.to_lowercase() == category)
                 .cloned()
-                .unwrap_or(category);
+                .unwrap_or_else(|| {
+                    tracing::warn!(category = %category, "ai_classify: LLM returned unknown category, using raw value");
+                    category
+                });
 
             exchange.input.headers.insert(
                 output_header,
