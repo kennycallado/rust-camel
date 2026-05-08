@@ -44,6 +44,7 @@ impl OpenAiCompatible {
 struct OaiChatRequest<'a> {
     model: &'a str,
     messages: &'a [OaiMessage],
+    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +119,7 @@ impl ChatModel for OpenAiCompatible {
         let body = OaiChatRequest {
             model: &self.config.model,
             messages: &messages,
+            stream: false,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             think: req.think,
