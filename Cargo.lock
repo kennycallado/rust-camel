@@ -1316,6 +1316,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-component-vector"
+version = "0.8.2"
+dependencies = [
+ "async-trait",
+ "camel-ai",
+ "camel-component-api",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "camel-component-wasm"
 version = "0.8.2"
 dependencies = [
@@ -1469,6 +1484,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

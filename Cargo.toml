@@ -123,6 +123,7 @@ members = [
     "crates/components/camel-component-wasm",
     "crates/components/camel-component-grpc",
     "crates/components/camel-llm",
+    "crates/components/camel-vector",
     "examples/wasm-bean-example",
 ]
 exclude = ["examples/wasm-bean-example/guest"]
@@ -198,6 +199,7 @@ camel-proto-compiler = { path = "crates/services/camel-proto-compiler", version 
 camel-dataformat-protobuf = { path = "crates/dataformats/camel-dataformat-protobuf", version = "=0.8.2" }
 camel-component-grpc = { path = "crates/components/camel-component-grpc", version = "=0.8.2" }
 camel-component-llm = { path = "crates/components/camel-llm", version = "=0.8.2" }
+camel-component-vector = { path = "crates/components/camel-vector", version = "=0.8.2" }
    camel-wit = { path = "crates/camel-wit", version = "=0.8.2" }
    camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.8.2" }
 
