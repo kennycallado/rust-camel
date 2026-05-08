@@ -48,6 +48,8 @@ struct OaiChatRequest<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -118,6 +120,7 @@ impl ChatModel for OpenAiCompatible {
             messages: &messages,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
+            think: req.think,
         };
 
         let resp = self
