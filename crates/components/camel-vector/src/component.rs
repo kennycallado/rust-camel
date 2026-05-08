@@ -55,7 +55,7 @@ impl Component for VectorComponent {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(5);
 
-        let store = Arc::new(QdrantStore::new(QdrantConfig { url, collection }));
+        let store = Arc::new(QdrantStore::new(QdrantConfig { url, collection })?);
 
         Ok(Box::new(VectorEndpoint {
             uri: uri.to_string(),

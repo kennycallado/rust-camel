@@ -1,5 +1,7 @@
-pub mod openai_compatible;
+pub mod ollama;
+pub mod openai;
 pub mod qdrant;
 
-pub use openai_compatible::{OpenAiCompatible, OpenAiCompatibleConfig};
+pub use ollama::{OllamaAdapter, OllamaConfig};
+pub use openai::{OpenAiAdapter, OpenAiConfig};
 pub use qdrant::{QdrantConfig, QdrantStore};

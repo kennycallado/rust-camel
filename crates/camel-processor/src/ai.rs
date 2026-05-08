@@ -103,13 +103,14 @@ impl Service<Exchange> for AiExtractService {
                 .ok_or_else(|| CamelError::TypeConversionFailed("body is not text".into()))?
                 .to_string();
 
-            let prompt = custom_prompt.unwrap_or_else(|| {
-                format!(
+            let prompt = match custom_prompt {
+                Some(p) => format!("{p}\n\n{body_str}"),
+                None => format!(
                     "Extract structured data from following text according to this JSON schema:\n\
                      {schema}\n\
                      Respond with ONLY valid JSON matching schema, nothing else.\n\nText: {body_str}"
                 )
-            });
+            };
 
             let req = ChatRequest {
                 messages: vec![ChatMessage {

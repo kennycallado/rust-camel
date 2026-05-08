@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use camel_ai::{OpenAiCompatible, OpenAiCompatibleConfig};
+use camel_ai::{OpenAiAdapter, OpenAiConfig};
 use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 
 use crate::endpoint::EmbeddingEndpoint;
@@ -31,17 +31,20 @@ impl Component for EmbeddingComponent {
         let (_, query) = uri.split_once('?').unwrap_or((uri, ""));
         let params = parse_query(query);
 
-        let adapter = Arc::new(OpenAiCompatible::new(OpenAiCompatibleConfig {
-            base_url: params
-                .get("base_url")
-                .cloned()
-                .unwrap_or_else(|| "http://localhost:11434".into()),
+        let api_key = params.get("api_key").cloned();
+
+        let adapter = Arc::new(OpenAiAdapter::new(OpenAiConfig {
+            api_key: api_key.or_else(|| std::env::var("OPENAI_API_KEY").ok()),
+            base_url: Some(
+                params
+                    .get("base_url")
+                    .cloned()
+                    .unwrap_or_else(|| "http://localhost:11434".into()),
+            ),
             model: params
                 .get("model")
                 .cloned()
                 .unwrap_or_else(|| "embeddinggemma".into()),
-            api_key: params.get("api_key").cloned(),
-            use_ollama_api: false,
         }));
 
         Ok(Box::new(EmbeddingEndpoint {

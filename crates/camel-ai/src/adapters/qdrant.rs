@@ -25,12 +25,11 @@ pub struct QdrantStore {
 }
 
 impl QdrantStore {
-    /// M4 note: panics on client build failure. Phase 2: change to Result.
-    pub fn new(config: QdrantConfig) -> Self {
+    pub fn new(config: QdrantConfig) -> Result<Self, CamelError> {
         let client = Qdrant::from_url(&config.url)
             .build()
-            .expect("failed to build Qdrant client");
-        Self { config, client }
+            .map_err(|e| CamelError::RouteError(format!("Qdrant client build failed: {e}")))?;
+        Ok(Self { config, client })
     }
 
     async fn ensure_collection(&self, vector_size: u64) -> Result<(), CamelError> {
