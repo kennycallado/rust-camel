@@ -1060,6 +1060,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-component-embedding"
+version = "0.8.2"
+dependencies = [
+ "async-trait",
+ "camel-ai",
+ "camel-component-api",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "camel-component-file"
 version = "0.8.2"
 dependencies = [
@@ -1178,6 +1193,22 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
+name = "camel-component-llm"
+version = "0.8.2"
+dependencies = [
+ "async-trait",
+ "camel-ai",
+ "camel-component-api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tower 0.5.3",
  "tracing",
@@ -1422,6 +1453,7 @@ dependencies = [
 name = "camel-dsl"
 version = "0.8.2"
 dependencies = [
+ "camel-ai",
  "camel-api",
  "camel-component-api",
  "camel-core",
@@ -1609,6 +1641,7 @@ version = "0.8.2"
 dependencies = [
  "async-trait",
  "bytes",
+ "camel-ai",
  "camel-api",
  "camel-language-api",
  "camel-support",

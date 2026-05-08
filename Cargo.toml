@@ -27,6 +27,7 @@ members = [
     "crates/components/camel-direct",
     "crates/components/camel-mock",
     "crates/components/camel-http",
+    "crates/components/camel-embedding",
     "crates/components/camel-ws",
     "crates/components/camel-redis",
     "crates/components/camel-kafka",
@@ -126,6 +127,7 @@ members = [
     "crates/components/camel-opensearch",
     "crates/components/camel-component-wasm",
     "crates/components/camel-component-grpc",
+    "crates/components/camel-llm",
     "examples/wasm-bean-example",
 ]
 exclude = ["examples/wasm-bean-example/guest"]
@@ -203,7 +205,8 @@ camel-dataformat-protobuf = { path = "crates/dataformats/camel-dataformat-protob
   camel-component-opensearch = { path = "crates/components/camel-opensearch", version = "=0.9.0" }
   camel-wit = { path = "crates/camel-wit", version = "=0.9.0" }
   camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.9.0" }
-
+camel-component-llm = { path = "crates/components/camel-llm", version = "=0.9.0" }
+camel-component-embedding = { path = "crates/components/camel-embedding", version = "=0.9.0" }
 
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14" }
