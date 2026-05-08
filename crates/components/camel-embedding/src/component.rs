@@ -41,6 +41,7 @@ impl Component for EmbeddingComponent {
                 .cloned()
                 .unwrap_or_else(|| "embeddinggemma".into()),
             api_key: params.get("api_key").cloned(),
+            use_ollama_api: false,
         }));
 
         Ok(Box::new(EmbeddingEndpoint {
