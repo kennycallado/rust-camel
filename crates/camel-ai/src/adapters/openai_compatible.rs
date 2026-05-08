@@ -28,6 +28,14 @@ impl OpenAiCompatible {
             .expect("failed to build reqwest client");
         Self { config, client }
     }
+
+    fn authenticated_post(&self, url: impl Into<String>) -> reqwest::RequestBuilder {
+        let mut req = self.client.post(url.into());
+        if let Some(key) = &self.config.api_key {
+            req = req.bearer_auth(key);
+        }
+        req
+    }
 }
 
 // ── OpenAI wire types ────────────────────────────────────────────────────────
@@ -112,26 +120,23 @@ impl ChatModel for OpenAiCompatible {
             max_tokens: req.max_tokens,
         };
 
-        let mut request = self
-            .client
-            .post(format!("{}/v1/chat/completions", self.config.base_url))
-            .json(&body);
-
-        if let Some(key) = &self.config.api_key {
-            request = request.bearer_auth(key);
-        }
-
-        let resp: OaiChatResponse = request
+        let resp = self
+            .authenticated_post(format!("{}/v1/chat/completions", self.config.base_url))
+            .json(&body)
             .send()
             .await
-            .map_err(|e| CamelError::RouteError(format!("HTTP error: {e}")))?
-            .error_for_status()
-            .map_err(|e| CamelError::RouteError(format!("API error: {e}")))?
+            .map_err(|e| CamelError::RouteError(format!("HTTP error: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CamelError::RouteError(format!("API error {status}: {body}")));
+        }
+        let parsed: OaiChatResponse = resp
             .json()
             .await
             .map_err(|e| CamelError::RouteError(format!("JSON parse: {e}")))?;
 
-        let content = resp
+        let content = parsed
             .choices
             .into_iter()
             .next()
@@ -140,7 +145,7 @@ impl ChatModel for OpenAiCompatible {
 
         Ok(ChatResponse {
             content,
-            usage: resp.usage.map(|u| TokenUsage {
+            usage: parsed.usage.map(|u| TokenUsage {
                 prompt_tokens: u.prompt_tokens,
                 completion_tokens: u.completion_tokens,
                 total_tokens: u.total_tokens,
@@ -159,26 +164,23 @@ impl EmbeddingModel for OpenAiCompatible {
             input: &texts,
         };
 
-        let mut request = self
-            .client
-            .post(format!("{}/v1/embeddings", self.config.base_url))
-            .json(&body);
-
-        if let Some(key) = &self.config.api_key {
-            request = request.bearer_auth(key);
-        }
-
-        let resp: OaiEmbeddingResponse = request
+        let resp = self
+            .authenticated_post(format!("{}/v1/embeddings", self.config.base_url))
+            .json(&body)
             .send()
             .await
-            .map_err(|e| CamelError::RouteError(format!("HTTP error: {e}")))?
-            .error_for_status()
-            .map_err(|e| CamelError::RouteError(format!("API error: {e}")))?
+            .map_err(|e| CamelError::RouteError(format!("HTTP error: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CamelError::RouteError(format!("API error {status}: {body}")));
+        }
+        let parsed: OaiEmbeddingResponse = resp
             .json()
             .await
             .map_err(|e| CamelError::RouteError(format!("JSON parse: {e}")))?;
 
-        Ok(resp.data.into_iter().map(|d| d.embedding).collect())
+        Ok(parsed.data.into_iter().map(|d| d.embedding).collect())
     }
 }
 
