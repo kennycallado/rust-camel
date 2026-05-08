@@ -28,7 +28,14 @@ impl OpenAiAdapter {
             cfg = cfg.with_api_key(key);
         }
         if let Some(ref base) = self.config.base_url {
-            cfg = cfg.with_api_base(base);
+            // async-openai appends paths directly to api_base (no /v1 added automatically).
+            // Ensure the base ends with /v1 so endpoints like /v1/embeddings resolve correctly.
+            let normalized = if base.ends_with("/v1") {
+                base.clone()
+            } else {
+                format!("{}/v1", base.trim_end_matches('/'))
+            };
+            cfg = cfg.with_api_base(normalized);
         }
         async_openai::Client::with_config(cfg)
     }
