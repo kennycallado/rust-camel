@@ -41,6 +41,22 @@ impl Endpoint for VectorEndpoint {
     }
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+fn read_embedding(exchange: &Exchange) -> Result<Vec<f32>, CamelError> {
+    serde_json::from_value(
+        exchange
+            .input
+            .headers
+            .get(HEADER_CAMEL_AI_EMBEDDING)
+            .ok_or_else(|| {
+                CamelError::RouteError(format!("missing header '{HEADER_CAMEL_AI_EMBEDDING}'"))
+            })?
+            .clone(),
+    )
+    .map_err(|e| CamelError::RouteError(format!("parse embedding: {e}")))
+}
+
 // ── Upsert Producer ───────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -60,20 +76,7 @@ impl Service<Exchange> for VectorUpsertProducer {
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let store = Arc::clone(&self.store);
         Box::pin(async move {
-            // Read embedding header as serde_json::Value → Vec<f32>
-            let vector: Vec<f32> = serde_json::from_value(
-                exchange
-                    .input
-                    .headers
-                    .get(HEADER_CAMEL_AI_EMBEDDING)
-                    .ok_or_else(|| {
-                        CamelError::RouteError(format!(
-                            "missing header '{HEADER_CAMEL_AI_EMBEDDING}'"
-                        ))
-                    })?
-                    .clone(),
-            )
-            .map_err(|e| CamelError::RouteError(format!("parse embedding: {e}")))?;
+            let vector = read_embedding(&exchange)?;
 
             let id = exchange.correlation_id.clone();
             let text = exchange.input.body.as_text().unwrap_or("").to_string();
@@ -112,20 +115,7 @@ impl Service<Exchange> for VectorSearchProducer {
         let store = Arc::clone(&self.store);
         let top_k = self.top_k;
         Box::pin(async move {
-            // Read embedding from header as serde_json::Value → Vec<f32>
-            let query: Vec<f32> = serde_json::from_value(
-                exchange
-                    .input
-                    .headers
-                    .get(HEADER_CAMEL_AI_EMBEDDING)
-                    .ok_or_else(|| {
-                        CamelError::RouteError(format!(
-                            "missing header '{HEADER_CAMEL_AI_EMBEDDING}'"
-                        ))
-                    })?
-                    .clone(),
-            )
-            .map_err(|e| CamelError::RouteError(format!("parse embedding: {e}")))?;
+            let query = read_embedding(&exchange)?;
 
             let hits = store.search(query, top_k).await?;
 
