@@ -265,6 +265,7 @@ toml = "1"
 schemars = "1"
 ts-rs = "12"
 
+
 # WASM dependencies
 wit-bindgen = "0.57"
 wasmtime = { version = "44", features = ["component-model"] }
