@@ -1,10 +1,10 @@
 services:
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
+  # ollama:  # uncomment if not running Ollama on host
+  #   image: ollama/ollama:latest
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -15,5 +15,5 @@ services:
       - qdrant_data:/qdrant/storage
 
 volumes:
-  ollama_data:
+  # ollama_data:
   qdrant_data:
