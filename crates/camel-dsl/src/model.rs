@@ -324,6 +324,21 @@ pub struct StreamCacheStepDef {
     pub threshold: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiClassifyStepDef {
+    pub model_uri: String,
+    pub labels: Vec<String>,
+    pub output_header: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiExtractStepDef {
+    pub model_uri: String,
+    pub schema: String,
+    pub output_header: String,
+    pub prompt: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclarativeStep {
     To(ToStepDef),
@@ -350,6 +365,8 @@ pub enum DeclarativeStep {
     Marshal(DataFormatDef),
     Unmarshal(DataFormatDef),
     Bean(BeanStepDef),
+    AiClassify(AiClassifyStepDef),
+    AiExtract(AiExtractStepDef),
     Delay(DelayStepDef),
     Loop(LoopStepDef),
 }

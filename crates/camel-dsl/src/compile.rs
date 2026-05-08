@@ -1,6 +1,5 @@
+use std::sync::Arc;
 use std::time::Duration;
-
-const DEFAULT_FUNCTION_TIMEOUT_MS: u64 = 5000;
 
 use camel_api::aggregator::{AggregationStrategy as AggregatorStrategy, AggregatorConfig};
 use camel_api::body_converter::BodyType;
@@ -24,16 +23,17 @@ use camel_component_api::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{
     ConvertBodyTo, LogLevel, MarshalService, StopService, StreamCacheService, UnmarshalService,
+    ai::{AiClassifyService, AiExtractService},
     builtin_data_format,
 };
 
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
-    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
-    DeclarativeStep, DelayStepDef, DynamicRouterStepDef, FunctionStepDef, LanguageExpressionDef,
-    LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
-    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
-    ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef,
+    AggregateStepDef, AggregateStrategyDef, AiClassifyStepDef, AiExtractStepDef, BeanStepDef,
+    BodyTypeDef, ChoiceStepDef, DataFormatDef, DeclarativeCircuitBreaker, DeclarativeConcurrency,
+    DeclarativeErrorHandler, DeclarativeRoute, DeclarativeStep, DelayStepDef, DynamicRouterStepDef,
+    LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef,
+    LoopStepDef, MulticastAggregationDef, MulticastStepDef, RecipientListStepDef,
+    RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef,
     SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
     ValueSourceDef, WireTapStepDef,
 };
@@ -104,206 +104,6 @@ pub fn compile_declarative_route_to_canonical(
     };
     spec.validate_contract()?;
     Ok(spec)
-}
-
-pub fn compile_canonical_route(
-    spec: CanonicalRouteSpec,
-    stream_cache_threshold: usize,
-) -> Result<RouteDefinition, CamelError> {
-    spec.validate_contract()?;
-    let steps = compile_canonical_steps(spec.steps, stream_cache_threshold)?;
-
-    let mut definition = RouteDefinition::new(spec.from, steps)
-        .with_route_id(spec.route_id)
-        .with_auto_startup(true);
-
-    if let Some(cb) = spec.circuit_breaker {
-        definition = definition.with_circuit_breaker(
-            CircuitBreakerConfig::new()
-                .failure_threshold(cb.failure_threshold)
-                .open_duration(Duration::from_millis(cb.open_duration_ms)),
-        );
-    }
-
-    Ok(definition)
-}
-
-pub fn compile_canonical_step(
-    step: CanonicalStepSpec,
-    stream_cache_threshold: usize,
-) -> Result<BuilderStep, CamelError> {
-    match step {
-        CanonicalStepSpec::To { uri } => Ok(BuilderStep::To(uri)),
-        CanonicalStepSpec::Log { message } => Ok(BuilderStep::Log {
-            level: LogLevel::Info,
-            message,
-        }),
-        CanonicalStepSpec::WireTap { uri } => Ok(BuilderStep::WireTap { uri }),
-        CanonicalStepSpec::Stop => Ok(BuilderStep::Stop),
-        CanonicalStepSpec::Script { expression } => {
-            Ok(BuilderStep::DeclarativeScript { expression })
-        }
-        CanonicalStepSpec::Delay {
-            delay_ms,
-            dynamic_header,
-        } => Ok(BuilderStep::Delay {
-            config: DelayConfig {
-                delay_ms,
-                dynamic_header,
-            },
-        }),
-        CanonicalStepSpec::Filter { predicate, steps } => Ok(BuilderStep::DeclarativeFilter {
-            predicate,
-            steps: compile_canonical_steps(steps, stream_cache_threshold)?,
-        }),
-        CanonicalStepSpec::Choice { whens, otherwise } => {
-            let mut compiled_whens = Vec::with_capacity(whens.len());
-            for when in whens {
-                compiled_whens.push(DeclarativeWhenStep {
-                    predicate: when.predicate,
-                    steps: compile_canonical_steps(when.steps, stream_cache_threshold)?,
-                });
-            }
-            let compiled_otherwise = match otherwise {
-                Some(steps) => Some(compile_canonical_steps(steps, stream_cache_threshold)?),
-                None => None,
-            };
-            Ok(BuilderStep::DeclarativeChoice {
-                whens: compiled_whens,
-                otherwise: compiled_otherwise,
-            })
-        }
-        CanonicalStepSpec::Split {
-            expression,
-            aggregation,
-            parallel,
-            parallel_limit,
-            stop_on_exception,
-            steps,
-        } => compile_canonical_split(
-            expression,
-            aggregation,
-            parallel,
-            parallel_limit,
-            stop_on_exception,
-            steps,
-            stream_cache_threshold,
-        ),
-        CanonicalStepSpec::Aggregate(config) => compile_canonical_aggregate(config),
-    }
-}
-
-fn compile_canonical_steps(
-    steps: Vec<CanonicalStepSpec>,
-    stream_cache_threshold: usize,
-) -> Result<Vec<BuilderStep>, CamelError> {
-    steps
-        .into_iter()
-        .map(|step| compile_canonical_step(step, stream_cache_threshold))
-        .collect()
-}
-
-fn compile_canonical_split(
-    expression: CanonicalSplitExpressionSpec,
-    aggregation: CanonicalSplitAggregationSpec,
-    parallel: bool,
-    parallel_limit: Option<usize>,
-    stop_on_exception: bool,
-    steps: Vec<CanonicalStepSpec>,
-    stream_cache_threshold: usize,
-) -> Result<BuilderStep, CamelError> {
-    let aggregation = match aggregation {
-        CanonicalSplitAggregationSpec::LastWins => SplitAggregation::LastWins,
-        CanonicalSplitAggregationSpec::CollectAll => SplitAggregation::CollectAll,
-        CanonicalSplitAggregationSpec::Original => SplitAggregation::Original,
-    };
-    let compiled_steps = compile_canonical_steps(steps, stream_cache_threshold)?;
-    match expression {
-        CanonicalSplitExpressionSpec::BodyLines => {
-            let config = SplitterConfig::new(split_body_lines())
-                .aggregation(aggregation)
-                .parallel(parallel)
-                .stop_on_exception(stop_on_exception);
-            let config = if let Some(limit) = parallel_limit {
-                config.parallel_limit(limit)
-            } else {
-                config
-            };
-            Ok(BuilderStep::Split {
-                config,
-                steps: compiled_steps,
-            })
-        }
-        CanonicalSplitExpressionSpec::BodyJsonArray => {
-            let config = SplitterConfig::new(split_body_json_array())
-                .aggregation(aggregation)
-                .parallel(parallel)
-                .stop_on_exception(stop_on_exception);
-            let config = if let Some(limit) = parallel_limit {
-                config.parallel_limit(limit)
-            } else {
-                config
-            };
-            Ok(BuilderStep::Split {
-                config,
-                steps: compiled_steps,
-            })
-        }
-        CanonicalSplitExpressionSpec::Language(expression) => Ok(BuilderStep::DeclarativeSplit {
-            expression,
-            aggregation,
-            parallel,
-            parallel_limit,
-            stop_on_exception,
-            steps: compiled_steps,
-        }),
-    }
-}
-
-fn compile_canonical_aggregate(config: CanonicalAggregateSpec) -> Result<BuilderStep, CamelError> {
-    let completion_size = config.completion_size.unwrap_or(1);
-    let mut builder = AggregatorConfig::correlate_by(&config.header);
-
-    match (config.completion_timeout_ms, completion_size) {
-        (Some(timeout_ms), size) if timeout_ms > 0 && size > 1 => {
-            builder = builder.complete_on_size_or_timeout(size, Duration::from_millis(timeout_ms));
-        }
-        (Some(timeout_ms), _) if timeout_ms > 0 => {
-            builder = builder.complete_on_timeout(Duration::from_millis(timeout_ms));
-        }
-        (_, size) => {
-            builder = builder.complete_when_size(size);
-        }
-    }
-
-    builder = match config.strategy {
-        CanonicalAggregateStrategySpec::CollectAll => {
-            builder.strategy(AggregatorStrategy::CollectAll)
-        }
-    };
-    if let Some(max_buckets) = config.max_buckets {
-        builder = builder.max_buckets(max_buckets);
-    }
-    if let Some(ttl_ms) = config.bucket_ttl_ms {
-        builder = builder.bucket_ttl(Duration::from_millis(ttl_ms));
-    }
-    if let Some(force) = config.force_completion_on_stop {
-        builder = builder.force_completion_on_stop(force);
-    }
-    if let Some(discard) = config.discard_on_timeout {
-        builder = builder.discard_on_timeout(discard);
-    }
-
-    let mut agg_config = builder.build();
-    if let Some(expr) = config.correlation_key {
-        use camel_api::aggregator::CorrelationStrategy;
-        agg_config.correlation = CorrelationStrategy::Expression {
-            expr,
-            language: "simple".to_string(),
-        };
-    }
-
-    Ok(BuilderStep::Aggregate { config: agg_config })
 }
 
 fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerConfig, CamelError> {
@@ -476,9 +276,6 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::SetHeader(SetHeaderStepDef { key, value }) => {
             compile_set_header_step(key, value)
         }
-        DeclarativeStep::SetProperty(SetPropertyStepDef { key, value }) => {
-            compile_set_property_step(key, value)
-        }
         DeclarativeStep::SetBody(SetBodyStepDef { value }) => compile_set_body_step(value),
         DeclarativeStep::Script(ScriptStepDef { expression }) => {
             Ok(BuilderStep::DeclarativeScript { expression })
@@ -494,22 +291,6 @@ fn compile_declarative_step_with_threshold(
         ))),
         DeclarativeStep::Filter(def) => {
             compile_filter_step(def.predicate, def.steps, stream_cache_threshold)
-        }
-        DeclarativeStep::Function(FunctionStepDef {
-            runtime,
-            source,
-            timeout_ms,
-        }) => {
-            let timeout_ms = timeout_ms.unwrap_or(DEFAULT_FUNCTION_TIMEOUT_MS);
-            let definition = camel_api::FunctionDefinition {
-                id: camel_api::FunctionId::compute(&runtime, &source, timeout_ms),
-                runtime,
-                source,
-                timeout_ms,
-                route_id: None,
-                step_index: None,
-            };
-            Ok(BuilderStep::DeclarativeFunction { definition })
         }
         DeclarativeStep::Choice(ChoiceStepDef { whens, otherwise }) => {
             let mut compiled_whens = Vec::with_capacity(whens.len());
@@ -655,6 +436,36 @@ fn compile_declarative_step_with_threshold(
         }
         DeclarativeStep::Bean(BeanStepDef { name, method }) => {
             Ok(BuilderStep::Bean { name, method })
+        }
+        DeclarativeStep::AiClassify(AiClassifyStepDef {
+            model_uri,
+            labels,
+            output_header,
+        }) => {
+            let model = resolve_chat_model(&model_uri)?;
+            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
+                AiClassifyService {
+                    model,
+                    labels,
+                    output_header,
+                },
+            )))
+        }
+        DeclarativeStep::AiExtract(AiExtractStepDef {
+            model_uri,
+            schema,
+            output_header,
+            prompt,
+        }) => {
+            let model = resolve_chat_model(&model_uri)?;
+            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
+                AiExtractService {
+                    model,
+                    schema,
+                    output_header,
+                    prompt,
+                },
+            )))
         }
         DeclarativeStep::Marshal(DataFormatDef { format }) => {
             let df = if format.strip_prefix("protobuf:").is_some() {
@@ -824,6 +635,9 @@ fn compile_declarative_step_to_canonical(
                 "canonical v1 does not support step `loop`: {detail}"
             )))
         }
+        DeclarativeStep::AiClassify(_) | DeclarativeStep::AiExtract(_) => {
+            Err(CamelError::RouteError("ai steps are not canonical".into()))
+        }
         other => {
             let step_name = declarative_step_name(&other);
             let detail = canonical_contract_rejection_reason(step_name)
@@ -878,17 +692,19 @@ fn compile_aggregate_step_to_canonical(
         AggregateStrategyDef::CollectAll => CanonicalAggregateStrategySpec::CollectAll,
     };
 
-    Ok(CanonicalStepSpec::Aggregate(CanonicalAggregateSpec {
-        header: def.header,
-        completion_size: def.completion_size,
-        completion_timeout_ms: def.completion_timeout_ms,
-        correlation_key: def.correlation_key,
-        force_completion_on_stop: def.force_completion_on_stop,
-        discard_on_timeout: def.discard_on_timeout,
-        strategy,
-        max_buckets: def.max_buckets,
-        bucket_ttl_ms: def.bucket_ttl_ms,
-    }))
+    Ok(CanonicalStepSpec::Aggregate {
+        config: CanonicalAggregateSpec {
+            header: def.header,
+            completion_size: def.completion_size,
+            completion_timeout_ms: def.completion_timeout_ms,
+            correlation_key: def.correlation_key,
+            force_completion_on_stop: def.force_completion_on_stop,
+            discard_on_timeout: def.discard_on_timeout,
+            strategy,
+            max_buckets: def.max_buckets,
+            bucket_ttl_ms: def.bucket_ttl_ms,
+        },
+    })
 }
 
 fn compile_log_message(message: ValueSourceDef) -> Result<String, CamelError> {
@@ -913,7 +729,6 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::To(_) => "to",
         DeclarativeStep::Log(_) => "log",
         DeclarativeStep::SetHeader(_) => "set_header",
-        DeclarativeStep::SetProperty(_) => "set_property",
         DeclarativeStep::SetBody(_) => "set_body",
         DeclarativeStep::Filter(_) => "filter",
         DeclarativeStep::Choice(_) => "choice",
@@ -935,8 +750,39 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Unmarshal(_) => "unmarshal",
         DeclarativeStep::Delay(_) => "delay",
         DeclarativeStep::Loop(_) => "loop",
-        DeclarativeStep::Function(_) => "function",
+        DeclarativeStep::AiClassify(_) => "ai_classify",
+        DeclarativeStep::AiExtract(_) => "ai_extract",
     }
+}
+
+fn resolve_chat_model(model_uri: &str) -> Result<Arc<dyn camel_ai::ChatModel>, CamelError> {
+    use camel_ai::{OpenAiCompatible, OpenAiCompatibleConfig};
+
+    let (_, query) = model_uri.split_once('?').unwrap_or((model_uri, ""));
+    let params: std::collections::HashMap<String, String> = query
+        .split('&')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            let k = parts.next()?.to_string();
+            let v = parts.next().unwrap_or("").to_string();
+            if k.is_empty() { None } else { Some((k, v)) }
+        })
+        .collect();
+
+    let base_url = params
+        .get("base_url")
+        .cloned()
+        .unwrap_or_else(|| "http://localhost:11434".into());
+    let model_name = params
+        .get("model")
+        .cloned()
+        .unwrap_or_else(|| "qwen3.5:4b".into());
+
+    Ok(Arc::new(OpenAiCompatible::new(OpenAiCompatibleConfig {
+        base_url,
+        model: model_name,
+        api_key: params.get("api_key").cloned(),
+    })))
 }
 
 fn compile_split_step(
@@ -1078,16 +924,6 @@ fn compile_filter_step(
 
 fn compile_set_header_step(key: String, value: ValueSourceDef) -> Result<BuilderStep, CamelError> {
     Ok(BuilderStep::DeclarativeSetHeader { key, value })
-}
-
-fn compile_set_property_step(
-    key: String,
-    value: ValueSourceDef,
-) -> Result<BuilderStep, CamelError> {
-    Ok(BuilderStep::DeclarativeSetProperty {
-        key,
-        value_source: value,
-    })
 }
 
 fn compile_set_body_step(value: ValueSourceDef) -> Result<BuilderStep, CamelError> {
@@ -1751,31 +1587,6 @@ mod tests {
             })),
             "loop"
         );
-        assert_eq!(
-            declarative_step_name(&DeclarativeStep::Function(FunctionStepDef {
-                runtime: "deno".into(),
-                source: "return {};".into(),
-                timeout_ms: None,
-            })),
-            "function"
-        );
-    }
-
-    #[test]
-    fn compile_function_step_default_timeout() {
-        let step = DeclarativeStep::Function(FunctionStepDef {
-            runtime: "deno".into(),
-            source: "return {};".into(),
-            timeout_ms: None,
-        });
-        let compiled = compile_declarative_step(step).unwrap();
-        match compiled {
-            BuilderStep::DeclarativeFunction { definition } => {
-                assert_eq!(definition.timeout_ms, 5000);
-                assert_eq!(definition.runtime, "deno");
-            }
-            other => panic!("expected DeclarativeFunction, got {other:?}"),
-        }
     }
 
     #[test]
@@ -2334,151 +2145,5 @@ mod tests {
             level: LogLevelDef::Warn,
         });
         assert!(compile_declarative_step(step).is_ok());
-    }
-
-    #[test]
-    fn compile_canonical_step_covers_all_variants() {
-        use camel_api::LanguageExpressionDef;
-        use camel_api::runtime::{
-            CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalSplitAggregationSpec,
-            CanonicalSplitExpressionSpec, CanonicalStepSpec, CanonicalWhenSpec,
-        };
-
-        let threshold = camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD;
-
-        let step = compile_canonical_step(
-            CanonicalStepSpec::To {
-                uri: "log:out".into(),
-            },
-            threshold,
-        )
-        .unwrap();
-        assert!(matches!(step, BuilderStep::To(_)));
-
-        let step = compile_canonical_step(
-            CanonicalStepSpec::Log {
-                message: "hello".into(),
-            },
-            threshold,
-        )
-        .unwrap();
-        assert!(matches!(step, BuilderStep::Log { .. }));
-
-        let step = compile_canonical_step(
-            CanonicalStepSpec::WireTap {
-                uri: "direct:audit".into(),
-            },
-            threshold,
-        )
-        .unwrap();
-        assert!(matches!(step, BuilderStep::WireTap { .. }));
-
-        let step = compile_canonical_step(CanonicalStepSpec::Stop, threshold).unwrap();
-        assert!(matches!(step, BuilderStep::Stop));
-
-        let step = compile_canonical_step(
-            CanonicalStepSpec::Script {
-                expression: LanguageExpressionDef {
-                    language: "simple".into(),
-                    source: "${body}".into(),
-                },
-            },
-            threshold,
-        )
-        .unwrap();
-        assert!(matches!(step, BuilderStep::DeclarativeScript { .. }));
-
-        let step = compile_canonical_step(
-            CanonicalStepSpec::Delay {
-                delay_ms: 500,
-                dynamic_header: None,
-            },
-            threshold,
-        )
-        .unwrap();
-        assert!(matches!(step, BuilderStep::Delay { .. }));
-
-        let step = compile_canonical_step(
-            CanonicalStepSpec::Filter {
-                predicate: LanguageExpressionDef {
-                    language: "simple".into(),
-                    source: "${body} != null".into(),
-                },
-                steps: vec![CanonicalStepSpec::Stop],
-            },
-            threshold,
-        )
-        .unwrap();
-        assert!(matches!(step, BuilderStep::DeclarativeFilter { .. }));
-
-        let step = compile_canonical_step(
-            CanonicalStepSpec::Choice {
-                whens: vec![CanonicalWhenSpec {
-                    predicate: LanguageExpressionDef {
-                        language: "simple".into(),
-                        source: "${body} == 1".into(),
-                    },
-                    steps: vec![CanonicalStepSpec::To {
-                        uri: "mock:a".into(),
-                    }],
-                }],
-                otherwise: Some(vec![CanonicalStepSpec::To {
-                    uri: "mock:b".into(),
-                }]),
-            },
-            threshold,
-        )
-        .unwrap();
-        assert!(matches!(step, BuilderStep::DeclarativeChoice { .. }));
-
-        let step = compile_canonical_step(
-            CanonicalStepSpec::Split {
-                expression: CanonicalSplitExpressionSpec::BodyLines,
-                aggregation: CanonicalSplitAggregationSpec::CollectAll,
-                parallel: false,
-                parallel_limit: None,
-                stop_on_exception: false,
-                steps: vec![CanonicalStepSpec::To {
-                    uri: "log:line".into(),
-                }],
-            },
-            threshold,
-        )
-        .unwrap();
-        assert!(matches!(step, BuilderStep::Split { .. }));
-
-        let step = compile_canonical_step(
-            CanonicalStepSpec::Split {
-                expression: CanonicalSplitExpressionSpec::Language(LanguageExpressionDef {
-                    language: "simple".into(),
-                    source: "${body.items}".into(),
-                }),
-                aggregation: CanonicalSplitAggregationSpec::Original,
-                parallel: false,
-                parallel_limit: None,
-                stop_on_exception: false,
-                steps: vec![CanonicalStepSpec::Stop],
-            },
-            threshold,
-        )
-        .unwrap();
-        assert!(matches!(step, BuilderStep::DeclarativeSplit { .. }));
-
-        let step = compile_canonical_step(
-            CanonicalStepSpec::Aggregate(CanonicalAggregateSpec {
-                header: "corr-id".into(),
-                completion_size: Some(5),
-                completion_timeout_ms: Some(1000),
-                correlation_key: Some("simple:${header.id}".into()),
-                force_completion_on_stop: Some(true),
-                discard_on_timeout: Some(false),
-                strategy: CanonicalAggregateStrategySpec::CollectAll,
-                max_buckets: Some(100),
-                bucket_ttl_ms: Some(60000),
-            }),
-            threshold,
-        )
-        .unwrap();
-        assert!(matches!(step, BuilderStep::Aggregate { .. }));
     }
 }

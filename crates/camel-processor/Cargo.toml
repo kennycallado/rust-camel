@@ -16,6 +16,7 @@ camel-api.workspace = true
 camel-language-api.workspace = true
 camel-util.workspace = true
 camel-support.workspace = true
+camel-ai.workspace = true
 async-trait.workspace = true
 futures = "0.3"
 serde_json.workspace = true
