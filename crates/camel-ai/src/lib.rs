@@ -1,6 +1,8 @@
+pub mod adapters;
 pub mod traits;
 pub mod types;
 
+pub use adapters::{OpenAiCompatible, OpenAiCompatibleConfig};
 pub use traits::{ChatModel, EmbeddingModel, VectorStore};
 pub use types::{
     ChatMessage, ChatRequest, ChatResponse, ChatRole, TokenUsage, VectorHit, VectorItem,
