@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "scripts/xtask",
     "crates/camel-api",
+    "crates/camel-ai",
     "crates/camel-bean",
     "crates/camel-bean-macros",
     "crates/camel-core",
@@ -144,6 +145,7 @@ categories = ["network-programming", "asynchronous", "development-tools"]
 # Exact pinning (=) ensures cargo publish verifies against the exact version
 # being released, not an older one already on crates.io.
 camel-api = { path = "crates/camel-api", version = "=0.8.2" }
+camel-ai = { path = "crates/camel-ai", version = "=0.8.2" }
 camel-bean = { path = "crates/camel-bean", version = "=0.8.2" }
 camel-bean-macros = { path = "crates/camel-bean-macros", version = "=0.8.2" }
 camel-cli = { path = "crates/camel-cli", version = "=0.8.2" }
