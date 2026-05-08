@@ -21,4 +21,5 @@ routes:
           schema: '{"type":"object","properties":{"answer":{"type":"string"}}}'
           output_header: "rag_result"
       - log:
-          message: "RAG answer extracted"
+          message:
+            simple: "RAG answer: ${header.rag_result}"
