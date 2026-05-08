@@ -14,6 +14,7 @@ pub struct LlmEndpoint {
     pub model: Arc<dyn ChatModel>,
     pub temperature: Option<f32>,
     pub system_prompt: Option<String>,
+    pub think: Option<bool>,
 }
 
 impl Endpoint for LlmEndpoint {
@@ -32,6 +33,7 @@ impl Endpoint for LlmEndpoint {
             model: Arc::clone(&self.model),
             temperature: self.temperature,
             system_prompt: self.system_prompt.clone(),
+            think: self.think,
         }))
     }
 }
@@ -41,6 +43,7 @@ struct LlmProducer {
     model: Arc<dyn ChatModel>,
     temperature: Option<f32>,
     system_prompt: Option<String>,
+    think: Option<bool>,
 }
 
 impl Service<Exchange> for LlmProducer {
@@ -56,6 +59,7 @@ impl Service<Exchange> for LlmProducer {
         let model = Arc::clone(&self.model);
         let temperature = self.temperature;
         let system_prompt = self.system_prompt.clone();
+        let think = self.think;
 
         Box::pin(async move {
             let body_str = exchange
@@ -81,6 +85,7 @@ impl Service<Exchange> for LlmProducer {
                 messages,
                 temperature,
                 max_tokens: None,
+                think,
             };
             let resp = model.complete(req).await?;
 

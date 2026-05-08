@@ -49,6 +49,7 @@ impl Service<Exchange> for AiClassifyService {
                 }],
                 temperature: Some(0.0),
                 max_tokens: Some(32),
+                think: Some(false),
             };
 
             let resp = model.complete(req).await?;
@@ -117,6 +118,7 @@ impl Service<Exchange> for AiExtractService {
                 }],
                 temperature: Some(0.0),
                 max_tokens: Some(512),
+                think: Some(false),
             };
 
             let resp = model.complete(req).await?;

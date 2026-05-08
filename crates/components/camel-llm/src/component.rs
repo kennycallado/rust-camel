@@ -35,6 +35,11 @@ impl Component for LlmComponent {
             .get("temperature")
             .and_then(|v| v.parse::<f32>().ok());
         let system_prompt = params.get("system_prompt").cloned();
+        let think = params.get("think").and_then(|v| match v.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        });
 
         let adapter = Arc::new(OpenAiCompatible::new(OpenAiCompatibleConfig {
             base_url,
@@ -47,6 +52,7 @@ impl Component for LlmComponent {
             model: adapter,
             temperature,
             system_prompt,
+            think,
         }))
     }
 }
