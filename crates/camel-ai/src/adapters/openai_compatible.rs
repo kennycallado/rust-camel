@@ -72,7 +72,8 @@ struct OaiChoice {
 
 #[derive(Deserialize)]
 struct OaiMessageContent {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -145,7 +146,7 @@ impl ChatModel for OpenAiCompatible {
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
+            .map(|c| c.message.content.unwrap_or_default())
             .unwrap_or_default();
 
         Ok(ChatResponse {
