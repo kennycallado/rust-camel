@@ -202,6 +202,7 @@ pub enum YamlStep {
 }
 
 #[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct FunctionStep {
     pub function: FunctionData,
 }
