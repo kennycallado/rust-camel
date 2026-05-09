@@ -66,6 +66,16 @@ impl BodyWire {
             BodyWire::Xml(s) => camel_api::Body::Xml(s.clone()),
         }
     }
+
+    pub fn to_patch_body(self) -> camel_api::function::PatchBody {
+        use camel_api::function::PatchBody;
+        match self {
+            BodyWire::Empty => PatchBody::Empty,
+            BodyWire::Text(s) => PatchBody::Text(s),
+            BodyWire::Json(v) => PatchBody::Json(v),
+            BodyWire::Bytes(_) | BodyWire::Xml(_) => PatchBody::Empty,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -99,12 +109,23 @@ pub struct InvokeResponse {
 // PatchWire
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct PatchWire {
     pub body: Option<BodyWire>,
     pub headers_set: Vec<(String, serde_json::Value)>,
     pub headers_removed: Vec<String>,
     pub properties_set: Vec<(String, serde_json::Value)>,
+}
+
+impl PatchWire {
+    pub fn to_exchange_patch(self) -> camel_api::function::ExchangePatch {
+        camel_api::function::ExchangePatch {
+            body: self.body.map(BodyWire::to_patch_body),
+            headers_set: self.headers_set,
+            headers_removed: self.headers_removed,
+            properties_set: self.properties_set,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
