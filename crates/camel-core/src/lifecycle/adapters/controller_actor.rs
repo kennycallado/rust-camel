@@ -287,11 +287,13 @@ impl RouteControllerHandle {
     ) -> Result<BoxProcessor, CamelError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(RouteControllerCommand::CompileRouteDefinitionWithGeneration {
-                definition,
-                generation,
-                reply: reply_tx,
-            })
+            .send(
+                RouteControllerCommand::CompileRouteDefinitionWithGeneration {
+                    definition,
+                    generation,
+                    reply: reply_tx,
+                },
+            )
             .await
             .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
         reply_rx
