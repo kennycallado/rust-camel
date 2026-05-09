@@ -75,6 +75,7 @@ pub struct CamelContext {
 pub struct RuntimeExecutionHandle {
     controller: RouteControllerHandle,
     runtime: Arc<RuntimeBus>,
+    function_invoker: Option<Arc<dyn FunctionInvoker>>,
 }
 
 impl RuntimeExecutionHandle {
@@ -207,6 +208,10 @@ impl RuntimeExecutionHandle {
             .in_flight_count(route_id)
             .await?
             .unwrap_or(0))
+    }
+
+    pub(crate) fn function_invoker(&self) -> Option<Arc<dyn FunctionInvoker>> {
+        self.function_invoker.clone()
     }
 
     #[cfg(test)]
@@ -426,6 +431,7 @@ impl CamelContext {
         RuntimeExecutionHandle {
             controller: self.route_controller.clone(),
             runtime: Arc::clone(&self.runtime),
+            function_invoker: self.function_invoker.clone(),
         }
     }
 
