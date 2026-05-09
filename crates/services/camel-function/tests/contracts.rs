@@ -126,6 +126,12 @@ fn lifecycle_impl_returns_some_for_function_invoker() {
         fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> {
             vec![]
         }
+        fn staged_refs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionId, Option<String>)> {
+            vec![]
+        }
+        fn staged_defs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionDefinition, Option<String>)> {
+            vec![]
+        }
     }
     #[async_trait]
     impl FunctionInvoker for InvokerService {
@@ -150,10 +156,24 @@ fn lifecycle_impl_returns_some_for_function_invoker() {
         ) -> Result<ExchangePatch, FunctionInvocationError> {
             Ok(ExchangePatch::default())
         }
-        async fn commit_reload(
+        async fn prepare_reload(
             &self,
             _diff: FunctionDiff,
-            _gen: u64,
+            _generation: u64,
+        ) -> Result<PrepareToken, FunctionInvocationError> {
+            Ok(PrepareToken::default())
+        }
+        async fn finalize_reload(
+            &self,
+            _diff: &FunctionDiff,
+            _generation: u64,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn rollback_reload(
+            &self,
+            _token: PrepareToken,
+            _generation: u64,
         ) -> Result<(), FunctionInvocationError> {
             Ok(())
         }
@@ -201,6 +221,12 @@ fn function_invoker_is_object_safe() {
         fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> {
             vec![]
         }
+        fn staged_refs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionId, Option<String>)> {
+            vec![]
+        }
+        fn staged_defs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionDefinition, Option<String>)> {
+            vec![]
+        }
     }
     #[async_trait]
     impl FunctionInvoker for MockInvoker {
@@ -225,10 +251,24 @@ fn function_invoker_is_object_safe() {
         ) -> Result<ExchangePatch, FunctionInvocationError> {
             Ok(ExchangePatch::default())
         }
-        async fn commit_reload(
+        async fn prepare_reload(
             &self,
             _diff: FunctionDiff,
-            _gen: u64,
+            _generation: u64,
+        ) -> Result<PrepareToken, FunctionInvocationError> {
+            Ok(PrepareToken::default())
+        }
+        async fn finalize_reload(
+            &self,
+            _diff: &FunctionDiff,
+            _generation: u64,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn rollback_reload(
+            &self,
+            _token: PrepareToken,
+            _generation: u64,
         ) -> Result<(), FunctionInvocationError> {
             Ok(())
         }

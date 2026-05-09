@@ -110,6 +110,34 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
             .map(|kv| kv.key().clone())
             .collect()
     }
+
+    fn staged_refs_for_route(&self, route_id: &str, generation: u64) -> Vec<(FunctionId, Option<String>)> {
+        let staging = self.staging.lock().expect("staging");
+        staging
+            .get(&generation)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|(_, rid)| rid.as_deref() == Some(route_id))
+                    .map(|(def, rid)| (def.id.clone(), rid.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn staged_defs_for_route(&self, route_id: &str, generation: u64) -> Vec<(FunctionDefinition, Option<String>)> {
+        let staging = self.staging.lock().expect("staging");
+        staging
+            .get(&generation)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|(_, rid)| rid.as_deref() == Some(route_id))
+                    .map(|(def, rid)| (def.clone(), rid.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait::async_trait]
@@ -231,18 +259,80 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             .map_err(|e| FunctionInvocationError::Transport(e.to_string()))
     }
 
-    async fn commit_reload(
+    async fn prepare_reload(
         &self,
         diff: FunctionDiff,
         generation: u64,
+    ) -> Result<PrepareToken, FunctionInvocationError> {
+        let current_gen = self.current_generation.load(Ordering::SeqCst);
+        if generation != current_gen {
+            self.discard_staging(generation);
+            return Err(FunctionInvocationError::Transport(
+                format!("stale generation: expected {}, got {}", current_gen, generation)
+            ));
+        }
+
+        {
+            let mut staging = self.staging.lock().expect("staging");
+            let before = staging.len();
+            staging.retain(|g, _| *g >= current_gen);
+            let purged = before - staging.len();
+            if purged > 0 {
+                tracing::info!(purged, "hot-reload: purged stale staging buffers");
+            }
+        }
+
+        let mut token = PrepareToken::default();
+        for (def, route_id) in &diff.added {
+            match self.register(def.clone(), route_id.as_deref()).await {
+                Ok(()) => {
+                    token.registered.push((def.clone(), route_id.clone()));
+                }
+                Err(e) => {
+                    for (reg_def, reg_rid) in &token.registered {
+                        if let Err(unreg_err) = self.unregister(&reg_def.id, reg_rid.as_deref()).await {
+                            tracing::warn!(
+                                function_id = %reg_def.id,
+                                error = %unreg_err,
+                                "hot-reload: failed to unregister during prepare rollback"
+                            );
+                        }
+                    }
+                    self.staging.lock().expect("staging").remove(&generation);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(token)
+    }
+
+    async fn finalize_reload(
+        &self,
+        diff: &FunctionDiff,
+        generation: u64,
     ) -> Result<(), FunctionInvocationError> {
+        for (id, route_id) in &diff.removed {
+            self.unregister(id, route_id.as_deref()).await?;
+        }
         self.staging.lock().expect("staging").remove(&generation);
-        for (def, route_id) in diff.added {
-            self.register(def, route_id.as_deref()).await?;
+        Ok(())
+    }
+
+    async fn rollback_reload(
+        &self,
+        token: PrepareToken,
+        generation: u64,
+    ) -> Result<(), FunctionInvocationError> {
+        for (def, route_id) in &token.registered {
+            if let Err(e) = self.unregister(&def.id, route_id.as_deref()).await {
+                tracing::warn!(
+                    function_id = %def.id,
+                    error = %e,
+                    "hot-reload: failed to unregister during rollback"
+                );
+            }
         }
-        for (id, route_id) in diff.removed {
-            self.unregister(&id, route_id.as_deref()).await?;
-        }
+        self.staging.lock().expect("staging").remove(&generation);
         Ok(())
     }
 
