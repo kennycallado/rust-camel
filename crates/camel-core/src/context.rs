@@ -285,10 +285,9 @@ impl CamelContext {
         }
         if let Some(invoker) = service.as_function_invoker() {
             self.function_invoker = Some(invoker.clone());
-            let controller = self.route_controller.clone();
-            tokio::spawn(async move {
-                let _ = controller.set_function_invoker(invoker).await;
-            });
+            self.route_controller
+                .try_set_function_invoker(invoker)
+                .expect("controller actor mailbox should accept function invoker");
         }
 
         self.services.push(Box::new(service));

@@ -457,6 +457,17 @@ impl RouteControllerHandle {
             .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))
     }
 
+    pub fn try_set_function_invoker(
+        &self,
+        invoker: Arc<dyn FunctionInvoker>,
+    ) -> Result<(), CamelError> {
+        self.tx
+            .try_send(RouteControllerCommand::SetFunctionInvoker { invoker })
+            .map_err(|err| {
+                CamelError::ProcessorError(format!("controller actor mailbox full: {err}"))
+            })
+    }
+
     pub async fn route_source_hash(&self, route_id: impl Into<String>) -> Option<u64> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx

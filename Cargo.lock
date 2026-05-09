@@ -1339,6 +1339,7 @@ dependencies = [
  "camel-component-mock",
  "camel-component-timer",
  "camel-endpoint",
+ "camel-function",
  "camel-language-api",
  "camel-language-js",
  "camel-language-jsonpath",
