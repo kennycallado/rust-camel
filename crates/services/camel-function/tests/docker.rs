@@ -3,6 +3,7 @@
 use camel_api::function::*;
 use camel_api::{Body, Exchange, Message};
 use camel_function::{ContainerProvider, PullPolicy, RunnerHandle};
+use std::collections::HashMap;
 use std::time::Duration;
 
 async fn build_runner_image() {
@@ -65,26 +66,20 @@ async fn wait_for_health(
 async fn assert_no_runner_containers() {
     let docker = bollard::Docker::connect_with_local_defaults().unwrap();
     let options = bollard::query_parameters::ListContainersOptions {
-        all: true,
+        filters: Some(HashMap::from([(
+            "label".to_string(),
+            vec!["camel.function.runner=true".to_string()],
+        )])),
         ..Default::default()
     };
     let containers = docker
         .list_containers(Some(options))
         .await
         .expect("list containers");
-    let runner_containers: Vec<_> = containers
-        .into_iter()
-        .filter(|c| {
-            c.labels
-                .as_ref()
-                .map(|l| l.get("camel.function.runner") == Some(&"true".to_string()))
-                .unwrap_or(false)
-        })
-        .collect();
     assert!(
-        runner_containers.is_empty(),
+        containers.is_empty(),
         "no containers with label camel.function.runner=true should remain, found {}",
-        runner_containers.len()
+        containers.len()
     );
 }
 
