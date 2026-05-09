@@ -704,6 +704,34 @@ routes = ["["]
         assert!(matches!(err, CamelError::Config(_)));
     }
 
+    #[test]
+    fn load_routes_with_explicit_json_pattern() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let json_file = dir.path().join("route.json");
+        std::fs::write(
+            &json_file,
+            r#"{"routes":[{"id":"config-json-route","from":"timer:tick","steps":[{"to":"log:info"}]}]}"#,
+        )
+        .unwrap();
+
+        let pattern = dir.path().join("*.json").to_string_lossy().to_string();
+        let mut cfg_file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            cfg_file,
+            r#"
+routes = ["{}"]
+"#,
+            pattern.replace('\\', "\\\\")
+        )
+        .unwrap();
+
+        let routes = CamelConfig::load_routes(cfg_file.path().to_str().unwrap()).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "config-json-route");
+    }
+
     #[tokio::test]
     async fn configure_context_with_noop_platform_succeeds() {
         let cfg = config::Config::builder()

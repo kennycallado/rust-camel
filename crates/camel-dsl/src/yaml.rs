@@ -96,7 +96,7 @@ pub fn parse_yaml_to_canonical(yaml: &str) -> Result<Vec<CanonicalRouteSpec>, Ca
         .collect()
 }
 
-fn yaml_route_to_declarative_route(route: YamlRoute) -> Result<DeclarativeRoute, CamelError> {
+pub(crate) fn yaml_route_to_declarative_route(route: YamlRoute) -> Result<DeclarativeRoute, CamelError> {
     if route.id.is_empty() {
         return Err(CamelError::RouteError(
             "route 'id' must not be empty".into(),
@@ -181,7 +181,7 @@ fn yaml_route_to_declarative_route(route: YamlRoute) -> Result<DeclarativeRoute,
     })
 }
 
-fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, CamelError> {
+pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, CamelError> {
     match step {
         YamlStep::To(ToStep { to }) => Ok(DeclarativeStep::To(ToStepDef::new(to))),
         YamlStep::WireTap(WireTapStep { wire_tap }) => {

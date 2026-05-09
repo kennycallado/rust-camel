@@ -30,7 +30,7 @@ Create a `Camel.toml` file in your project root:
 
 ```toml
 [default]
-routes = ["routes/*.yaml"]
+routes = ["routes/*.yaml"]    # Default examples use YAML; explicit .json globs are also supported
 watch = false
 log_level = "info"
 drain_timeout_ms = 10000  # Graceful drain timeout for hot-reload restart/remove (default: 10s)
@@ -123,7 +123,7 @@ allow_private_ips = true  # Allow internal services in dev
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `routes` | `[String]` |  | Glob patterns for route files |
+| `routes` | `[String]` |  | Glob patterns for route files (default examples use YAML; explicit `.json` globs also supported) |
 | `watch` | `bool` |  | Enable hot reload on file changes |
 | `runtime_journal_path` | `String?` |  | Optional durability flag: when set, enables local runtime journal replay |
 | `log_level` | `String` |  | Logging level (trace/debug/info/warn/error) |
@@ -394,7 +394,7 @@ camel-config = "*"
 ## Related Crates
 
 - **camel-core** - Core framework and context
-- **camel-dsl** - YAML route definitions and parsing
+- **camel-dsl** - YAML and JSON route definitions and parsing
 - **camel-runtime** - Route execution engine
 
 ## Documentation

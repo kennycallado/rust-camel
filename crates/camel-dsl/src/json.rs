@@ -1,0 +1,378 @@
+//! JSON route definition parser.
+//!
+//! Reuses the same AST types as the YAML parser ([`crate::yaml::YamlRoutes`],
+//! [`crate::yaml::YamlRoute`], [`crate::yaml::YamlStep`])
+//! since JSON is a subset of YAML's data model. The only difference is the deserializer.
+//!
+//! ## Stability note
+//!
+//! The type aliases [`JsonRoutes`], [`JsonRoute`], [`JsonStep`] are convenience wrappers
+//! around the YAML AST types. They are **not a stable SDK contract**. SDKs and external
+//! consumers should target [`CanonicalRouteSpec`] for forward compatibility.
+
+use std::path::Path;
+
+use camel_api::{CamelError, CanonicalRouteSpec};
+use camel_core::route::RouteDefinition;
+
+use crate::compile::{
+    compile_declarative_route, compile_declarative_route_to_canonical,
+    compile_declarative_route_with_stream_cache_threshold,
+};
+use crate::yaml::{yaml_route_to_declarative_route, YamlRoutes};
+
+/// Convenience alias — not a stable SDK contract. Target [`CanonicalRouteSpec`] instead.
+pub type JsonRoutes = crate::yaml::YamlRoutes;
+
+/// Convenience alias — not a stable SDK contract. Target [`CanonicalRouteSpec`] instead.
+pub type JsonRoute = crate::yaml::YamlRoute;
+
+/// Convenience alias — not a stable SDK contract. Target [`CanonicalRouteSpec`] instead.
+pub type JsonStep = crate::yaml::YamlStep;
+
+/// Parse a JSON string into declarative route models.
+pub fn parse_json_to_declarative(
+    json: &str,
+) -> Result<Vec<crate::model::DeclarativeRoute>, CamelError> {
+    let routes: YamlRoutes = serde_json::from_str(json)
+        .map_err(|e| CamelError::RouteError(format!("JSON parse error: {e}")))?;
+
+    routes
+        .routes
+        .into_iter()
+        .map(yaml_route_to_declarative_route)
+        .collect()
+}
+
+/// Parse a JSON string into compiled [`RouteDefinition`]s.
+pub fn parse_json(json: &str) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_json_to_declarative(json)?
+        .into_iter()
+        .map(compile_declarative_route)
+        .collect()
+}
+
+/// Parse a JSON string with a custom stream-cache threshold.
+pub fn parse_json_with_threshold(
+    json: &str,
+    stream_cache_threshold: usize,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_json_to_declarative(json)?
+        .into_iter()
+        .map(|route| {
+            compile_declarative_route_with_stream_cache_threshold(route, stream_cache_threshold)
+        })
+        .collect()
+}
+
+/// Parse a JSON string into canonical route specs.
+pub fn parse_json_to_canonical(
+    json: &str,
+) -> Result<Vec<CanonicalRouteSpec>, CamelError> {
+    parse_json_to_declarative(json)?
+        .into_iter()
+        .map(compile_declarative_route_to_canonical)
+        .collect()
+}
+
+/// Load a JSON route definition from a file.
+///
+/// Reads the file contents and parses them as JSON. No environment variable interpolation is performed.
+pub fn load_json_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| CamelError::Io(format!("Failed to read {}: {e}", path.display())))?;
+    parse_json(&content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::DeclarativeStep;
+
+    /// Basic route: parse JSON to declarative model.
+    #[test]
+    fn test_basic_route_to_declarative() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "test-route",
+                    "from": "timer:tick?period=1000",
+                    "steps": [
+                        {"set_header": {"key": "source", "value": "timer"}},
+                        {"to": "log:info"}
+                    ]
+                }
+            ]
+        }"#;
+        let routes = parse_json_to_declarative(json).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id, "test-route");
+        assert_eq!(routes[0].from, "timer:tick?period=1000");
+        assert_eq!(routes[0].steps.len(), 2);
+    }
+
+    /// Route metadata: auto_startup and startup_order round-trip correctly.
+    #[test]
+    fn test_route_metadata_auto_startup_and_startup_order() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "meta-route",
+                    "from": "direct:start",
+                    "auto_startup": false,
+                    "startup_order": 42
+                }
+            ]
+        }"#;
+        let routes = parse_json_to_declarative(json).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert!(!routes[0].auto_startup);
+        assert_eq!(routes[0].startup_order, 42);
+    }
+
+    /// Error handler with on_exceptions including handled_by.
+    #[test]
+    fn test_error_handler_with_handled_by() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "eh-route",
+                    "from": "direct:start",
+                    "error_handler": {
+                        "dead_letter_channel": "log:dlc",
+                        "on_exceptions": [
+                            {
+                                "kind": "Io",
+                                "retry": {
+                                    "max_attempts": 3,
+                                    "handled_by": "log:io"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }"#;
+        let routes = parse_json_to_declarative(json).unwrap();
+        let eh = routes[0]
+            .error_handler
+            .as_ref()
+            .expect("error handler should be present");
+        let clauses = eh
+            .on_exceptions
+            .as_ref()
+            .expect("on_exceptions should be present");
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].kind.as_deref(), Some("Io"));
+        let retry = clauses[0].retry.as_ref().expect("retry should be present");
+        assert_eq!(retry.max_attempts, 3);
+        assert_eq!(retry.handled_by.as_deref(), Some("log:io"));
+    }
+
+    /// Empty route id must be rejected.
+    #[test]
+    fn test_empty_id_fails() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "",
+                    "from": "timer:tick"
+                }
+            ]
+        }"#;
+        let result = parse_json_to_declarative(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("route 'id' must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Invalid JSON must produce an error containing "JSON".
+    #[test]
+    fn test_invalid_json_error_says_json() {
+        let json = "{ not valid json }}}";
+        let result = parse_json_to_declarative(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("JSON parse error:"),
+            "expected 'JSON parse error:' in error, got: {err}"
+        );
+    }
+
+    /// Compiled route via parse_json produces a RouteDefinition.
+    #[test]
+    fn test_compiled_route_via_parse_json() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "compiled-route",
+                    "from": "timer:tick",
+                    "steps": [
+                        {"to": "log:info"}
+                    ]
+                }
+            ]
+        }"#;
+        let defs = parse_json(json).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].route_id(), "compiled-route");
+        assert_eq!(defs[0].from_uri(), "timer:tick");
+    }
+
+    /// parse_json_with_threshold compiles routes with custom stream-cache threshold.
+    #[test]
+    fn test_threshold_parse() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "threshold-route",
+                    "from": "timer:tick",
+                    "steps": [
+                        {"stream_cache": true},
+                        {"to": "log:info"}
+                    ]
+                }
+            ]
+        }"#;
+        let defs = parse_json_with_threshold(json, 8192).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].route_id(), "threshold-route");
+    }
+
+    /// Canonical conversion via parse_json_to_canonical.
+    #[test]
+    fn test_canonical_conversion() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "canonical-v1",
+                    "from": "direct:start",
+                    "steps": [
+                        {"to": "mock:out"},
+                        {"log": {"message": "hello"}},
+                        {"stop": true}
+                    ]
+                }
+            ]
+        }"#;
+        let routes = parse_json_to_canonical(json).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id, "canonical-v1");
+        assert_eq!(routes[0].from, "direct:start");
+        assert_eq!(routes[0].version, 1);
+        assert_eq!(routes[0].steps.len(), 3);
+    }
+
+    /// The "loop" step JSON key works.
+    #[test]
+    fn test_loop_step_json_key() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "loop-route",
+                    "from": "direct:start",
+                    "steps": [
+                        {"loop": 3}
+                    ]
+                }
+            ]
+        }"#;
+        let routes = parse_json_to_declarative(json).unwrap();
+        assert_eq!(routes.len(), 1);
+        match &routes[0].steps[0] {
+            DeclarativeStep::Loop(def) => {
+                assert_eq!(def.count, Some(3));
+            }
+            other => panic!("expected Loop step, got {:?}", other),
+        }
+    }
+
+    /// Multiple routes in a single JSON document.
+    #[test]
+    fn test_multiple_routes() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "route-a",
+                    "from": "timer:tick",
+                    "steps": [{"to": "log:info"}]
+                },
+                {
+                    "id": "route-b",
+                    "from": "timer:tock",
+                    "auto_startup": false,
+                    "startup_order": 10
+                }
+            ]
+        }"#;
+        let defs = parse_json(json).unwrap();
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].route_id(), "route-a");
+        assert_eq!(defs[1].route_id(), "route-b");
+    }
+
+    /// Defaults: auto_startup=true, startup_order=1000 when omitted.
+    #[test]
+    fn test_defaults() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "default-route",
+                    "from": "timer:tick"
+                }
+            ]
+        }"#;
+        let defs = parse_json(json).unwrap();
+        assert!(defs[0].auto_startup());
+        assert_eq!(defs[0].startup_order(), 1000);
+    }
+
+    /// File loading via load_json_from_file.
+    #[test]
+    fn test_file_loading() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+
+        let json_content = r#"
+        {
+            "routes": [
+                {
+                    "id": "file-route",
+                    "from": "timer:tick",
+                    "steps": [{"to": "log:info"}]
+                }
+            ]
+        }"#;
+
+        file.write_all(json_content.as_bytes()).unwrap();
+
+        let defs = load_json_from_file(file.path()).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].route_id(), "file-route");
+    }
+
+    /// Missing file must return an error.
+    #[test]
+    fn test_missing_file_error() {
+        let result = load_json_from_file(Path::new("/nonexistent/path/routes.json"));
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("Failed to read"),
+            "expected file read error, got: {err}"
+        );
+    }
+}

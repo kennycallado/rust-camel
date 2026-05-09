@@ -15,7 +15,7 @@ camel <COMMAND>
 
 Commands:
   new      Scaffold a new Camel project
-  run      Start a Camel context from YAML route files with hot-reload
+  run      Start a Camel context from route files (YAML or JSON) with hot-reload
   journal  Inspect a runtime journal file
   help     Print help
 
@@ -77,18 +77,18 @@ camel run
 
 ## `camel run`
 
-Starts a Camel context and loads routes from YAML files. Hot-reload is **disabled
+Starts a Camel context and loads routes from YAML or JSON files. Hot-reload is **disabled
 by default** — enable it with `--watch` or via `Camel.toml`.
 
 ```bash
 camel run [OPTIONS]
 
 Options:
-  --routes <GLOB>   Glob pattern for route YAML files
-  --config <FILE>   Path to Camel.toml (default: Camel.toml)
-  --watch           Enable file-watcher hot-reload
-  --no-watch        Disable file-watcher hot-reload (overrides Camel.toml)
-  --health-port <PORT>  Override health server port (enables standalone health server)
+   --routes <GLOB>   Glob pattern for route files (default examples use YAML; explicit .json globs also supported)
+   --config <FILE>   Path to Camel.toml (default: Camel.toml)
+   --watch           Enable file-watcher hot-reload
+   --no-watch        Disable file-watcher hot-reload (overrides Camel.toml)
+   --health-port <PORT>  Override health server port (enables standalone health server)
 ```
 
 ### Quick start — no config file
@@ -187,7 +187,7 @@ See [camel-dsl](../crates/camel-dsl) for the full step reference.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `routes` | `[String]` | `[]` | Glob patterns for route YAML files |
+| `routes` | `[String]` | `[]` | Glob patterns for route files (default examples use YAML; explicit `.json` globs are also supported) |
 | `watch` | `bool` | `false` | Enable file-watcher hot-reload |
 | `runtime_journal_path` | `String?` | disabled | Optional flag to enable local runtime durability/replay |
 | `log_level` | `String` | `"INFO"` | Tracing log level |

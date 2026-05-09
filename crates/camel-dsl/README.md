@@ -1,11 +1,11 @@
 # camel-dsl
 
-> 
-> DSL support for rust-camel (YAML, etc)
+>
+> DSL support for rust-camel (YAML, JSON)
 
 ## Overview
 
-`camel-dsl` provides Domain Specific Language support for defining routes in rust-camel declaratively. Routes can be defined in YAML files and loaded at runtime, enabling external configuration without recompiling the application.
+`camel-dsl` provides Domain Specific Language support for defining routes in rust-camel declaratively. Routes can be defined in YAML or JSON files and loaded at runtime, enabling external configuration without recompiling the application.
 
  This crate is useful when you want to:
 - Externalize route configuration
@@ -14,7 +14,7 @@
 
 ## Features
 
-- **YAML route definitions**: Define routes using YAML syntax
+- **YAML and JSON route definitions**: Define routes using YAML or JSON syntax
 - **Declarative integration flows**: Use all available EIPs and DSL
 - **External configuration**: Load routes from files at runtime
 - **Language expressions**: Use `simple:` and `rhai:` syntax for dynamic values
@@ -126,7 +126,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-camel-dsl = "*"
+camel-dsl = "0.8"
 ```
 
 ## Quick Start
@@ -181,6 +181,72 @@ routes:
             - to: "log:filtered"
 ```
 
+## JSON Route Definitions
+
+JSON route definitions use the same shape as YAML — the only difference is the serialization format. This means all step types, route-level configuration, and language expressions work identically in both formats.
+
+### Example
+
+Create a JSON file `routes.json`:
+
+```json
+{
+  "routes": [
+    {
+      "id": "hello-timer",
+      "from": "timer:tick?period=2000",
+      "steps": [
+        { "log": "Timer fired!" },
+        { "to": "log:info" }
+      ]
+    }
+  ]
+}
+```
+
+### Programmatic Loading
+
+```rust
+// Parse a JSON string directly
+use camel_dsl::parse_json;
+
+let routes = parse_json(&json_string)?;
+
+// Load from a file
+use camel_dsl::json::load_json_from_file;
+use std::path::Path;
+
+let routes = load_json_from_file(Path::new("routes.json"))?;
+```
+
+The type aliases `JsonRoutes`, `JsonRoute`, and `JsonStep` are convenience wrappers around the YAML AST types and are **not a stable SDK contract**. SDKs and external consumers that need forward compatibility should target `CanonicalRouteSpec` instead:
+
+```rust
+use camel_dsl::parse_json_to_canonical;
+
+let specs = parse_json_to_canonical(&json_string)?;
+```
+
+### Discovery Behavior
+
+When using [`discover_routes`] to load route files via glob patterns, **JSON files require an explicit `.json` glob pattern**. Broad patterns like `routes/*` will intentionally not load `.json` files — this prevents accidental loading from mixed-format directories.
+
+```rust
+use camel_dsl::discover_routes;
+
+// ✅ Explicit .json pattern — loads JSON files
+let routes = discover_routes(&["routes/*.json".to_string()])?;
+
+// ❌ Broad pattern — will NOT load .json files (returns an error if any are matched)
+let routes = discover_routes(&["routes/*".to_string()])?;
+
+// Mixing both formats in one call is fine:
+let routes = discover_routes(&[
+    "routes/*.yaml".to_string(),
+    "routes/*.json".to_string(),
+])?;
+```
+
 ## Available Step Types
 
 | Step | Description | Example |
@@ -189,7 +255,7 @@ routes:
 | `log` | Log message | `- log: "Processing"` |
 | `set_header` | Set header | `- set_header: { key: "x", value: "y" }` |
 | `set_body` | Set body | `- set_body: { value: "content" }` |
-| `transform` | Transform body (alias for `set_body`) | `- transform: { simple: "${body}" }` |
+| `transform` | Transform body | `- transform: { simple: "${body}" }` |
 | `marshal` | Serialize body using a data format (e.g., Json → Text) | `- marshal: json` |
 | `unmarshal` | Deserialize body using a data format (e.g., Text → Json) | `- unmarshal: xml` |
 | `filter` | Filter messages | `- filter: { simple: "${header.type} == 'allowed'", steps: [...] }` |
@@ -280,7 +346,7 @@ routes:
 
 ## Environment Variable Interpolation
 
-Use `${env:VAR_NAME}` anywhere in a YAML route file to inject an environment variable at load time:
+Use `${env:VAR_NAME}` anywhere in a route file to inject an environment variable at load time. This works for both YAML and JSON formats when loaded via [`discover_routes`]:
 
 ```yaml
 routes:
@@ -291,7 +357,9 @@ routes:
       - to: "${env:OUTPUT_ENDPOINT}"
 ```
 
-The substitution happens before YAML parsing, so it works in any position — URIs, log messages, header values, etc. Unset variables are left as-is (the literal `${env:VAR_NAME}` string).
+The substitution happens before parsing, so it works in any position — URIs, log messages, header values, etc. If an environment variable is not set and no default is provided via the `:-` syntax, discovery returns a `DiscoveryError::Env` error — the literal `${env:VAR_NAME}` string is **not** left in place.
+
+> **Caution:** Because interpolation is textual (performed before parsing), env values injected into JSON string positions must already be valid for their JSON context. For example, an env var containing an unescaped double quote will produce invalid JSON, causing a `DiscoveryError::Json` parse error. YAML is more forgiving of unquoted values but the same principle applies to structured contexts.
 
 You can specify a default value when the variable is not set:
 
@@ -305,6 +373,8 @@ routes:
 ```
 
 If `POLL_MS` is not set, the default `1000` is used. The `:-` syntax follows the same convention as shell parameter expansion.
+
+> **Note:** Direct file loaders (`load_from_file` for YAML, `json::load_json_from_file` for JSON) read and parse files without interpolating environment variables. Use [`discover_routes`] if you need env interpolation.
 
 ## Language Expressions
 Many steps support language expressions for dynamic values:
