@@ -266,7 +266,13 @@ pub(crate) async fn execute_reload_actions(
                                     &route_id,
                                     ctx.generation,
                                 );
-                                let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
+                                if let Err(e) = ctx.invoker.finalize_reload(&diff, ctx.generation).await {
+                                    errors.push(ReloadError {
+                                        route_id: route_id.clone(),
+                                        action: "Finalize".into(),
+                                        error: CamelError::ProcessorError(format!("{e}")),
+                                    });
+                                }
                             }
                             if in_flight > 0 {
                                 tracing::info!(
@@ -328,12 +334,9 @@ pub(crate) async fn execute_reload_actions(
                         .await
                     {
                         let _ = controller
-                            .execute_runtime_command(camel_api::RuntimeCommand::RemoveRoute {
-                                route_id: route_id.clone(),
-                                command_id: next_reload_command_id("add-rollback", &route_id),
-                                causation_id: None,
-                            })
+                            .remove_route_preserving_functions(route_id.clone())
                             .await;
+                        ctx.invoker.discard_staging(ctx.generation);
                         errors.push(ReloadError {
                             route_id,
                             action: "Add (aggregate)".into(),
@@ -347,12 +350,9 @@ pub(crate) async fn execute_reload_actions(
 
                     if let Err(e) = ctx.invoker.prepare_reload(diff, ctx.generation).await {
                         let _ = controller
-                            .execute_runtime_command(camel_api::RuntimeCommand::RemoveRoute {
-                                route_id: route_id.clone(),
-                                command_id: next_reload_command_id("add-rollback", &route_id),
-                                causation_id: None,
-                            })
+                            .remove_route_preserving_functions(route_id.clone())
                             .await;
+                        ctx.invoker.discard_staging(ctx.generation);
                         errors.push(ReloadError {
                             route_id,
                             action: "Add (prepare)".into(),
@@ -363,7 +363,13 @@ pub(crate) async fn execute_reload_actions(
 
                     let diff =
                         compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
-                    let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
+                    if let Err(e) = ctx.invoker.finalize_reload(&diff, ctx.generation).await {
+                        errors.push(ReloadError {
+                            route_id: route_id.clone(),
+                            action: "Finalize".into(),
+                            error: CamelError::ProcessorError(format!("{e}")),
+                        });
+                    }
                 } else {
                     if let Err(e) = controller.add_route_definition(def).await {
                         errors.push(ReloadError {
@@ -394,65 +400,120 @@ pub(crate) async fn execute_reload_actions(
             }
 
             ReloadAction::Remove { route_id } => {
-                let runtime_status = match controller.runtime_route_status(&route_id).await {
-                    Ok(status) => status,
-                    Err(e) => {
-                        errors.push(ReloadError {
-                            route_id,
-                            action: "Remove (status)".into(),
-                            error: e,
-                        });
-                        continue;
-                    }
-                };
+                if let Some(ctx) = function_ctx {
+                    let diff = compute_function_diff_for_route(
+                        &ctx.invoker,
+                        &route_id,
+                        ctx.generation,
+                    );
 
-                if should_stop_before_mutation(runtime_status.as_deref()) {
-                    let stop_result = controller
-                        .execute_runtime_command(camel_api::RuntimeCommand::StopRoute {
-                            route_id: route_id.clone(),
-                            command_id: next_reload_command_id("remove-stop", &route_id),
-                            causation_id: None,
-                        })
-                        .await;
-                    if let Err(e) = stop_result
-                        && !is_invalid_stop_transition(&e)
-                    {
-                        errors.push(ReloadError {
-                            route_id: route_id.clone(),
-                            action: "Remove (stop)".into(),
-                            error: e,
-                        });
-                        continue;
-                    }
-
-                    let _ = drain_route(&route_id, "remove", controller, drain_timeout).await;
-                }
-
-                let remove_result = controller
-                    .execute_runtime_command(camel_api::RuntimeCommand::RemoveRoute {
-                        route_id: route_id.clone(),
-                        command_id: next_reload_command_id("remove", &route_id),
-                        causation_id: None,
-                    })
-                    .await;
-                match remove_result {
-                    Ok(_) => {
-                        if let Some(ctx) = function_ctx {
-                            let diff = compute_function_diff_for_route(
-                                &ctx.invoker,
-                                &route_id,
-                                ctx.generation,
-                            );
-                            let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
+                    let runtime_status = match controller.runtime_route_status(&route_id).await {
+                        Ok(status) => status,
+                        Err(e) => {
+                            errors.push(ReloadError {
+                                route_id: route_id.clone(),
+                                action: "Remove (status)".into(),
+                                error: e,
+                            });
+                            continue;
                         }
-                        tracing::info!(route_id = %route_id, "hot-reload: stopped and removed route");
+                    };
+
+                    if should_stop_before_mutation(runtime_status.as_deref()) {
+                        let stop_result = controller
+                            .execute_runtime_command(camel_api::RuntimeCommand::StopRoute {
+                                route_id: route_id.clone(),
+                                command_id: next_reload_command_id("remove-stop", &route_id),
+                                causation_id: None,
+                            })
+                            .await;
+                        if let Err(e) = stop_result
+                            && !is_invalid_stop_transition(&e)
+                        {
+                            errors.push(ReloadError {
+                                route_id: route_id.clone(),
+                                action: "Remove (stop)".into(),
+                                error: e,
+                            });
+                            continue;
+                        }
+
+                        let _ = drain_route(&route_id, "remove", controller, drain_timeout).await;
                     }
-                    Err(e) => {
+
+                    if let Err(e) =
+                        controller.remove_route_preserving_functions(route_id.clone()).await
+                    {
                         errors.push(ReloadError {
                             route_id,
                             action: "Remove".into(),
                             error: e,
                         });
+                        continue;
+                    }
+
+                    if let Err(e) = ctx.invoker.finalize_reload(&diff, ctx.generation).await {
+                        errors.push(ReloadError {
+                            route_id: route_id.clone(),
+                            action: "Finalize".into(),
+                            error: CamelError::ProcessorError(format!("{e}")),
+                        });
+                    }
+
+                    tracing::info!(route_id = %route_id, "hot-reload: stopped and removed route");
+                } else {
+                    let runtime_status = match controller.runtime_route_status(&route_id).await {
+                        Ok(status) => status,
+                        Err(e) => {
+                            errors.push(ReloadError {
+                                route_id,
+                                action: "Remove (status)".into(),
+                                error: e,
+                            });
+                            continue;
+                        }
+                    };
+
+                    if should_stop_before_mutation(runtime_status.as_deref()) {
+                        let stop_result = controller
+                            .execute_runtime_command(camel_api::RuntimeCommand::StopRoute {
+                                route_id: route_id.clone(),
+                                command_id: next_reload_command_id("remove-stop", &route_id),
+                                causation_id: None,
+                            })
+                            .await;
+                        if let Err(e) = stop_result
+                            && !is_invalid_stop_transition(&e)
+                        {
+                            errors.push(ReloadError {
+                                route_id: route_id.clone(),
+                                action: "Remove (stop)".into(),
+                                error: e,
+                            });
+                            continue;
+                        }
+
+                        let _ = drain_route(&route_id, "remove", controller, drain_timeout).await;
+                    }
+
+                    let remove_result = controller
+                        .execute_runtime_command(camel_api::RuntimeCommand::RemoveRoute {
+                            route_id: route_id.clone(),
+                            command_id: next_reload_command_id("remove", &route_id),
+                            causation_id: None,
+                        })
+                        .await;
+                    match remove_result {
+                        Ok(_) => {
+                            tracing::info!(route_id = %route_id, "hot-reload: stopped and removed route");
+                        }
+                        Err(e) => {
+                            errors.push(ReloadError {
+                                route_id,
+                                action: "Remove".into(),
+                                error: e,
+                            });
+                        }
                     }
                 }
             }
@@ -586,7 +647,13 @@ pub(crate) async fn execute_reload_actions(
                         &route_id,
                         ctx.generation,
                     );
-                    let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
+                    if let Err(e) = ctx.invoker.finalize_reload(&diff, ctx.generation).await {
+                        errors.push(ReloadError {
+                            route_id: route_id.clone(),
+                            action: "Finalize".into(),
+                            error: CamelError::ProcessorError(format!("{e}")),
+                        });
+                    }
 
                     if should_start_after_restart(runtime_status.as_deref()) {
                         let start_result = controller

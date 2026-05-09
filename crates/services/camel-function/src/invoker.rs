@@ -209,23 +209,30 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             self.pool.ref_counts.remove(&key);
         }
         if should_unregister && let Some((_, pool_key)) = self.pool.function_to_key.remove(&key) {
-            if let Some(handle) = self.pool.handles.get(&pool_key) {
-                self.provider
-                    .unregister(&handle, id)
-                    .await
-                    .map_err(|e| FunctionInvocationError::Transport(e.to_string()))?;
-            }
-            let still_used = self
+            let still_used_by_other_route = self
                 .pool
                 .function_to_key
                 .iter()
-                .any(|kv| kv.value() == &pool_key);
-            if !still_used && let Some((_, handle)) = self.pool.handles.remove(&pool_key) {
-                handle.cancel.cancel();
-                self.provider
-                    .shutdown(handle)
-                    .await
-                    .map_err(|e| FunctionInvocationError::Transport(e.to_string()))?;
+                .any(|kv| kv.key().0 == *id);
+            if !still_used_by_other_route {
+                if let Some(handle) = self.pool.handles.get(&pool_key) {
+                    self.provider
+                        .unregister(&handle, id)
+                        .await
+                        .map_err(|e| FunctionInvocationError::Transport(e.to_string()))?;
+                }
+                let still_used = self
+                    .pool
+                    .function_to_key
+                    .iter()
+                    .any(|kv| kv.value() == &pool_key);
+                if !still_used && let Some((_, handle)) = self.pool.handles.remove(&pool_key) {
+                    handle.cancel.cancel();
+                    self.provider
+                        .shutdown(handle)
+                        .await
+                        .map_err(|e| FunctionInvocationError::Transport(e.to_string()))?;
+                }
             }
         }
         Ok(())
