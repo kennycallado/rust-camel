@@ -162,6 +162,9 @@ mod tests {
         ) -> Result<(), FunctionInvocationError> {
             Ok(())
         }
+        async fn commit_staged(&self) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
     }
 
     fn test_definition() -> FunctionDefinition {
@@ -302,6 +305,9 @@ mod tests {
                 _diff: FunctionDiff,
                 _generation: u64,
             ) -> Result<(), FunctionInvocationError> {
+                Ok(())
+            }
+            async fn commit_staged(&self) -> Result<(), FunctionInvocationError> {
                 Ok(())
             }
         }

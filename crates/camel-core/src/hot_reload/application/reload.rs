@@ -457,11 +457,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_removed_route_detected() {
+    #[tokio::test]
+    async fn test_removed_route_detected() {
         let mut controller = make_controller();
         let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("old-route");
-        controller.add_route(def).unwrap();
+        controller.add_route(def).await.unwrap();
 
         let actions = compute_reload_actions(&[], &controller);
         assert_eq!(
@@ -472,13 +472,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_same_from_uri_detected_as_swap() {
+    #[tokio::test]
+    async fn test_same_from_uri_detected_as_swap() {
         let mut controller = make_controller();
         let def = RouteDefinition::new("timer:tick", vec![])
             .with_route_id("my-route")
             .with_source_hash(100);
-        controller.add_route(def).unwrap();
+        controller.add_route(def).await.unwrap();
 
         let new_defs = vec![
             RouteDefinition::new("timer:tick", vec![])
@@ -494,11 +494,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_changed_from_uri_detected_as_restart() {
+    #[tokio::test]
+    async fn test_changed_from_uri_detected_as_restart() {
         let mut controller = make_controller();
         let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("my-route");
-        controller.add_route(def).unwrap();
+        controller.add_route(def).await.unwrap();
 
         let new_defs =
             vec![RouteDefinition::new("timer:tock?period=500", vec![]).with_route_id("my-route")];
@@ -511,14 +511,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_runtime_snapshot_drives_remove_set() {
+    #[tokio::test]
+    async fn test_runtime_snapshot_drives_remove_set() {
         let mut controller = make_controller();
         controller
             .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("runtime-route"))
+            .await
             .unwrap();
         controller
             .add_route(RouteDefinition::new("timer:ghost", vec![]).with_route_id("ghost-route"))
+            .await
             .unwrap();
 
         let runtime_ids = vec!["runtime-route".to_string()];
@@ -565,13 +567,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_same_hash_detected_as_skip() {
+    #[tokio::test]
+    async fn test_same_hash_detected_as_skip() {
         let mut controller = make_controller();
         let def = RouteDefinition::new("timer:tick", vec![])
             .with_route_id("my-route")
             .with_source_hash(42);
-        controller.add_route(def).unwrap();
+        controller.add_route(def).await.unwrap();
 
         let new_defs = vec![
             RouteDefinition::new("timer:tick", vec![])
@@ -587,11 +589,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_none_hash_detected_as_swap() {
+    #[tokio::test]
+    async fn test_none_hash_detected_as_swap() {
         let mut controller = make_controller();
         let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("my-route");
-        controller.add_route(def).unwrap();
+        controller.add_route(def).await.unwrap();
 
         let new_defs = vec![
             RouteDefinition::new("timer:tick", vec![])

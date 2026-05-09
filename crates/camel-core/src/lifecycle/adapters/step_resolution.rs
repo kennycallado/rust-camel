@@ -328,8 +328,7 @@ pub(crate) fn resolve_steps(
                 };
                 definition.route_id = route_id.map(|s| s.to_string());
                 definition.step_index = Some(step_index);
-                let generation = invoker.begin_reload();
-                invoker.stage_pending(definition.clone(), route_id, generation);
+                invoker.stage_pending(definition.clone(), route_id, 0);
                 let step = crate::step::function_step::FunctionStep::new(invoker, definition);
                 processors.push((BoxProcessor::new(step), None));
             }

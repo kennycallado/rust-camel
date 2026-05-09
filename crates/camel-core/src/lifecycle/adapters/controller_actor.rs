@@ -507,7 +507,7 @@ pub fn spawn_controller_actor(
                     let _ = reply.send(controller.stop_all_routes().await);
                 }
                 RouteControllerCommand::AddRoute { definition, reply } => {
-                    let _ = reply.send(controller.add_route(definition));
+                    let _ = reply.send(controller.add_route(definition).await);
                 }
                 RouteControllerCommand::RemoveRoute { route_id, reply } => {
                     let _ = reply.send(controller.remove_route(&route_id));

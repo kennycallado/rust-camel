@@ -219,4 +219,14 @@ impl FunctionInvoker for DefaultFunctionInvoker {
     ) -> Result<(), FunctionInvocationError> {
         Ok(())
     }
+
+    async fn commit_staged(&self) -> Result<(), FunctionInvocationError> {
+        let entries = self.staging.lock().expect("staging").remove(&0);
+        if let Some(entries) = entries {
+            for (def, route_id) in entries {
+                self.register(def, route_id.as_deref()).await?;
+            }
+        }
+        Ok(())
+    }
 }

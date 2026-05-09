@@ -27,7 +27,7 @@ async fn test_swap_pipeline_is_picked_up_by_new_requests() {
     );
 
     let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("hot-test");
-    controller.add_route(def).unwrap();
+    controller.add_route(def).await.unwrap();
 
     // Swap with a new identity pipeline (just verifying the method works)
     let new_pipeline = BoxProcessor::new(IdentityProcessor);
@@ -53,7 +53,7 @@ async fn test_hot_reload_in_flight_requests_use_old_pipeline() {
 
     // Create route
     let def = RouteDefinition::new("direct:test", vec![]).with_route_id("hot-reload-test");
-    controller.add_route(def).unwrap();
+    controller.add_route(def).await.unwrap();
 
     // Create v1 pipeline that adds a "v1" marker property
     let v1_pipeline = BoxProcessor::from_fn(|mut ex: Exchange| async move {
@@ -135,7 +135,7 @@ async fn test_hot_reload_multiple_swaps_preserve_correctness() {
     );
 
     let def = RouteDefinition::new("direct:multi-swap", vec![]).with_route_id("multi-swap-test");
-    controller.add_route(def).unwrap();
+    controller.add_route(def).await.unwrap();
 
     // Perform multiple swaps
     for version in 1..=5 {
@@ -176,7 +176,7 @@ async fn test_hot_reload_concurrent_access_no_panic() {
     );
 
     let def = RouteDefinition::new("direct:concurrent", vec![]).with_route_id("concurrent-test");
-    controller.add_route(def).unwrap();
+    controller.add_route(def).await.unwrap();
 
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
@@ -242,7 +242,7 @@ async fn test_remove_route() {
 
     let def = RouteDefinition::new("timer:tick", vec![]).with_route_id("remove-test");
 
-    controller.add_route(def).unwrap();
+    controller.add_route(def).await.unwrap();
     assert_eq!(controller.route_count(), 1);
 
     controller.remove_route("remove-test").unwrap();
@@ -265,7 +265,7 @@ async fn test_remove_route_rejects_running_route() {
     let def =
         RouteDefinition::new("timer:tick?period=100", vec![]).with_route_id("running-remove-test");
 
-    controller.add_route(def).unwrap();
+    controller.add_route(def).await.unwrap();
     controller.start_route("running-remove-test").await.unwrap();
 
     let result = controller.remove_route("running-remove-test");

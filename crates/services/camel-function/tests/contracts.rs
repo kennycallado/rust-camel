@@ -154,6 +154,9 @@ fn lifecycle_impl_returns_some_for_function_invoker() {
         ) -> Result<(), FunctionInvocationError> {
             Ok(())
         }
+        async fn commit_staged(&self) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
     }
     #[async_trait]
     impl Lifecycle for InvokerService {
@@ -221,6 +224,9 @@ fn function_invoker_is_object_safe() {
             _diff: FunctionDiff,
             _gen: u64,
         ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn commit_staged(&self) -> Result<(), FunctionInvocationError> {
             Ok(())
         }
     }

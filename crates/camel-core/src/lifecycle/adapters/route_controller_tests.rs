@@ -71,22 +71,24 @@ fn helper_functions_cover_non_async_branches() {
     }
 }
 
-#[test]
-fn add_route_detects_duplicates() {
+#[tokio::test]
+async fn add_route_detects_duplicates() {
     let mut controller = build_controller();
 
     controller
         .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
+        .await
         .expect("add route");
 
     let dup_err = controller
         .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
+        .await
         .expect_err("duplicate must fail");
     assert!(dup_err.to_string().contains("already exists"));
 }
 
-#[test]
-fn route_introspection_and_ordering_helpers_work() {
+#[tokio::test]
+async fn route_introspection_and_ordering_helpers_work() {
     let mut controller = build_controller();
 
     controller
@@ -95,6 +97,7 @@ fn route_introspection_and_ordering_helpers_work() {
                 .with_route_id("a")
                 .with_startup_order(20),
         )
+        .await
         .unwrap();
     controller
         .add_route(
@@ -102,6 +105,7 @@ fn route_introspection_and_ordering_helpers_work() {
                 .with_route_id("b")
                 .with_startup_order(10),
         )
+        .await
         .unwrap();
     controller
         .add_route(
@@ -110,6 +114,7 @@ fn route_introspection_and_ordering_helpers_work() {
                 .with_auto_startup(false)
                 .with_startup_order(5),
         )
+        .await
         .unwrap();
 
     assert_eq!(controller.route_count(), 3);
@@ -125,12 +130,13 @@ fn route_introspection_and_ordering_helpers_work() {
     );
 }
 
-#[test]
-fn swap_pipeline_and_remove_route_behaviors() {
+#[tokio::test]
+async fn swap_pipeline_and_remove_route_behaviors() {
     let mut controller = build_controller();
 
     controller
         .add_route(RouteDefinition::new("timer:a", vec![]).with_route_id("swap"))
+        .await
         .unwrap();
 
     controller
@@ -330,7 +336,7 @@ async fn start_stop_route_happy_path_with_timer_and_mock() {
         vec![BuilderStep::To("mock:out".into())],
     )
     .with_route_id("rt-1");
-    controller.add_route(route).unwrap();
+    controller.add_route(route).await.unwrap();
 
     controller.start_route("rt-1").await.unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
@@ -358,6 +364,7 @@ async fn start_route_spawns_pipeline_before_consumer_for_eager_consumers() {
             )
             .with_route_id("startup-order"),
         )
+        .await
         .unwrap();
 
     controller.start_route("startup-order").await.unwrap();
@@ -389,7 +396,7 @@ async fn suspend_resume_and_restart_cover_execution_transitions() {
         vec![BuilderStep::To("mock:out".into())],
     )
     .with_route_id("rt-2");
-    controller.add_route(route).unwrap();
+    controller.add_route(route).await.unwrap();
 
     controller.start_route("rt-2").await.unwrap();
     controller.suspend_route("rt-2").await.unwrap();
@@ -407,7 +414,7 @@ async fn remove_route_rejects_running_route() {
         vec![BuilderStep::To("mock:out".into())],
     )
     .with_route_id("rt-running");
-    controller.add_route(route).unwrap();
+    controller.add_route(route).await.unwrap();
     controller.start_route("rt-running").await.unwrap();
 
     let err = controller
@@ -428,7 +435,7 @@ async fn start_route_on_suspended_state_returns_guidance_error() {
         vec![BuilderStep::To("mock:out".into())],
     )
     .with_route_id("rt-suspend");
-    controller.add_route(route).unwrap();
+    controller.add_route(route).await.unwrap();
 
     controller.start_route("rt-suspend").await.unwrap();
     controller.suspend_route("rt-suspend").await.unwrap();
@@ -449,6 +456,7 @@ async fn suspend_and_resume_validate_execution_state() {
 
     controller
         .add_route(RouteDefinition::new("timer:tick?period=50", vec![]).with_route_id("rt-state"))
+        .await
         .unwrap();
 
     let suspend_err = controller
@@ -478,7 +486,7 @@ async fn concurrent_concurrency_override_path_executes() {
     .with_route_id("rt-concurrent")
     .with_concurrency(ConcurrencyModel::Concurrent { max: Some(2) });
 
-    controller.add_route(route).unwrap();
+    controller.add_route(route).await.unwrap();
     controller.start_route("rt-concurrent").await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     controller.stop_route("rt-concurrent").await.unwrap();
@@ -498,6 +506,7 @@ async fn add_route_with_circuit_breaker_and_error_handler_compiles() {
 
     controller
         .add_route(route)
+        .await
         .expect("route with layers should compile");
     controller.start_route("rt-eh").await.unwrap();
     controller.stop_route("rt-eh").await.unwrap();

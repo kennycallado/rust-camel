@@ -540,7 +540,7 @@ impl DefaultRouteController {
     /// Returns an error if:
     /// - A route with the same ID already exists
     /// - Step resolution fails
-    pub fn add_route(&mut self, definition: RouteDefinition) -> Result<(), CamelError> {
+    pub async fn add_route(&mut self, definition: RouteDefinition) -> Result<(), CamelError> {
         let route_id = definition.route_id().to_string();
 
         if self.routes.contains_key(&route_id) {
@@ -671,6 +671,13 @@ impl DefaultRouteController {
                 agg_service: None,
             },
         );
+
+        if let Some(invoker) = &self.function_invoker {
+            invoker
+                .commit_staged()
+                .await
+                .map_err(|e| CamelError::Config(e.to_string()))?;
+        }
 
         Ok(())
     }

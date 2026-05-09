@@ -105,4 +105,5 @@ pub trait FunctionInvoker: FunctionInvokerSync + Send + Sync {
         diff: FunctionDiff,
         generation: u64,
     ) -> Result<(), FunctionInvocationError>;
+    async fn commit_staged(&self) -> Result<(), FunctionInvocationError>;
 }
