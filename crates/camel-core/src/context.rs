@@ -124,7 +124,9 @@ impl RuntimeExecutionHandle {
         &self,
         route_id: String,
     ) -> Result<(), CamelError> {
-        self.controller.remove_route_preserving_functions(route_id).await
+        self.controller
+            .remove_route_preserving_functions(route_id)
+            .await
     }
 
     pub(crate) async fn add_route_definition_with_generation(
@@ -137,7 +139,10 @@ impl RuntimeExecutionHandle {
             .await
     }
 
-    pub(crate) async fn register_route_aggregate(&self, route_id: String) -> Result<(), CamelError> {
+    pub(crate) async fn register_route_aggregate(
+        &self,
+        route_id: String,
+    ) -> Result<(), CamelError> {
         self.runtime.register_aggregate_only(route_id).await
     }
 

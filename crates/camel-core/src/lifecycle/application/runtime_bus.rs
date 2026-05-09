@@ -61,10 +61,7 @@ impl RuntimeBus {
         &self.repo
     }
 
-    pub(crate) async fn register_aggregate_only(
-        &self,
-        route_id: String,
-    ) -> Result<(), CamelError> {
+    pub(crate) async fn register_aggregate_only(&self, route_id: String) -> Result<(), CamelError> {
         self.ensure_journal_recovered().await?;
         let deps = self.deps();
         if deps.repo.load(&route_id).await?.is_some() {

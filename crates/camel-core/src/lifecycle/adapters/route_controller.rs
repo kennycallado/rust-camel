@@ -559,7 +559,10 @@ impl DefaultRouteController {
 
         info!(route_id = %route_id, "Adding route to controller");
 
-        let prepared = self.build_managed_route(definition, &super::step_resolution::FunctionStagingMode::DirectAdd)?;
+        let prepared = self.build_managed_route(
+            definition,
+            &super::step_resolution::FunctionStagingMode::DirectAdd,
+        )?;
 
         if let Some(invoker) = &self.function_invoker {
             invoker
@@ -568,10 +571,8 @@ impl DefaultRouteController {
                 .map_err(|e| CamelError::Config(e.to_string()))?;
         }
 
-        self.routes.insert(
-            prepared.route_id.clone(),
-            prepared.managed,
-        );
+        self.routes
+            .insert(prepared.route_id.clone(), prepared.managed);
 
         Ok(())
     }
@@ -721,7 +722,8 @@ impl DefaultRouteController {
                 prepared.route_id
             )));
         }
-        self.routes.insert(prepared.route_id.clone(), prepared.managed);
+        self.routes
+            .insert(prepared.route_id.clone(), prepared.managed);
         Ok(())
     }
 
@@ -741,12 +743,13 @@ impl DefaultRouteController {
 
         info!(route_id = %route_id, generation, "Adding route to controller with generation");
 
-        let prepared = self.build_managed_route(definition, &super::step_resolution::FunctionStagingMode::HotReload { generation })?;
+        let prepared = self.build_managed_route(
+            definition,
+            &super::step_resolution::FunctionStagingMode::HotReload { generation },
+        )?;
 
-        self.routes.insert(
-            prepared.route_id.clone(),
-            prepared.managed,
-        );
+        self.routes
+            .insert(prepared.route_id.clone(), prepared.managed);
 
         Ok(())
     }
@@ -755,7 +758,10 @@ impl DefaultRouteController {
         &self,
         definition: RouteDefinition,
     ) -> Result<PreparedRoute, CamelError> {
-        self.build_managed_route(definition, &super::step_resolution::FunctionStagingMode::DryCompile)
+        self.build_managed_route(
+            definition,
+            &super::step_resolution::FunctionStagingMode::DryCompile,
+        )
     }
 
     pub fn prepare_route_definition_with_generation(
@@ -763,10 +769,16 @@ impl DefaultRouteController {
         definition: RouteDefinition,
         generation: u64,
     ) -> Result<PreparedRoute, CamelError> {
-        self.build_managed_route(definition, &super::step_resolution::FunctionStagingMode::HotReload { generation })
+        self.build_managed_route(
+            definition,
+            &super::step_resolution::FunctionStagingMode::HotReload { generation },
+        )
     }
 
-    pub async fn remove_route_preserving_functions(&mut self, route_id: &str) -> Result<(), CamelError> {
+    pub async fn remove_route_preserving_functions(
+        &mut self,
+        route_id: &str,
+    ) -> Result<(), CamelError> {
         let managed = self.routes.get(route_id).ok_or_else(|| {
             CamelError::RouteError(format!("Route '{}' not found for removal", route_id))
         })?;

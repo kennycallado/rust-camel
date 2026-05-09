@@ -248,12 +248,13 @@ pub(crate) async fn execute_reload_actions(
                         let result = controller.swap_route_pipeline(&route_id, p).await;
                         if let Err(e) = result {
                             if let Some(ctx) = function_ctx
-                                && let Some(ref token) = prepare_token {
-                                    let _ = ctx
-                                        .invoker
-                                        .rollback_reload(token.clone(), ctx.generation)
-                                        .await;
-                                }
+                                && let Some(ref token) = prepare_token
+                            {
+                                let _ = ctx
+                                    .invoker
+                                    .rollback_reload(token.clone(), ctx.generation)
+                                    .await;
+                            }
                             errors.push(ReloadError {
                                 route_id,
                                 action: "Swap".into(),
@@ -266,7 +267,9 @@ pub(crate) async fn execute_reload_actions(
                                     &route_id,
                                     ctx.generation,
                                 );
-                                if let Err(e) = ctx.invoker.finalize_reload(&diff, ctx.generation).await {
+                                if let Err(e) =
+                                    ctx.invoker.finalize_reload(&diff, ctx.generation).await
+                                {
                                     errors.push(ReloadError {
                                         route_id: route_id.clone(),
                                         action: "Finalize".into(),
@@ -336,7 +339,8 @@ pub(crate) async fn execute_reload_actions(
                     let diff =
                         compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
 
-                    let prepare_token = match ctx.invoker.prepare_reload(diff, ctx.generation).await {
+                    let prepare_token = match ctx.invoker.prepare_reload(diff, ctx.generation).await
+                    {
                         Ok(token) => token,
                         Err(e) => {
                             ctx.invoker.discard_staging(ctx.generation);
@@ -362,10 +366,7 @@ pub(crate) async fn execute_reload_actions(
                         continue;
                     }
 
-                    if let Err(e) = controller
-                        .register_route_aggregate(route_id.clone())
-                        .await
-                    {
+                    if let Err(e) = controller.register_route_aggregate(route_id.clone()).await {
                         let _ = controller
                             .remove_route_preserving_functions(route_id.clone())
                             .await;
@@ -421,11 +422,8 @@ pub(crate) async fn execute_reload_actions(
 
             ReloadAction::Remove { route_id } => {
                 if let Some(ctx) = function_ctx {
-                    let diff = compute_function_diff_for_route(
-                        &ctx.invoker,
-                        &route_id,
-                        ctx.generation,
-                    );
+                    let diff =
+                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
 
                     let runtime_status = match controller.runtime_route_status(&route_id).await {
                         Ok(status) => status,
@@ -461,8 +459,9 @@ pub(crate) async fn execute_reload_actions(
                         let _ = drain_route(&route_id, "remove", controller, drain_timeout).await;
                     }
 
-                    if let Err(e) =
-                        controller.remove_route_preserving_functions(route_id.clone()).await
+                    if let Err(e) = controller
+                        .remove_route_preserving_functions(route_id.clone())
+                        .await
                     {
                         errors.push(ReloadError {
                             route_id,
@@ -575,12 +574,10 @@ pub(crate) async fn execute_reload_actions(
                         }
                     };
 
-                    let diff = compute_function_diff_for_route(
-                        &ctx.invoker,
-                        &route_id,
-                        ctx.generation,
-                    );
-                    let prepare_token = match ctx.invoker.prepare_reload(diff, ctx.generation).await {
+                    let diff =
+                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
+                    let prepare_token = match ctx.invoker.prepare_reload(diff, ctx.generation).await
+                    {
                         Ok(token) => token,
                         Err(e) => {
                             errors.push(ReloadError {
@@ -634,8 +631,9 @@ pub(crate) async fn execute_reload_actions(
                         let _ = drain_route(&route_id, "restart", controller, drain_timeout).await;
                     }
 
-                    if let Err(e) =
-                        controller.remove_route_preserving_functions(route_id.clone()).await
+                    if let Err(e) = controller
+                        .remove_route_preserving_functions(route_id.clone())
+                        .await
                     {
                         let _ = ctx
                             .invoker
@@ -662,11 +660,8 @@ pub(crate) async fn execute_reload_actions(
                         continue;
                     }
 
-                    let diff = compute_function_diff_for_route(
-                        &ctx.invoker,
-                        &route_id,
-                        ctx.generation,
-                    );
+                    let diff =
+                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
                     if let Err(e) = ctx.invoker.finalize_reload(&diff, ctx.generation).await {
                         errors.push(ReloadError {
                             route_id: route_id.clone(),
@@ -1703,7 +1698,10 @@ mod tests {
             Some(&function_ctx),
         )
         .await;
-        assert!(!errors.is_empty(), "Expected errors from swapping nonexistent route");
+        assert!(
+            !errors.is_empty(),
+            "Expected errors from swapping nonexistent route"
+        );
 
         let calls = provider.calls.lock().unwrap().clone();
         let register_idx = calls
@@ -1925,7 +1923,10 @@ mod tests {
         let initial_register = initial_calls
             .iter()
             .any(|c| matches!(c, FakeCall::Register(_, id) if *id == old_fn_id));
-        assert!(initial_register, "fn-life-old should be registered initially");
+        assert!(
+            initial_register,
+            "fn-life-old should be registered initially"
+        );
 
         provider.calls.lock().unwrap().clear();
 
@@ -1965,12 +1966,18 @@ mod tests {
         let register_new = calls
             .iter()
             .any(|c| matches!(c, FakeCall::Register(_, id) if *id == new_fn_id));
-        assert!(register_new, "fn-life-new should be registered after restart");
+        assert!(
+            register_new,
+            "fn-life-new should be registered after restart"
+        );
 
         let unregister_old = calls
             .iter()
             .any(|c| matches!(c, FakeCall::Unregister(_, id) if *id == old_fn_id));
-        assert!(unregister_old, "fn-life-old should be unregistered after restart");
+        assert!(
+            unregister_old,
+            "fn-life-old should be unregistered after restart"
+        );
 
         drop(calls);
 

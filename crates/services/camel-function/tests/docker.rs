@@ -3,7 +3,6 @@
 use camel_api::function::*;
 use camel_api::{Body, Exchange, Message};
 use camel_function::{ContainerProvider, PullPolicy, RunnerHandle};
-use std::collections::HashMap;
 use std::time::Duration;
 
 async fn build_runner_image() {
@@ -24,11 +23,12 @@ async fn build_runner_image() {
     }
 }
 
-fn create_provider() -> ContainerProvider {
+fn create_provider(test_id: &str) -> ContainerProvider {
     ContainerProvider::builder()
         .image("rustcamel/deno-runner:test")
         .pull_policy(PullPolicy::Never)
         .boot_timeout(Duration::from_secs(15))
+        .instance_id(test_id)
         .build()
         .expect("create container provider")
 }
@@ -63,30 +63,19 @@ async fn wait_for_health(
     }
 }
 
-async fn assert_no_runner_containers() {
-    let docker = bollard::Docker::connect_with_local_defaults().unwrap();
-    let options = bollard::query_parameters::ListContainersOptions {
-        filters: Some(HashMap::from([(
-            "label".to_string(),
-            vec!["camel.function.runner=true".to_string()],
-        )])),
-        ..Default::default()
-    };
-    let containers = docker
-        .list_containers(Some(options))
-        .await
-        .expect("list containers");
+async fn assert_clean(provider: &ContainerProvider) {
     assert!(
-        containers.is_empty(),
-        "no containers with label camel.function.runner=true should remain, found {}",
-        containers.len()
+        provider.is_clean().await,
+        "no containers should remain for instance {}, found: {:?}",
+        provider.instance_id(),
+        provider.list_instance_containers().await
     );
 }
 
 #[tokio::test]
 async fn test_spawn_and_health() {
     build_runner_image().await;
-    let provider = create_provider();
+    let provider = create_provider("spawn_health");
     let handle = provider.spawn_runner("deno").await.expect("spawn");
     wait_for_health(&provider, &handle, Duration::from_secs(10))
         .await
@@ -94,13 +83,13 @@ async fn test_spawn_and_health() {
     let report = provider.health_runner(&handle).await.expect("health");
     assert!(matches!(report, camel_function::HealthReport::Healthy));
     provider.shutdown_runner(handle).await.expect("shutdown");
-    assert_no_runner_containers().await;
+    assert_clean(&provider).await;
 }
 
 #[tokio::test]
 async fn test_register_and_invoke() {
     build_runner_image().await;
-    let provider = create_provider();
+    let provider = create_provider("register_invoke");
     let handle = provider.spawn_runner("deno").await.expect("spawn");
     wait_for_health(&provider, &handle, Duration::from_secs(10))
         .await
@@ -123,29 +112,29 @@ async fn test_register_and_invoke() {
     assert!(matches!(patch.body, Some(PatchBody::Text(ref s)) if s == "HELLO"));
 
     provider.shutdown_runner(handle).await.expect("shutdown");
-    assert_no_runner_containers().await;
+    assert_clean(&provider).await;
 }
 
 #[tokio::test]
 async fn test_shutdown_removes_container() {
     build_runner_image().await;
-    let provider = create_provider();
+    let provider = create_provider("shutdown_remove");
     let handle = provider.spawn_runner("deno").await.expect("spawn");
     wait_for_health(&provider, &handle, Duration::from_secs(10))
         .await
         .expect("health");
     provider.shutdown_runner(handle).await.expect("shutdown");
-    assert_no_runner_containers().await;
+    assert_clean(&provider).await;
 }
 
 #[tokio::test]
 async fn test_cleanup_all() {
     build_runner_image().await;
-    let provider = create_provider();
+    let provider = create_provider("cleanup_all");
     let h1 = provider.spawn_runner("deno").await.expect("spawn");
     wait_for_health(&provider, &h1, Duration::from_secs(10))
         .await
         .expect("health");
     provider.cleanup_all().await;
-    assert_no_runner_containers().await;
+    assert_clean(&provider).await;
 }

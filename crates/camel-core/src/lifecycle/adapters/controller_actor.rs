@@ -326,20 +326,21 @@ impl RouteControllerHandle {
     ) -> Result<PreparedRoute, CamelError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(RouteControllerCommand::PrepareRouteDefinitionWithGeneration {
-                definition,
-                generation,
-                reply: reply_tx,
-            })
+            .send(
+                RouteControllerCommand::PrepareRouteDefinitionWithGeneration {
+                    definition,
+                    generation,
+                    reply: reply_tx,
+                },
+            )
             .await
             .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
-        reply_rx.await.map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
     }
 
-    pub async fn insert_prepared_route(
-        &self,
-        prepared: PreparedRoute,
-    ) -> Result<(), CamelError> {
+    pub async fn insert_prepared_route(&self, prepared: PreparedRoute) -> Result<(), CamelError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RouteControllerCommand::InsertPreparedRoute {
@@ -348,7 +349,9 @@ impl RouteControllerHandle {
             })
             .await
             .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
-        reply_rx.await.map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
     }
 
     pub async fn remove_route_preserving_functions(
@@ -363,7 +366,9 @@ impl RouteControllerHandle {
             })
             .await
             .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
-        reply_rx.await.map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
     }
 
     pub async fn add_route_definition_with_generation(
@@ -380,7 +385,9 @@ impl RouteControllerHandle {
             })
             .await
             .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
-        reply_rx.await.map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
     }
 
     pub async fn route_from_uri(
@@ -650,17 +657,35 @@ pub fn spawn_controller_actor(
                         controller.compile_route_definition_with_generation(definition, generation),
                     );
                 }
-                RouteControllerCommand::PrepareRouteDefinitionWithGeneration { definition, generation, reply } => {
-                    let _ = reply.send(controller.prepare_route_definition_with_generation(definition, generation));
+                RouteControllerCommand::PrepareRouteDefinitionWithGeneration {
+                    definition,
+                    generation,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        controller.prepare_route_definition_with_generation(definition, generation),
+                    );
                 }
                 RouteControllerCommand::InsertPreparedRoute { prepared, reply } => {
                     let _ = reply.send(controller.insert_prepared_route(prepared));
                 }
                 RouteControllerCommand::RemoveRoutePreservingFunctions { route_id, reply } => {
-                    let _ = reply.send(controller.remove_route_preserving_functions(&route_id).await);
+                    let _ = reply.send(
+                        controller
+                            .remove_route_preserving_functions(&route_id)
+                            .await,
+                    );
                 }
-                RouteControllerCommand::AddRouteDefinitionWithGeneration { definition, generation, reply } => {
-                    let _ = reply.send(controller.add_route_with_generation(definition, generation).await);
+                RouteControllerCommand::AddRouteDefinitionWithGeneration {
+                    definition,
+                    generation,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        controller
+                            .add_route_with_generation(definition, generation)
+                            .await,
+                    );
                 }
                 RouteControllerCommand::RouteFromUri { route_id, reply } => {
                     let _ = reply.send(controller.route_from_uri(&route_id));

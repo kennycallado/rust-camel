@@ -1433,6 +1433,10 @@ dependencies = [
  "bollard",
  "bytes",
  "camel-api",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-core",
+ "camel-dsl",
  "dashmap 6.1.0",
  "futures",
  "reqwest 0.13.3",
@@ -1441,6 +1445,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
 ]
 

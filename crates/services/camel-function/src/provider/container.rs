@@ -36,6 +36,7 @@ pub struct ContainerProviderBuilder {
     image: String,
     boot_timeout: std::time::Duration,
     pull_policy: PullPolicy,
+    instance_id: Option<String>,
 }
 
 impl Default for ContainerProviderBuilder {
@@ -44,6 +45,7 @@ impl Default for ContainerProviderBuilder {
             image: "rustcamel/deno-runner:latest".to_string(),
             boot_timeout: std::time::Duration::from_secs(10),
             pull_policy: PullPolicy::IfMissing,
+            instance_id: None,
         }
     }
 }
@@ -68,9 +70,28 @@ impl ContainerProviderBuilder {
         self
     }
 
+    pub fn instance_id(mut self, id: impl Into<String>) -> Self {
+        self.instance_id = Some(id.into());
+        self
+    }
+
     pub fn build(self) -> Result<ContainerProvider, ProviderError> {
         let docker = bollard::Docker::connect_with_local_defaults()
             .map_err(|e| ProviderError::SpawnFailed(format!("docker connect: {e}")))?;
+        let instance_id = self.instance_id.unwrap_or_else(|| {
+            let hash = blake3::hash(
+                format!(
+                    "{}-{}",
+                    self.image,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                )
+                .as_bytes(),
+            );
+            format!("inst-{}", &hash.to_hex()[..12])
+        });
         Ok(ContainerProvider {
             docker,
             image: self.image,
@@ -78,6 +99,7 @@ impl ContainerProviderBuilder {
             pull_policy: self.pull_policy,
             client: ProtocolClient::new(),
             containers_by_handle: DashMap::new(),
+            instance_id,
         })
     }
 }
@@ -85,6 +107,7 @@ impl ContainerProviderBuilder {
 pub struct ContainerProvider {
     docker: bollard::Docker,
     image: String,
+    instance_id: String,
     #[allow(dead_code)]
     boot_timeout: std::time::Duration,
     #[allow(dead_code)]
@@ -107,6 +130,28 @@ impl ContainerProvider {
         for (handle_id, container_id) in entries {
             self.stop_and_remove_container(&container_id).await;
             self.containers_by_handle.remove(&handle_id);
+        }
+    }
+
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    pub async fn is_clean(&self) -> bool {
+        self.list_instance_containers().await.is_empty()
+    }
+
+    pub async fn list_instance_containers(&self) -> Vec<String> {
+        let options = bollard::query_parameters::ListContainersOptions {
+            filters: Some(std::collections::HashMap::from([(
+                "label".to_string(),
+                vec![format!("camel.function.instance={}", self.instance_id)],
+            )])),
+            ..Default::default()
+        };
+        match self.docker.list_containers(Some(options)).await {
+            Ok(containers) => containers.into_iter().filter_map(|c| c.id).collect(),
+            Err(_) => vec![],
         }
     }
 
@@ -258,6 +303,10 @@ impl FunctionProvider for ContainerProvider {
         let labels = std::collections::HashMap::from([
             ("camel.function.runner".to_string(), "true".to_string()),
             ("camel.function.context".to_string(), handle_id.clone()),
+            (
+                "camel.function.instance".to_string(),
+                self.instance_id.clone(),
+            ),
         ]);
 
         let config = bollard::models::ContainerCreateBody {

@@ -14,6 +14,7 @@ const STATUS_FAILED: u8 = 2;
 pub struct FunctionRuntimeService {
     config: FunctionConfig,
     provider: Arc<dyn FunctionProvider>,
+    container_provider: Option<Arc<crate::provider::container::ContainerProvider>>,
     pub(crate) invoker: Arc<DefaultFunctionInvoker>,
     status: Arc<AtomicU8>,
 }
@@ -29,6 +30,7 @@ impl FunctionRuntimeService {
         Self {
             config,
             provider,
+            container_provider: None,
             invoker,
             status: Arc::new(AtomicU8::new(STATUS_STOPPED)),
         }
@@ -45,7 +47,10 @@ impl FunctionRuntimeService {
         config: FunctionConfig,
         provider: crate::provider::container::ContainerProvider,
     ) -> Self {
-        Self::new(config, Arc::new(provider))
+        let arc = Arc::new(provider);
+        let mut svc = Self::new(config, arc.clone() as Arc<dyn FunctionProvider>);
+        svc.container_provider = Some(arc);
+        svc
     }
 
     pub fn with_default_container_provider(
@@ -57,6 +62,12 @@ impl FunctionRuntimeService {
 
     pub fn invoker(&self) -> Arc<dyn FunctionInvoker> {
         self.invoker.clone() as Arc<dyn FunctionInvoker>
+    }
+
+    pub fn provider(&self) -> &crate::provider::container::ContainerProvider {
+        self.container_provider
+            .as_ref()
+            .expect("not a container provider")
     }
 
     pub fn runner_state(&self, runtime: &str) -> Option<RunnerState> {
@@ -90,16 +101,19 @@ impl FunctionRuntimeService {
             if tokio::time::Instant::now() > deadline {
                 return Err(ProviderError::BootTimeout);
             }
-            match self.provider.health(handle).await? {
-                HealthReport::Healthy => {
+            match self.provider.health(handle).await {
+                Ok(HealthReport::Healthy) => {
                     *handle.state.lock().expect("state") = RunnerState::Healthy;
                     return Ok(());
                 }
-                HealthReport::Unhealthy(reason) => {
+                Ok(HealthReport::Unhealthy(reason)) => {
                     *handle.state.lock().expect("state") = RunnerState::Unhealthy {
                         since: std::time::Instant::now(),
                         reason,
                     };
+                    tokio::time::sleep(self.config.health_interval).await;
+                }
+                Err(_) => {
                     tokio::time::sleep(self.config.health_interval).await;
                 }
             }

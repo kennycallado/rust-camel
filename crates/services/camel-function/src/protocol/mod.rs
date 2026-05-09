@@ -23,7 +23,7 @@ pub struct RegisterRequest {
 /// v1 supports `Empty`, `Text`, `Json`. `Bytes` (base64) and `Xml` are
 /// forward-looking extensions for future protocol versions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase", tag = "kind", content = "value")]
 pub enum BodyWire {
     Empty,
     Text(String),
