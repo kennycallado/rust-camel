@@ -317,13 +317,40 @@ pub(crate) async fn execute_reload_actions(
                 };
 
                 if let Some(ctx) = function_ctx {
-                    if let Err(e) = controller
-                        .add_route_definition_with_generation(def, ctx.generation)
+                    let prepared = match controller
+                        .prepare_route_definition_with_generation(def, ctx.generation)
                         .await
                     {
+                        Ok(p) => p,
+                        Err(e) => {
+                            ctx.invoker.discard_staging(ctx.generation);
+                            errors.push(ReloadError {
+                                route_id,
+                                action: "Add (prepare-route)".into(),
+                                error: e,
+                            });
+                            continue;
+                        }
+                    };
+
+                    let diff =
+                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
+
+                    if let Err(e) = ctx.invoker.prepare_reload(diff, ctx.generation).await {
+                        ctx.invoker.discard_staging(ctx.generation);
                         errors.push(ReloadError {
                             route_id,
-                            action: "Add".into(),
+                            action: "Add (prepare)".into(),
+                            error: CamelError::ProcessorError(format!("{e}")),
+                        });
+                        continue;
+                    }
+
+                    if let Err(e) = controller.insert_prepared_route(prepared).await {
+                        ctx.invoker.discard_staging(ctx.generation);
+                        errors.push(ReloadError {
+                            route_id,
+                            action: "Add (insert)".into(),
                             error: e,
                         });
                         continue;
@@ -341,22 +368,6 @@ pub(crate) async fn execute_reload_actions(
                             route_id,
                             action: "Add (aggregate)".into(),
                             error: e,
-                        });
-                        continue;
-                    }
-
-                    let diff =
-                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
-
-                    if let Err(e) = ctx.invoker.prepare_reload(diff, ctx.generation).await {
-                        let _ = controller
-                            .remove_route_preserving_functions(route_id.clone())
-                            .await;
-                        ctx.invoker.discard_staging(ctx.generation);
-                        errors.push(ReloadError {
-                            route_id,
-                            action: "Add (prepare)".into(),
-                            error: CamelError::ProcessorError(format!("{e}")),
                         });
                         continue;
                     }
@@ -1967,6 +1978,87 @@ mod tests {
             }
             other => panic!("unexpected query result: {other:?}"),
         }
+
+        ctx.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_add_with_prepare_failure_never_inserts_route() {
+        use crate::CamelContext;
+        use crate::lifecycle::application::route_definition::BuilderStep;
+        use camel_api::Lifecycle;
+        use camel_function::provider::fake::{FakeProvider, FakeProviderConfig};
+        use camel_function::{FunctionConfig, FunctionRuntimeService};
+
+        let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
+        let function_service =
+            FunctionRuntimeService::with_fake_provider(FunctionConfig::default(), provider.clone());
+        let invoker = function_service.invoker();
+
+        let mut ctx = CamelContext::builder()
+            .with_lifecycle(function_service)
+            .build()
+            .await
+            .unwrap();
+        ctx.register_component(camel_component_timer::TimerComponent::new());
+        ctx.start().await.unwrap();
+
+        provider.config.lock().unwrap().fail_on_register = 1;
+
+        let generation = invoker.begin_reload();
+        invoker.stage_pending(
+            fn_def("fn-first", Some("add-fail-route")),
+            Some("add-fail-route"),
+            generation,
+        );
+        invoker.stage_pending(
+            fn_def("fn-second", Some("add-fail-route")),
+            Some("add-fail-route"),
+            generation,
+        );
+
+        let new_def = RouteDefinition::new(
+            "timer:tick?period=50&repeatCount=1",
+            vec![
+                BuilderStep::DeclarativeFunction {
+                    definition: fn_def("fn-first", Some("add-fail-route")),
+                },
+                BuilderStep::DeclarativeFunction {
+                    definition: fn_def("fn-second", Some("add-fail-route")),
+                },
+            ],
+        )
+        .with_route_id("add-fail-route");
+
+        let actions = vec![ReloadAction::Add {
+            route_id: "add-fail-route".into(),
+        }];
+        let function_ctx = FunctionReloadContext {
+            invoker: invoker.clone(),
+            generation,
+        };
+        let errors = execute_reload_actions(
+            actions,
+            vec![new_def],
+            &ctx.runtime_execution_handle(),
+            Duration::from_secs(10),
+            Some(&function_ctx),
+        )
+        .await;
+        assert_eq!(errors.len(), 1, "Expected one error, got: {:?}", errors);
+        assert!(
+            errors[0].action.contains("prepare"),
+            "Expected prepare error, got: {}",
+            errors[0].action
+        );
+
+        assert_eq!(
+            ctx.runtime_execution_handle()
+                .controller_route_count_for_test()
+                .await,
+            0,
+            "Route should NOT exist after prepare failure"
+        );
 
         ctx.stop().await.unwrap();
     }
