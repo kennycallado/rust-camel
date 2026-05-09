@@ -1,0 +1,14 @@
+routes:
+  - id: "enrich-users"
+    from: "timer:enrich?period=2000"
+    steps:
+      - set_body: "hello world"
+      - function:
+          runtime: deno
+          timeout_ms: 5000
+          source: |
+            export default (camel) => {
+              camel.setBody(String(camel.body()).toUpperCase());
+              camel.setHeader("X-Enriched", "true");
+            };
+      - log: "enriched"

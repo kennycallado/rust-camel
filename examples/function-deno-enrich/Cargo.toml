@@ -1,0 +1,17 @@
+[package]
+name = "function-deno-enrich"
+description = "Function step example — enrich messages via Deno/TypeScript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-dsl.workspace = true
+camel-function.workspace = true
+camel-component-log.workspace = true
+camel-component-timer.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
