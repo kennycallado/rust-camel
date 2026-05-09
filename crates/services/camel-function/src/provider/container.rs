@@ -11,6 +11,7 @@ use super::{FunctionProvider, HealthReport, ProviderError};
 struct ContainerEntry {
     container_id: String,
     endpoint: String,
+    #[allow(dead_code)]
     host_port: u16,
 }
 
@@ -84,7 +85,9 @@ impl ContainerProviderBuilder {
 pub struct ContainerProvider {
     docker: bollard::Docker,
     image: String,
+    #[allow(dead_code)]
     boot_timeout: std::time::Duration,
+    #[allow(dead_code)]
     pull_policy: PullPolicy,
     client: ProtocolClient,
     containers_by_handle: DashMap<String, ContainerEntry>,
@@ -318,11 +321,13 @@ impl FunctionProvider for ContainerProvider {
     }
 
     async fn health(&self, handle: &RunnerHandle) -> Result<HealthReport, ProviderError> {
-        let entry = self
+        let endpoint = self
             .containers_by_handle
             .get(&handle.id)
-            .ok_or_else(|| ProviderError::HealthFailed(format!("unknown handle {}", handle.id)))?;
-        self.client.health(&entry.endpoint).await
+            .ok_or_else(|| ProviderError::HealthFailed(format!("unknown handle {}", handle.id)))?
+            .endpoint
+            .clone();
+        self.client.health(&endpoint).await
     }
 
     async fn register(
@@ -330,11 +335,13 @@ impl FunctionProvider for ContainerProvider {
         handle: &RunnerHandle,
         def: &FunctionDefinition,
     ) -> Result<(), ProviderError> {
-        let entry = self
+        let endpoint = self
             .containers_by_handle
             .get(&handle.id)
-            .ok_or_else(|| ProviderError::RegisterFailed(format!("unknown handle {}", handle.id)))?;
-        self.client.register(&entry.endpoint, def).await
+            .ok_or_else(|| ProviderError::RegisterFailed(format!("unknown handle {}", handle.id)))?
+            .endpoint
+            .clone();
+        self.client.register(&endpoint, def).await
     }
 
     async fn unregister(
@@ -351,12 +358,14 @@ impl FunctionProvider for ContainerProvider {
         id: &FunctionId,
         ex: &Exchange,
     ) -> Result<ExchangePatch, ProviderError> {
-        let entry = self
+        let endpoint = self
             .containers_by_handle
             .get(&handle.id)
-            .ok_or_else(|| ProviderError::InvokeFailed(format!("unknown handle {}", handle.id)))?;
+            .ok_or_else(|| ProviderError::InvokeFailed(format!("unknown handle {}", handle.id)))?
+            .endpoint
+            .clone();
         let timeout = std::time::Duration::from_millis(5000);
-        let resp = self.client.invoke(&entry.endpoint, id, ex, timeout).await?;
+        let resp = self.client.invoke(&endpoint, id, ex, timeout).await?;
         if resp.ok {
             let patch = resp.patch.unwrap_or_default();
             Ok(patch.to_exchange_patch())
