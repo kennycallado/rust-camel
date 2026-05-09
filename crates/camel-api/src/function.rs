@@ -81,11 +81,26 @@ pub struct FunctionDiff {
     pub unchanged: Vec<FunctionId>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct PrepareToken {
+    pub registered: Vec<(FunctionDefinition, Option<String>)>,
+}
+
 pub trait FunctionInvokerSync: Send + Sync {
     fn stage_pending(&self, def: FunctionDefinition, route_id: Option<&str>, generation: u64);
     fn discard_staging(&self, generation: u64);
     fn begin_reload(&self) -> u64;
     fn function_refs_for_route(&self, route_id: &str) -> Vec<(FunctionId, Option<String>)>;
+    fn staged_refs_for_route(
+        &self,
+        route_id: &str,
+        generation: u64,
+    ) -> Vec<(FunctionId, Option<String>)>;
+    fn staged_defs_for_route(
+        &self,
+        route_id: &str,
+        generation: u64,
+    ) -> Vec<(FunctionDefinition, Option<String>)>;
 }
 
 #[async_trait::async_trait]
@@ -105,10 +120,28 @@ pub trait FunctionInvoker: FunctionInvokerSync + Send + Sync {
         id: &FunctionId,
         exchange: &Exchange,
     ) -> Result<ExchangePatch, FunctionInvocationError>;
+    async fn prepare_reload(
+        &self,
+        diff: FunctionDiff,
+        generation: u64,
+    ) -> Result<PrepareToken, FunctionInvocationError>;
+    async fn finalize_reload(
+        &self,
+        diff: &FunctionDiff,
+        generation: u64,
+    ) -> Result<(), FunctionInvocationError>;
+    async fn rollback_reload(
+        &self,
+        token: PrepareToken,
+        generation: u64,
+    ) -> Result<(), FunctionInvocationError>;
     async fn commit_reload(
         &self,
         diff: FunctionDiff,
         generation: u64,
-    ) -> Result<(), FunctionInvocationError>;
+    ) -> Result<(), FunctionInvocationError> {
+        let token = self.prepare_reload(diff.clone(), generation).await?;
+        self.finalize_reload(&diff, generation).await
+    }
     async fn commit_staged(&self) -> Result<(), FunctionInvocationError>;
 }
