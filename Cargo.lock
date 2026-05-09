@@ -1428,9 +1428,12 @@ name = "camel-function"
 version = "0.8.2"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "blake3",
+ "bytes",
  "camel-api",
  "dashmap 6.1.0",
+ "futures",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

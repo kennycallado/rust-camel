@@ -38,7 +38,10 @@ impl BodyWire {
                 BodyWire::Bytes(base64::engine::general_purpose::STANDARD.encode(b))
             }
             camel_api::Body::Xml(s) => BodyWire::Xml(s.clone()),
-            camel_api::Body::Stream(_) => BodyWire::Empty,
+            camel_api::Body::Stream(_) => {
+                tracing::debug!("stream body cannot cross process boundary, mapping to Empty");
+                BodyWire::Empty
+            }
         }
     }
 
@@ -47,10 +50,15 @@ impl BodyWire {
             BodyWire::Empty => camel_api::Body::Empty,
             BodyWire::Text(s) => camel_api::Body::Text(s.clone()),
             BodyWire::Json(v) => camel_api::Body::Json(v.clone()),
-            BodyWire::Bytes(b64) => base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .map(|bytes| camel_api::Body::Bytes(bytes::Bytes::from(bytes)))
-                .unwrap_or(camel_api::Body::Empty),
+            BodyWire::Bytes(b64) => {
+                match base64::engine::general_purpose::STANDARD.decode(b64) {
+                    Ok(bytes) => camel_api::Body::Bytes(bytes::Bytes::from(bytes)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "invalid base64 in wire body, falling back to Empty");
+                        camel_api::Body::Empty
+                    }
+                }
+            }
             BodyWire::Xml(s) => camel_api::Body::Xml(s.clone()),
         }
     }
@@ -321,5 +329,56 @@ mod tests {
         } else {
             panic!("expected Body::Bytes from to_body()");
         }
+    }
+
+    #[test]
+    fn test_body_wire_from_body_roundtrip() {
+        let bodies = vec![
+            ("Empty", camel_api::Body::Empty),
+            ("Text", camel_api::Body::Text("hello world".into())),
+            ("Json", camel_api::Body::Json(serde_json::json!({"key": "value"}))),
+            ("Xml", camel_api::Body::Xml("<root><item>1</item></root>".into())),
+        ];
+
+        for (name, body) in bodies {
+            let wire = BodyWire::from_body(&body);
+            let roundtripped = wire.to_body();
+            assert_eq!(body, roundtripped, "roundtrip failed for {name}");
+        }
+
+        // Bytes need special handling since from_body base64-encodes
+        let original_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let body = camel_api::Body::Bytes(bytes::Bytes::from(original_bytes.clone()));
+        let wire = BodyWire::from_body(&body);
+        let roundtripped = wire.to_body();
+        if let camel_api::Body::Bytes(b) = roundtripped {
+            assert_eq!(b.to_vec(), original_bytes);
+        } else {
+            panic!("expected Body::Bytes after Bytes roundtrip");
+        }
+    }
+
+    #[test]
+    fn test_body_wire_from_body_stream_maps_to_empty() {
+        use camel_api::{StreamBody, StreamMetadata};
+        use futures::stream;
+
+        let chunks = vec![Ok(bytes::Bytes::from("stream data"))];
+        let stream_body = camel_api::Body::Stream(StreamBody {
+            stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream::iter(chunks))))),
+            metadata: StreamMetadata::default(),
+        });
+
+        let wire = BodyWire::from_body(&stream_body);
+        assert!(matches!(wire, BodyWire::Empty));
+    }
+
+    #[test]
+    fn test_body_wire_to_body_from_body_text() {
+        let wire = BodyWire::Text("hello world".into());
+        let body = wire.to_body();
+        let wire2 = BodyWire::from_body(&body);
+
+        assert!(matches!(wire2, BodyWire::Text(ref s) if s == "hello world"));
     }
 }
