@@ -41,6 +41,20 @@ impl FunctionRuntimeService {
         Self::new(config, provider as Arc<dyn FunctionProvider>)
     }
 
+    pub fn with_container_provider(
+        config: FunctionConfig,
+        provider: crate::provider::container::ContainerProvider,
+    ) -> Self {
+        Self::new(config, Arc::new(provider))
+    }
+
+    pub fn with_default_container_provider(
+        config: FunctionConfig,
+    ) -> Result<Self, crate::provider::ProviderError> {
+        let provider = crate::provider::container::ContainerProvider::builder().build()?;
+        Ok(Self::with_container_provider(config, provider))
+    }
+
     pub fn invoker(&self) -> Arc<dyn FunctionInvoker> {
         self.invoker.clone() as Arc<dyn FunctionInvoker>
     }

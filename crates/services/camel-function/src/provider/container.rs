@@ -227,21 +227,26 @@ impl super::sealed::Sealed for ContainerProvider {}
 #[async_trait::async_trait]
 impl FunctionProvider for ContainerProvider {
     async fn spawn(&self, _key: &RunnerPoolKey) -> Result<RunnerHandle, ProviderError> {
-        let handle_id = format!(
-            "deno-{}",
-            blake3::hash(
-                format!(
-                    "{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                )
-                .as_bytes()
+        let hash = blake3::hash(
+            format!(
+                "{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
             )
-            .to_hex()
-        );
+            .as_bytes(),
+        )
+        .to_hex();
+        let handle_id = format!("deno-{}", &hash[..16]);
         let host_port = self.allocate_host_port().await?;
+
+        tracing::debug!(
+            target: "camel_function::container",
+            %handle_id,
+            image = %self.image,
+            "spawning container"
+        );
 
         let labels = std::collections::HashMap::from([
             ("camel.function.runner".to_string(), "true".to_string()),
@@ -394,19 +399,26 @@ impl Drop for ContainerProvider {
             .iter()
             .map(|e| e.container_id.clone())
             .collect();
-        drop(tokio::spawn(async move {
-            for id in container_ids {
-                let _ = docker.stop_container(&id, None).await;
-                let _ = docker
-                    .remove_container(
-                        &id,
-                        Some(bollard::query_parameters::RemoveContainerOptions {
-                            force: true,
-                            ..Default::default()
-                        }),
-                    )
-                    .await;
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                drop(handle.spawn(async move {
+                    for id in container_ids {
+                        let _ = docker.stop_container(&id, None).await;
+                        let _ = docker
+                            .remove_container(
+                                &id,
+                                Some(bollard::query_parameters::RemoveContainerOptions {
+                                    force: true,
+                                    ..Default::default()
+                                }),
+                            )
+                            .await;
+                    }
+                }));
             }
-        }));
+            Err(_) => {
+                tracing::warn!(target: "camel_function::container", "container cleanup skipped: no tokio runtime");
+            }
+        }
     }
 }
