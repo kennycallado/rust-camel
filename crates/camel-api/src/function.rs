@@ -140,7 +140,7 @@ pub trait FunctionInvoker: FunctionInvokerSync + Send + Sync {
         diff: FunctionDiff,
         generation: u64,
     ) -> Result<(), FunctionInvocationError> {
-        let token = self.prepare_reload(diff.clone(), generation).await?;
+        let _token = self.prepare_reload(diff.clone(), generation).await?;
         self.finalize_reload(&diff, generation).await
     }
     async fn commit_staged(&self) -> Result<(), FunctionInvocationError>;
