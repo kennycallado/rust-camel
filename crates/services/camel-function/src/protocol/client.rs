@@ -7,6 +7,12 @@ pub struct ProtocolClient {
     http: reqwest::Client,
 }
 
+impl Default for ProtocolClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProtocolClient {
     pub fn new() -> Self {
         Self {
