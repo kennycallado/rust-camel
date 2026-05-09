@@ -4,9 +4,7 @@ use camel_api::{CamelError, Exchange, Message};
 use camel_component_direct::DirectComponent;
 use camel_component_log::LogComponent;
 use camel_core::context::CamelContext;
-use camel_dsl;
 use camel_function::{ContainerProvider, FunctionConfig, FunctionRuntimeService, PullPolicy};
-use std::collections::HashMap;
 use std::time::Duration;
 use tower::ServiceExt;
 

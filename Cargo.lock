@@ -3311,6 +3311,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "function-deno-enrich"
+version = "0.8.2"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "camel-function",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"

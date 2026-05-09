@@ -1,6 +1,6 @@
 # camel-function
 
-Out-of-process function runtime for [rust-camel](../../README.md).
+Out-of-process function runtime for [rust-camel](../../../README.md).
 
 Provides the `function:` DSL step — executes user-supplied TypeScript/JavaScript functions inside Deno containers with automatic lifecycle management, hot-reload, and structured error mapping.
 
