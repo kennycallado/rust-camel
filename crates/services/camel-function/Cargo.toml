@@ -25,6 +25,8 @@ blake3.workspace = true
 dashmap.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 reqwest = { workspace = true, features = ["json"] }
+bollard = "0.20"
+futures = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time", "process"] }

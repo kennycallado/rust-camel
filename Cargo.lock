@@ -1430,6 +1430,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "blake3",
+ "bollard",
  "bytes",
  "camel-api",
  "dashmap 6.1.0",

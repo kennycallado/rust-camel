@@ -49,6 +49,7 @@ pub(crate) trait FunctionProvider: Send + Sync + sealed::Sealed {
     ) -> Result<ExchangePatch, ProviderError>;
 }
 
+pub mod container;
 pub mod fake {
     use super::*;
     use std::collections::{HashMap, HashSet};
