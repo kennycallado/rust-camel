@@ -354,3 +354,30 @@ async fn discard_staging_drops_buffer_current_untouched() {
     let invoke_a = invoker.invoke(&fn_id("fn-a"), &Exchange::default()).await;
     assert!(invoke_a.is_ok());
 }
+
+#[tokio::test]
+async fn commit_staged_rolls_back_on_partial_register_failure() {
+    let (provider, _service, invoker) = started_service(FakeProviderConfig {
+        fail_on_register: 1,
+        ..Default::default()
+    })
+    .await;
+
+    let def_a = fn_def("fn-a", Some("r1"));
+    let def_b = fn_def("fn-b", Some("r1"));
+    invoker.stage_pending(def_a.clone(), Some("r1"), 0);
+    invoker.stage_pending(def_b.clone(), Some("r1"), 0);
+
+    let result = invoker.commit_staged().await;
+    assert!(result.is_err());
+
+    let refs = invoker.function_refs_for_route("r1");
+    assert!(refs.is_empty());
+
+    let calls = provider.calls.lock().expect("calls").clone();
+    let unreg_a = calls
+        .iter()
+        .filter(|c| matches!(c, FakeCall::Unregister(_, id) if *id == fn_id("fn-a")))
+        .count();
+    assert_eq!(unreg_a, 1);
+}

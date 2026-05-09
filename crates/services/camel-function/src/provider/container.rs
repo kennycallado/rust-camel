@@ -222,7 +222,14 @@ impl ContainerProvider {
         function_id: &FunctionId,
         exchange: &Exchange,
     ) -> Result<ExchangePatch, ProviderError> {
-        FunctionProvider::invoke(self, handle, function_id, exchange).await
+        FunctionProvider::invoke(
+            self,
+            handle,
+            function_id,
+            exchange,
+            std::time::Duration::from_millis(5000),
+        )
+        .await
     }
 
     fn spawn_log_forwarder(&self, container_id: String) {
@@ -418,6 +425,7 @@ impl FunctionProvider for ContainerProvider {
         handle: &RunnerHandle,
         id: &FunctionId,
         ex: &Exchange,
+        timeout: std::time::Duration,
     ) -> Result<ExchangePatch, ProviderError> {
         let endpoint = self
             .containers_by_handle
@@ -425,7 +433,6 @@ impl FunctionProvider for ContainerProvider {
             .ok_or_else(|| ProviderError::InvokeFailed(format!("unknown handle {}", handle.id)))?
             .endpoint
             .clone();
-        let timeout = std::time::Duration::from_millis(5000);
         let resp = self.client.invoke(&endpoint, id, ex, timeout).await?;
         if resp.ok {
             let patch = resp.patch.unwrap_or_default();

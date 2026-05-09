@@ -13,6 +13,7 @@ pub(crate) struct DefaultFunctionInvoker {
     pub(crate) config: FunctionConfig,
     pub(crate) pending: Mutex<Vec<(FunctionDefinition, Option<String>)>>,
     pub(crate) staging: Mutex<HashMap<u64, StagedEntries>>,
+    pub(crate) function_timeouts: Mutex<HashMap<FunctionId, u64>>,
     pub(crate) next_generation: AtomicU64,
     pub(crate) current_generation: AtomicU64,
     pub(crate) started: AtomicBool,
@@ -32,6 +33,7 @@ impl DefaultFunctionInvoker {
             config,
             pending: Mutex::new(Vec::new()),
             staging: Mutex::new(HashMap::new()),
+            function_timeouts: Mutex::new(HashMap::new()),
             next_generation: AtomicU64::new(0),
             current_generation: AtomicU64::new(0),
             started: AtomicBool::new(false),
@@ -187,6 +189,10 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             .entry(ref_key.clone())
             .and_modify(|c| *c += 1)
             .or_insert(1);
+        self.function_timeouts
+            .lock()
+            .expect("function_timeouts")
+            .insert(def.id.clone(), def.timeout_ms);
         self.pool.function_to_key.insert(ref_key, key);
         Ok(())
     }
@@ -212,6 +218,10 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             let still_used_by_other_route =
                 self.pool.function_to_key.iter().any(|kv| kv.key().0 == *id);
             if !still_used_by_other_route {
+                self.function_timeouts
+                    .lock()
+                    .expect("function_timeouts")
+                    .remove(id);
                 if let Some(handle) = self.pool.handles.get(&pool_key) {
                     self.provider
                         .unregister(&handle, id)
@@ -267,8 +277,16 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             }
             _ => {}
         }
+        let timeout = std::time::Duration::from_millis(
+            self.function_timeouts
+                .lock()
+                .expect("function_timeouts")
+                .get(id)
+                .copied()
+                .unwrap_or(self.config.default_timeout_ms),
+        );
         self.provider
-            .invoke(&handle, id, exchange)
+            .invoke(&handle, id, exchange, timeout)
             .await
             .map_err(|e| FunctionInvocationError::Transport(e.to_string()))
     }
@@ -356,8 +374,17 @@ impl FunctionInvoker for DefaultFunctionInvoker {
     async fn commit_staged(&self) -> Result<(), FunctionInvocationError> {
         let entries = self.staging.lock().expect("staging").remove(&0);
         if let Some(entries) = entries {
+            let mut committed: Vec<(FunctionId, Option<String>)> = Vec::new();
             for (def, route_id) in entries {
-                self.register(def, route_id.as_deref()).await?;
+                match self.register(def.clone(), route_id.as_deref()).await {
+                    Ok(()) => committed.push((def.id, route_id)),
+                    Err(e) => {
+                        for (id, rid) in committed.iter().rev() {
+                            let _ = self.unregister(id, rid.as_deref()).await;
+                        }
+                        return Err(e);
+                    }
+                }
             }
         }
         Ok(())

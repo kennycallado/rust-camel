@@ -160,6 +160,19 @@ impl FunctionRuntimeService {
         for (ref_key, _pool_key) in registered_refs {
             self.invoker.pool.ref_counts.remove(ref_key);
             self.invoker.pool.function_to_key.remove(ref_key);
+            let still_used = self
+                .invoker
+                .pool
+                .function_to_key
+                .iter()
+                .any(|kv| kv.key().0 == ref_key.0);
+            if !still_used {
+                self.invoker
+                    .function_timeouts
+                    .lock()
+                    .expect("function_timeouts")
+                    .remove(&ref_key.0);
+            }
         }
         for (key, handle) in spawned {
             self.invoker.pool.handles.remove(key);
@@ -271,6 +284,11 @@ impl Lifecycle for FunctionRuntimeService {
         self.invoker.pool.handles.clear();
         self.invoker.pool.ref_counts.clear();
         self.invoker.pool.function_to_key.clear();
+        self.invoker
+            .function_timeouts
+            .lock()
+            .expect("function_timeouts")
+            .clear();
         for handle in handles {
             handle.cancel.cancel();
             self.provider

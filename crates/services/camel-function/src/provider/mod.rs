@@ -1,5 +1,6 @@
 use crate::pool::{RunnerHandle, RunnerPoolKey};
 use camel_api::{Exchange, function::*};
+use std::time::Duration;
 
 mod sealed {
     pub trait Sealed {}
@@ -46,6 +47,7 @@ pub(crate) trait FunctionProvider: Send + Sync + sealed::Sealed {
         handle: &RunnerHandle,
         id: &FunctionId,
         ex: &Exchange,
+        timeout: Duration,
     ) -> Result<ExchangePatch, ProviderError>;
 }
 
@@ -192,6 +194,7 @@ pub mod fake {
             handle: &RunnerHandle,
             id: &FunctionId,
             _ex: &Exchange,
+            _timeout: Duration,
         ) -> Result<ExchangePatch, ProviderError> {
             self.calls
                 .lock()
