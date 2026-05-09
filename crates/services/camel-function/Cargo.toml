@@ -27,7 +27,9 @@ tokio-util = { workspace = true, features = ["rt"] }
 reqwest = { workspace = true, features = ["json"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "time", "process"] }
+reqwest = { workspace = true, features = ["json"] }
+serde_json.workspace = true
 futures.workspace = true
 
 [features]
