@@ -523,6 +523,21 @@ fn canonical_step_to_builder_step(
                 dynamic_header,
             },
         }),
+        camel_api::runtime::CanonicalStepSpec::Function {
+            runtime,
+            source,
+            timeout_ms,
+        } => {
+            let definition = camel_api::FunctionDefinition {
+                id: camel_api::FunctionId::compute(&runtime, &source, timeout_ms),
+                runtime,
+                source,
+                timeout_ms,
+                route_id: None,
+                step_index: None,
+            };
+            Ok(BuilderStep::DeclarativeFunction { definition })
+        }
     }
 }
 

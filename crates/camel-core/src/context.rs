@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    CamelError, HealthReport, HealthStatus, Lifecycle, MetricsCollector, NoOpMetrics,
+    CamelError, FunctionInvoker, HealthReport, HealthStatus, Lifecycle, MetricsCollector, NoOpMetrics,
     NoopPlatformService, PlatformIdentity, PlatformService, ReadinessGate, RuntimeCommandBus,
     RuntimeQueryBus, ServiceHealth, ServiceStatus, SupervisionConfig,
 };
@@ -40,6 +40,7 @@ pub struct CamelContextBuilder {
     runtime_store: Option<crate::lifecycle::adapters::InMemoryRuntimeStore>,
     shutdown_timeout: std::time::Duration,
     beans: Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>,
+    function_invoker: Option<Arc<dyn FunctionInvoker>>,
 }
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
@@ -63,6 +64,7 @@ pub struct CamelContext {
     shutdown_timeout: std::time::Duration,
     services: Vec<Box<dyn Lifecycle>>,
     component_configs: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    function_invoker: Option<Arc<dyn FunctionInvoker>>,
 }
 
 /// Opaque handle for runtime side-effect execution operations.
@@ -273,6 +275,9 @@ impl CamelContext {
         // Auto-register MetricsCollector if available
         if let Some(collector) = service.as_metrics_collector() {
             self.metrics = collector;
+        }
+        if let Some(invoker) = service.as_function_invoker() {
+            self.function_invoker = Some(invoker);
         }
 
         self.services.push(Box::new(service));
@@ -636,6 +641,7 @@ impl CamelContextBuilder {
             runtime_store: None,
             shutdown_timeout: std::time::Duration::from_secs(30),
             beans: None,
+            function_invoker: None,
         }
     }
 
@@ -728,6 +734,9 @@ impl CamelContextBuilder {
                         Arc::clone(&platform_service),
                     )
                 };
+                if let Some(invoker) = self.function_invoker.clone() {
+                    controller_impl = controller_impl.with_function_invoker(invoker);
+                }
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 let supervision_join = spawn_supervision_task(
@@ -738,7 +747,7 @@ impl CamelContextBuilder {
                 );
                 (controller, actor_join, Some(supervision_join))
             } else {
-                let controller_impl = if let Some(ref beans) = self.beans {
+                let mut controller_impl = if let Some(ref beans) = self.beans {
                     DefaultRouteController::with_languages_and_beans(
                         Arc::clone(&registry),
                         Arc::clone(&languages),
@@ -752,6 +761,9 @@ impl CamelContextBuilder {
                         Arc::clone(&platform_service),
                     )
                 };
+                if let Some(invoker) = self.function_invoker.clone() {
+                    controller_impl = controller_impl.with_function_invoker(invoker);
+                }
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)
             };
@@ -776,6 +788,7 @@ impl CamelContextBuilder {
             shutdown_timeout: self.shutdown_timeout,
             services: Vec::new(),
             component_configs: HashMap::new(),
+            function_invoker: self.function_invoker,
         })
     }
 }

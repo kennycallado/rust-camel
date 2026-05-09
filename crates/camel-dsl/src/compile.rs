@@ -30,8 +30,8 @@ use crate::model::{
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
     DeclarativeStep, DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
     LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
-    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
-    SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef,
+    FunctionStepDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef,
+    SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef,
     ThrottleStrategyDef, ToStepDef, ValueSourceDef, WireTapStepDef,
 };
 
@@ -288,6 +288,22 @@ fn compile_declarative_step_with_threshold(
         ))),
         DeclarativeStep::Filter(def) => {
             compile_filter_step(def.predicate, def.steps, stream_cache_threshold)
+        }
+        DeclarativeStep::Function(FunctionStepDef {
+            runtime,
+            source,
+            timeout_ms,
+        }) => {
+            let timeout_ms = timeout_ms.unwrap_or(5000);
+            let definition = camel_api::FunctionDefinition {
+                id: camel_api::FunctionId::compute(&runtime, &source, timeout_ms),
+                runtime,
+                source,
+                timeout_ms,
+                route_id: None,
+                step_index: None,
+            };
+            Ok(BuilderStep::DeclarativeFunction { definition })
         }
         DeclarativeStep::Choice(ChoiceStepDef { whens, otherwise }) => {
             let mut compiled_whens = Vec::with_capacity(whens.len());
@@ -595,6 +611,15 @@ fn compile_declarative_step_to_canonical(
             delay_ms,
             dynamic_header,
         }),
+        DeclarativeStep::Function(FunctionStepDef {
+            runtime,
+            source,
+            timeout_ms,
+        }) => Ok(CanonicalStepSpec::Function {
+            runtime,
+            source,
+            timeout_ms: timeout_ms.unwrap_or(5000),
+        }),
         DeclarativeStep::Loop(_) => {
             let detail = canonical_contract_rejection_reason("loop")
                 .unwrap_or("not included in canonical v1");
@@ -714,6 +739,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Unmarshal(_) => "unmarshal",
         DeclarativeStep::Delay(_) => "delay",
         DeclarativeStep::Loop(_) => "loop",
+        DeclarativeStep::Function(_) => "function",
     }
 }
 
@@ -1519,6 +1545,31 @@ mod tests {
             })),
             "loop"
         );
+        assert_eq!(
+            declarative_step_name(&DeclarativeStep::Function(FunctionStepDef {
+                runtime: "deno".into(),
+                source: "return {};".into(),
+                timeout_ms: None,
+            })),
+            "function"
+        );
+    }
+
+    #[test]
+    fn compile_function_step_default_timeout() {
+        let step = DeclarativeStep::Function(FunctionStepDef {
+            runtime: "deno".into(),
+            source: "return {};".into(),
+            timeout_ms: None,
+        });
+        let compiled = compile_declarative_step(step).unwrap();
+        match compiled {
+            BuilderStep::DeclarativeFunction { definition } => {
+                assert_eq!(definition.timeout_ms, 5000);
+                assert_eq!(definition.runtime, "deno");
+            }
+            other => panic!("expected DeclarativeFunction, got {other:?}"),
+        }
     }
 
     #[test]

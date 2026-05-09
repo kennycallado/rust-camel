@@ -5,8 +5,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use camel_api::{
-    BoxProcessor, CamelError, Exchange, FilterPredicate, IdentityProcessor, ProducerContext, Value,
-    body::Body,
+    BoxProcessor, CamelError, Exchange, FilterPredicate, FunctionInvoker, IdentityProcessor,
+    ProducerContext, Value, body::Body,
     loop_eip::{LoopConfig, LoopMode},
 };
 use camel_bean::BeanRegistry;
@@ -92,6 +92,7 @@ pub(crate) fn resolve_steps(
     registry: &Arc<std::sync::Mutex<Registry>>,
     languages: &SharedLanguageRegistry,
     beans: &Arc<std::sync::Mutex<BeanRegistry>>,
+    function_invoker: Option<Arc<dyn FunctionInvoker>>,
     component_ctx: Arc<dyn ComponentContext>,
 ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
     let resolve_producer = |uri: &str| -> Result<BoxProcessor, CamelError> {
@@ -133,6 +134,7 @@ pub(crate) fn resolve_steps(
                     registry,
                     languages,
                     beans,
+                    function_invoker.clone(),
                     Arc::clone(&component_ctx),
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
@@ -169,6 +171,7 @@ pub(crate) fn resolve_steps(
                     registry,
                     languages,
                     beans,
+                    function_invoker.clone(),
                     Arc::clone(&component_ctx),
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
@@ -228,6 +231,7 @@ pub(crate) fn resolve_steps(
                     registry,
                     languages,
                     beans,
+                    function_invoker.clone(),
                     Arc::clone(&component_ctx),
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
@@ -246,6 +250,7 @@ pub(crate) fn resolve_steps(
                         registry,
                         languages,
                         beans,
+                        function_invoker.clone(),
                         Arc::clone(&component_ctx),
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
@@ -263,6 +268,7 @@ pub(crate) fn resolve_steps(
                         registry,
                         languages,
                         beans,
+                        function_invoker.clone(),
                         Arc::clone(&component_ctx),
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
@@ -306,6 +312,17 @@ pub(crate) fn resolve_steps(
                     }
                 }
             }
+            BuilderStep::DeclarativeFunction { definition } => {
+                let Some(invoker) = function_invoker.clone() else {
+                    return Err(CamelError::Config(
+                        "function: step requires FunctionRuntimeService registered via with_lifecycle"
+                            .into(),
+                    ));
+                };
+                invoker.stage_pending(definition.clone(), definition.route_id.as_deref(), 0);
+                let step = crate::step::function_step::FunctionStep::new(invoker, definition);
+                processors.push((BoxProcessor::new(step), None));
+            }
             BuilderStep::Split { config, steps } => {
                 let sub_pairs = resolve_steps(
                     steps,
@@ -313,6 +330,7 @@ pub(crate) fn resolve_steps(
                     registry,
                     languages,
                     beans,
+                    function_invoker.clone(),
                     Arc::clone(&component_ctx),
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
@@ -369,6 +387,7 @@ pub(crate) fn resolve_steps(
                     registry,
                     languages,
                     beans,
+                    function_invoker.clone(),
                     Arc::clone(&component_ctx),
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
@@ -394,6 +413,7 @@ pub(crate) fn resolve_steps(
                     registry,
                     languages,
                     beans,
+                    function_invoker.clone(),
                     Arc::clone(&component_ctx),
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
@@ -412,6 +432,7 @@ pub(crate) fn resolve_steps(
                         registry,
                         languages,
                         beans,
+                        function_invoker.clone(),
                         Arc::clone(&component_ctx),
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
@@ -430,6 +451,7 @@ pub(crate) fn resolve_steps(
                         registry,
                         languages,
                         beans,
+                        function_invoker.clone(),
                         Arc::clone(&component_ctx),
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
@@ -456,6 +478,7 @@ pub(crate) fn resolve_steps(
                         registry,
                         languages,
                         beans,
+                        function_invoker.clone(),
                         Arc::clone(&component_ctx),
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
@@ -547,6 +570,7 @@ pub(crate) fn resolve_steps(
                     registry,
                     languages,
                     beans,
+                    function_invoker.clone(),
                     Arc::clone(&component_ctx),
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
@@ -565,6 +589,7 @@ pub(crate) fn resolve_steps(
                         registry,
                         languages,
                         beans,
+                        function_invoker.clone(),
                         Arc::clone(&component_ctx),
                     )?;
                     let sub_processors: Vec<BoxProcessor> =

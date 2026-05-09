@@ -112,6 +112,13 @@ pub struct FilterStepDef {
     pub steps: Vec<DeclarativeStep>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionStepDef {
+    pub runtime: String,
+    pub source: String,
+    pub timeout_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WhenStepDef {
     pub predicate: LanguageExpressionDef,
@@ -310,6 +317,7 @@ pub enum DeclarativeStep {
     ConvertBodyTo(BodyTypeDef),
     DynamicRouter(DynamicRouterStepDef),
     Filter(FilterStepDef),
+    Function(FunctionStepDef),
     LoadBalance(LoadBalanceStepDef),
     Log(LogStepDef),
     Choice(ChoiceStepDef),

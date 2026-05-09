@@ -59,6 +59,9 @@ pub enum BuilderStep {
     DeclarativeScript {
         expression: LanguageExpressionDef,
     },
+    DeclarativeFunction {
+        definition: camel_api::FunctionDefinition,
+    },
     /// Declarative split using a language expression, resolved at route-add time.
     DeclarativeSplit {
         expression: LanguageExpressionDef,
@@ -207,6 +210,11 @@ impl std::fmt::Debug for BuilderStep {
                 f,
                 "BuilderStep::DeclarativeScript {{ language: {:?}, .. }}",
                 expression.language
+            ),
+            BuilderStep::DeclarativeFunction { definition } => write!(
+                f,
+                "BuilderStep::DeclarativeFunction {{ id: {:?}, runtime: {:?}, .. }}",
+                definition.id, definition.runtime
             ),
             BuilderStep::DeclarativeSplit { steps, .. } => {
                 write!(

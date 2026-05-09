@@ -179,6 +179,7 @@ pub enum YamlStep {
     Choice(ChoiceStep),
     DynamicRouter(DynamicRouterStep),
     Filter(FilterStep),
+    Function(FunctionStep),
     LoadBalance(LoadBalanceStep),
     Log(LogStep),
     Split(SplitStep),
@@ -198,6 +199,20 @@ pub enum YamlStep {
     Delay(DelayStep),
     Loop(LoopStep),
     Validate(ValidateStep),
+}
+
+#[derive(Deserialize, Debug)]
+pub struct FunctionStep {
+    pub function: FunctionData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionData {
+    pub runtime: String,
+    pub source: String,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]

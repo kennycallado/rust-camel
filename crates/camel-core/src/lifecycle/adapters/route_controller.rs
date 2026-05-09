@@ -18,8 +18,9 @@ use camel_api::aggregator::AggregatorConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
-    BoxProcessor, CamelError, Exchange, IdentityProcessor, NoOpMetrics, NoopPlatformService,
-    PlatformService, ProducerContext, RouteController, RuntimeCommand, RuntimeHandle,
+    BoxProcessor, CamelError, Exchange, FunctionInvoker, IdentityProcessor, NoOpMetrics,
+    NoopPlatformService, PlatformService, ProducerContext, RouteController, RuntimeCommand,
+    RuntimeHandle,
 };
 use camel_component_api::{
     ComponentContext, ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope,
@@ -300,6 +301,7 @@ pub struct DefaultRouteController {
     /// Metrics collector for tracing processor.
     tracer_metrics: Option<Arc<dyn MetricsCollector>>,
     platform_service: Arc<dyn PlatformService>,
+    function_invoker: Option<Arc<dyn FunctionInvoker>>,
 }
 
 impl DefaultRouteController {
@@ -344,6 +346,7 @@ impl DefaultRouteController {
             tracer_detail_level: DetailLevel::Minimal,
             tracer_metrics: None,
             platform_service,
+            function_invoker: None,
         }
     }
 
@@ -365,6 +368,7 @@ impl DefaultRouteController {
             tracer_detail_level: DetailLevel::Minimal,
             tracer_metrics: None,
             platform_service,
+            function_invoker: None,
         }
     }
 
@@ -386,7 +390,13 @@ impl DefaultRouteController {
             tracer_detail_level: DetailLevel::Minimal,
             tracer_metrics: None,
             platform_service,
+            function_invoker: None,
         }
+    }
+
+    pub fn with_function_invoker(mut self, function_invoker: Arc<dyn FunctionInvoker>) -> Self {
+        self.function_invoker = Some(function_invoker);
+        self
     }
 
     /// Set runtime handle for ProducerContext creation.
@@ -510,6 +520,7 @@ impl DefaultRouteController {
             registry,
             &self.languages,
             &self.beans,
+            self.function_invoker.clone(),
             component_ctx,
         )
     }

@@ -959,6 +959,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::DeclarativeFilter { .. } => "filter",
         BuilderStep::DeclarativeChoice { .. } => "choice",
         BuilderStep::DeclarativeScript { .. } => "script",
+        BuilderStep::DeclarativeFunction { .. } => "function",
         BuilderStep::DeclarativeSplit { .. } => "split",
         BuilderStep::Split { .. } => "split",
         BuilderStep::Loop { .. } | BuilderStep::DeclarativeLoop { .. } => "loop",
