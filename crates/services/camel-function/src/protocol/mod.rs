@@ -85,10 +85,9 @@ pub struct ExchangeWire {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InvokeResponse {
     pub ok: bool,
-    pub body: Option<BodyWire>,
-    pub headers_set: Vec<(String, serde_json::Value)>,
-    pub headers_removed: Vec<String>,
-    pub properties_set: Vec<(String, serde_json::Value)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<PatchWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorWire>,
 }
 
@@ -228,27 +227,26 @@ mod tests {
     fn test_invoke_response_ok() {
         let resp = InvokeResponse {
             ok: true,
-            body: Some(BodyWire::Text("processed".into())),
-            headers_set: vec![("x-custom".into(), serde_json::json!("added"))],
-            headers_removed: vec!["x-old".into()],
-            properties_set: vec![("status".into(), serde_json::json!("done"))],
+            patch: Some(PatchWire {
+                body: Some(BodyWire::Text("processed".into())),
+                headers_set: vec![("x-custom".into(), serde_json::json!("added"))],
+                headers_removed: vec!["x-old".into()],
+                properties_set: vec![("status".into(), serde_json::json!("done"))],
+            }),
             error: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let decoded: InvokeResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, decoded);
         assert!(decoded.ok);
-        assert!(decoded.body.is_some());
+        assert!(decoded.patch.as_ref().unwrap().body.is_some());
     }
 
     #[test]
     fn test_invoke_response_error() {
         let resp = InvokeResponse {
             ok: false,
-            body: None,
-            headers_set: vec![],
-            headers_removed: vec![],
-            properties_set: vec![],
+            patch: None,
             error: Some(ErrorWire {
                 kind: "user_error".into(),
                 message: "ReferenceError: x is not defined".into(),

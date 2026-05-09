@@ -29,7 +29,14 @@ impl ProtocolClient {
             ProviderError::HealthFailed(format!("health request failed: {e}"))
         })?;
         if resp.status().is_success() {
-            Ok(HealthReport::Healthy)
+            let health: HealthResponse = resp.json().await.map_err(|e| {
+                ProviderError::HealthFailed(format!("decode health response: {e}"))
+            })?;
+            if health.status == "ready" {
+                Ok(HealthReport::Healthy)
+            } else {
+                Ok(HealthReport::Unhealthy(health.status))
+            }
         } else {
             Ok(HealthReport::Unhealthy(format!("status {}", resp.status())))
         }

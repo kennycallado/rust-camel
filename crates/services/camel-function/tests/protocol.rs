@@ -180,8 +180,9 @@ async fn test_invoke_text_body() {
     wire.body = BodyWire::Text("hello".to_string());
     let result = runner.invoke(&wire).await;
     assert!(result.ok);
-    assert!(result.body.is_some());
-    let body = result.body.unwrap();
+    let patch = result.patch.unwrap();
+    assert!(patch.body.is_some());
+    let body = patch.body.unwrap();
     match body {
         BodyWire::Text(s) => assert_eq!(s, "HELLO"),
         other => panic!("expected Text, got {:?}", other),
@@ -201,8 +202,9 @@ async fn test_invoke_json_body() {
     wire.body = BodyWire::Json(serde_json::json!({"input": "data"}));
     let result = runner.invoke(&wire).await;
     assert!(result.ok);
-    assert!(result.body.is_some());
-    let body = result.body.unwrap();
+    let patch = result.patch.unwrap();
+    assert!(patch.body.is_some());
+    let body = patch.body.unwrap();
     match body {
         BodyWire::Json(v) => {
             assert_eq!(v["input"], "data");
@@ -225,8 +227,9 @@ async fn test_invoke_headers() {
     wire.headers.insert("X-Remove-Me".to_string(), serde_json::json!("bye"));
     let result = runner.invoke(&wire).await;
     assert!(result.ok);
-    assert!(result.headers_set.iter().any(|(k, v)| k == "X-Added" && v == "yes"));
-    assert!(result.headers_removed.contains(&"X-Remove-Me".to_string()));
+    let patch = result.patch.unwrap();
+    assert!(patch.headers_set.iter().any(|(k, v)| k == "X-Added" && v == "yes"));
+    assert!(patch.headers_removed.contains(&"X-Remove-Me".to_string()));
 }
 
 #[tokio::test]
@@ -240,7 +243,8 @@ async fn test_invoke_properties() {
         .await;
     let result = runner.invoke(&make_exchange("prop_fn")).await;
     assert!(result.ok);
-    assert!(result.properties_set.iter().any(|(k, v)| k == "my_prop" && v == 42));
+    let patch = result.patch.unwrap();
+    assert!(patch.properties_set.iter().any(|(k, v)| k == "my_prop" && v == 42));
 }
 
 #[tokio::test]

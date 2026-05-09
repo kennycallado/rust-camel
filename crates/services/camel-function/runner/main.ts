@@ -29,7 +29,7 @@ async function handleRegister(req: Request): Promise<Response> {
     return jsonResponse({ error: "missing required fields", kind: "compile_error" }, 400);
   }
 
-  if (runtime !== "typescript" && runtime !== "javascript") {
+  if (runtime !== "deno" && runtime !== "typescript" && runtime !== "javascript") {
     return jsonResponse({ error: `unsupported runtime: ${runtime}`, kind: "invalid_runtime" }, 400);
   }
 
@@ -113,10 +113,12 @@ async function handleInvoke(req: Request): Promise<Response> {
     const patch: PatchWire = camel.collectPatch();
     return jsonResponse({
       ok: true,
-      body: patch.body ?? null,
-      headers_set: patch.headers_set ?? [],
-      headers_removed: patch.headers_removed ?? [],
-      properties_set: patch.properties_set ?? [],
+      patch: {
+        body: patch.body ?? null,
+        headers_set: patch.headers_set ?? [],
+        headers_removed: patch.headers_removed ?? [],
+        properties_set: patch.properties_set ?? [],
+      },
     });
   } catch (e) {
     if (e instanceof Error && e.message === "timeout") {
