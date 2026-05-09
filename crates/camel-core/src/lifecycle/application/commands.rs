@@ -340,7 +340,7 @@ async fn remove_runtime_route_with_recovery(
     }
 }
 
-fn project_from_aggregate(aggregate: &RouteRuntimeAggregate) -> RouteStatusProjection {
+pub(crate) fn project_from_aggregate(aggregate: &RouteRuntimeAggregate) -> RouteStatusProjection {
     RouteStatusProjection {
         route_id: aggregate.route_id().to_string(),
         status: state_label(aggregate.state()).to_string(),
@@ -359,7 +359,7 @@ fn state_label(state: &RouteRuntimeState) -> &'static str {
     }
 }
 
-async fn upsert_projection_with_reconciliation(
+pub(crate) async fn upsert_projection_with_reconciliation(
     projections: &dyn ProjectionStorePort,
     status: RouteStatusProjection,
 ) -> Result<Option<String>, CamelError> {

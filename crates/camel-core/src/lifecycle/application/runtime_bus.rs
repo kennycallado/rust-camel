@@ -61,6 +61,47 @@ impl RuntimeBus {
         &self.repo
     }
 
+    pub(crate) async fn register_aggregate_only(
+        &self,
+        route_id: String,
+    ) -> Result<(), CamelError> {
+        self.ensure_journal_recovered().await?;
+        let deps = self.deps();
+        if deps.repo.load(&route_id).await?.is_some() {
+            return Err(CamelError::RouteError(format!(
+                "route '{route_id}' already registered"
+            )));
+        }
+        let (aggregate, events) =
+            crate::lifecycle::domain::RouteRuntimeAggregate::register(route_id.clone());
+        let _ = aggregate;
+        if let Some(uow) = &deps.uow {
+            uow.persist_upsert(
+                aggregate.clone(),
+                None,
+                crate::lifecycle::application::commands::project_from_aggregate(&aggregate),
+                &events,
+            )
+            .await?;
+        } else {
+            deps.repo.save(aggregate.clone()).await?;
+            if let Some(primary_error) =
+                crate::lifecycle::application::commands::upsert_projection_with_reconciliation(
+                    &*deps.projections,
+                    crate::lifecycle::application::commands::project_from_aggregate(&aggregate),
+                )
+                .await?
+            {
+                deps.events.publish(&events).await?;
+                return Err(CamelError::RouteError(format!(
+                    "post-effect reconciliation recovered after runtime persistence error: {primary_error}"
+                )));
+            }
+            deps.events.publish(&events).await?;
+        }
+        Ok(())
+    }
+
     fn deps(&self) -> CommandDeps {
         CommandDeps {
             repo: Arc::clone(&self.repo),

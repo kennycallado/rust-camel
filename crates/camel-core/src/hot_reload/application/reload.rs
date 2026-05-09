@@ -214,24 +214,6 @@ pub(crate) async fn execute_reload_actions(
 
                 let in_flight = controller.in_flight_count(&route_id).await.unwrap_or(0);
 
-                let prepare_token = if let Some(ctx) = function_ctx {
-                    let diff =
-                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
-                    match ctx.invoker.prepare_reload(diff, ctx.generation).await {
-                        Ok(token) => Some(token),
-                        Err(e) => {
-                            errors.push(ReloadError {
-                                route_id: route_id.clone(),
-                                action: "Swap (prepare)".into(),
-                                error: CamelError::ProcessorError(format!("{e}")),
-                            });
-                            continue;
-                        }
-                    }
-                } else {
-                    None
-                };
-
                 let pipeline = if let Some(ctx) = function_ctx {
                     controller
                         .compile_route_definition_with_generation(def, ctx.generation)
@@ -242,6 +224,27 @@ pub(crate) async fn execute_reload_actions(
 
                 match pipeline {
                     Ok(p) => {
+                        let prepare_token = if let Some(ctx) = function_ctx {
+                            let diff = compute_function_diff_for_route(
+                                &ctx.invoker,
+                                &route_id,
+                                ctx.generation,
+                            );
+                            match ctx.invoker.prepare_reload(diff, ctx.generation).await {
+                                Ok(token) => Some(token),
+                                Err(e) => {
+                                    errors.push(ReloadError {
+                                        route_id: route_id.clone(),
+                                        action: "Swap (prepare)".into(),
+                                        error: CamelError::ProcessorError(format!("{e}")),
+                                    });
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
                         let result = controller.swap_route_pipeline(&route_id, p).await;
                         if let Err(e) = result {
                             if let Some(ctx) = function_ctx {
@@ -280,14 +283,6 @@ pub(crate) async fn execute_reload_actions(
                         }
                     }
                     Err(e) => {
-                        if let Some(ctx) = function_ctx {
-                            if let Some(ref token) = prepare_token {
-                                let _ = ctx
-                                    .invoker
-                                    .rollback_reload(token.clone(), ctx.generation)
-                                    .await;
-                            }
-                        }
                         errors.push(ReloadError {
                             route_id,
                             action: "Swap (compile)".into(),
@@ -316,45 +311,69 @@ pub(crate) async fn execute_reload_actions(
                     }
                 };
 
-                let prepare_token = if let Some(ctx) = function_ctx {
+                if let Some(ctx) = function_ctx {
+                    if let Err(e) = controller
+                        .add_route_definition_with_generation(def, ctx.generation)
+                        .await
+                    {
+                        errors.push(ReloadError {
+                            route_id,
+                            action: "Add".into(),
+                            error: e,
+                        });
+                        continue;
+                    }
+
+                    if let Err(e) = controller
+                        .register_route_aggregate(route_id.clone())
+                        .await
+                    {
+                        let _ = controller
+                            .execute_runtime_command(camel_api::RuntimeCommand::RemoveRoute {
+                                route_id: route_id.clone(),
+                                command_id: next_reload_command_id("add-rollback", &route_id),
+                                causation_id: None,
+                            })
+                            .await;
+                        errors.push(ReloadError {
+                            route_id,
+                            action: "Add (aggregate)".into(),
+                            error: e,
+                        });
+                        continue;
+                    }
+
                     let diff =
                         compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
-                    match ctx.invoker.prepare_reload(diff, ctx.generation).await {
-                        Ok(token) => Some(token),
-                        Err(e) => {
-                            errors.push(ReloadError {
+
+                    if let Err(e) = ctx.invoker.prepare_reload(diff, ctx.generation).await {
+                        let _ = controller
+                            .execute_runtime_command(camel_api::RuntimeCommand::RemoveRoute {
                                 route_id: route_id.clone(),
-                                action: "Add (prepare)".into(),
-                                error: CamelError::ProcessorError(format!("{e}")),
-                            });
-                            continue;
-                        }
+                                command_id: next_reload_command_id("add-rollback", &route_id),
+                                causation_id: None,
+                            })
+                            .await;
+                        errors.push(ReloadError {
+                            route_id,
+                            action: "Add (prepare)".into(),
+                            error: CamelError::ProcessorError(format!("{e}")),
+                        });
+                        continue;
                     }
-                } else {
-                    None
-                };
 
-                if let Err(e) = controller.add_route_definition(def).await {
-                    if let Some(ctx) = function_ctx {
-                        if let Some(ref token) = prepare_token {
-                            let _ = ctx
-                                .invoker
-                                .rollback_reload(token.clone(), ctx.generation)
-                                .await;
-                        }
-                    }
-                    errors.push(ReloadError {
-                        route_id,
-                        action: "Add".into(),
-                        error: e,
-                    });
-                    continue;
-                }
-
-                if let Some(ctx) = function_ctx {
                     let diff =
                         compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
                     let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
+                } else {
+                    if let Err(e) = controller.add_route_definition(def).await {
+                        errors.push(ReloadError {
+                            route_id,
+                            action: "Add".into(),
+                            error: e,
+                        });
+                        continue;
+                    }
                 }
 
                 let start_result = controller
@@ -460,146 +479,228 @@ pub(crate) async fn execute_reload_actions(
                     }
                 };
 
-                let prepare_token = if let Some(ctx) = function_ctx {
-                    let diff =
-                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
-                    match ctx.invoker.prepare_reload(diff, ctx.generation).await {
-                        Ok(token) => Some(token),
+                if let Some(ctx) = function_ctx {
+                    let prepared = match controller
+                        .prepare_route_definition_with_generation(def, ctx.generation)
+                        .await
+                    {
+                        Ok(p) => p,
                         Err(e) => {
                             errors.push(ReloadError {
-                                route_id: route_id.clone(),
+                                route_id,
+                                action: "Restart (prepare-route)".into(),
+                                error: e,
+                            });
+                            continue;
+                        }
+                    };
+
+                    let diff = compute_function_diff_for_route(
+                        &ctx.invoker,
+                        &route_id,
+                        ctx.generation,
+                    );
+                    let prepare_token = match ctx.invoker.prepare_reload(diff, ctx.generation).await {
+                        Ok(token) => token,
+                        Err(e) => {
+                            errors.push(ReloadError {
+                                route_id,
                                 action: "Restart (prepare)".into(),
                                 error: CamelError::ProcessorError(format!("{e}")),
                             });
                             continue;
                         }
-                    }
-                } else {
-                    None
-                };
+                    };
 
-                let runtime_status = match controller.runtime_route_status(&route_id).await {
-                    Ok(status) => status,
-                    Err(e) => {
-                        if let Some(ctx) = function_ctx {
-                            if let Some(ref token) = prepare_token {
-                                let _ = ctx
-                                    .invoker
-                                    .rollback_reload(token.clone(), ctx.generation)
-                                    .await;
-                            }
+                    let runtime_status = match controller.runtime_route_status(&route_id).await {
+                        Ok(status) => status,
+                        Err(e) => {
+                            let _ = ctx
+                                .invoker
+                                .rollback_reload(prepare_token, ctx.generation)
+                                .await;
+                            errors.push(ReloadError {
+                                route_id,
+                                action: "Restart (status)".into(),
+                                error: e,
+                            });
+                            continue;
                         }
-                        errors.push(ReloadError {
-                            route_id,
-                            action: "Restart (status)".into(),
-                            error: e,
-                        });
-                        continue;
-                    }
-                };
+                    };
 
-                if should_stop_before_mutation(runtime_status.as_deref()) {
-                    let stop_result = controller
-                        .execute_runtime_command(camel_api::RuntimeCommand::StopRoute {
-                            route_id: route_id.clone(),
-                            command_id: next_reload_command_id("restart-stop", &route_id),
-                            causation_id: None,
-                        })
-                        .await;
-                    if let Err(e) = stop_result
-                        && !is_invalid_stop_transition(&e)
+                    if should_stop_before_mutation(runtime_status.as_deref()) {
+                        let stop_result = controller
+                            .execute_runtime_command(camel_api::RuntimeCommand::StopRoute {
+                                route_id: route_id.clone(),
+                                command_id: next_reload_command_id("restart-stop", &route_id),
+                                causation_id: None,
+                            })
+                            .await;
+                        if let Err(e) = stop_result
+                            && !is_invalid_stop_transition(&e)
+                        {
+                            let _ = ctx
+                                .invoker
+                                .rollback_reload(prepare_token, ctx.generation)
+                                .await;
+                            errors.push(ReloadError {
+                                route_id,
+                                action: "Restart (stop)".into(),
+                                error: e,
+                            });
+                            continue;
+                        }
+
+                        let _ = drain_route(&route_id, "restart", controller, drain_timeout).await;
+                    }
+
+                    if let Err(e) =
+                        controller.remove_route_preserving_functions(route_id.clone()).await
                     {
-                        if let Some(ctx) = function_ctx {
-                            if let Some(ref token) = prepare_token {
-                                let _ = ctx
-                                    .invoker
-                                    .rollback_reload(token.clone(), ctx.generation)
-                                    .await;
-                            }
-                        }
+                        let _ = ctx
+                            .invoker
+                            .rollback_reload(prepare_token, ctx.generation)
+                            .await;
                         errors.push(ReloadError {
                             route_id,
-                            action: "Restart (stop)".into(),
+                            action: "Restart (remove)".into(),
                             error: e,
                         });
                         continue;
                     }
 
-                    let _ = drain_route(&route_id, "restart", controller, drain_timeout).await;
-                }
-
-                if let Err(e) = controller
-                    .execute_runtime_command(camel_api::RuntimeCommand::RemoveRoute {
-                        route_id: route_id.clone(),
-                        command_id: next_reload_command_id("restart-remove", &route_id),
-                        causation_id: None,
-                    })
-                    .await
-                {
-                    if let Some(ctx) = function_ctx {
-                        if let Some(ref token) = prepare_token {
-                            let _ = ctx
-                                .invoker
-                                .rollback_reload(token.clone(), ctx.generation)
-                                .await;
-                        }
-                    }
-                    errors.push(ReloadError {
-                        route_id,
-                        action: "Restart (remove)".into(),
-                        error: e,
-                    });
-                    continue;
-                }
-
-                if let Err(e) = controller.add_route_definition(def).await {
-                    if let Some(ctx) = function_ctx {
-                        if let Some(ref token) = prepare_token {
-                            let _ = ctx
-                                .invoker
-                                .rollback_reload(token.clone(), ctx.generation)
-                                .await;
-                        }
-                    }
-                    errors.push(ReloadError {
-                        route_id,
-                        action: "Restart (add)".into(),
-                        error: e,
-                    });
-                    continue;
-                }
-
-                if let Some(ctx) = function_ctx {
-                    let diff =
-                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
-                    let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
-                }
-
-                if should_start_after_restart(runtime_status.as_deref()) {
-                    let start_result = controller
-                        .execute_runtime_command(camel_api::RuntimeCommand::StartRoute {
-                            route_id: route_id.clone(),
-                            command_id: next_reload_command_id("restart-start", &route_id),
-                            causation_id: None,
-                        })
-                        .await;
-                    if let Err(e) = start_result {
+                    if let Err(e) = controller.insert_prepared_route(prepared).await {
+                        let _ = ctx
+                            .invoker
+                            .rollback_reload(prepare_token, ctx.generation)
+                            .await;
                         errors.push(ReloadError {
                             route_id,
-                            action: "Restart (start)".into(),
+                            action: "Restart (insert)".into(),
                             error: e,
                         });
+                        continue;
+                    }
+
+                    let diff = compute_function_diff_for_route(
+                        &ctx.invoker,
+                        &route_id,
+                        ctx.generation,
+                    );
+                    let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
+
+                    if should_start_after_restart(runtime_status.as_deref()) {
+                        let start_result = controller
+                            .execute_runtime_command(camel_api::RuntimeCommand::StartRoute {
+                                route_id: route_id.clone(),
+                                command_id: next_reload_command_id("restart-start", &route_id),
+                                causation_id: None,
+                            })
+                            .await;
+                        if let Err(e) = start_result {
+                            errors.push(ReloadError {
+                                route_id,
+                                action: "Restart (start)".into(),
+                                error: e,
+                            });
+                        } else {
+                            tracing::info!(
+                                route_id = %route_id,
+                                "hot-reload: route restarted successfully"
+                            );
+                        }
                     } else {
                         tracing::info!(
                             route_id = %route_id,
-                            "hot-reload: route restarted successfully"
+                            "hot-reload: restart applied while preserving stopped lifecycle state"
                         );
                     }
                 } else {
-                    tracing::info!(
-                        route_id = %route_id,
-                        "hot-reload: restart applied while preserving stopped lifecycle state"
-                    );
+                    let runtime_status = match controller.runtime_route_status(&route_id).await {
+                        Ok(status) => status,
+                        Err(e) => {
+                            errors.push(ReloadError {
+                                route_id,
+                                action: "Restart (status)".into(),
+                                error: e,
+                            });
+                            continue;
+                        }
+                    };
+
+                    if should_stop_before_mutation(runtime_status.as_deref()) {
+                        let stop_result = controller
+                            .execute_runtime_command(camel_api::RuntimeCommand::StopRoute {
+                                route_id: route_id.clone(),
+                                command_id: next_reload_command_id("restart-stop", &route_id),
+                                causation_id: None,
+                            })
+                            .await;
+                        if let Err(e) = stop_result
+                            && !is_invalid_stop_transition(&e)
+                        {
+                            errors.push(ReloadError {
+                                route_id,
+                                action: "Restart (stop)".into(),
+                                error: e,
+                            });
+                            continue;
+                        }
+
+                        let _ = drain_route(&route_id, "restart", controller, drain_timeout).await;
+                    }
+
+                    if let Err(e) = controller
+                        .execute_runtime_command(camel_api::RuntimeCommand::RemoveRoute {
+                            route_id: route_id.clone(),
+                            command_id: next_reload_command_id("restart-remove", &route_id),
+                            causation_id: None,
+                        })
+                        .await
+                    {
+                        errors.push(ReloadError {
+                            route_id,
+                            action: "Restart (remove)".into(),
+                            error: e,
+                        });
+                        continue;
+                    }
+
+                    if let Err(e) = controller.add_route_definition(def).await {
+                        errors.push(ReloadError {
+                            route_id,
+                            action: "Restart (add)".into(),
+                            error: e,
+                        });
+                        continue;
+                    }
+
+                    if should_start_after_restart(runtime_status.as_deref()) {
+                        let start_result = controller
+                            .execute_runtime_command(camel_api::RuntimeCommand::StartRoute {
+                                route_id: route_id.clone(),
+                                command_id: next_reload_command_id("restart-start", &route_id),
+                                causation_id: None,
+                            })
+                            .await;
+                        if let Err(e) = start_result {
+                            errors.push(ReloadError {
+                                route_id,
+                                action: "Restart (start)".into(),
+                                error: e,
+                            });
+                        } else {
+                            tracing::info!(
+                                route_id = %route_id,
+                                "hot-reload: route restarted successfully"
+                            );
+                        }
+                    } else {
+                        tracing::info!(
+                            route_id = %route_id,
+                            "hot-reload: restart applied while preserving stopped lifecycle state"
+                        );
+                    }
                 }
             }
 

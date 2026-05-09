@@ -137,6 +137,10 @@ impl RuntimeExecutionHandle {
             .await
     }
 
+    pub(crate) async fn register_route_aggregate(&self, route_id: String) -> Result<(), CamelError> {
+        self.runtime.register_aggregate_only(route_id).await
+    }
+
     pub(crate) async fn swap_route_pipeline(
         &self,
         route_id: &str,
