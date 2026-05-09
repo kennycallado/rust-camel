@@ -3,7 +3,8 @@ use std::time::Instant;
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    BoxProcessor, CamelError, MetricsCollector, RouteController, RuntimeHandle, SupervisionConfig,
+    BoxProcessor, CamelError, FunctionInvoker, MetricsCollector, RouteController, RuntimeHandle,
+    SupervisionConfig,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -101,6 +102,9 @@ pub(crate) enum RouteControllerCommand {
     },
     SetRuntimeHandle {
         runtime: Arc<dyn RuntimeHandle>,
+    },
+    SetFunctionInvoker {
+        invoker: Arc<dyn FunctionInvoker>,
     },
     RouteSourceHash {
         route_id: String,
@@ -443,6 +447,16 @@ impl RouteControllerHandle {
             })
     }
 
+    pub async fn set_function_invoker(
+        &self,
+        invoker: Arc<dyn FunctionInvoker>,
+    ) -> Result<(), CamelError> {
+        self.tx
+            .send(RouteControllerCommand::SetFunctionInvoker { invoker })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))
+    }
+
     pub async fn route_source_hash(&self, route_id: impl Into<String>) -> Option<u64> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -546,6 +560,9 @@ pub fn spawn_controller_actor(
                 }
                 RouteControllerCommand::SetRuntimeHandle { runtime } => {
                     controller.set_runtime_handle(runtime);
+                }
+                RouteControllerCommand::SetFunctionInvoker { invoker } => {
+                    controller.set_function_invoker(invoker);
                 }
                 RouteControllerCommand::RouteSourceHash { route_id, reply } => {
                     let _ = reply.send(controller.route_source_hash(&route_id));

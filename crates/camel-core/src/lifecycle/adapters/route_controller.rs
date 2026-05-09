@@ -399,6 +399,10 @@ impl DefaultRouteController {
         self
     }
 
+    pub fn set_function_invoker(&mut self, invoker: Arc<dyn FunctionInvoker>) {
+        self.function_invoker = Some(invoker);
+    }
+
     /// Set runtime handle for ProducerContext creation.
     pub fn set_runtime_handle(&mut self, runtime: Arc<dyn RuntimeHandle>) {
         self.runtime = Some(Arc::downgrade(&runtime));

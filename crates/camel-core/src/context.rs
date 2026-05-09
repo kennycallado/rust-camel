@@ -41,6 +41,7 @@ pub struct CamelContextBuilder {
     shutdown_timeout: std::time::Duration,
     beans: Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>,
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
+    lifecycle_services: Vec<Box<dyn Lifecycle>>,
 }
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
@@ -271,13 +272,23 @@ impl CamelContext {
     }
 
     /// Register a lifecycle service (Apache Camel: addService pattern)
+    ///
+    /// For services exposing `as_function_invoker()`, the invoker is propagated
+    /// to the route controller so that subsequent route definitions with function
+    /// steps work correctly.
+    ///
+    /// Prefer [`CamelContextBuilder::with_lifecycle`] when possible, which wires
+    /// the invoker at build time before any routes are added.
     pub fn with_lifecycle<L: Lifecycle + 'static>(mut self, service: L) -> Self {
-        // Auto-register MetricsCollector if available
         if let Some(collector) = service.as_metrics_collector() {
             self.metrics = collector;
         }
         if let Some(invoker) = service.as_function_invoker() {
-            self.function_invoker = Some(invoker);
+            self.function_invoker = Some(invoker.clone());
+            let controller = self.route_controller.clone();
+            tokio::spawn(async move {
+                let _ = controller.set_function_invoker(invoker).await;
+            });
         }
 
         self.services.push(Box::new(service));
@@ -642,6 +653,7 @@ impl CamelContextBuilder {
             shutdown_timeout: std::time::Duration::from_secs(30),
             beans: None,
             function_invoker: None,
+            lifecycle_services: Vec::new(),
         }
     }
 
@@ -687,6 +699,22 @@ impl CamelContextBuilder {
     /// Inject a shared `BeanRegistry` for bean resolution across routes.
     pub fn beans(mut self, beans: Arc<std::sync::Mutex<camel_bean::BeanRegistry>>) -> Self {
         self.beans = Some(beans);
+        self
+    }
+
+    /// Register a lifecycle service (e.g., FunctionRuntimeService) at builder time.
+    ///
+    /// This is the recommended path for services that need to be wired into the
+    /// route controller before any routes are added. The function invoker (if any)
+    /// is extracted and passed to the `DefaultRouteController` during `build()`.
+    pub fn with_lifecycle<L: Lifecycle + 'static>(mut self, service: L) -> Self {
+        if let Some(collector) = service.as_metrics_collector() {
+            self.metrics = Some(collector);
+        }
+        if let Some(invoker) = service.as_function_invoker() {
+            self.function_invoker = Some(invoker);
+        }
+        self.lifecycle_services.push(Box::new(service));
         self
     }
 
@@ -786,7 +814,7 @@ impl CamelContextBuilder {
             platform_service,
             languages,
             shutdown_timeout: self.shutdown_timeout,
-            services: Vec::new(),
+            services: self.lifecycle_services,
             component_configs: HashMap::new(),
             function_invoker: self.function_invoker,
         })
