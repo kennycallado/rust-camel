@@ -43,6 +43,7 @@ mod tests {
     fn test_grpc_mode_copy_and_clone() {
         let mode = GrpcMode::Unary;
         let copied = mode;
+        #[allow(clippy::clone_on_copy)]
         let cloned = mode.clone();
         assert_eq!(mode, copied);
         assert_eq!(mode, cloned);

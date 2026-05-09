@@ -31,11 +31,7 @@ impl ConsoleMetrics {
         let processed = self.exchanges_processed.load(Ordering::Relaxed);
         let errors = self.errors.load(Ordering::Relaxed);
         let total_ns = self.total_duration_ns.load(Ordering::Relaxed);
-        let avg_ms = if processed > 0 {
-            (total_ns / processed) as f64 / 1_000_000.0
-        } else {
-            0.0
-        };
+        let avg_ms = (total_ns.checked_div(processed).unwrap_or(0)) as f64 / 1_000_000.0;
 
         println!(
             "[METRICS] exchanges={} errors={} avg_duration_ms={:.2}",

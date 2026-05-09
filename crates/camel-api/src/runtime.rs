@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn command_helpers_cover_all_variants() {
         let spec = CanonicalRouteSpec::new("r1", "timer:tick");
-        let cmds = vec![
+        let cmds = [
             RuntimeCommand::RegisterRoute {
                 spec,
                 command_id: "c1".into(),

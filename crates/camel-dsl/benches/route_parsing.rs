@@ -1,5 +1,6 @@
 use camel_dsl::parse_yaml;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 
 fn generate_routes_yaml(count: usize) -> String {
     let mut yaml = String::from("routes:\n");

@@ -546,6 +546,7 @@ mod tests {
     fn test_queue_pop_command_derives() {
         let cmd = QueuePopCommand::Blpop;
         let _cmd2 = cmd; // Copy
+        #[allow(clippy::clone_on_copy)]
         let _cmd3 = cmd.clone(); // Clone
         assert_eq!(format!("{:?}", cmd), "Blpop"); // Debug
         assert_eq!(QueuePopCommand::Blpop, QueuePopCommand::Blpop); // PartialEq
