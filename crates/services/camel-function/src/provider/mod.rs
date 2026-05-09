@@ -65,8 +65,8 @@ pub mod fake {
 
     #[derive(Debug, Clone)]
     pub enum FakeCall {
-        Spawn(String),
-        Shutdown(String),
+        Spawn(RunnerPoolKey),
+        Shutdown(RunnerPoolKey),
         Health(String),
         Register(String, FunctionId),
         Unregister(String, FunctionId),
@@ -77,6 +77,8 @@ pub mod fake {
         pub config: Arc<Mutex<FakeProviderConfig>>,
         pub calls: Arc<Mutex<Vec<FakeCall>>>,
         pub registered: Arc<Mutex<HashMap<String, HashSet<FunctionId>>>>,
+        pub spawned: Arc<Mutex<Vec<RunnerPoolKey>>>,
+        pub shutdowns: Arc<Mutex<Vec<RunnerPoolKey>>>,
         register_ok_count: Arc<Mutex<usize>>,
     }
 
@@ -86,6 +88,8 @@ pub mod fake {
                 config: Arc::new(Mutex::new(config)),
                 calls: Arc::new(Mutex::new(Vec::new())),
                 registered: Arc::new(Mutex::new(HashMap::new())),
+                spawned: Arc::new(Mutex::new(Vec::new())),
+                shutdowns: Arc::new(Mutex::new(Vec::new())),
                 register_ok_count: Arc::new(Mutex::new(0)),
             }
         }
@@ -99,7 +103,11 @@ pub mod fake {
             self.calls
                 .lock()
                 .expect("calls")
-                .push(FakeCall::Spawn(key.runtime.clone()));
+                .push(FakeCall::Spawn(key.clone()));
+            self.spawned
+                .lock()
+                .expect("spawned")
+                .push(key.clone());
             if self.config.lock().expect("config").fail_on_spawn {
                 return Err(ProviderError::SpawnFailed("configured".into()));
             }
@@ -114,7 +122,15 @@ pub mod fake {
             self.calls
                 .lock()
                 .expect("calls")
-                .push(FakeCall::Shutdown(handle.id.clone()));
+                .push(FakeCall::Shutdown(RunnerPoolKey {
+                    runtime: handle.id.replace("fake-", ""),
+                }));
+            self.shutdowns
+                .lock()
+                .expect("shutdowns")
+                .push(RunnerPoolKey {
+                    runtime: handle.id.replace("fake-", ""),
+                });
             Ok(())
         }
 
