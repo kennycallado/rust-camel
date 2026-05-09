@@ -3,6 +3,7 @@ pub use camel_api::function::*;
 mod config;
 mod invoker;
 mod pool;
+pub mod protocol;
 pub mod provider;
 mod service;
 
