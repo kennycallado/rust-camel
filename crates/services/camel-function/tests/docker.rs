@@ -120,9 +120,7 @@ async fn test_register_and_invoke() {
         .invoke_function(&handle, &def.id, &exchange)
         .await
         .expect("invoke");
-    assert!(
-        matches!(patch.body, Some(PatchBody::Text(ref s)) if s == "HELLO")
-    );
+    assert!(matches!(patch.body, Some(PatchBody::Text(ref s)) if s == "HELLO"));
 
     provider.shutdown_runner(handle).await.expect("shutdown");
     assert_no_runner_containers().await;

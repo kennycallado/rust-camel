@@ -138,7 +138,9 @@ async fn test_health_empty() {
 #[tokio::test]
 async fn test_register_happy() {
     let runner = DenoRunner::spawn().await;
-    let resp = runner.register(&make_register_request("fn1", "export default (c) => {}")).await;
+    let resp = runner
+        .register(&make_register_request("fn1", "export default (c) => {}"))
+        .await;
     assert_eq!(resp.status().as_u16(), 204);
     let health = runner.health().await;
     assert!(health.registered.contains(&"fn1".to_string()));
@@ -224,11 +226,17 @@ async fn test_invoke_headers() {
         ))
         .await;
     let mut wire = make_exchange("header_fn");
-    wire.headers.insert("X-Remove-Me".to_string(), serde_json::json!("bye"));
+    wire.headers
+        .insert("X-Remove-Me".to_string(), serde_json::json!("bye"));
     let result = runner.invoke(&wire).await;
     assert!(result.ok);
     let patch = result.patch.unwrap();
-    assert!(patch.headers_set.iter().any(|(k, v)| k == "X-Added" && v == "yes"));
+    assert!(
+        patch
+            .headers_set
+            .iter()
+            .any(|(k, v)| k == "X-Added" && v == "yes")
+    );
     assert!(patch.headers_removed.contains(&"X-Remove-Me".to_string()));
 }
 
@@ -244,7 +252,12 @@ async fn test_invoke_properties() {
     let result = runner.invoke(&make_exchange("prop_fn")).await;
     assert!(result.ok);
     let patch = result.patch.unwrap();
-    assert!(patch.properties_set.iter().any(|(k, v)| k == "my_prop" && v == 42));
+    assert!(
+        patch
+            .properties_set
+            .iter()
+            .any(|(k, v)| k == "my_prop" && v == 42)
+    );
 }
 
 #[tokio::test]
@@ -309,10 +322,7 @@ async fn test_shutdown() {
 async fn test_health_shows_registered() {
     let runner = DenoRunner::spawn().await;
     runner
-        .register(&make_register_request(
-            "h1",
-            "export default (c) => {}",
-        ))
+        .register(&make_register_request("h1", "export default (c) => {}"))
         .await;
     let health = runner.health().await;
     assert!(health.registered.contains(&"h1".to_string()));

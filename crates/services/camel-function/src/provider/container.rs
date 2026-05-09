@@ -1,7 +1,7 @@
 use crate::pool::{RunnerHandle, RunnerPoolKey};
 use crate::protocol::ProtocolClient;
-use camel_api::function::*;
 use camel_api::Exchange;
+use camel_api::function::*;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -124,7 +124,9 @@ impl ContainerProvider {
             .await
         {
             Ok(()) => {}
-            Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => {}
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {}
             Err(e) => {
                 tracing::warn!(target: "camel_function::container", %container_id, "remove error: {e}");
             }
@@ -144,7 +146,9 @@ impl ContainerProvider {
     }
 
     pub async fn spawn_runner(&self, runtime: &str) -> Result<RunnerHandle, ProviderError> {
-        let key = RunnerPoolKey { runtime: runtime.to_string() };
+        let key = RunnerPoolKey {
+            runtime: runtime.to_string(),
+        };
         FunctionProvider::spawn(self, &key).await
     }
 
@@ -152,7 +156,10 @@ impl ContainerProvider {
         FunctionProvider::shutdown(self, handle).await
     }
 
-    pub async fn health_runner(&self, handle: &RunnerHandle) -> Result<HealthReport, ProviderError> {
+    pub async fn health_runner(
+        &self,
+        handle: &RunnerHandle,
+    ) -> Result<HealthReport, ProviderError> {
         FunctionProvider::health(self, handle).await
     }
 

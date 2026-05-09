@@ -9,6 +9,6 @@ mod service;
 
 pub use config::FunctionConfig;
 pub use pool::{RunnerHandle, RunnerState};
-pub use provider::container::{ContainerProvider, ContainerProviderBuilder, PullPolicy};
 pub use provider::HealthReport;
+pub use provider::container::{ContainerProvider, ContainerProviderBuilder, PullPolicy};
 pub use service::FunctionRuntimeService;

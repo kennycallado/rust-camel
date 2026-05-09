@@ -25,13 +25,17 @@ impl ProtocolClient {
 
     pub async fn health(&self, endpoint: &str) -> Result<HealthReport, ProviderError> {
         let url = format!("{}/health", endpoint);
-        let resp = self.http.get(&url).send().await.map_err(|e| {
-            ProviderError::HealthFailed(format!("health request failed: {e}"))
-        })?;
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ProviderError::HealthFailed(format!("health request failed: {e}")))?;
         if resp.status().is_success() {
-            let health: HealthResponse = resp.json().await.map_err(|e| {
-                ProviderError::HealthFailed(format!("decode health response: {e}"))
-            })?;
+            let health: HealthResponse = resp
+                .json()
+                .await
+                .map_err(|e| ProviderError::HealthFailed(format!("decode health response: {e}")))?;
             if health.status == "ready" {
                 Ok(HealthReport::Healthy)
             } else {
@@ -54,16 +58,20 @@ impl ProtocolClient {
             source: def.source.clone(),
             timeout_ms: def.timeout_ms,
         };
-        let resp = self.http.post(&url).json(&body).send().await.map_err(|e| {
-            ProviderError::RegisterFailed(format!("register request failed: {e}"))
-        })?;
+        let resp =
+            self.http.post(&url).json(&body).send().await.map_err(|e| {
+                ProviderError::RegisterFailed(format!("register request failed: {e}"))
+            })?;
         if resp.status().is_success() {
             Ok(())
         } else {
             let err_resp: ErrorResponse = resp.json().await.map_err(|e| {
                 ProviderError::RegisterFailed(format!("decode register error: {e}"))
             })?;
-            Err(ProviderError::RegisterFailed(format!("{}: {}", err_resp.kind, err_resp.error)))
+            Err(ProviderError::RegisterFailed(format!(
+                "{}: {}",
+                err_resp.kind, err_resp.error
+            )))
         }
     }
 
@@ -83,24 +91,34 @@ impl ProtocolClient {
             properties: exchange.properties.clone(),
             timeout_ms: timeout.as_millis() as u64,
         };
-        let resp = self.http.post(&url).json(&wire).timeout(timeout).send().await.map_err(|e| {
-            ProviderError::InvokeFailed(format!("invoke request failed: {e}"))
-        })?;
-        let invoke_resp: InvokeResponse = resp.json().await.map_err(|e| {
-            ProviderError::InvokeFailed(format!("decode invoke response: {e}"))
-        })?;
+        let resp = self
+            .http
+            .post(&url)
+            .json(&wire)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| ProviderError::InvokeFailed(format!("invoke request failed: {e}")))?;
+        let invoke_resp: InvokeResponse = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvokeFailed(format!("decode invoke response: {e}")))?;
         Ok(invoke_resp)
     }
 
     pub async fn shutdown(&self, endpoint: &str) -> Result<(), ProviderError> {
         let url = format!("{}/shutdown", endpoint);
-        let resp = self.http.post(&url).send().await.map_err(|e| {
-            ProviderError::ShutdownFailed(format!("shutdown request failed: {e}"))
-        })?;
+        let resp =
+            self.http.post(&url).send().await.map_err(|e| {
+                ProviderError::ShutdownFailed(format!("shutdown request failed: {e}"))
+            })?;
         if resp.status().is_success() {
             Ok(())
         } else {
-            Err(ProviderError::ShutdownFailed(format!("status {}", resp.status())))
+            Err(ProviderError::ShutdownFailed(format!(
+                "status {}",
+                resp.status()
+            )))
         }
     }
 }

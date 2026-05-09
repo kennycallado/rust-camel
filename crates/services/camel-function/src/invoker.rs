@@ -209,11 +209,8 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             self.pool.ref_counts.remove(&key);
         }
         if should_unregister && let Some((_, pool_key)) = self.pool.function_to_key.remove(&key) {
-            let still_used_by_other_route = self
-                .pool
-                .function_to_key
-                .iter()
-                .any(|kv| kv.key().0 == *id);
+            let still_used_by_other_route =
+                self.pool.function_to_key.iter().any(|kv| kv.key().0 == *id);
             if !still_used_by_other_route {
                 if let Some(handle) = self.pool.handles.get(&pool_key) {
                     self.provider

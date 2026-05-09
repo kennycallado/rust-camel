@@ -54,15 +54,13 @@ impl BodyWire {
             BodyWire::Empty => camel_api::Body::Empty,
             BodyWire::Text(s) => camel_api::Body::Text(s.clone()),
             BodyWire::Json(v) => camel_api::Body::Json(v.clone()),
-            BodyWire::Bytes(b64) => {
-                match base64::engine::general_purpose::STANDARD.decode(b64) {
-                    Ok(bytes) => camel_api::Body::Bytes(bytes::Bytes::from(bytes)),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "invalid base64 in wire body, falling back to Empty");
-                        camel_api::Body::Empty
-                    }
+            BodyWire::Bytes(b64) => match base64::engine::general_purpose::STANDARD.decode(b64) {
+                Ok(bytes) => camel_api::Body::Bytes(bytes::Bytes::from(bytes)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "invalid base64 in wire body, falling back to Empty");
+                    camel_api::Body::Empty
                 }
-            }
+            },
             BodyWire::Xml(s) => camel_api::Body::Xml(s.clone()),
         }
     }
@@ -225,7 +223,9 @@ mod tests {
         assert_eq!(wire, decoded);
         // Verify base64 roundtrip
         if let BodyWire::Bytes(b64) = &decoded.body {
-            let decoded_bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+            let decoded_bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .unwrap();
             assert_eq!(decoded_bytes, original);
         } else {
             panic!("expected Bytes variant");
@@ -327,8 +327,14 @@ mod tests {
     fn test_body_wire_serde_lowercase() {
         let wire = BodyWire::Text("hello".into());
         let json = serde_json::to_string(&wire).unwrap();
-        assert!(json.contains("\"text\""), "expected lowercase variant name, got: {json}");
-        assert!(!json.contains("\"Text\""), "should not have UpperCamelCase variant");
+        assert!(
+            json.contains("\"text\""),
+            "expected lowercase variant name, got: {json}"
+        );
+        assert!(
+            !json.contains("\"Text\""),
+            "should not have UpperCamelCase variant"
+        );
         let decoded: BodyWire = serde_json::from_str(&json).unwrap();
         assert_eq!(wire, decoded);
     }
@@ -343,7 +349,9 @@ mod tests {
         let decoded: BodyWire = serde_json::from_str(&json).unwrap();
 
         if let BodyWire::Bytes(b64) = &decoded {
-            let roundtrip = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+            let roundtrip = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .unwrap();
             assert_eq!(roundtrip, original_bytes);
         } else {
             panic!("expected Bytes variant after roundtrip");
@@ -363,8 +371,14 @@ mod tests {
         let bodies = vec![
             ("Empty", camel_api::Body::Empty),
             ("Text", camel_api::Body::Text("hello world".into())),
-            ("Json", camel_api::Body::Json(serde_json::json!({"key": "value"}))),
-            ("Xml", camel_api::Body::Xml("<root><item>1</item></root>".into())),
+            (
+                "Json",
+                camel_api::Body::Json(serde_json::json!({"key": "value"})),
+            ),
+            (
+                "Xml",
+                camel_api::Body::Xml("<root><item>1</item></root>".into()),
+            ),
         ];
 
         for (name, body) in bodies {
@@ -392,7 +406,9 @@ mod tests {
 
         let chunks = vec![Ok(bytes::Bytes::from("stream data"))];
         let stream_body = camel_api::Body::Stream(StreamBody {
-            stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream::iter(chunks))))),
+            stream: std::sync::Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream::iter(
+                chunks,
+            ))))),
             metadata: StreamMetadata::default(),
         });
 
