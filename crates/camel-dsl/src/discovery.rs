@@ -528,10 +528,8 @@ mod tests {
         )
         .unwrap();
 
-        let pattern = f.path().to_string_lossy().to_string();
-        // Need an explicit .json pattern since the temp file has .json suffix
-        let json_pattern = f.path().with_extension("json").to_string_lossy().to_string();
         // The temp file path IS the pattern (already ends in .json)
+        let pattern = f.path().to_string_lossy().to_string();
         let err = match discover_routes(&[pattern]) {
             Ok(_) => panic!("expected JSON parse error"),
             Err(e) => e,
