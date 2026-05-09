@@ -3,7 +3,6 @@ use crate::protocol::ProtocolClient;
 use camel_api::function::*;
 use camel_api::Exchange;
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -140,9 +139,240 @@ impl ContainerProvider {
         drop(listener);
         Ok(port)
     }
+
+    pub async fn spawn_runner(&self, runtime: &str) -> Result<RunnerHandle, ProviderError> {
+        let key = RunnerPoolKey { runtime: runtime.to_string() };
+        FunctionProvider::spawn(self, &key).await
+    }
+
+    pub async fn shutdown_runner(&self, handle: RunnerHandle) -> Result<(), ProviderError> {
+        FunctionProvider::shutdown(self, handle).await
+    }
+
+    pub async fn health_runner(&self, handle: &RunnerHandle) -> Result<HealthReport, ProviderError> {
+        FunctionProvider::health(self, handle).await
+    }
+
+    pub async fn register_function(
+        &self,
+        handle: &RunnerHandle,
+        def: &FunctionDefinition,
+    ) -> Result<(), ProviderError> {
+        FunctionProvider::register(self, handle, def).await
+    }
+
+    pub async fn invoke_function(
+        &self,
+        handle: &RunnerHandle,
+        function_id: &FunctionId,
+        exchange: &Exchange,
+    ) -> Result<ExchangePatch, ProviderError> {
+        FunctionProvider::invoke(self, handle, function_id, exchange).await
+    }
+
+    fn spawn_log_forwarder(&self, container_id: String) {
+        use futures::StreamExt;
+
+        let docker = self.docker.clone();
+        tokio::spawn(async move {
+            let options = bollard::query_parameters::LogsOptions {
+                follow: true,
+                stdout: true,
+                stderr: true,
+                ..Default::default()
+            };
+            let mut stream = docker.logs(&container_id, Some(options));
+
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(log_output) => {
+                        let text = match &log_output {
+                            bollard::container::LogOutput::StdOut { message } => {
+                                String::from_utf8_lossy(message).into_owned()
+                            }
+                            bollard::container::LogOutput::StdErr { message } => {
+                                String::from_utf8_lossy(message).into_owned()
+                            }
+                            _ => continue,
+                        };
+                        let trimmed = text.trim_end();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        match &log_output {
+                            bollard::container::LogOutput::StdOut { .. } => {
+                                tracing::info!(target: "camel_function::runner", "{trimmed}");
+                            }
+                            bollard::container::LogOutput::StdErr { .. } => {
+                                tracing::warn!(target: "camel_function::runner", "{trimmed}");
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(target: "camel_function::container", "log stream error: {e}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
 }
 
 impl super::sealed::Sealed for ContainerProvider {}
+
+#[async_trait::async_trait]
+impl FunctionProvider for ContainerProvider {
+    async fn spawn(&self, _key: &RunnerPoolKey) -> Result<RunnerHandle, ProviderError> {
+        let handle_id = format!(
+            "deno-{}",
+            blake3::hash(
+                format!(
+                    "{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                )
+                .as_bytes()
+            )
+            .to_hex()
+        );
+        let host_port = self.allocate_host_port().await?;
+
+        let labels = std::collections::HashMap::from([
+            ("camel.function.runner".to_string(), "true".to_string()),
+            ("camel.function.context".to_string(), handle_id.clone()),
+        ]);
+
+        let config = bollard::models::ContainerCreateBody {
+            image: Some(self.image.clone()),
+            env: Some(vec![
+                "PORT=8080".to_string(),
+                "DENO_NO_PROMPT=1".to_string(),
+            ]),
+            labels: Some(labels),
+            exposed_ports: Some(vec!["8080/tcp".to_string()]),
+            host_config: Some(bollard::models::HostConfig {
+                port_bindings: Some(std::collections::HashMap::from([(
+                    "8080/tcp".to_string(),
+                    Some(vec![bollard::models::PortBinding {
+                        host_ip: Some("127.0.0.1".to_string()),
+                        host_port: Some(host_port.to_string()),
+                    }]),
+                )])),
+                init: Some(true),
+                auto_remove: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let create_opts = bollard::query_parameters::CreateContainerOptions {
+            name: Some(handle_id.clone()),
+            ..Default::default()
+        };
+
+        let create_result = self
+            .docker
+            .create_container(Some(create_opts), config)
+            .await
+            .map_err(|e| ProviderError::SpawnFailed(format!("create container: {e}")))?;
+
+        let container_id = create_result.id;
+
+        if let Err(e) = self.docker.start_container(&container_id, None).await {
+            let _ = self.stop_and_remove_container(&container_id).await;
+            return Err(ProviderError::SpawnFailed(format!("start container: {e}")));
+        }
+
+        let endpoint = format!("http://127.0.0.1:{host_port}");
+
+        self.spawn_log_forwarder(container_id.clone());
+
+        self.containers_by_handle.insert(
+            handle_id.clone(),
+            ContainerEntry {
+                container_id,
+                endpoint,
+                host_port,
+            },
+        );
+
+        Ok(RunnerHandle {
+            id: handle_id,
+            state: Arc::new(std::sync::Mutex::new(crate::pool::RunnerState::Booting)),
+            cancel: CancellationToken::new(),
+        })
+    }
+
+    async fn shutdown(&self, handle: RunnerHandle) -> Result<(), ProviderError> {
+        handle.cancel.cancel();
+        let entry = match self.containers_by_handle.remove(&handle.id) {
+            Some((_, entry)) => entry,
+            None => return Ok(()),
+        };
+        let _ = self.client.shutdown(&entry.endpoint).await;
+        self.stop_and_remove_container(&entry.container_id).await;
+        Ok(())
+    }
+
+    async fn health(&self, handle: &RunnerHandle) -> Result<HealthReport, ProviderError> {
+        let entry = self
+            .containers_by_handle
+            .get(&handle.id)
+            .ok_or_else(|| ProviderError::HealthFailed(format!("unknown handle {}", handle.id)))?;
+        self.client.health(&entry.endpoint).await
+    }
+
+    async fn register(
+        &self,
+        handle: &RunnerHandle,
+        def: &FunctionDefinition,
+    ) -> Result<(), ProviderError> {
+        let entry = self
+            .containers_by_handle
+            .get(&handle.id)
+            .ok_or_else(|| ProviderError::RegisterFailed(format!("unknown handle {}", handle.id)))?;
+        self.client.register(&entry.endpoint, def).await
+    }
+
+    async fn unregister(
+        &self,
+        _handle: &RunnerHandle,
+        _id: &FunctionId,
+    ) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    async fn invoke(
+        &self,
+        handle: &RunnerHandle,
+        id: &FunctionId,
+        ex: &Exchange,
+    ) -> Result<ExchangePatch, ProviderError> {
+        let entry = self
+            .containers_by_handle
+            .get(&handle.id)
+            .ok_or_else(|| ProviderError::InvokeFailed(format!("unknown handle {}", handle.id)))?;
+        let timeout = std::time::Duration::from_millis(5000);
+        let resp = self.client.invoke(&entry.endpoint, id, ex, timeout).await?;
+        if resp.ok {
+            let patch = resp.patch.unwrap_or_default();
+            Ok(patch.to_exchange_patch())
+        } else {
+            let err = resp.error.unwrap_or_else(|| crate::protocol::ErrorWire {
+                kind: "unknown".into(),
+                message: "no error body".into(),
+                stack: None,
+            });
+            Err(ProviderError::InvokeFailed(format!(
+                "{}: {}",
+                err.kind, err.message
+            )))
+        }
+    }
+}
 
 impl Drop for ContainerProvider {
     fn drop(&mut self) {
