@@ -12,7 +12,11 @@ impl std::fmt::Display for FunctionId {
 impl FunctionId {
     pub fn compute(runtime: &str, source: &str, timeout_ms_resolved: u64) -> Self {
         let mut hasher = blake3::Hasher::new();
+        let rlen = (runtime.len() as u64).to_le_bytes();
+        hasher.update(&rlen);
         hasher.update(runtime.as_bytes());
+        let slen = (source.len() as u64).to_le_bytes();
+        hasher.update(&slen);
         hasher.update(source.as_bytes());
         hasher.update(&timeout_ms_resolved.to_le_bytes());
         let hash = hasher.finalize();
@@ -81,6 +85,7 @@ pub trait FunctionInvokerSync: Send + Sync {
     fn stage_pending(&self, def: FunctionDefinition, route_id: Option<&str>, generation: u64);
     fn discard_staging(&self, generation: u64);
     fn begin_reload(&self) -> u64;
+    fn function_refs_for_route(&self, route_id: &str) -> Vec<(FunctionId, Option<String>)>;
 }
 
 #[async_trait::async_trait]

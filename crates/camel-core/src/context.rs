@@ -285,9 +285,9 @@ impl CamelContext {
         }
         if let Some(invoker) = service.as_function_invoker() {
             self.function_invoker = Some(invoker.clone());
-            self.route_controller
-                .try_set_function_invoker(invoker)
-                .expect("controller actor mailbox should accept function invoker");
+            if let Err(e) = self.route_controller.try_set_function_invoker(invoker) {
+                tracing::warn!("Failed to propagate function invoker to route controller: {e}");
+            }
         }
 
         self.services.push(Box::new(service));

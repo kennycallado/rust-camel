@@ -245,7 +245,7 @@ async fn test_remove_route() {
     controller.add_route(def).await.unwrap();
     assert_eq!(controller.route_count(), 1);
 
-    controller.remove_route("remove-test").unwrap();
+    controller.remove_route("remove-test").await.unwrap();
     assert_eq!(controller.route_count(), 0);
 }
 
@@ -268,7 +268,7 @@ async fn test_remove_route_rejects_running_route() {
     controller.add_route(def).await.unwrap();
     controller.start_route("running-remove-test").await.unwrap();
 
-    let result = controller.remove_route("running-remove-test");
+    let result = controller.remove_route("running-remove-test").await;
     assert!(
         result.is_err(),
         "remove_route should return an error when route is in Started state"

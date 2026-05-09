@@ -80,8 +80,11 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
         }
         let mut staging = self.staging.lock().expect("staging");
         let entry = staging.entry(generation).or_default();
-        entry.retain(|(existing, _)| existing.id != def.id);
-        entry.push((def, rid));
+        let did = def.id.clone();
+        let rid_owned = rid.clone();
+        entry
+            .retain(|(existing, existing_rid)| !(existing.id == did && existing_rid == &rid_owned));
+        entry.push((def, rid_owned));
     }
 
     fn discard_staging(&self, generation: u64) {
@@ -98,6 +101,15 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
             .or_default();
         generation
     }
+
+    fn function_refs_for_route(&self, route_id: &str) -> Vec<(FunctionId, Option<String>)> {
+        self.pool
+            .function_to_key
+            .iter()
+            .filter(|kv| kv.key().1.as_deref() == Some(route_id))
+            .map(|kv| kv.key().clone())
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]
@@ -110,17 +122,24 @@ impl FunctionInvoker for DefaultFunctionInvoker {
         let key = RunnerPoolKey {
             runtime: def.runtime.clone(),
         };
-        let handle = if let Some(existing) = self.pool.handles.get(&key) {
-            existing.clone()
-        } else {
-            let spawned = self.provider.spawn(&key).await.map_err(|e| {
-                FunctionInvocationError::RunnerUnavailable {
-                    reason: e.to_string(),
+        let handle = {
+            let existing = self.pool.handles.get(&key).map(|h| h.clone());
+            match existing {
+                Some(h) => h,
+                None => {
+                    let spawned = self.provider.spawn(&key).await.map_err(|e| {
+                        FunctionInvocationError::RunnerUnavailable {
+                            reason: e.to_string(),
+                        }
+                    })?;
+                    self.wait_until_healthy(&spawned).await?;
+                    self.pool
+                        .handles
+                        .entry(key.clone())
+                        .or_insert(spawned)
+                        .clone()
                 }
-            })?;
-            self.wait_until_healthy(&spawned).await?;
-            self.pool.handles.insert(key.clone(), spawned.clone());
-            spawned
+            }
         };
         self.provider
             .register(&handle, &def)
@@ -214,9 +233,16 @@ impl FunctionInvoker for DefaultFunctionInvoker {
 
     async fn commit_reload(
         &self,
-        _diff: FunctionDiff,
-        _generation: u64,
+        diff: FunctionDiff,
+        generation: u64,
     ) -> Result<(), FunctionInvocationError> {
+        self.staging.lock().expect("staging").remove(&generation);
+        for (def, route_id) in diff.added {
+            self.register(def, route_id.as_deref()).await?;
+        }
+        for (id, route_id) in diff.removed {
+            self.unregister(&id, route_id.as_deref()).await?;
+        }
         Ok(())
     }
 

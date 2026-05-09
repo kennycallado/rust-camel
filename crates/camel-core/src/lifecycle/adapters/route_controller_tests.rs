@@ -144,11 +144,12 @@ async fn swap_pipeline_and_remove_route_behaviors() {
         .unwrap();
     assert!(controller.get_pipeline("swap").is_some());
 
-    controller.remove_route("swap").unwrap();
+    controller.remove_route("swap").await.unwrap();
     assert_eq!(controller.route_count(), 0);
 
     let err = controller
         .remove_route("swap")
+        .await
         .expect_err("missing route must fail");
     assert!(err.to_string().contains("not found"));
 }
@@ -342,7 +343,7 @@ async fn start_stop_route_happy_path_with_timer_and_mock() {
     tokio::time::sleep(Duration::from_millis(40)).await;
     controller.stop_route("rt-1").await.unwrap();
 
-    controller.remove_route("rt-1").unwrap();
+    controller.remove_route("rt-1").await.unwrap();
 }
 
 #[tokio::test]
@@ -419,11 +420,12 @@ async fn remove_route_rejects_running_route() {
 
     let err = controller
         .remove_route("rt-running")
+        .await
         .expect_err("running route removal must fail");
     assert!(err.to_string().contains("must be stopped before removal"));
 
     controller.stop_route("rt-running").await.unwrap();
-    controller.remove_route("rt-running").unwrap();
+    controller.remove_route("rt-running").await.unwrap();
 }
 
 #[tokio::test]

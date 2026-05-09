@@ -342,6 +342,13 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                     "function: 'source' must not be empty".into(),
                 ));
             }
+            if let Some(t) = data.timeout_ms {
+                if t == 0 {
+                    return Err(CamelError::RouteError(
+                        "function: 'timeout_ms' must be greater than 0".into(),
+                    ));
+                }
+            }
             if data.runtime != "deno" {
                 return Err(CamelError::RouteError(format!(
                     "function: unsupported runtime '{}'. Supported runtimes: [\"deno\"]",

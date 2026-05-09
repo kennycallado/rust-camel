@@ -576,15 +576,35 @@ impl DefaultRouteController {
                 let _agg_step = rest.remove(0);
                 let post_steps = rest;
 
-                let pre_pairs =
-                    self.resolve_steps(pre_steps, &producer_ctx, &self.registry, Some(&route_id))?;
+                let pre_pairs = match self.resolve_steps(
+                    pre_steps,
+                    &producer_ctx,
+                    &self.registry,
+                    Some(&route_id),
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.discard_function_staging();
+                        return Err(e);
+                    }
+                };
                 let pre_procs: Vec<BoxProcessor> = pre_pairs.into_iter().map(|(p, _)| p).collect();
                 let pre_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
                     compose_pipeline(pre_procs),
                 )));
 
-                let post_pairs =
-                    self.resolve_steps(post_steps, &producer_ctx, &self.registry, Some(&route_id))?;
+                let post_pairs = match self.resolve_steps(
+                    post_steps,
+                    &producer_ctx,
+                    &self.registry,
+                    Some(&route_id),
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.discard_function_staging();
+                        return Err(e);
+                    }
+                };
                 let post_procs: Vec<BoxProcessor> =
                     post_pairs.into_iter().map(|(p, _)| p).collect();
                 let post_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
@@ -599,7 +619,14 @@ impl DefaultRouteController {
 
                 vec![]
             }
-            None => self.resolve_steps(steps, &producer_ctx, &self.registry, Some(&route_id))?,
+            None => match self.resolve_steps(steps, &producer_ctx, &self.registry, Some(&route_id))
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    self.discard_function_staging();
+                    return Err(e);
+                }
+            },
         };
         let route_id_for_tracing = route_id.clone();
         let mut pipeline = if processors_with_contracts.is_empty() {
@@ -654,6 +681,13 @@ impl DefaultRouteController {
             None
         };
 
+        if let Some(invoker) = &self.function_invoker {
+            invoker
+                .commit_staged()
+                .await
+                .map_err(|e| CamelError::Config(e.to_string()))?;
+        }
+
         self.routes.insert(
             route_id.clone(),
             ManagedRoute {
@@ -671,13 +705,6 @@ impl DefaultRouteController {
                 agg_service: None,
             },
         );
-
-        if let Some(invoker) = &self.function_invoker {
-            invoker
-                .commit_staged()
-                .await
-                .map_err(|e| CamelError::Config(e.to_string()))?;
-        }
 
         Ok(())
     }
@@ -760,7 +787,7 @@ impl DefaultRouteController {
     /// The route **must** be stopped before removal (status `Stopped` or `Failed`).
     /// Returns an error if the route is still running or does not exist.
     /// Does not cancel any running tasks — call `stop_route` first.
-    pub fn remove_route(&mut self, route_id: &str) -> Result<(), CamelError> {
+    pub async fn remove_route(&mut self, route_id: &str) -> Result<(), CamelError> {
         let managed = self.routes.get(route_id).ok_or_else(|| {
             CamelError::RouteError(format!("Route '{}' not found for removal", route_id))
         })?;
@@ -773,9 +800,32 @@ impl DefaultRouteController {
                 inferred_lifecycle_label(managed)
             )));
         }
+        if let Some(invoker) = &self.function_invoker {
+            for (id, rid) in self.collect_function_refs(route_id) {
+                if let Err(e) = invoker.unregister(&id, rid.as_deref()).await {
+                    warn!(route_id = %route_id, error = %e, "Failed to unregister function during route removal");
+                }
+            }
+        }
         self.routes.remove(route_id);
         info!(route_id = %route_id, "Route removed from controller");
         Ok(())
+    }
+
+    fn collect_function_refs(
+        &self,
+        route_id: &str,
+    ) -> Vec<(camel_api::FunctionId, Option<String>)> {
+        self.function_invoker
+            .as_ref()
+            .map(|invoker| invoker.function_refs_for_route(route_id))
+            .unwrap_or_default()
+    }
+
+    fn discard_function_staging(&self) {
+        if let Some(invoker) = &self.function_invoker {
+            invoker.discard_staging(0);
+        }
     }
 
     /// Returns the number of routes in the controller.

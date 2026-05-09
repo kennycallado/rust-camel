@@ -123,6 +123,9 @@ fn lifecycle_impl_returns_some_for_function_invoker() {
         fn begin_reload(&self) -> u64 {
             0
         }
+        fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> {
+            vec![]
+        }
     }
     #[async_trait]
     impl FunctionInvoker for InvokerService {
@@ -194,6 +197,9 @@ fn function_invoker_is_object_safe() {
         fn discard_staging(&self, _gen: u64) {}
         fn begin_reload(&self) -> u64 {
             0
+        }
+        fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> {
+            vec![]
         }
     }
     #[async_trait]

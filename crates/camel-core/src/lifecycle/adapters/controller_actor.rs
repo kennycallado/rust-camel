@@ -521,7 +521,7 @@ pub fn spawn_controller_actor(
                     let _ = reply.send(controller.add_route(definition).await);
                 }
                 RouteControllerCommand::RemoveRoute { route_id, reply } => {
-                    let _ = reply.send(controller.remove_route(&route_id));
+                    let _ = reply.send(controller.remove_route(&route_id).await);
                 }
                 RouteControllerCommand::SwapPipeline {
                     route_id,

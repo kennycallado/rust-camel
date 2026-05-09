@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+const DEFAULT_FUNCTION_TIMEOUT_MS: u64 = 5000;
+
 use camel_api::aggregator::{AggregationStrategy as AggregatorStrategy, AggregatorConfig};
 use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
@@ -294,7 +296,7 @@ fn compile_declarative_step_with_threshold(
             source,
             timeout_ms,
         }) => {
-            let timeout_ms = timeout_ms.unwrap_or(5000);
+            let timeout_ms = timeout_ms.unwrap_or(DEFAULT_FUNCTION_TIMEOUT_MS);
             let definition = camel_api::FunctionDefinition {
                 id: camel_api::FunctionId::compute(&runtime, &source, timeout_ms),
                 runtime,
@@ -618,7 +620,7 @@ fn compile_declarative_step_to_canonical(
         }) => Ok(CanonicalStepSpec::Function {
             runtime,
             source,
-            timeout_ms: timeout_ms.unwrap_or(5000),
+            timeout_ms: timeout_ms.unwrap_or(DEFAULT_FUNCTION_TIMEOUT_MS),
         }),
         DeclarativeStep::Loop(_) => {
             let detail = canonical_contract_rejection_reason("loop")

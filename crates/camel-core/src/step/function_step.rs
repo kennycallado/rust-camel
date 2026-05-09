@@ -57,8 +57,14 @@ impl Service<Exchange> for FunctionStep {
 
 fn map_invocation_error(err: FunctionInvocationError, id: &FunctionId) -> CamelError {
     match err {
-        FunctionInvocationError::UserError { message, .. } => {
-            CamelError::ProcessorError(format!("function:user_error: {}: {}", id.0, message))
+        FunctionInvocationError::UserError { message, stack, .. } => {
+            let detail = match stack {
+                Some(s) if !s.is_empty() => {
+                    format!("function:user_error: {}: {}\n{}", id.0, message, s)
+                }
+                _ => format!("function:user_error: {}: {}", id.0, message),
+            };
+            CamelError::ProcessorError(detail)
         }
         FunctionInvocationError::Timeout { timeout_ms, .. } => CamelError::ProcessorError(format!(
             "function:timeout: {} timed out after {}ms",
@@ -128,6 +134,9 @@ mod tests {
         fn discard_staging(&self, _generation: u64) {}
         fn begin_reload(&self) -> u64 {
             0
+        }
+        fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> {
+            vec![]
         }
     }
 
@@ -274,6 +283,12 @@ mod tests {
             fn discard_staging(&self, _generation: u64) {}
             fn begin_reload(&self) -> u64 {
                 0
+            }
+            fn function_refs_for_route(
+                &self,
+                _route_id: &str,
+            ) -> Vec<(FunctionId, Option<String>)> {
+                vec![]
             }
         }
         #[async_trait]
