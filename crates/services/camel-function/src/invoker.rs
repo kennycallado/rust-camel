@@ -111,7 +111,11 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
             .collect()
     }
 
-    fn staged_refs_for_route(&self, route_id: &str, generation: u64) -> Vec<(FunctionId, Option<String>)> {
+    fn staged_refs_for_route(
+        &self,
+        route_id: &str,
+        generation: u64,
+    ) -> Vec<(FunctionId, Option<String>)> {
         let staging = self.staging.lock().expect("staging");
         staging
             .get(&generation)
@@ -125,7 +129,11 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
             .unwrap_or_default()
     }
 
-    fn staged_defs_for_route(&self, route_id: &str, generation: u64) -> Vec<(FunctionDefinition, Option<String>)> {
+    fn staged_defs_for_route(
+        &self,
+        route_id: &str,
+        generation: u64,
+    ) -> Vec<(FunctionDefinition, Option<String>)> {
         let staging = self.staging.lock().expect("staging");
         staging
             .get(&generation)
@@ -194,9 +202,11 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             if *c > 1 {
                 *c -= 1;
             } else {
-                self.pool.ref_counts.remove(&key);
                 should_unregister = true;
             }
+        }
+        if should_unregister {
+            self.pool.ref_counts.remove(&key);
         }
         if should_unregister && let Some((_, pool_key)) = self.pool.function_to_key.remove(&key) {
             if let Some(handle) = self.pool.handles.get(&pool_key) {
@@ -267,9 +277,10 @@ impl FunctionInvoker for DefaultFunctionInvoker {
         let current_gen = self.current_generation.load(Ordering::SeqCst);
         if generation != current_gen {
             self.discard_staging(generation);
-            return Err(FunctionInvocationError::Transport(
-                format!("stale generation: expected {}, got {}", current_gen, generation)
-            ));
+            return Err(FunctionInvocationError::Transport(format!(
+                "stale generation: expected {}, got {}",
+                current_gen, generation
+            )));
         }
 
         {
@@ -290,7 +301,9 @@ impl FunctionInvoker for DefaultFunctionInvoker {
                 }
                 Err(e) => {
                     for (reg_def, reg_rid) in &token.registered {
-                        if let Err(unreg_err) = self.unregister(&reg_def.id, reg_rid.as_deref()).await {
+                        if let Err(unreg_err) =
+                            self.unregister(&reg_def.id, reg_rid.as_deref()).await
+                        {
                             tracing::warn!(
                                 function_id = %reg_def.id,
                                 error = %unreg_err,
