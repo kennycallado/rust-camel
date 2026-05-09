@@ -247,14 +247,13 @@ pub(crate) async fn execute_reload_actions(
 
                         let result = controller.swap_route_pipeline(&route_id, p).await;
                         if let Err(e) = result {
-                            if let Some(ctx) = function_ctx {
-                                if let Some(ref token) = prepare_token {
+                            if let Some(ctx) = function_ctx
+                                && let Some(ref token) = prepare_token {
                                     let _ = ctx
                                         .invoker
                                         .rollback_reload(token.clone(), ctx.generation)
                                         .await;
                                 }
-                            }
                             errors.push(ReloadError {
                                 route_id,
                                 action: "Swap".into(),
