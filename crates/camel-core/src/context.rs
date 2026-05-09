@@ -8,9 +8,9 @@ use tracing::{info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    CamelError, FunctionInvoker, HealthReport, HealthStatus, Lifecycle, MetricsCollector, NoOpMetrics,
-    NoopPlatformService, PlatformIdentity, PlatformService, ReadinessGate, RuntimeCommandBus,
-    RuntimeQueryBus, ServiceHealth, ServiceStatus, SupervisionConfig,
+    CamelError, FunctionInvoker, HealthReport, HealthStatus, Lifecycle, MetricsCollector,
+    NoOpMetrics, NoopPlatformService, PlatformIdentity, PlatformService, ReadinessGate,
+    RuntimeCommandBus, RuntimeQueryBus, ServiceHealth, ServiceStatus, SupervisionConfig,
 };
 use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;

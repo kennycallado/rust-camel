@@ -6,7 +6,8 @@ use tracing::warn;
 
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FilterPredicate, FunctionInvoker, IdentityProcessor,
-    ProducerContext, Value, body::Body,
+    ProducerContext, Value,
+    body::Body,
     loop_eip::{LoopConfig, LoopMode},
 };
 use camel_bean::BeanRegistry;

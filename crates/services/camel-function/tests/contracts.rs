@@ -85,9 +85,7 @@ fn invocation_error_is_std_error() {
         function_id: FunctionId("x".into()),
         timeout_ms: 100,
     });
-    assert_error(&FunctionInvocationError::RunnerUnavailable {
-        reason: "x".into(),
-    });
+    assert_error(&FunctionInvocationError::RunnerUnavailable { reason: "x".into() });
     assert_error(&FunctionInvocationError::UserError {
         function_id: FunctionId("x".into()),
         message: "x".into(),
@@ -122,22 +120,52 @@ fn lifecycle_impl_returns_some_for_function_invoker() {
     impl FunctionInvokerSync for InvokerService {
         fn stage_pending(&self, _def: FunctionDefinition, _route_id: Option<&str>, _gen: u64) {}
         fn discard_staging(&self, _gen: u64) {}
-        fn begin_reload(&self) -> u64 { 0 }
+        fn begin_reload(&self) -> u64 {
+            0
+        }
     }
     #[async_trait]
     impl FunctionInvoker for InvokerService {
-        async fn register(&self, _def: FunctionDefinition, _route_id: Option<&str>) -> Result<(), FunctionInvocationError> { Ok(()) }
-        async fn unregister(&self, _id: &FunctionId, _route_id: Option<&str>) -> Result<(), FunctionInvocationError> { Ok(()) }
-        async fn invoke(&self, _id: &FunctionId, _exchange: &camel_api::Exchange) -> Result<ExchangePatch, FunctionInvocationError> {
+        async fn register(
+            &self,
+            _def: FunctionDefinition,
+            _route_id: Option<&str>,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn unregister(
+            &self,
+            _id: &FunctionId,
+            _route_id: Option<&str>,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn invoke(
+            &self,
+            _id: &FunctionId,
+            _exchange: &camel_api::Exchange,
+        ) -> Result<ExchangePatch, FunctionInvocationError> {
             Ok(ExchangePatch::default())
         }
-        async fn commit_reload(&self, _diff: FunctionDiff, _gen: u64) -> Result<(), FunctionInvocationError> { Ok(()) }
+        async fn commit_reload(
+            &self,
+            _diff: FunctionDiff,
+            _gen: u64,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
     }
     #[async_trait]
     impl Lifecycle for InvokerService {
-        fn name(&self) -> &str { "invoker-svc" }
-        async fn start(&mut self) -> Result<(), camel_api::CamelError> { Ok(()) }
-        async fn stop(&mut self) -> Result<(), camel_api::CamelError> { Ok(()) }
+        fn name(&self) -> &str {
+            "invoker-svc"
+        }
+        async fn start(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), camel_api::CamelError> {
+            Ok(())
+        }
         fn as_function_invoker(&self) -> Option<Arc<dyn FunctionInvoker>> {
             Some(Arc::new(InvokerService))
         }

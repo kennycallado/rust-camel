@@ -278,14 +278,12 @@ fn validate_steps(steps: &[CanonicalStepSpec]) -> Result<(), CamelError> {
                 }
                 if source.trim().is_empty() {
                     return Err(CamelError::RouteError(
-                        "canonical contract violation: function.source cannot be empty"
-                            .to_string(),
+                        "canonical contract violation: function.source cannot be empty".to_string(),
                     ));
                 }
                 if *timeout_ms == 0 {
                     return Err(CamelError::RouteError(
-                        "canonical contract violation: function.timeout_ms must be > 0"
-                            .to_string(),
+                        "canonical contract violation: function.timeout_ms must be > 0".to_string(),
                     ));
                 }
             }

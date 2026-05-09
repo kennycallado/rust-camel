@@ -39,7 +39,8 @@ pub(crate) trait FunctionProvider: Send + Sync + sealed::Sealed {
         handle: &RunnerHandle,
         def: &FunctionDefinition,
     ) -> Result<(), ProviderError>;
-    async fn unregister(&self, handle: &RunnerHandle, id: &FunctionId) -> Result<(), ProviderError>;
+    async fn unregister(&self, handle: &RunnerHandle, id: &FunctionId)
+    -> Result<(), ProviderError>;
     async fn invoke(
         &self,
         handle: &RunnerHandle,
@@ -95,7 +96,10 @@ pub mod fake {
     #[async_trait::async_trait]
     impl FunctionProvider for FakeProvider {
         async fn spawn(&self, key: &RunnerPoolKey) -> Result<RunnerHandle, ProviderError> {
-            self.calls.lock().expect("calls").push(FakeCall::Spawn(key.runtime.clone()));
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(FakeCall::Spawn(key.runtime.clone()));
             if self.config.lock().expect("config").fail_on_spawn {
                 return Err(ProviderError::SpawnFailed("configured".into()));
             }
@@ -107,12 +111,18 @@ pub mod fake {
         }
 
         async fn shutdown(&self, handle: RunnerHandle) -> Result<(), ProviderError> {
-            self.calls.lock().expect("calls").push(FakeCall::Shutdown(handle.id.clone()));
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(FakeCall::Shutdown(handle.id.clone()));
             Ok(())
         }
 
         async fn health(&self, handle: &RunnerHandle) -> Result<HealthReport, ProviderError> {
-            self.calls.lock().expect("calls").push(FakeCall::Health(handle.id.clone()));
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(FakeCall::Health(handle.id.clone()));
             if self.config.lock().expect("config").fail_on_health {
                 return Ok(HealthReport::Unhealthy("configured".into()));
             }
@@ -124,7 +134,10 @@ pub mod fake {
             handle: &RunnerHandle,
             def: &FunctionDefinition,
         ) -> Result<(), ProviderError> {
-            self.calls.lock().expect("calls").push(FakeCall::Register(handle.id.clone(), def.id.clone()));
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(FakeCall::Register(handle.id.clone(), def.id.clone()));
             let mut count = self.register_ok_count.lock().expect("count");
             let cfg = self.config.lock().expect("config").clone();
             if cfg.fail_on_register > 0 && *count >= cfg.fail_on_register {
@@ -140,9 +153,21 @@ pub mod fake {
             Ok(())
         }
 
-        async fn unregister(&self, handle: &RunnerHandle, id: &FunctionId) -> Result<(), ProviderError> {
-            self.calls.lock().expect("calls").push(FakeCall::Unregister(handle.id.clone(), id.clone()));
-            if let Some(set) = self.registered.lock().expect("registered").get_mut(&handle.id) {
+        async fn unregister(
+            &self,
+            handle: &RunnerHandle,
+            id: &FunctionId,
+        ) -> Result<(), ProviderError> {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(FakeCall::Unregister(handle.id.clone(), id.clone()));
+            if let Some(set) = self
+                .registered
+                .lock()
+                .expect("registered")
+                .get_mut(&handle.id)
+            {
                 set.remove(id);
             }
             Ok(())
@@ -154,7 +179,10 @@ pub mod fake {
             id: &FunctionId,
             _ex: &Exchange,
         ) -> Result<ExchangePatch, ProviderError> {
-            self.calls.lock().expect("calls").push(FakeCall::Invoke(handle.id.clone(), id.clone()));
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(FakeCall::Invoke(handle.id.clone(), id.clone()));
             let exists = self
                 .registered
                 .lock()

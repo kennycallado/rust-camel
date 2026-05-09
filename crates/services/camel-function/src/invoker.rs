@@ -1,8 +1,8 @@
 use crate::config::FunctionConfig;
 use crate::pool::{RunnerPool, RunnerPoolKey, RunnerState};
 use crate::provider::{FunctionProvider, HealthReport};
-use camel_api::function::*;
 use camel_api::Exchange;
+use camel_api::function::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,11 @@ pub(crate) struct DefaultFunctionInvoker {
 type StagedEntries = Vec<(FunctionDefinition, Option<String>)>;
 
 impl DefaultFunctionInvoker {
-    pub(crate) fn new(pool: Arc<RunnerPool>, provider: Arc<dyn FunctionProvider>, config: FunctionConfig) -> Self {
+    pub(crate) fn new(
+        pool: Arc<RunnerPool>,
+        provider: Arc<dyn FunctionProvider>,
+        config: FunctionConfig,
+    ) -> Self {
         Self {
             pool,
             provider,
@@ -34,7 +38,10 @@ impl DefaultFunctionInvoker {
         }
     }
 
-    pub(crate) async fn wait_until_healthy(&self, handle: &crate::pool::RunnerHandle) -> Result<(), FunctionInvocationError> {
+    pub(crate) async fn wait_until_healthy(
+        &self,
+        handle: &crate::pool::RunnerHandle,
+    ) -> Result<(), FunctionInvocationError> {
         let deadline = tokio::time::Instant::now() + self.config.boot_timeout;
         loop {
             if tokio::time::Instant::now() > deadline {
@@ -55,7 +62,9 @@ impl DefaultFunctionInvoker {
                     tokio::time::sleep(self.config.health_interval).await;
                 }
                 Err(e) => {
-                    return Err(FunctionInvocationError::RunnerUnavailable { reason: e.to_string() });
+                    return Err(FunctionInvocationError::RunnerUnavailable {
+                        reason: e.to_string(),
+                    });
                 }
             }
         }
@@ -82,7 +91,11 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
     fn begin_reload(&self) -> u64 {
         let generation = self.next_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.current_generation.store(generation, Ordering::SeqCst);
-        self.staging.lock().expect("staging").entry(generation).or_default();
+        self.staging
+            .lock()
+            .expect("staging")
+            .entry(generation)
+            .or_default();
         generation
     }
 }
@@ -94,11 +107,17 @@ impl FunctionInvoker for DefaultFunctionInvoker {
         def: FunctionDefinition,
         route_id: Option<&str>,
     ) -> Result<(), FunctionInvocationError> {
-        let key = RunnerPoolKey { runtime: def.runtime.clone() };
+        let key = RunnerPoolKey {
+            runtime: def.runtime.clone(),
+        };
         let handle = if let Some(existing) = self.pool.handles.get(&key) {
             existing.clone()
         } else {
-            let spawned = self.provider.spawn(&key).await.map_err(|e| FunctionInvocationError::RunnerUnavailable { reason: e.to_string() })?;
+            let spawned = self.provider.spawn(&key).await.map_err(|e| {
+                FunctionInvocationError::RunnerUnavailable {
+                    reason: e.to_string(),
+                }
+            })?;
             self.wait_until_healthy(&spawned).await?;
             self.pool.handles.insert(key.clone(), spawned.clone());
             spawned
@@ -108,7 +127,11 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             .await
             .map_err(|e| FunctionInvocationError::Transport(e.to_string()))?;
         let ref_key = (def.id.clone(), route_id.map(ToOwned::to_owned));
-        self.pool.ref_counts.entry(ref_key.clone()).and_modify(|c| *c += 1).or_insert(1);
+        self.pool
+            .ref_counts
+            .entry(ref_key.clone())
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
         self.pool.function_to_key.insert(ref_key, key);
         Ok(())
     }
@@ -129,14 +152,24 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             }
         }
         if should_unregister && let Some((_, pool_key)) = self.pool.function_to_key.remove(&key) {
-                if let Some(handle) = self.pool.handles.get(&pool_key) {
-                    self.provider.unregister(&handle, id).await.map_err(|e| FunctionInvocationError::Transport(e.to_string()))?;
-                }
-                let still_used = self.pool.function_to_key.iter().any(|kv| kv.value() == &pool_key);
-                if !still_used && let Some((_, handle)) = self.pool.handles.remove(&pool_key) {
-                        handle.cancel.cancel();
-                        self.provider.shutdown(handle).await.map_err(|e| FunctionInvocationError::Transport(e.to_string()))?;
-                }
+            if let Some(handle) = self.pool.handles.get(&pool_key) {
+                self.provider
+                    .unregister(&handle, id)
+                    .await
+                    .map_err(|e| FunctionInvocationError::Transport(e.to_string()))?;
+            }
+            let still_used = self
+                .pool
+                .function_to_key
+                .iter()
+                .any(|kv| kv.value() == &pool_key);
+            if !still_used && let Some((_, handle)) = self.pool.handles.remove(&pool_key) {
+                handle.cancel.cancel();
+                self.provider
+                    .shutdown(handle)
+                    .await
+                    .map_err(|e| FunctionInvocationError::Transport(e.to_string()))?;
+            }
         }
         Ok(())
     }
@@ -152,12 +185,17 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             .iter()
             .find(|kv| kv.key().0 == *id)
             .map(|kv| kv.value().clone())
-            .ok_or_else(|| FunctionInvocationError::NotRegistered { function_id: id.clone() })?;
-        let handle = self.pool.handles.get(&key).map(|h| h.clone()).ok_or_else(|| {
-            FunctionInvocationError::RunnerUnavailable {
+            .ok_or_else(|| FunctionInvocationError::NotRegistered {
+                function_id: id.clone(),
+            })?;
+        let handle = self
+            .pool
+            .handles
+            .get(&key)
+            .map(|h| h.clone())
+            .ok_or_else(|| FunctionInvocationError::RunnerUnavailable {
                 reason: "missing handle".into(),
-            }
-        })?;
+            })?;
         let state = handle.state.lock().expect("state").clone();
         match state {
             RunnerState::Failed { reason } => {

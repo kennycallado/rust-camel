@@ -18,7 +18,10 @@ pub struct FunctionStep {
 
 impl FunctionStep {
     pub fn new(invoker: Arc<dyn FunctionInvoker>, definition: FunctionDefinition) -> Self {
-        Self { definition, invoker }
+        Self {
+            definition,
+            invoker,
+        }
     }
 }
 
@@ -36,17 +39,15 @@ impl Service<Exchange> for FunctionStep {
         let id = self.definition.id.clone();
         let timeout_ms = self.definition.timeout_ms;
         Box::pin(async move {
-            let result = tokio::time::timeout(
-                Duration::from_millis(timeout_ms),
-                invoker.invoke(&id, &ex),
-            )
-            .await
-            .map_err(|_| {
-                CamelError::ProcessorError(format!(
-                    "function:timeout: {} timed out after {}ms",
-                    id.0, timeout_ms
-                ))
-            })?;
+            let result =
+                tokio::time::timeout(Duration::from_millis(timeout_ms), invoker.invoke(&id, &ex))
+                    .await
+                    .map_err(|_| {
+                        CamelError::ProcessorError(format!(
+                            "function:timeout: {} timed out after {}ms",
+                            id.0, timeout_ms
+                        ))
+                    })?;
             let patch = result.map_err(|e| map_invocation_error(e, &id))?;
             apply_patch(&mut ex, patch);
             Ok(ex)
@@ -100,8 +101,8 @@ fn apply_patch(ex: &mut Exchange, patch: ExchangePatch) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{FunctionInvokerSync, FunctionDiff};
     use async_trait::async_trait;
+    use camel_api::{FunctionDiff, FunctionInvokerSync};
     use std::sync::Mutex;
 
     struct MockInvoker {
@@ -110,25 +111,57 @@ mod tests {
 
     impl MockInvoker {
         fn new(responses: Vec<Result<ExchangePatch, FunctionInvocationError>>) -> Self {
-            Self { responses: Mutex::new(responses) }
+            Self {
+                responses: Mutex::new(responses),
+            }
         }
     }
 
     impl FunctionInvokerSync for MockInvoker {
-        fn stage_pending(&self, _def: FunctionDefinition, _route_id: Option<&str>, _generation: u64) {}
+        fn stage_pending(
+            &self,
+            _def: FunctionDefinition,
+            _route_id: Option<&str>,
+            _generation: u64,
+        ) {
+        }
         fn discard_staging(&self, _generation: u64) {}
-        fn begin_reload(&self) -> u64 { 0 }
+        fn begin_reload(&self) -> u64 {
+            0
+        }
     }
 
     #[async_trait]
     impl FunctionInvoker for MockInvoker {
-        async fn register(&self, _def: FunctionDefinition, _route_id: Option<&str>) -> Result<(), FunctionInvocationError> { Ok(()) }
-        async fn unregister(&self, _id: &FunctionId, _route_id: Option<&str>) -> Result<(), FunctionInvocationError> { Ok(()) }
-        async fn invoke(&self, _id: &FunctionId, _exchange: &Exchange) -> Result<ExchangePatch, FunctionInvocationError> {
+        async fn register(
+            &self,
+            _def: FunctionDefinition,
+            _route_id: Option<&str>,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn unregister(
+            &self,
+            _id: &FunctionId,
+            _route_id: Option<&str>,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn invoke(
+            &self,
+            _id: &FunctionId,
+            _exchange: &Exchange,
+        ) -> Result<ExchangePatch, FunctionInvocationError> {
             let mut resp = self.responses.lock().unwrap();
             resp.remove(0)
         }
-        async fn commit_reload(&self, _diff: FunctionDiff, _generation: u64) -> Result<(), FunctionInvocationError> { Ok(()) }
+        async fn commit_reload(
+            &self,
+            _diff: FunctionDiff,
+            _generation: u64,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
     }
 
     fn test_definition() -> FunctionDefinition {
@@ -163,9 +196,14 @@ mod tests {
         })]));
         let mut step = FunctionStep::new(invoker, test_definition());
         let mut ex = Exchange::default();
-        ex.input.headers.insert("x-old".into(), serde_json::json!("gone"));
+        ex.input
+            .headers
+            .insert("x-old".into(), serde_json::json!("gone"));
         let result = step.call(ex).await.unwrap();
-        assert_eq!(result.input.headers.get("x-key").unwrap().as_str(), Some("val"));
+        assert_eq!(
+            result.input.headers.get("x-key").unwrap().as_str(),
+            Some("val")
+        );
         assert!(!result.input.headers.contains_key("x-old"));
     }
 
@@ -183,28 +221,38 @@ mod tests {
 
     #[tokio::test]
     async fn function_step_maps_timeout_error() {
-        let invoker = Arc::new(MockInvoker::new(vec![Err(FunctionInvocationError::Timeout {
-            function_id: FunctionId("x".into()),
-            timeout_ms: 5000,
-        })]));
+        let invoker = Arc::new(MockInvoker::new(vec![Err(
+            FunctionInvocationError::Timeout {
+                function_id: FunctionId("x".into()),
+                timeout_ms: 5000,
+            },
+        )]));
         let mut step = FunctionStep::new(invoker, test_definition());
         let ex = Exchange::default();
         let err = step.call(ex).await.unwrap_err();
-        let msg = match &err { CamelError::ProcessorError(m) => m, _ => panic!("wrong error type") };
+        let msg = match &err {
+            CamelError::ProcessorError(m) => m,
+            _ => panic!("wrong error type"),
+        };
         assert!(msg.contains("function:timeout:"));
     }
 
     #[tokio::test]
     async fn function_step_maps_user_error() {
-        let invoker = Arc::new(MockInvoker::new(vec![Err(FunctionInvocationError::UserError {
-            function_id: FunctionId("x".into()),
-            message: "boom".into(),
-            stack: None,
-        })]));
+        let invoker = Arc::new(MockInvoker::new(vec![Err(
+            FunctionInvocationError::UserError {
+                function_id: FunctionId("x".into()),
+                message: "boom".into(),
+                stack: None,
+            },
+        )]));
         let mut step = FunctionStep::new(invoker, test_definition());
         let ex = Exchange::default();
         let err = step.call(ex).await.unwrap_err();
-        let msg = match &err { CamelError::ProcessorError(m) => m, _ => panic!("wrong error type") };
+        let msg = match &err {
+            CamelError::ProcessorError(m) => m,
+            _ => panic!("wrong error type"),
+        };
         assert!(msg.contains("function:user_error:"));
         assert!(msg.contains("boom"));
     }
@@ -213,19 +261,49 @@ mod tests {
     async fn function_step_client_side_timeout_fires() {
         struct SlowInvoker;
         impl FunctionInvokerSync for SlowInvoker {
-            fn stage_pending(&self, _def: FunctionDefinition, _route_id: Option<&str>, _generation: u64) {}
+            fn stage_pending(
+                &self,
+                _def: FunctionDefinition,
+                _route_id: Option<&str>,
+                _generation: u64,
+            ) {
+            }
             fn discard_staging(&self, _generation: u64) {}
-            fn begin_reload(&self) -> u64 { 0 }
+            fn begin_reload(&self) -> u64 {
+                0
+            }
         }
         #[async_trait]
         impl FunctionInvoker for SlowInvoker {
-            async fn register(&self, _def: FunctionDefinition, _route_id: Option<&str>) -> Result<(), FunctionInvocationError> { Ok(()) }
-            async fn unregister(&self, _id: &FunctionId, _route_id: Option<&str>) -> Result<(), FunctionInvocationError> { Ok(()) }
-            async fn invoke(&self, _id: &FunctionId, _exchange: &Exchange) -> Result<ExchangePatch, FunctionInvocationError> {
+            async fn register(
+                &self,
+                _def: FunctionDefinition,
+                _route_id: Option<&str>,
+            ) -> Result<(), FunctionInvocationError> {
+                Ok(())
+            }
+            async fn unregister(
+                &self,
+                _id: &FunctionId,
+                _route_id: Option<&str>,
+            ) -> Result<(), FunctionInvocationError> {
+                Ok(())
+            }
+            async fn invoke(
+                &self,
+                _id: &FunctionId,
+                _exchange: &Exchange,
+            ) -> Result<ExchangePatch, FunctionInvocationError> {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 Ok(ExchangePatch::default())
             }
-            async fn commit_reload(&self, _diff: FunctionDiff, _generation: u64) -> Result<(), FunctionInvocationError> { Ok(()) }
+            async fn commit_reload(
+                &self,
+                _diff: FunctionDiff,
+                _generation: u64,
+            ) -> Result<(), FunctionInvocationError> {
+                Ok(())
+            }
         }
         let def = FunctionDefinition {
             id: FunctionId::compute("deno", "slow", 50),
@@ -238,7 +316,10 @@ mod tests {
         let mut step = FunctionStep::new(Arc::new(SlowInvoker), def);
         let ex = Exchange::default();
         let err = step.call(ex).await.unwrap_err();
-        let msg = match &err { CamelError::ProcessorError(m) => m, _ => panic!("wrong error type") };
+        let msg = match &err {
+            CamelError::ProcessorError(m) => m,
+            _ => panic!("wrong error type"),
+        };
         assert!(msg.contains("function:timeout:"));
     }
 }

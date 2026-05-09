@@ -572,13 +572,15 @@ impl DefaultRouteController {
                 let _agg_step = rest.remove(0);
                 let post_steps = rest;
 
-                let pre_pairs = self.resolve_steps(pre_steps, &producer_ctx, &self.registry, Some(&route_id))?;
+                let pre_pairs =
+                    self.resolve_steps(pre_steps, &producer_ctx, &self.registry, Some(&route_id))?;
                 let pre_procs: Vec<BoxProcessor> = pre_pairs.into_iter().map(|(p, _)| p).collect();
                 let pre_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
                     compose_pipeline(pre_procs),
                 )));
 
-                let post_pairs = self.resolve_steps(post_steps, &producer_ctx, &self.registry, Some(&route_id))?;
+                let post_pairs =
+                    self.resolve_steps(post_steps, &producer_ctx, &self.registry, Some(&route_id))?;
                 let post_procs: Vec<BoxProcessor> =
                     post_pairs.into_iter().map(|(p, _)| p).collect();
                 let post_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(

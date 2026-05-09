@@ -61,8 +61,8 @@
 pub mod context;
 pub(crate) mod hot_reload;
 pub mod lifecycle;
-pub mod step;
 pub(crate) mod shared;
+pub mod step;
 
 pub mod route {
     pub use crate::lifecycle::adapters::route_compiler::{

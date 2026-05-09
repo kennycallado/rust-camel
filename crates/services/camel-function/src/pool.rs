@@ -12,8 +12,13 @@ pub struct RunnerPoolKey {
 pub enum RunnerState {
     Booting,
     Healthy,
-    Unhealthy { since: std::time::Instant, reason: String },
-    Failed { reason: String },
+    Unhealthy {
+        since: std::time::Instant,
+        reason: String,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
