@@ -16,7 +16,6 @@ use tracing::{error, info, warn};
 use camel_api::UnitOfWorkConfig;
 use camel_api::aggregator::AggregatorConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::function::FunctionDiff;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FunctionInvoker, IdentityProcessor, NoOpMetrics,

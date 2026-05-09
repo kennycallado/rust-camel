@@ -126,10 +126,18 @@ fn lifecycle_impl_returns_some_for_function_invoker() {
         fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> {
             vec![]
         }
-        fn staged_refs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionId, Option<String>)> {
+        fn staged_refs_for_route(
+            &self,
+            _route_id: &str,
+            _generation: u64,
+        ) -> Vec<(FunctionId, Option<String>)> {
             vec![]
         }
-        fn staged_defs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionDefinition, Option<String>)> {
+        fn staged_defs_for_route(
+            &self,
+            _route_id: &str,
+            _generation: u64,
+        ) -> Vec<(FunctionDefinition, Option<String>)> {
             vec![]
         }
     }
@@ -221,10 +229,18 @@ fn function_invoker_is_object_safe() {
         fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> {
             vec![]
         }
-        fn staged_refs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionId, Option<String>)> {
+        fn staged_refs_for_route(
+            &self,
+            _route_id: &str,
+            _generation: u64,
+        ) -> Vec<(FunctionId, Option<String>)> {
             vec![]
         }
-        fn staged_defs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionDefinition, Option<String>)> {
+        fn staged_defs_for_route(
+            &self,
+            _route_id: &str,
+            _generation: u64,
+        ) -> Vec<(FunctionDefinition, Option<String>)> {
             vec![]
         }
     }

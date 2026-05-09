@@ -215,11 +215,8 @@ pub(crate) async fn execute_reload_actions(
                 let in_flight = controller.in_flight_count(&route_id).await.unwrap_or(0);
 
                 let prepare_token = if let Some(ctx) = function_ctx {
-                    let diff = compute_function_diff_for_route(
-                        &ctx.invoker,
-                        &route_id,
-                        ctx.generation,
-                    );
+                    let diff =
+                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
                     match ctx.invoker.prepare_reload(diff, ctx.generation).await {
                         Ok(token) => Some(token),
                         Err(e) => {
@@ -320,11 +317,8 @@ pub(crate) async fn execute_reload_actions(
                 };
 
                 let prepare_token = if let Some(ctx) = function_ctx {
-                    let diff = compute_function_diff_for_route(
-                        &ctx.invoker,
-                        &route_id,
-                        ctx.generation,
-                    );
+                    let diff =
+                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
                     match ctx.invoker.prepare_reload(diff, ctx.generation).await {
                         Ok(token) => Some(token),
                         Err(e) => {
@@ -358,11 +352,8 @@ pub(crate) async fn execute_reload_actions(
                 }
 
                 if let Some(ctx) = function_ctx {
-                    let diff = compute_function_diff_for_route(
-                        &ctx.invoker,
-                        &route_id,
-                        ctx.generation,
-                    );
+                    let diff =
+                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
                     let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
                 }
 
@@ -470,11 +461,8 @@ pub(crate) async fn execute_reload_actions(
                 };
 
                 let prepare_token = if let Some(ctx) = function_ctx {
-                    let diff = compute_function_diff_for_route(
-                        &ctx.invoker,
-                        &route_id,
-                        ctx.generation,
-                    );
+                    let diff =
+                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
                     match ctx.invoker.prepare_reload(diff, ctx.generation).await {
                         Ok(token) => Some(token),
                         Err(e) => {
@@ -582,11 +570,8 @@ pub(crate) async fn execute_reload_actions(
                 }
 
                 if let Some(ctx) = function_ctx {
-                    let diff = compute_function_diff_for_route(
-                        &ctx.invoker,
-                        &route_id,
-                        ctx.generation,
-                    );
+                    let diff =
+                        compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
                     let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
                 }
 
@@ -1098,5 +1083,293 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].action, "Restart");
         assert_eq!(errors[0].route_id, "missing-restart-def");
+    }
+
+    // ---- function hot-reload integration tests ----
+
+    fn fn_def(name: &str, route_id: Option<&str>) -> camel_api::function::FunctionDefinition {
+        camel_api::function::FunctionDefinition {
+            id: camel_api::function::FunctionId::compute("deno", name, 5000),
+            runtime: "fake".into(),
+            source: name.into(),
+            timeout_ms: 5000,
+            route_id: route_id.map(|s| s.to_string()),
+            step_index: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_swap_with_function_steps_replaces_function() {
+        use crate::CamelContext;
+        use crate::lifecycle::application::route_definition::BuilderStep;
+        use camel_api::Lifecycle;
+        use camel_api::function::FunctionId;
+        use camel_component_timer::TimerComponent;
+        use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
+        use camel_function::{FunctionConfig, FunctionRuntimeService};
+
+        let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
+        let function_service =
+            FunctionRuntimeService::with_fake_provider(FunctionConfig::default(), provider.clone());
+        let invoker = function_service.invoker();
+
+        let mut ctx = CamelContext::builder()
+            .with_lifecycle(function_service)
+            .build()
+            .await
+            .unwrap();
+        ctx.register_component(TimerComponent::new());
+        ctx.start().await.unwrap();
+
+        let old_fn_id = FunctionId::compute("deno", "fn-old", 5000);
+        let old_def = RouteDefinition::new(
+            "timer:tick?period=50&repeatCount=1",
+            vec![BuilderStep::DeclarativeFunction {
+                definition: fn_def("fn-old", Some("swap-fn-route")),
+            }],
+        )
+        .with_route_id("swap-fn-route");
+        ctx.add_route_definition(old_def).await.unwrap();
+
+        let register_calls: Vec<_> = provider
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                FakeCall::Register(_, id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(register_calls.len(), 1);
+        assert_eq!(register_calls[0], old_fn_id);
+
+        let generation = invoker.begin_reload();
+        invoker.stage_pending(
+            fn_def("fn-new", Some("swap-fn-route")),
+            Some("swap-fn-route"),
+            generation,
+        );
+
+        let new_def = RouteDefinition::new(
+            "timer:tick?period=50&repeatCount=1",
+            vec![BuilderStep::DeclarativeFunction {
+                definition: fn_def("fn-new", Some("swap-fn-route")),
+            }],
+        )
+        .with_route_id("swap-fn-route");
+
+        let actions = vec![ReloadAction::Swap {
+            route_id: "swap-fn-route".into(),
+        }];
+        let function_ctx = FunctionReloadContext {
+            invoker: invoker.clone(),
+            generation,
+        };
+        let errors = execute_reload_actions(
+            actions,
+            vec![new_def],
+            &ctx.runtime_execution_handle(),
+            Duration::from_secs(10),
+            Some(&function_ctx),
+        )
+        .await;
+        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+
+        let register_calls: Vec<_> = provider
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                FakeCall::Register(_, id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let new_fn_id = FunctionId::compute("deno", "fn-new", 5000);
+        assert!(
+            register_calls.iter().any(|id| *id == new_fn_id),
+            "fn-new should be registered, calls: {:?}",
+            register_calls
+        );
+
+        let unregister_calls: Vec<_> = provider
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                FakeCall::Unregister(_, id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            unregister_calls.iter().any(|id| *id == old_fn_id),
+            "fn-old should be unregistered, calls: {:?}",
+            unregister_calls
+        );
+
+        ctx.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_execute_add_with_function_step_registers_function() {
+        use crate::CamelContext;
+        use crate::lifecycle::application::route_definition::BuilderStep;
+        use camel_api::Lifecycle;
+        use camel_api::function::FunctionId;
+        use camel_component_timer::TimerComponent;
+        use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
+        use camel_function::{FunctionConfig, FunctionRuntimeService};
+
+        let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
+        let function_service =
+            FunctionRuntimeService::with_fake_provider(FunctionConfig::default(), provider.clone());
+        let invoker = function_service.invoker();
+
+        let mut ctx = CamelContext::builder()
+            .with_lifecycle(function_service)
+            .build()
+            .await
+            .unwrap();
+        ctx.register_component(TimerComponent::new());
+        ctx.start().await.unwrap();
+
+        let generation = invoker.begin_reload();
+        invoker.stage_pending(
+            fn_def("fn-a", Some("add-fn-route")),
+            Some("add-fn-route"),
+            generation,
+        );
+
+        let new_def = RouteDefinition::new(
+            "timer:tick?period=50&repeatCount=1",
+            vec![BuilderStep::DeclarativeFunction {
+                definition: fn_def("fn-a", Some("add-fn-route")),
+            }],
+        )
+        .with_route_id("add-fn-route");
+
+        let actions = vec![ReloadAction::Add {
+            route_id: "add-fn-route".into(),
+        }];
+        let function_ctx = FunctionReloadContext {
+            invoker: invoker.clone(),
+            generation,
+        };
+        let errors = execute_reload_actions(
+            actions,
+            vec![new_def],
+            &ctx.runtime_execution_handle(),
+            Duration::from_secs(10),
+            Some(&function_ctx),
+        )
+        .await;
+        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+
+        let fn_a_id = FunctionId::compute("deno", "fn-a", 5000);
+        let register_calls: Vec<_> = provider
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                FakeCall::Register(_, id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            register_calls.iter().any(|id| *id == fn_a_id),
+            "fn-a should be registered, calls: {:?}",
+            register_calls
+        );
+
+        ctx.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_execute_remove_with_function_step_unregisters_function() {
+        use crate::CamelContext;
+        use crate::lifecycle::application::route_definition::BuilderStep;
+        use camel_api::Lifecycle;
+        use camel_api::function::FunctionId;
+        use camel_component_timer::TimerComponent;
+        use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
+        use camel_function::{FunctionConfig, FunctionRuntimeService};
+
+        let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
+        let function_service =
+            FunctionRuntimeService::with_fake_provider(FunctionConfig::default(), provider.clone());
+        let invoker = function_service.invoker();
+
+        let mut ctx = CamelContext::builder()
+            .with_lifecycle(function_service)
+            .build()
+            .await
+            .unwrap();
+        ctx.register_component(TimerComponent::new());
+        ctx.start().await.unwrap();
+
+        let old_fn_id = FunctionId::compute("deno", "fn-old", 5000);
+        let def = RouteDefinition::new(
+            "timer:tick?period=50&repeatCount=1",
+            vec![BuilderStep::DeclarativeFunction {
+                definition: fn_def("fn-old", Some("remove-fn-route")),
+            }],
+        )
+        .with_route_id("remove-fn-route");
+        ctx.add_route_definition(def).await.unwrap();
+
+        let register_calls: Vec<_> = provider
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                FakeCall::Register(_, id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            register_calls.iter().any(|id| *id == old_fn_id),
+            "fn-old should be registered initially"
+        );
+
+        let generation = invoker.begin_reload();
+
+        let actions = vec![ReloadAction::Remove {
+            route_id: "remove-fn-route".into(),
+        }];
+        let function_ctx = FunctionReloadContext {
+            invoker: invoker.clone(),
+            generation,
+        };
+        let errors = execute_reload_actions(
+            actions,
+            vec![],
+            &ctx.runtime_execution_handle(),
+            Duration::from_secs(10),
+            Some(&function_ctx),
+        )
+        .await;
+        assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
+
+        let unregister_calls: Vec<_> = provider
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                FakeCall::Unregister(_, id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            unregister_calls.iter().any(|id| *id == old_fn_id),
+            "fn-old should be unregistered after remove, calls: {:?}",
+            unregister_calls
+        );
+
+        ctx.stop().await.unwrap();
     }
 }

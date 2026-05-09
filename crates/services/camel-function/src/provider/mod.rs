@@ -104,10 +104,7 @@ pub mod fake {
                 .lock()
                 .expect("calls")
                 .push(FakeCall::Spawn(key.clone()));
-            self.spawned
-                .lock()
-                .expect("spawned")
-                .push(key.clone());
+            self.spawned.lock().expect("spawned").push(key.clone());
             if self.config.lock().expect("config").fail_on_spawn {
                 return Err(ProviderError::SpawnFailed("configured".into()));
             }
