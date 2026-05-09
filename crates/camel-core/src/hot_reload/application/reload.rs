@@ -336,18 +336,24 @@ pub(crate) async fn execute_reload_actions(
                     let diff =
                         compute_function_diff_for_route(&ctx.invoker, &route_id, ctx.generation);
 
-                    if let Err(e) = ctx.invoker.prepare_reload(diff, ctx.generation).await {
-                        ctx.invoker.discard_staging(ctx.generation);
-                        errors.push(ReloadError {
-                            route_id,
-                            action: "Add (prepare)".into(),
-                            error: CamelError::ProcessorError(format!("{e}")),
-                        });
-                        continue;
-                    }
+                    let prepare_token = match ctx.invoker.prepare_reload(diff, ctx.generation).await {
+                        Ok(token) => token,
+                        Err(e) => {
+                            ctx.invoker.discard_staging(ctx.generation);
+                            errors.push(ReloadError {
+                                route_id,
+                                action: "Add (prepare)".into(),
+                                error: CamelError::ProcessorError(format!("{e}")),
+                            });
+                            continue;
+                        }
+                    };
 
                     if let Err(e) = controller.insert_prepared_route(prepared).await {
-                        ctx.invoker.discard_staging(ctx.generation);
+                        let _ = ctx
+                            .invoker
+                            .rollback_reload(prepare_token, ctx.generation)
+                            .await;
                         errors.push(ReloadError {
                             route_id,
                             action: "Add (insert)".into(),
@@ -363,7 +369,10 @@ pub(crate) async fn execute_reload_actions(
                         let _ = controller
                             .remove_route_preserving_functions(route_id.clone())
                             .await;
-                        ctx.invoker.discard_staging(ctx.generation);
+                        let _ = ctx
+                            .invoker
+                            .rollback_reload(prepare_token, ctx.generation)
+                            .await;
                         errors.push(ReloadError {
                             route_id,
                             action: "Add (aggregate)".into(),
