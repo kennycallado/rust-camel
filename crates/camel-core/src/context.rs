@@ -93,6 +93,16 @@ impl RuntimeExecutionHandle {
         self.controller.compile_route_definition(definition).await
     }
 
+    pub(crate) async fn compile_route_definition_with_generation(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<camel_api::BoxProcessor, CamelError> {
+        self.controller
+            .compile_route_definition_with_generation(definition, generation)
+            .await
+    }
+
     pub(crate) async fn swap_route_pipeline(
         &self,
         route_id: &str,

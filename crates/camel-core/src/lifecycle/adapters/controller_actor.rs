@@ -58,6 +58,11 @@ pub(crate) enum RouteControllerCommand {
         definition: RouteDefinition,
         reply: oneshot::Sender<Result<BoxProcessor, CamelError>>,
     },
+    CompileRouteDefinitionWithGeneration {
+        definition: RouteDefinition,
+        generation: u64,
+        reply: oneshot::Sender<Result<BoxProcessor, CamelError>>,
+    },
     RouteFromUri {
         route_id: String,
         reply: oneshot::Sender<Option<String>>,
@@ -266,6 +271,25 @@ impl RouteControllerHandle {
         self.tx
             .send(RouteControllerCommand::CompileRouteDefinition {
                 definition,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+    }
+
+    pub async fn compile_route_definition_with_generation(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<BoxProcessor, CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::CompileRouteDefinitionWithGeneration {
+                definition,
+                generation,
                 reply: reply_tx,
             })
             .await
@@ -532,6 +556,15 @@ pub fn spawn_controller_actor(
                 }
                 RouteControllerCommand::CompileRouteDefinition { definition, reply } => {
                     let _ = reply.send(controller.compile_route_definition(definition));
+                }
+                RouteControllerCommand::CompileRouteDefinitionWithGeneration {
+                    definition,
+                    generation,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        controller.compile_route_definition_with_generation(definition, generation),
+                    );
                 }
                 RouteControllerCommand::RouteFromUri { route_id, reply } => {
                     let _ = reply.send(controller.route_from_uri(&route_id));

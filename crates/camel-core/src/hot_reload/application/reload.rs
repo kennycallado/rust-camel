@@ -14,6 +14,45 @@ use crate::hot_reload::domain::ReloadAction;
 use crate::lifecycle::adapters::route_controller::DefaultRouteController;
 use crate::lifecycle::application::route_definition::RouteDefinition;
 
+pub(crate) struct FunctionReloadContext {
+    pub invoker: std::sync::Arc<dyn camel_api::function::FunctionInvoker>,
+    pub generation: u64,
+}
+
+fn compute_function_diff_for_route(
+    invoker: &std::sync::Arc<dyn camel_api::function::FunctionInvoker>,
+    route_id: &str,
+    generation: u64,
+) -> camel_api::function::FunctionDiff {
+    let current_refs: std::collections::HashSet<_> = invoker
+        .function_refs_for_route(route_id)
+        .into_iter()
+        .collect();
+    let staged_defs = invoker.staged_defs_for_route(route_id, generation);
+    let staged_refs: std::collections::HashSet<_> = staged_defs
+        .iter()
+        .map(|(def, rid)| (def.id.clone(), rid.clone()))
+        .collect();
+
+    let removed: Vec<_> = current_refs.difference(&staged_refs).cloned().collect();
+    let added_refs: std::collections::HashSet<_> =
+        staged_refs.difference(&current_refs).cloned().collect();
+    let added: Vec<_> = staged_defs
+        .into_iter()
+        .filter(|(def, rid)| added_refs.contains(&(def.id.clone(), rid.clone())))
+        .collect();
+    let unchanged: Vec<_> = current_refs
+        .intersection(&staged_refs)
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    camel_api::function::FunctionDiff {
+        added,
+        removed,
+        unchanged,
+    }
+}
+
 static RELOAD_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn next_reload_command_id(op: &str, route_id: &str) -> String {
@@ -148,13 +187,13 @@ pub(crate) async fn execute_reload_actions(
     mut new_definitions: Vec<RouteDefinition>,
     controller: &RuntimeExecutionHandle,
     drain_timeout: Duration,
+    function_ctx: Option<&FunctionReloadContext>,
 ) -> Vec<ReloadError> {
     let mut errors = Vec::new();
 
     for action in actions {
         match action {
             ReloadAction::Swap { route_id } => {
-                // Find and remove the matching definition by route_id
                 let def_pos = new_definitions
                     .iter()
                     .position(|d| d.route_id() == route_id);
@@ -175,30 +214,83 @@ pub(crate) async fn execute_reload_actions(
 
                 let in_flight = controller.in_flight_count(&route_id).await.unwrap_or(0);
 
-                // Compile new pipeline then swap using explicit execution handle operations.
-                let pipeline = controller.compile_route_definition(def).await;
+                let prepare_token = if let Some(ctx) = function_ctx {
+                    let diff = compute_function_diff_for_route(
+                        &ctx.invoker,
+                        &route_id,
+                        ctx.generation,
+                    );
+                    match ctx.invoker.prepare_reload(diff, ctx.generation).await {
+                        Ok(token) => Some(token),
+                        Err(e) => {
+                            errors.push(ReloadError {
+                                route_id: route_id.clone(),
+                                action: "Swap (prepare)".into(),
+                                error: CamelError::ProcessorError(format!("{e}")),
+                            });
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let pipeline = if let Some(ctx) = function_ctx {
+                    controller
+                        .compile_route_definition_with_generation(def, ctx.generation)
+                        .await
+                } else {
+                    controller.compile_route_definition(def).await
+                };
+
                 match pipeline {
                     Ok(p) => {
                         let result = controller.swap_route_pipeline(&route_id, p).await;
                         if let Err(e) = result {
+                            if let Some(ctx) = function_ctx {
+                                if let Some(ref token) = prepare_token {
+                                    let _ = ctx
+                                        .invoker
+                                        .rollback_reload(token.clone(), ctx.generation)
+                                        .await;
+                                }
+                            }
                             errors.push(ReloadError {
                                 route_id,
                                 action: "Swap".into(),
                                 error: e,
                             });
-                        } else if in_flight > 0 {
-                            tracing::info!(
-                                route_id = %route_id,
-                                action = "swap",
-                                in_flight = in_flight,
-                                "hot-reload: swapped route pipeline ({} exchanges continuing with previous pipeline)",
-                                in_flight
-                            );
                         } else {
-                            tracing::info!(route_id = %route_id, "hot-reload: swapped route pipeline");
+                            if let Some(ctx) = function_ctx {
+                                let diff = compute_function_diff_for_route(
+                                    &ctx.invoker,
+                                    &route_id,
+                                    ctx.generation,
+                                );
+                                let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
+                            }
+                            if in_flight > 0 {
+                                tracing::info!(
+                                    route_id = %route_id,
+                                    action = "swap",
+                                    in_flight = in_flight,
+                                    "hot-reload: swapped route pipeline ({} exchanges continuing with previous pipeline)",
+                                    in_flight
+                                );
+                            } else {
+                                tracing::info!(route_id = %route_id, "hot-reload: swapped route pipeline");
+                            }
                         }
                     }
                     Err(e) => {
+                        if let Some(ctx) = function_ctx {
+                            if let Some(ref token) = prepare_token {
+                                let _ = ctx
+                                    .invoker
+                                    .rollback_reload(token.clone(), ctx.generation)
+                                    .await;
+                            }
+                        }
                         errors.push(ReloadError {
                             route_id,
                             action: "Swap (compile)".into(),
@@ -227,13 +319,51 @@ pub(crate) async fn execute_reload_actions(
                     }
                 };
 
+                let prepare_token = if let Some(ctx) = function_ctx {
+                    let diff = compute_function_diff_for_route(
+                        &ctx.invoker,
+                        &route_id,
+                        ctx.generation,
+                    );
+                    match ctx.invoker.prepare_reload(diff, ctx.generation).await {
+                        Ok(token) => Some(token),
+                        Err(e) => {
+                            errors.push(ReloadError {
+                                route_id: route_id.clone(),
+                                action: "Add (prepare)".into(),
+                                error: CamelError::ProcessorError(format!("{e}")),
+                            });
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 if let Err(e) = controller.add_route_definition(def).await {
+                    if let Some(ctx) = function_ctx {
+                        if let Some(ref token) = prepare_token {
+                            let _ = ctx
+                                .invoker
+                                .rollback_reload(token.clone(), ctx.generation)
+                                .await;
+                        }
+                    }
                     errors.push(ReloadError {
                         route_id,
                         action: "Add".into(),
                         error: e,
                     });
                     continue;
+                }
+
+                if let Some(ctx) = function_ctx {
+                    let diff = compute_function_diff_for_route(
+                        &ctx.invoker,
+                        &route_id,
+                        ctx.generation,
+                    );
+                    let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
                 }
 
                 let start_result = controller
@@ -298,6 +428,14 @@ pub(crate) async fn execute_reload_actions(
                     .await;
                 match remove_result {
                     Ok(_) => {
+                        if let Some(ctx) = function_ctx {
+                            let diff = compute_function_diff_for_route(
+                                &ctx.invoker,
+                                &route_id,
+                                ctx.generation,
+                            );
+                            let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
+                        }
                         tracing::info!(route_id = %route_id, "hot-reload: stopped and removed route");
                     }
                     Err(e) => {
@@ -331,9 +469,38 @@ pub(crate) async fn execute_reload_actions(
                     }
                 };
 
+                let prepare_token = if let Some(ctx) = function_ctx {
+                    let diff = compute_function_diff_for_route(
+                        &ctx.invoker,
+                        &route_id,
+                        ctx.generation,
+                    );
+                    match ctx.invoker.prepare_reload(diff, ctx.generation).await {
+                        Ok(token) => Some(token),
+                        Err(e) => {
+                            errors.push(ReloadError {
+                                route_id: route_id.clone(),
+                                action: "Restart (prepare)".into(),
+                                error: CamelError::ProcessorError(format!("{e}")),
+                            });
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let runtime_status = match controller.runtime_route_status(&route_id).await {
                     Ok(status) => status,
                     Err(e) => {
+                        if let Some(ctx) = function_ctx {
+                            if let Some(ref token) = prepare_token {
+                                let _ = ctx
+                                    .invoker
+                                    .rollback_reload(token.clone(), ctx.generation)
+                                    .await;
+                            }
+                        }
                         errors.push(ReloadError {
                             route_id,
                             action: "Restart (status)".into(),
@@ -343,7 +510,6 @@ pub(crate) async fn execute_reload_actions(
                     }
                 };
 
-                // Stop → remove via runtime command bus (only if prior state was active/failed).
                 if should_stop_before_mutation(runtime_status.as_deref()) {
                     let stop_result = controller
                         .execute_runtime_command(camel_api::RuntimeCommand::StopRoute {
@@ -355,6 +521,14 @@ pub(crate) async fn execute_reload_actions(
                     if let Err(e) = stop_result
                         && !is_invalid_stop_transition(&e)
                     {
+                        if let Some(ctx) = function_ctx {
+                            if let Some(ref token) = prepare_token {
+                                let _ = ctx
+                                    .invoker
+                                    .rollback_reload(token.clone(), ctx.generation)
+                                    .await;
+                            }
+                        }
                         errors.push(ReloadError {
                             route_id,
                             action: "Restart (stop)".into(),
@@ -374,6 +548,14 @@ pub(crate) async fn execute_reload_actions(
                     })
                     .await
                 {
+                    if let Some(ctx) = function_ctx {
+                        if let Some(ref token) = prepare_token {
+                            let _ = ctx
+                                .invoker
+                                .rollback_reload(token.clone(), ctx.generation)
+                                .await;
+                        }
+                    }
                     errors.push(ReloadError {
                         route_id,
                         action: "Restart (remove)".into(),
@@ -383,12 +565,29 @@ pub(crate) async fn execute_reload_actions(
                 }
 
                 if let Err(e) = controller.add_route_definition(def).await {
+                    if let Some(ctx) = function_ctx {
+                        if let Some(ref token) = prepare_token {
+                            let _ = ctx
+                                .invoker
+                                .rollback_reload(token.clone(), ctx.generation)
+                                .await;
+                        }
+                    }
                     errors.push(ReloadError {
                         route_id,
                         action: "Restart (add)".into(),
                         error: e,
                     });
                     continue;
+                }
+
+                if let Some(ctx) = function_ctx {
+                    let diff = compute_function_diff_for_route(
+                        &ctx.invoker,
+                        &route_id,
+                        ctx.generation,
+                    );
+                    let _ = ctx.invoker.finalize_reload(&diff, ctx.generation).await;
                 }
 
                 if should_start_after_restart(runtime_status.as_deref()) {
@@ -653,6 +852,7 @@ mod tests {
             vec![def],
             &ctx.runtime_execution_handle(),
             Duration::from_secs(10),
+            None,
         )
         .await;
         assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
@@ -695,6 +895,7 @@ mod tests {
             vec![],
             &ctx.runtime_execution_handle(),
             Duration::from_secs(10),
+            None,
         )
         .await;
         assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
@@ -734,6 +935,7 @@ mod tests {
             vec![new_def],
             &ctx.runtime_execution_handle(),
             Duration::from_secs(10),
+            None,
         )
         .await;
         assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
@@ -787,6 +989,7 @@ mod tests {
             vec![replacement],
             &ctx.runtime_execution_handle(),
             Duration::from_secs(10),
+            None,
         )
         .await;
         assert!(errors.is_empty(), "Expected no errors, got: {:?}", errors);
@@ -825,6 +1028,7 @@ mod tests {
             vec![],
             &ctx.runtime_execution_handle(),
             Duration::from_millis(1),
+            None,
         )
         .await;
 
@@ -845,6 +1049,7 @@ mod tests {
             vec![],
             &ctx.runtime_execution_handle(),
             Duration::from_millis(1),
+            None,
         )
         .await;
 
@@ -865,6 +1070,7 @@ mod tests {
             vec![],
             &ctx.runtime_execution_handle(),
             Duration::from_millis(1),
+            None,
         )
         .await;
 
@@ -885,6 +1091,7 @@ mod tests {
             vec![],
             &ctx.runtime_execution_handle(),
             Duration::from_millis(1),
+            None,
         )
         .await;
 

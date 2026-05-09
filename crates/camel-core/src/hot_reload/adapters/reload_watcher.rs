@@ -219,7 +219,7 @@ where
 
         tracing::info!("hot-reload: applying {} reload action(s)", actions.len());
 
-        let errors = execute_reload_actions(actions, new_defs, &controller, drain_timeout).await;
+        let errors = execute_reload_actions(actions, new_defs, &controller, drain_timeout, None).await;
         for err in &errors {
             tracing::warn!(
                 "hot-reload: error on route '{}' ({}): {}",
