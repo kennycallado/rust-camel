@@ -13,7 +13,7 @@ fn make_service_with_config(
     Arc<dyn FunctionInvoker>,
 ) {
     let provider = Arc::new(FakeProvider::new(config));
-    let mut service =
+    let service =
         FunctionRuntimeService::with_fake_provider(FunctionConfig::default(), provider.clone());
     let invoker = service.invoker();
     (provider, service, invoker)

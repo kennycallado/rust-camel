@@ -394,7 +394,7 @@ impl Drop for ContainerProvider {
             .iter()
             .map(|e| e.container_id.clone())
             .collect();
-        let _ = tokio::spawn(async move {
+        drop(tokio::spawn(async move {
             for id in container_ids {
                 let _ = docker.stop_container(&id, None).await;
                 let _ = docker
@@ -407,6 +407,6 @@ impl Drop for ContainerProvider {
                     )
                     .await;
             }
-        });
+        }));
     }
 }
