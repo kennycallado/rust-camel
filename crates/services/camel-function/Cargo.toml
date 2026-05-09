@@ -21,6 +21,7 @@ thiserror.workspace = true
 tracing.workspace = true
 blake3.workspace = true
 dashmap.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
