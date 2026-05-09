@@ -1,8 +1,7 @@
 use camel_api::{CanonicalRouteSpec, RuntimeCommand};
-use camel_config::config::{
-    CamelConfig, JournalConfig, ObservabilityConfig, OtelCamelConfig, PlatformCamelConfig,
-    StreamCachingConfig,
-};
+use camel_config::config::{CamelConfig, JournalConfig, PlatformCamelConfig, StreamCachingConfig};
+#[cfg(feature = "otel")]
+use camel_config::config::{ObservabilityConfig, OtelCamelConfig};
 use std::collections::HashMap;
 use std::fs;
 use tempfile::tempdir;

@@ -1,5 +1,5 @@
 use camel_dsl::parse_yaml;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 fn generate_routes_yaml(count: usize) -> String {

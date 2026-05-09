@@ -1,43 +1,30 @@
-//! Route discovery module - finds and loads routes from YAML files using glob patterns.
+//! Route discovery module — delegates to [`camel_dsl::discovery`] for YAML and JSON.
 
 use camel_core::route::RouteDefinition;
-use glob::glob;
-use std::fs;
-use std::io;
-
-use crate::yaml::parse_yaml_with_threshold;
 
 /// Errors that can occur during route discovery.
+///
+/// Wraps errors from [`camel_dsl::discovery::DiscoveryError`] with a single
+/// variant to preserve the existing `camel-config` public API.
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
-    /// Invalid glob pattern.
-    #[error("Glob pattern error: {0}")]
-    GlobPattern(#[from] glob::PatternError),
-
-    /// Error accessing file while iterating glob.
-    #[error("Glob error accessing {path}: {source}")]
-    GlobAccess { path: String, source: io::Error },
-
-    /// Error reading a file.
-    #[error("IO error reading {path}: {source}")]
-    Io { path: String, source: io::Error },
-
-    /// Error parsing YAML content.
-    #[error("YAML parse error in {path}: {error}")]
-    Yaml { path: String, error: String },
+    /// Error from the underlying DSL discovery (YAML, JSON, glob, env, etc.).
+    #[error("{0}")]
+    Dsl(#[from] camel_dsl::DiscoveryError),
 }
 
-/// Discovers routes from YAML files matching the given glob patterns.
+/// Discovers routes from YAML/JSON files matching the given glob patterns.
+///
+/// Delegates to [`camel_dsl::discover_routes`] which supports:
+/// - `.yaml` / `.yml` — parsed as YAML
+/// - `.json` — parsed as JSON, but only when the glob explicitly targets `.json`
 ///
 /// # Arguments
-/// * `patterns` - Slice of glob patterns to match YAML files
-///
-/// # Returns
-/// A vector of all discovered route definitions, or an error.
+/// * `patterns` - Slice of glob patterns to match route definition files
 ///
 /// # Example
 /// ```ignore
-/// let routes = discover_routes(&["routes/*.yaml".to_string(), "extra/**/*.yaml".to_string()])?;
+/// let routes = discover_routes(&["routes/*.yaml".to_string(), "routes/*.json".to_string()])?;
 /// ```
 pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, DiscoveryError> {
     discover_routes_with_threshold(
@@ -46,38 +33,16 @@ pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, Disc
     )
 }
 
+/// Discovers routes with a custom stream-cache threshold.
+///
+/// Same as [`discover_routes`] but compiles routes with the given threshold
+/// instead of the default.
 pub fn discover_routes_with_threshold(
     patterns: &[String],
     stream_cache_threshold: usize,
 ) -> Result<Vec<RouteDefinition>, DiscoveryError> {
-    let mut routes = Vec::new();
-
-    for pattern in patterns {
-        let entries = glob(pattern)?;
-
-        for entry in entries {
-            let path = entry.map_err(|e| DiscoveryError::GlobAccess {
-                path: e.path().to_string_lossy().to_string(),
-                source: e.into_error(),
-            })?;
-            let path_str = path.to_string_lossy().to_string();
-
-            let yaml_content = fs::read_to_string(&path).map_err(|e| DiscoveryError::Io {
-                path: path_str.clone(),
-                source: e,
-            })?;
-
-            let file_routes = parse_yaml_with_threshold(&yaml_content, stream_cache_threshold)
-                .map_err(|e| DiscoveryError::Yaml {
-                    path: path_str,
-                    error: e.to_string(),
-                })?;
-
-            routes.extend(file_routes);
-        }
-    }
-
-    Ok(routes)
+    camel_dsl::discover_routes_with_threshold(patterns, stream_cache_threshold)
+        .map_err(DiscoveryError::from)
 }
 
 #[cfg(test)]
@@ -94,7 +59,11 @@ mod tests {
     #[test]
     fn discover_routes_invalid_glob_returns_pattern_error() {
         let err = discover_routes(&["[".to_string()]).err().unwrap();
-        assert!(matches!(err, DiscoveryError::GlobPattern(_)));
+        assert!(matches!(err, DiscoveryError::Dsl(_)));
+        assert!(
+            err.to_string().contains("Glob pattern"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -110,7 +79,7 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("does-not-exist.yaml"), &link_path).unwrap();
 
         let err = discover_routes(&[pattern]).err().unwrap();
-        assert!(matches!(err, DiscoveryError::Io { .. }));
+        assert!(matches!(err, DiscoveryError::Dsl(_)));
     }
 
     #[test]
@@ -121,6 +90,26 @@ mod tests {
         let pattern = dir.path().join("*.yaml").to_string_lossy().to_string();
 
         let err = discover_routes(&[pattern]).err().unwrap();
-        assert!(matches!(err, DiscoveryError::Yaml { .. }));
+        assert!(matches!(err, DiscoveryError::Dsl(_)));
+        assert!(
+            err.to_string().contains("YAML parse error"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn discover_routes_explicit_json_pattern_loads_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("route.json");
+        fs::write(
+            &file_path,
+            r#"{"routes":[{"id":"config-json","from":"direct:start","steps":[{"to":"log:out"}]}]}"#,
+        )
+        .unwrap();
+
+        let pattern = dir.path().join("*.json").to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "config-json");
     }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "json-dsl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-dsl.workspace = true
+camel-component-log.workspace = true
+camel-component-timer.workspace = true
+camel-component-direct.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

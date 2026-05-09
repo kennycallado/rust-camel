@@ -1,0 +1,153 @@
+{
+  "routes": [
+    {
+      "id": "timer-to-log",
+      "from": "timer:tick?period=5000&repeatCount=3",
+      "auto_startup": true,
+      "startup_order": 100,
+      "steps": [
+        { "log": "Timer fired - JSON DSL pipeline" },
+        {
+          "set_header": {
+            "key": "source",
+            "value": "json-timer"
+          }
+        },
+        { "to": "log:info?showHeaders=true" }
+      ]
+    },
+    {
+      "id": "filter-demo",
+      "from": "timer:filter?period=3000&repeatCount=5",
+      "startup_order": 150,
+      "steps": [
+        {
+          "set_header": {
+            "key": "type",
+            "value": "allowed"
+          }
+        },
+        { "log": "Before filter - checking type header" },
+        {
+          "filter": {
+            "simple": "${header.type} == 'allowed'",
+            "steps": [
+              { "log": "PASSED FILTER - processing message" },
+              { "to": "log:filtered" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "choice-demo",
+      "from": "timer:choice?period=4000&repeatCount=3",
+      "startup_order": 200,
+      "steps": [
+        {
+          "set_header": {
+            "key": "type",
+            "value": "order"
+          }
+        },
+        {
+          "choice": {
+            "when": [
+              {
+                "simple": "${header.type} == 'order'",
+                "steps": [
+                  { "log": "Processing ORDER" },
+                  { "to": "log:orders" }
+                ]
+              },
+              {
+                "simple": "${header.type} == 'invoice'",
+                "steps": [
+                  { "log": "Processing INVOICE" },
+                  { "to": "log:invoices" }
+                ]
+              }
+            ],
+            "otherwise": [
+              { "log": "Processing UNKNOWN type" },
+              { "to": "log:unknown" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "split-demo",
+      "from": "timer:split?period=6000&repeatCount=2",
+      "startup_order": 250,
+      "steps": [
+        {
+          "set_body": {
+            "value": "apple\nbanana\ncherry"
+          }
+        },
+        { "log": "Before split - body has multiple lines" },
+        {
+          "split": {
+            "expression": "body_lines",
+            "aggregation": "last_wins",
+            "steps": [
+              { "log": "Split item: ${body}" },
+              { "to": "log:split-item" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "wiretap-demo",
+      "from": "timer:wiretap?period=5000&repeatCount=2",
+      "startup_order": 300,
+      "steps": [
+        { "log": "Main pipeline - before wiretap" },
+        { "wire_tap": "direct:audit" },
+        { "log": "Main pipeline - after wiretap" },
+        { "to": "log:main-output" }
+      ]
+    },
+    {
+      "id": "wiretap-audit-receiver",
+      "from": "direct:audit",
+      "startup_order": 50,
+      "steps": [
+        { "log": "WIRETAP AUDIT - received copy of message" },
+        { "to": "log:audit" }
+      ]
+    },
+    {
+      "id": "set-body-demo",
+      "from": "timer:setbody?period=5000&repeatCount=2",
+      "startup_order": 500,
+      "steps": [
+        {
+          "set_header": {
+            "key": "greeting",
+            "value": "Hello"
+          }
+        },
+        {
+          "set_body": {
+            "value": "Hello from JSON DSL!"
+          }
+        },
+        { "log": "Body set to literal value" },
+        { "to": "log:body-set" }
+      ]
+    },
+    {
+      "id": "stop-demo",
+      "from": "timer:stop?period=10000&repeatCount=1",
+      "startup_order": 550,
+      "steps": [
+        { "log": "Before stop - this will appear" },
+        { "stop": true },
+        { "log": "After stop - this will NOT appear" }
+      ]
+    }
+  ]
+}

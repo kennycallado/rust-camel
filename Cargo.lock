@@ -4326,6 +4326,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-dsl"
+version = "0.8.2"
+dependencies = [
+ "camel-api",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "json-patch"
 version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
