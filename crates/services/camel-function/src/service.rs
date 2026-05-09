@@ -21,7 +21,7 @@ pub struct FunctionRuntimeService {
 impl FunctionRuntimeService {
     pub(crate) fn new(config: FunctionConfig, provider: Arc<dyn FunctionProvider>) -> Self {
         let pool = Arc::new(RunnerPool::new());
-        let invoker = Arc::new(DefaultFunctionInvoker::new(Arc::clone(&pool), Arc::clone(&provider)));
+        let invoker = Arc::new(DefaultFunctionInvoker::new(Arc::clone(&pool), Arc::clone(&provider), config.clone()));
         Self { config, provider, invoker, status: Arc::new(AtomicU8::new(STATUS_STOPPED)) }
     }
 
@@ -164,7 +164,7 @@ impl Lifecycle for FunctionRuntimeService {
                 Err(e) => {
                     self.rollback_start(&spawned, &registered_refs, &pending).await;
                     self.status.store(STATUS_FAILED, Ordering::SeqCst);
-                    return Err(CamelError::ProcessorError(e.to_string()));
+                    return Err(CamelError::Config(format!("function: spawn failed: {e}")));
                 }
             };
             match self.wait_until_healthy(&handle).await {
@@ -174,7 +174,7 @@ impl Lifecycle for FunctionRuntimeService {
                     let _ = self.provider.shutdown(handle).await;
                     self.rollback_start(&spawned, &registered_refs, &pending).await;
                     self.status.store(STATUS_FAILED, Ordering::SeqCst);
-                    return Err(CamelError::ProcessorError(e.to_string()));
+                    return Err(CamelError::Config(format!("function: boot timeout: {e}")));
                 }
             }
             self.invoker.pool.handles.insert(key.clone(), handle.clone());
@@ -184,7 +184,7 @@ impl Lifecycle for FunctionRuntimeService {
                 if let Err(err) = self.provider.register(&handle, &def).await {
                     self.rollback_start(&spawned, &registered_refs, &pending).await;
                     self.status.store(STATUS_FAILED, Ordering::SeqCst);
-                    return Err(CamelError::ProcessorError(err.to_string()));
+                    return Err(CamelError::Config(format!("function: register failed: {err}")));
                 }
                 let ref_key = (def.id.clone(), route_id.clone());
                 self.invoker.pool.ref_counts.insert(ref_key.clone(), 1);

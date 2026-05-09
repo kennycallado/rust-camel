@@ -258,7 +258,7 @@ fn resolve_steps_covers_declarative_and_eip_variants() {
 
     let producer_ctx = ProducerContext::new();
     let resolved = controller
-        .resolve_steps(steps, &producer_ctx, &controller.registry)
+        .resolve_steps(steps, &producer_ctx, &controller.registry, None)
         .expect("resolve should succeed");
     assert!(!resolved.is_empty());
 }
@@ -276,7 +276,7 @@ fn resolve_steps_script_requires_mutating_language_support() {
     }];
 
     let err = controller
-        .resolve_steps(steps, &ProducerContext::new(), &controller.registry)
+        .resolve_steps(steps, &ProducerContext::new(), &controller.registry, None)
         .expect_err("simple script should fail for mutating expression");
     assert!(err.to_string().contains("does not support"));
 
@@ -285,7 +285,7 @@ fn resolve_steps_script_requires_mutating_language_support() {
         method: "run".into(),
     }];
     let bean_err = controller
-        .resolve_steps(bean_missing, &ProducerContext::new(), &controller.registry)
+        .resolve_steps(bean_missing, &ProducerContext::new(), &controller.registry, None)
         .expect_err("missing bean must fail");
     assert!(bean_err.to_string().contains("Bean not found"));
 
@@ -300,6 +300,7 @@ fn resolve_steps_script_requires_mutating_language_support() {
             bad_declarative,
             &ProducerContext::new(),
             &controller.registry,
+        None,
         )
         .expect_err("unknown language must fail");
     assert!(lang_err.to_string().contains("not registered"));
@@ -532,6 +533,7 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             vec![BuilderStep::Processor(BoxProcessor::new(IdentityProcessor))],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect("processor step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -543,6 +545,7 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect("delay step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -554,6 +557,7 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect("declarative set body null should resolve");
     assert_eq!(resolved.len(), 1);
@@ -565,6 +569,7 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect("declarative set body string should resolve");
     assert_eq!(resolved.len(), 1);
@@ -576,6 +581,7 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect("declarative set body json should resolve");
     assert_eq!(resolved.len(), 1);
@@ -587,6 +593,7 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect("routing slip step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -601,6 +608,7 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect("declarative routing slip step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -614,6 +622,7 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect("recipient list step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -630,6 +639,7 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect("declarative recipient list step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -645,6 +655,7 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect("declarative dynamic router step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -714,6 +725,7 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             vec![BuilderStep::To("missing:out".into())],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect_err("unknown scheme in to should fail");
     assert!(err.to_string().contains("missing"));
@@ -725,6 +737,7 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect_err("unknown scheme in wiretap should fail");
     assert!(err.to_string().contains("missing"));
@@ -740,6 +753,7 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect_err("unknown language in declarative filter should fail");
     assert!(err.to_string().contains("not registered"));
@@ -760,6 +774,7 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect_err("unknown language in declarative choice should fail");
     assert!(err.to_string().contains("not registered"));
@@ -775,6 +790,7 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect_err("unknown language in declarative log should fail");
     assert!(err.to_string().contains("not registered"));
@@ -789,6 +805,7 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             }],
             &producer_ctx,
             &controller.registry,
+        None,
         )
         .expect_err("declarative script generic language error should fail");
     assert!(

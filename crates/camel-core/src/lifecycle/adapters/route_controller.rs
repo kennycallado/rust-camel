@@ -504,6 +504,7 @@ impl DefaultRouteController {
         steps: Vec<BuilderStep>,
         producer_ctx: &ProducerContext,
         registry: &Arc<std::sync::Mutex<Registry>>,
+        route_id: Option<&str>,
     ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
         let component_ctx = Arc::new(ControllerComponentContext::new(
             Arc::clone(registry),
@@ -522,6 +523,7 @@ impl DefaultRouteController {
             &self.beans,
             self.function_invoker.clone(),
             component_ctx,
+            route_id,
         )
     }
 
@@ -570,13 +572,13 @@ impl DefaultRouteController {
                 let _agg_step = rest.remove(0);
                 let post_steps = rest;
 
-                let pre_pairs = self.resolve_steps(pre_steps, &producer_ctx, &self.registry)?;
+                let pre_pairs = self.resolve_steps(pre_steps, &producer_ctx, &self.registry, Some(&route_id))?;
                 let pre_procs: Vec<BoxProcessor> = pre_pairs.into_iter().map(|(p, _)| p).collect();
                 let pre_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
                     compose_pipeline(pre_procs),
                 )));
 
-                let post_pairs = self.resolve_steps(post_steps, &producer_ctx, &self.registry)?;
+                let post_pairs = self.resolve_steps(post_steps, &producer_ctx, &self.registry, Some(&route_id))?;
                 let post_procs: Vec<BoxProcessor> =
                     post_pairs.into_iter().map(|(p, _)| p).collect();
                 let post_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
@@ -591,7 +593,7 @@ impl DefaultRouteController {
 
                 vec![]
             }
-            None => self.resolve_steps(steps, &producer_ctx, &self.registry)?,
+            None => self.resolve_steps(steps, &producer_ctx, &self.registry, Some(&route_id))?,
         };
         let route_id_for_tracing = route_id.clone();
         let mut pipeline = if processors_with_contracts.is_empty() {
@@ -680,7 +682,7 @@ impl DefaultRouteController {
         let producer_ctx = self.build_producer_context()?;
 
         let processors_with_contracts =
-            self.resolve_steps(def.steps, &producer_ctx, &self.registry)?;
+            self.resolve_steps(def.steps, &producer_ctx, &self.registry, Some(&route_id))?;
         let mut pipeline = compose_traced_pipeline_with_contracts(
             processors_with_contracts,
             &route_id,

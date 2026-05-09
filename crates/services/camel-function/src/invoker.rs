@@ -1,5 +1,6 @@
+use crate::config::FunctionConfig;
 use crate::pool::{RunnerPool, RunnerPoolKey, RunnerState};
-use crate::provider::FunctionProvider;
+use crate::provider::{FunctionProvider, HealthReport};
 use camel_api::function::*;
 use camel_api::Exchange;
 use std::collections::HashMap;
@@ -9,6 +10,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct DefaultFunctionInvoker {
     pub(crate) pool: Arc<RunnerPool>,
     pub(crate) provider: Arc<dyn FunctionProvider>,
+    pub(crate) config: FunctionConfig,
     pub(crate) pending: Mutex<Vec<(FunctionDefinition, Option<String>)>>,
     pub(crate) staging: Mutex<HashMap<u64, StagedEntries>>,
     pub(crate) next_generation: AtomicU64,
@@ -19,15 +21,43 @@ pub(crate) struct DefaultFunctionInvoker {
 type StagedEntries = Vec<(FunctionDefinition, Option<String>)>;
 
 impl DefaultFunctionInvoker {
-    pub(crate) fn new(pool: Arc<RunnerPool>, provider: Arc<dyn FunctionProvider>) -> Self {
+    pub(crate) fn new(pool: Arc<RunnerPool>, provider: Arc<dyn FunctionProvider>, config: FunctionConfig) -> Self {
         Self {
             pool,
             provider,
+            config,
             pending: Mutex::new(Vec::new()),
             staging: Mutex::new(HashMap::new()),
             next_generation: AtomicU64::new(0),
             current_generation: AtomicU64::new(0),
             started: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) async fn wait_until_healthy(&self, handle: &crate::pool::RunnerHandle) -> Result<(), FunctionInvocationError> {
+        let deadline = tokio::time::Instant::now() + self.config.boot_timeout;
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                return Err(FunctionInvocationError::RunnerUnavailable {
+                    reason: "boot timeout".into(),
+                });
+            }
+            match self.provider.health(handle).await {
+                Ok(HealthReport::Healthy) => {
+                    *handle.state.lock().expect("state") = RunnerState::Healthy;
+                    return Ok(());
+                }
+                Ok(HealthReport::Unhealthy(reason)) => {
+                    *handle.state.lock().expect("state") = RunnerState::Unhealthy {
+                        since: std::time::Instant::now(),
+                        reason,
+                    };
+                    tokio::time::sleep(self.config.health_interval).await;
+                }
+                Err(e) => {
+                    return Err(FunctionInvocationError::RunnerUnavailable { reason: e.to_string() });
+                }
+            }
         }
     }
 }
@@ -69,6 +99,7 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             existing.clone()
         } else {
             let spawned = self.provider.spawn(&key).await.map_err(|e| FunctionInvocationError::RunnerUnavailable { reason: e.to_string() })?;
+            self.wait_until_healthy(&spawned).await?;
             self.pool.handles.insert(key.clone(), spawned.clone());
             spawned
         };

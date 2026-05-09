@@ -85,7 +85,7 @@ fn value_to_body(value: Value) -> Body {
     }
 }
 
-#[allow(clippy::only_used_in_recursion)]
+#[allow(clippy::only_used_in_recursion, clippy::too_many_arguments)]
 pub(crate) fn resolve_steps(
     steps: Vec<BuilderStep>,
     producer_ctx: &ProducerContext,
@@ -94,6 +94,7 @@ pub(crate) fn resolve_steps(
     beans: &Arc<std::sync::Mutex<BeanRegistry>>,
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
     component_ctx: Arc<dyn ComponentContext>,
+    route_id: Option<&str>,
 ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
     let resolve_producer = |uri: &str| -> Result<BoxProcessor, CamelError> {
         let parsed = parse_uri(uri)?;
@@ -105,7 +106,7 @@ pub(crate) fn resolve_steps(
     };
 
     let mut processors: Vec<(BoxProcessor, Option<camel_api::BodyType>)> = Vec::new();
-    for step in steps {
+    for (step_index, step) in steps.into_iter().enumerate() {
         match step {
             BuilderStep::Processor(svc) => {
                 processors.push((svc, None));
@@ -136,6 +137,7 @@ pub(crate) fn resolve_steps(
                     beans,
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
+                    route_id,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -173,6 +175,7 @@ pub(crate) fn resolve_steps(
                     beans,
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
+                    route_id,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -233,6 +236,7 @@ pub(crate) fn resolve_steps(
                     beans,
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
+                    route_id,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -252,6 +256,7 @@ pub(crate) fn resolve_steps(
                         beans,
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
+                        route_id,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -270,6 +275,7 @@ pub(crate) fn resolve_steps(
                         beans,
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
+                        route_id,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -312,14 +318,17 @@ pub(crate) fn resolve_steps(
                     }
                 }
             }
-            BuilderStep::DeclarativeFunction { definition } => {
+            BuilderStep::DeclarativeFunction { mut definition } => {
                 let Some(invoker) = function_invoker.clone() else {
                     return Err(CamelError::Config(
                         "function: step requires FunctionRuntimeService registered via with_lifecycle"
                             .into(),
                     ));
                 };
-                invoker.stage_pending(definition.clone(), definition.route_id.as_deref(), 0);
+                definition.route_id = route_id.map(|s| s.to_string());
+                definition.step_index = Some(step_index);
+                let generation = invoker.begin_reload();
+                invoker.stage_pending(definition.clone(), route_id, generation);
                 let step = crate::step::function_step::FunctionStep::new(invoker, definition);
                 processors.push((BoxProcessor::new(step), None));
             }
@@ -332,6 +341,7 @@ pub(crate) fn resolve_steps(
                     beans,
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
+                    route_id,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -389,6 +399,7 @@ pub(crate) fn resolve_steps(
                     beans,
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
+                    route_id,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -415,6 +426,7 @@ pub(crate) fn resolve_steps(
                     beans,
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
+                    route_id,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -434,6 +446,7 @@ pub(crate) fn resolve_steps(
                         beans,
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
+                        route_id,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -453,6 +466,7 @@ pub(crate) fn resolve_steps(
                         beans,
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
+                        route_id,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -480,6 +494,7 @@ pub(crate) fn resolve_steps(
                         beans,
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
+                        route_id,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -572,6 +587,7 @@ pub(crate) fn resolve_steps(
                     beans,
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
+                    route_id,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -591,6 +607,7 @@ pub(crate) fn resolve_steps(
                         beans,
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
+                        route_id,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();

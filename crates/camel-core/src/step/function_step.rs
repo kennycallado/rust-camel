@@ -63,7 +63,18 @@ fn map_invocation_error(err: FunctionInvocationError, id: &FunctionId) -> CamelE
             "function:timeout: {} timed out after {}ms",
             id.0, timeout_ms
         )),
-        other => CamelError::ProcessorError(format!("function:invoke_error: {}: {other}", id.0)),
+        FunctionInvocationError::NotRegistered { .. } => {
+            CamelError::ProcessorError(format!("function:not_registered: {}", id.0))
+        }
+        FunctionInvocationError::RunnerUnavailable { reason } => {
+            CamelError::ProcessorError(format!("function:runner_unavailable: {}: {}", id.0, reason))
+        }
+        FunctionInvocationError::Transport(msg) => {
+            CamelError::ProcessorError(format!("function:transport: {}: {}", id.0, msg))
+        }
+        FunctionInvocationError::InvalidPatch(msg) => {
+            CamelError::ProcessorError(format!("function:invalid_patch: {}: {}", id.0, msg))
+        }
     }
 }
 
@@ -138,7 +149,7 @@ mod tests {
             ..Default::default()
         })]));
         let mut step = FunctionStep::new(invoker, test_definition());
-        let mut ex = Exchange::default();
+        let ex = Exchange::default();
         let result = step.call(ex).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("patched"));
     }
@@ -155,7 +166,7 @@ mod tests {
         ex.input.headers.insert("x-old".into(), serde_json::json!("gone"));
         let result = step.call(ex).await.unwrap();
         assert_eq!(result.input.headers.get("x-key").unwrap().as_str(), Some("val"));
-        assert!(result.input.headers.get("x-old").is_none());
+        assert!(!result.input.headers.contains_key("x-old"));
     }
 
     #[tokio::test]
