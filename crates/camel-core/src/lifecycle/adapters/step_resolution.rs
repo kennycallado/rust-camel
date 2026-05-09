@@ -4,6 +4,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+pub(crate) enum FunctionStagingMode {
+    DirectAdd,
+    DryCompile,
+}
+
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FilterPredicate, FunctionInvoker, IdentityProcessor,
     ProducerContext, Value,
@@ -96,6 +101,7 @@ pub(crate) fn resolve_steps(
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
     component_ctx: Arc<dyn ComponentContext>,
     route_id: Option<&str>,
+    staging_mode: &FunctionStagingMode,
 ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
     let resolve_producer = |uri: &str| -> Result<BoxProcessor, CamelError> {
         let parsed = parse_uri(uri)?;
@@ -139,6 +145,7 @@ pub(crate) fn resolve_steps(
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
                     route_id,
+                    staging_mode,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -177,6 +184,7 @@ pub(crate) fn resolve_steps(
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
                     route_id,
+                    staging_mode,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -238,6 +246,7 @@ pub(crate) fn resolve_steps(
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
                     route_id,
+                    staging_mode,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -258,6 +267,7 @@ pub(crate) fn resolve_steps(
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
                         route_id,
+                        staging_mode,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -277,6 +287,7 @@ pub(crate) fn resolve_steps(
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
                         route_id,
+                        staging_mode,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -328,7 +339,9 @@ pub(crate) fn resolve_steps(
                 };
                 definition.route_id = route_id.map(|s| s.to_string());
                 definition.step_index = Some(step_index);
-                invoker.stage_pending(definition.clone(), route_id, 0);
+                if let FunctionStagingMode::DirectAdd = staging_mode {
+                    invoker.stage_pending(definition.clone(), route_id, 0);
+                }
                 let step = crate::step::function_step::FunctionStep::new(invoker, definition);
                 processors.push((BoxProcessor::new(step), None));
             }
@@ -342,6 +355,7 @@ pub(crate) fn resolve_steps(
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
                     route_id,
+                    staging_mode,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -400,6 +414,7 @@ pub(crate) fn resolve_steps(
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
                     route_id,
+                    staging_mode,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -427,6 +442,7 @@ pub(crate) fn resolve_steps(
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
                     route_id,
+                    staging_mode,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -447,6 +463,7 @@ pub(crate) fn resolve_steps(
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
                         route_id,
+                        staging_mode,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -467,6 +484,7 @@ pub(crate) fn resolve_steps(
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
                         route_id,
+                        staging_mode,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -495,6 +513,7 @@ pub(crate) fn resolve_steps(
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
                         route_id,
+                        staging_mode,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -588,6 +607,7 @@ pub(crate) fn resolve_steps(
                     function_invoker.clone(),
                     Arc::clone(&component_ctx),
                     route_id,
+                    staging_mode,
                 )?;
                 let sub_processors: Vec<BoxProcessor> =
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
@@ -608,6 +628,7 @@ pub(crate) fn resolve_steps(
                         function_invoker.clone(),
                         Arc::clone(&component_ctx),
                         route_id,
+                        staging_mode,
                     )?;
                     let sub_processors: Vec<BoxProcessor> =
                         sub_pairs.into_iter().map(|(p, _)| p).collect();

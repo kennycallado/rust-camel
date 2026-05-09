@@ -509,6 +509,7 @@ impl DefaultRouteController {
         producer_ctx: &ProducerContext,
         registry: &Arc<std::sync::Mutex<Registry>>,
         route_id: Option<&str>,
+        staging_mode: &super::step_resolution::FunctionStagingMode,
     ) -> Result<Vec<(BoxProcessor, Option<camel_api::BodyType>)>, CamelError> {
         let component_ctx = Arc::new(ControllerComponentContext::new(
             Arc::clone(registry),
@@ -528,6 +529,7 @@ impl DefaultRouteController {
             self.function_invoker.clone(),
             component_ctx,
             route_id,
+            staging_mode,
         )
     }
 
@@ -581,6 +583,7 @@ impl DefaultRouteController {
                     &producer_ctx,
                     &self.registry,
                     Some(&route_id),
+                    &super::step_resolution::FunctionStagingMode::DirectAdd,
                 ) {
                     Ok(p) => p,
                     Err(e) => {
@@ -598,6 +601,7 @@ impl DefaultRouteController {
                     &producer_ctx,
                     &self.registry,
                     Some(&route_id),
+                    &super::step_resolution::FunctionStagingMode::DirectAdd,
                 ) {
                     Ok(p) => p,
                     Err(e) => {
@@ -619,8 +623,13 @@ impl DefaultRouteController {
 
                 vec![]
             }
-            None => match self.resolve_steps(steps, &producer_ctx, &self.registry, Some(&route_id))
-            {
+            None => match self.resolve_steps(
+                steps,
+                &producer_ctx,
+                &self.registry,
+                Some(&route_id),
+                &super::step_resolution::FunctionStagingMode::DirectAdd,
+            ) {
                 Ok(p) => p,
                 Err(e) => {
                     self.discard_function_staging();
@@ -721,8 +730,13 @@ impl DefaultRouteController {
 
         let producer_ctx = self.build_producer_context()?;
 
-        let processors_with_contracts =
-            self.resolve_steps(def.steps, &producer_ctx, &self.registry, Some(&route_id))?;
+        let processors_with_contracts = self.resolve_steps(
+            def.steps,
+            &producer_ctx,
+            &self.registry,
+            Some(&route_id),
+            &super::step_resolution::FunctionStagingMode::DryCompile,
+        )?;
         let mut pipeline = compose_traced_pipeline_with_contracts(
             processors_with_contracts,
             &route_id,
