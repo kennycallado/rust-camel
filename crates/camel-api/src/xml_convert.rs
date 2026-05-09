@@ -1,6 +1,18 @@
 use crate::error::CamelError;
-use quick_xml::Reader;
 use quick_xml::events::Event;
+use quick_xml::Reader;
+
+fn check_root_element(depth: usize, root_count: &mut usize) -> Result<(), CamelError> {
+    if depth == 0 {
+        *root_count += 1;
+        if *root_count > 1 {
+            return Err(CamelError::TypeConversionFailed(
+                "multiple root elements found".into(),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Validate that the input is well-formed XML.
 ///
@@ -15,25 +27,12 @@ pub fn validate_xml(input: &str) -> Result<(), CamelError> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(_)) => {
-                if depth == 0 {
-                    root_count += 1;
-                    if root_count > 1 {
-                        return Err(CamelError::TypeConversionFailed(
-                            "multiple root elements found".into(),
-                        ));
-                    }
-                }
+                check_root_element(depth, &mut root_count)?;
                 depth += 1;
             }
-            Ok(Event::Empty(_)) if depth == 0 => {
-                root_count += 1;
-                if root_count > 1 {
-                    return Err(CamelError::TypeConversionFailed(
-                        "multiple root elements found".into(),
-                    ));
-                }
+            Ok(Event::Empty(_)) => {
+                check_root_element(depth, &mut root_count)?;
             }
-            Ok(Event::Empty(_)) => {}
             Ok(Event::End(_)) => {
                 depth = depth.saturating_sub(1);
             }

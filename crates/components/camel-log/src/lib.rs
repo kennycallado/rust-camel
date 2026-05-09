@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_log_component_default() {
-        let component = LogComponent::default();
+        let component = LogComponent;
         assert_eq!(component.scheme(), "log");
     }
 

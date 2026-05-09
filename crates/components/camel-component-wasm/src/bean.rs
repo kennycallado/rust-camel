@@ -160,7 +160,7 @@ impl BeanProcessor for WasmBean {
         let bean_exchange = wasm_exchange.into();
 
         let result = plugin
-            .call_invoke(&mut store, &method.to_string(), &bean_exchange)
+            .call_invoke(&mut store, method, &bean_exchange)
             .await
             .map_err(|e| self.classify_error(e))?;
 

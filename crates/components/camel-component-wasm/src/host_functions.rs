@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn test_get_property_missing_key() {
         let state = make_state(0);
-        assert!(state.properties.get("missing").is_none());
+        assert!(!state.properties.contains_key("missing"));
     }
 
     #[test]
