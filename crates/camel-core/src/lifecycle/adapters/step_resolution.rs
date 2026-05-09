@@ -7,6 +7,7 @@ use tracing::warn;
 pub(crate) enum FunctionStagingMode {
     DirectAdd,
     DryCompile,
+    HotReload { generation: u64 },
 }
 
 use camel_api::{
@@ -339,8 +340,14 @@ pub(crate) fn resolve_steps(
                 };
                 definition.route_id = route_id.map(|s| s.to_string());
                 definition.step_index = Some(step_index);
-                if let FunctionStagingMode::DirectAdd = staging_mode {
-                    invoker.stage_pending(definition.clone(), route_id, 0);
+                match staging_mode {
+                    FunctionStagingMode::DirectAdd => {
+                        invoker.stage_pending(definition.clone(), route_id, 0);
+                    }
+                    FunctionStagingMode::HotReload { generation } => {
+                        invoker.stage_pending(definition.clone(), route_id, *generation);
+                    }
+                    FunctionStagingMode::DryCompile => {}
                 }
                 let step = crate::step::function_step::FunctionStep::new(invoker, definition);
                 processors.push((BoxProcessor::new(step), None));

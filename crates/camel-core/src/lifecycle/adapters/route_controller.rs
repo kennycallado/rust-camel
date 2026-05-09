@@ -16,6 +16,7 @@ use tracing::{error, info, warn};
 use camel_api::UnitOfWorkConfig;
 use camel_api::aggregator::AggregatorConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::function::FunctionDiff;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
     BoxProcessor, CamelError, Exchange, FunctionInvoker, IdentityProcessor, NoOpMetrics,
@@ -768,6 +769,80 @@ impl DefaultRouteController {
         }
 
         // Apply UoW layer outermost
+        if let Some(uow_config) = &def.unit_of_work {
+            let existing_counter = self
+                .routes
+                .get(&route_id)
+                .and_then(|r| r.in_flight.as_ref().map(Arc::clone));
+
+            let component_ctx = ControllerComponentContext::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(&self.platform_service),
+            );
+
+            let (uow_layer, _counter) = self.resolve_uow_layer(
+                uow_config,
+                &producer_ctx,
+                &component_ctx,
+                existing_counter,
+            )?;
+
+            pipeline = BoxProcessor::new(uow_layer.layer(pipeline));
+        }
+
+        Ok(pipeline)
+    }
+
+    pub fn compile_route_definition_with_generation(
+        &self,
+        def: RouteDefinition,
+        generation: u64,
+    ) -> Result<BoxProcessor, CamelError> {
+        let route_id = def.route_id().to_string();
+
+        let producer_ctx = self.build_producer_context()?;
+
+        let processors_with_contracts = self.resolve_steps(
+            def.steps,
+            &producer_ctx,
+            &self.registry,
+            Some(&route_id),
+            &super::step_resolution::FunctionStagingMode::HotReload { generation },
+        )?;
+        let mut pipeline = compose_traced_pipeline_with_contracts(
+            processors_with_contracts,
+            &route_id,
+            self.tracing_enabled,
+            self.tracer_detail_level.clone(),
+            self.tracer_metrics.clone(),
+        );
+
+        if let Some(cb_config) = def.circuit_breaker {
+            let cb_layer = CircuitBreakerLayer::new(cb_config);
+            pipeline = BoxProcessor::new(cb_layer.layer(pipeline));
+        }
+
+        let eh_config = def
+            .error_handler
+            .clone()
+            .or_else(|| self.global_error_handler.clone());
+        if let Some(config) = eh_config {
+            let component_ctx = ControllerComponentContext::new(
+                Arc::clone(&self.registry),
+                Arc::clone(&self.languages),
+                self.tracer_metrics
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                Arc::clone(&self.platform_service),
+            );
+            let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
+            pipeline = BoxProcessor::new(layer.layer(pipeline));
+        }
+
         if let Some(uow_config) = &def.unit_of_work {
             let existing_counter = self
                 .routes
