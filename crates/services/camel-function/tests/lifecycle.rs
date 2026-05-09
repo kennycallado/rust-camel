@@ -40,8 +40,20 @@ async fn pre_start_register_failure_rolls_back_and_keeps_pending() {
     inv.stage_pending(def("a"), Some("r1"), 0);
     inv.stage_pending(def("b"), Some("r1"), 0);
     assert!(service.start().await.is_err());
+    assert!(service.runner_state("fake").is_none());
     let calls = provider.calls.lock().expect("calls").clone();
     assert!(calls.iter().any(|c| matches!(c, FakeCall::Shutdown(_))));
+}
+
+#[tokio::test]
+async fn start_is_idempotent() {
+    let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
+    let mut service = FunctionRuntimeService::with_fake_provider(FunctionConfig::default(), provider);
+    let inv = service.invoker();
+    inv.stage_pending(def("idem"), Some("r1"), 0);
+    service.start().await.unwrap();
+    service.start().await.unwrap();
+    assert!(service.runner_state("fake").is_some());
 }
 
 #[tokio::test]

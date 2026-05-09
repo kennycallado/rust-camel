@@ -2,7 +2,7 @@ use crate::config::FunctionConfig;
 use crate::invoker::DefaultFunctionInvoker;
 use crate::pool::{RunnerPool, RunnerPoolKey, RunnerState};
 use crate::provider::{FunctionProvider, HealthReport, ProviderError};
-use camel_api::function::{FunctionDefinition, FunctionInvoker};
+use camel_api::function::{FunctionDefinition, FunctionId, FunctionInvoker};
 use camel_api::{CamelError, Lifecycle, ServiceStatus};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -110,6 +110,24 @@ impl FunctionRuntimeService {
             }
         });
     }
+
+    pub(crate) async fn rollback_start(
+        &self,
+        spawned: &[(RunnerPoolKey, crate::pool::RunnerHandle)],
+        registered_refs: &[((FunctionId, Option<String>), RunnerPoolKey)],
+        pending: &[(FunctionDefinition, Option<String>)],
+    ) {
+        for (ref_key, _pool_key) in registered_refs {
+            self.invoker.pool.ref_counts.remove(ref_key);
+            self.invoker.pool.function_to_key.remove(ref_key);
+        }
+        for (key, handle) in spawned {
+            self.invoker.pool.handles.remove(key);
+            handle.cancel.cancel();
+            let _ = self.provider.shutdown(handle.clone()).await;
+        }
+        self.invoker.pending.lock().expect("pending").extend(pending.iter().cloned());
+    }
 }
 
 #[async_trait::async_trait]
@@ -127,6 +145,9 @@ impl Lifecycle for FunctionRuntimeService {
     }
 
     async fn start(&mut self) -> Result<(), CamelError> {
+        if self.status.load(Ordering::SeqCst) == STATUS_STARTED {
+            return Ok(());
+        }
         let pending = {
             let mut lock = self.invoker.pending.lock().expect("pending");
             std::mem::take(&mut *lock)
@@ -135,26 +156,40 @@ impl Lifecycle for FunctionRuntimeService {
         for (def, route_id) in pending.iter().cloned() {
             grouped.entry(RunnerPoolKey { runtime: def.runtime.clone() }).or_default().push((def, route_id));
         }
-        let mut spawned = Vec::new();
+        let mut spawned: Vec<(RunnerPoolKey, crate::pool::RunnerHandle)> = Vec::new();
+        let mut registered_refs: Vec<((FunctionId, Option<String>), RunnerPoolKey)> = Vec::new();
         for (key, defs) in grouped {
-            let handle = self.provider.spawn(&key).await.map_err(|e| CamelError::ProcessorError(e.to_string()))?;
-            self.wait_until_healthy(&handle).await.map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+            let handle = match self.provider.spawn(&key).await {
+                Ok(h) => h,
+                Err(e) => {
+                    self.rollback_start(&spawned, &registered_refs, &pending).await;
+                    self.status.store(STATUS_FAILED, Ordering::SeqCst);
+                    return Err(CamelError::ProcessorError(e.to_string()));
+                }
+            };
+            match self.wait_until_healthy(&handle).await {
+                Ok(()) => {}
+                Err(e) => {
+                    handle.cancel.cancel();
+                    let _ = self.provider.shutdown(handle).await;
+                    self.rollback_start(&spawned, &registered_refs, &pending).await;
+                    self.status.store(STATUS_FAILED, Ordering::SeqCst);
+                    return Err(CamelError::ProcessorError(e.to_string()));
+                }
+            }
             self.invoker.pool.handles.insert(key.clone(), handle.clone());
             self.spawn_health_task(handle.clone());
             spawned.push((key.clone(), handle.clone()));
             for (def, route_id) in defs {
                 if let Err(err) = self.provider.register(&handle, &def).await {
-                    for (_, h) in spawned.drain(..) {
-                        h.cancel.cancel();
-                        let _ = self.provider.shutdown(h).await;
-                    }
-                    self.invoker.pending.lock().expect("pending").extend(pending);
+                    self.rollback_start(&spawned, &registered_refs, &pending).await;
                     self.status.store(STATUS_FAILED, Ordering::SeqCst);
                     return Err(CamelError::ProcessorError(err.to_string()));
                 }
                 let ref_key = (def.id.clone(), route_id.clone());
                 self.invoker.pool.ref_counts.insert(ref_key.clone(), 1);
-                self.invoker.pool.function_to_key.insert(ref_key, key.clone());
+                self.invoker.pool.function_to_key.insert(ref_key.clone(), key.clone());
+                registered_refs.push((ref_key, key.clone()));
             }
         }
         self.invoker.started.store(true, Ordering::SeqCst);
