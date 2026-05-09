@@ -18,6 +18,10 @@ pub struct RegisterRequest {
 // BodyWire
 // ---------------------------------------------------------------------------
 
+/// Wire representation of a message body.
+///
+/// v1 supports `Empty`, `Text`, `Json`. `Bytes` (base64) and `Xml` are
+/// forward-looking extensions for future protocol versions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum BodyWire {

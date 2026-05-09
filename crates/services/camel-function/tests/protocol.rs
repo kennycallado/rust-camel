@@ -28,8 +28,8 @@ impl DenoRunner {
                 runner_path.to_str().unwrap(),
             ])
             .env("PORT", port.to_string())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .expect("failed to spawn deno");
 
@@ -110,7 +110,7 @@ impl Drop for DenoRunner {
 fn make_register_request(id: &str, source: &str) -> RegisterRequest {
     RegisterRequest {
         function_id: id.to_string(),
-        runtime: "typescript".to_string(),
+        runtime: "deno".to_string(),
         source: source.to_string(),
         timeout_ms: 5000,
     }
@@ -269,7 +269,7 @@ async fn test_invoke_timeout() {
     let runner = DenoRunner::spawn().await;
     let mut req = make_register_request(
         "to1",
-        "export default () => { while(true) {} }",
+        "export default async () => { await new Promise((resolve) => setTimeout(resolve, 10_000)); }",
     );
     req.timeout_ms = 300;
     runner.register(&req).await;
@@ -316,4 +316,13 @@ async fn test_health_shows_registered() {
         .await;
     let health = runner.health().await;
     assert!(health.registered.contains(&"h1".to_string()));
+}
+
+#[tokio::test]
+async fn test_register_typescript_alias() {
+    let runner = DenoRunner::spawn().await;
+    let mut req = make_register_request("alias_fn", "export default (c) => {}");
+    req.runtime = "typescript".to_string();
+    let resp = runner.register(&req).await;
+    assert_eq!(resp.status().as_u16(), 204);
 }
