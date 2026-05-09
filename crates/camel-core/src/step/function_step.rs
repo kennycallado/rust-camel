@@ -9,6 +9,7 @@ use camel_api::{
     FunctionInvoker, PatchBody,
 };
 use tower::Service;
+use tracing::Instrument;
 
 #[derive(Clone)]
 pub struct FunctionStep {
@@ -37,18 +38,68 @@ impl Service<Exchange> for FunctionStep {
     fn call(&mut self, mut ex: Exchange) -> Self::Future {
         let invoker = Arc::clone(&self.invoker);
         let id = self.definition.id.clone();
+        let runtime = self.definition.runtime.clone();
         let timeout_ms = self.definition.timeout_ms;
+        let span = tracing::info_span!(
+            target: "camel_function",
+            "function",
+            function_id = %id.0,
+            runtime = %runtime,
+            timeout_ms = timeout_ms,
+            status = tracing::field::Empty,
+            duration_ms = tracing::field::Empty,
+            error_kind = tracing::field::Empty,
+        );
         Box::pin(async move {
-            let result =
-                tokio::time::timeout(Duration::from_millis(timeout_ms), invoker.invoke(&id, &ex))
-                    .await
-                    .map_err(|_| {
-                        CamelError::ProcessorError(format!(
-                            "function:timeout: {} timed out after {}ms",
-                            id.0, timeout_ms
-                        ))
-                    })?;
-            let patch = result.map_err(|e| map_invocation_error(e, &id))?;
+            let start = std::time::Instant::now();
+            let outcome: Result<ExchangePatch, CamelError> = async {
+                let result = tokio::time::timeout(
+                    Duration::from_millis(timeout_ms),
+                    invoker.invoke(&id, &ex),
+                )
+                .await
+                .map_err(|_| {
+                    CamelError::ProcessorError(format!(
+                        "function:timeout: {} timed out after {}ms",
+                        id.0, timeout_ms
+                    ))
+                })?;
+                let patch = result.map_err(|e| map_invocation_error(e, &id))?;
+                Ok(patch)
+            }
+            .instrument(span.clone())
+            .await;
+            let elapsed = start.elapsed().as_millis() as u64;
+            span.record("duration_ms", elapsed);
+            match &outcome {
+                Ok(_) => {
+                    span.record("status", "ok");
+                }
+                Err(CamelError::ProcessorError(msg)) => {
+                    let kind = if msg.starts_with("function:timeout:") {
+                        "timeout"
+                    } else if msg.starts_with("function:user_error:") {
+                        "user_error"
+                    } else if msg.starts_with("function:runner_unavailable:") {
+                        "runner_unavailable"
+                    } else if msg.starts_with("function:not_registered:") {
+                        "not_registered"
+                    } else if msg.starts_with("function:transport:") {
+                        "transport"
+                    } else if msg.starts_with("function:invalid_patch:") {
+                        "invalid_patch"
+                    } else {
+                        "unknown"
+                    };
+                    span.record("status", kind);
+                    span.record("error_kind", kind);
+                }
+                Err(_) => {
+                    span.record("status", "unknown");
+                    span.record("error_kind", "unknown");
+                }
+            }
+            let patch = outcome?;
             apply_patch(&mut ex, patch);
             Ok(ex)
         })
@@ -413,5 +464,64 @@ mod tests {
             _ => panic!("wrong error type"),
         };
         assert!(msg.contains("function:timeout:"));
+    }
+
+    #[tokio::test]
+    async fn function_step_emits_tracing_span() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        use tracing_subscriber::prelude::*;
+
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch::default())]));
+        let def = FunctionDefinition {
+            id: FunctionId::compute("deno", "span_test", 5000),
+            runtime: "deno".into(),
+            source: "span_test".into(),
+            timeout_ms: 5000,
+            route_id: None,
+            step_index: None,
+        };
+        let mut step = FunctionStep::new(invoker, def);
+        let ex = Exchange::default();
+
+        let span_seen = Arc::new(AtomicBool::new(false));
+        let span_seen_clone = span_seen.clone();
+
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::sink)
+            .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+                if meta.target() == "camel_function" && meta.name() == "function" {
+                    span_seen_clone.store(true, AtomicOrdering::SeqCst);
+                }
+                true
+            }));
+
+        let _guard = tracing_subscriber::registry().with(layer).set_default();
+        let result = step.call(ex).await;
+        assert!(result.is_ok());
+        assert!(
+            span_seen.load(AtomicOrdering::SeqCst),
+            "expected function span with target 'camel_function' and name 'function'"
+        );
+    }
+
+    #[tokio::test]
+    async fn function_step_user_error_with_stack() {
+        let invoker = Arc::new(MockInvoker::new(vec![Err(
+            FunctionInvocationError::UserError {
+                function_id: FunctionId("x".into()),
+                message: "custom error".into(),
+                stack: Some("at line 1\nat line 2".into()),
+            },
+        )]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let ex = Exchange::default();
+        let err = step.call(ex).await.unwrap_err();
+        let msg = match &err {
+            CamelError::ProcessorError(m) => m.clone(),
+            _ => panic!("wrong error type"),
+        };
+        assert!(msg.contains("function:user_error:"));
+        assert!(msg.contains("custom error"));
+        assert!(msg.contains("at line 1"));
     }
 }
