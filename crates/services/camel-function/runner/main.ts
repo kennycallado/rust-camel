@@ -75,7 +75,7 @@ async function handleInvoke(req: Request): Promise<Response> {
   } catch {
     return jsonResponse({
       ok: false,
-      error: { kind: "not_registered", message: "invalid JSON" },
+      error: { kind: "user_error", message: "invalid request body" },
     });
   }
 
@@ -122,7 +122,7 @@ async function handleInvoke(req: Request): Promise<Response> {
     if (e instanceof Error && e.message === "timeout") {
       return jsonResponse({
         ok: false,
-        error: { kind: "timeout", message: `function ${function_id} timed out after ${timeout_ms}ms` },
+        error: { kind: "timeout", message: `function ${function_id} timed out after ${timeout}ms` },
       });
     }
     const message = e instanceof Error ? e.message : String(e);
