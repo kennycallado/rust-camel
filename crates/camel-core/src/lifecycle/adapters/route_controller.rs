@@ -131,6 +131,11 @@ pub(super) struct ManagedRoute {
     pub(super) agg_service: Option<Arc<std::sync::Mutex<AggregatorService>>>,
 }
 
+pub(crate) struct PreparedRoute {
+    pub(crate) route_id: String,
+    pub(crate) managed: ManagedRoute,
+}
+
 pub(super) fn handle_is_running(handle: &Option<JoinHandle<()>>) -> bool {
     handle.as_ref().is_some_and(|h| !h.is_finished())
 }
@@ -554,7 +559,30 @@ impl DefaultRouteController {
 
         info!(route_id = %route_id, "Adding route to controller");
 
-        // Extract definition info for storage before steps are consumed
+        let prepared = self.build_managed_route(definition, &super::step_resolution::FunctionStagingMode::DirectAdd)?;
+
+        if let Some(invoker) = &self.function_invoker {
+            invoker
+                .commit_staged()
+                .await
+                .map_err(|e| CamelError::Config(e.to_string()))?;
+        }
+
+        self.routes.insert(
+            prepared.route_id.clone(),
+            prepared.managed,
+        );
+
+        Ok(())
+    }
+
+    fn build_managed_route(
+        &self,
+        definition: RouteDefinition,
+        staging_mode: &super::step_resolution::FunctionStagingMode,
+    ) -> Result<PreparedRoute, CamelError> {
+        let route_id = definition.route_id().to_string();
+
         let definition_info = definition.to_info();
         let RouteDefinition {
             from_uri,
@@ -566,10 +594,8 @@ impl DefaultRouteController {
             ..
         } = definition;
 
-        // Create ProducerContext from self_ref for step resolution
         let producer_ctx = self.build_producer_context()?;
 
-        // Take ownership of steps before resolve_steps consumes them
         let mut aggregate_split: Option<AggregateSplitInfo> = None;
         let processors_with_contracts = match find_top_level_aggregate_with_timeout(&steps) {
             Some((idx, agg_config)) => {
@@ -578,37 +604,25 @@ impl DefaultRouteController {
                 let _agg_step = rest.remove(0);
                 let post_steps = rest;
 
-                let pre_pairs = match self.resolve_steps(
+                let pre_pairs = self.resolve_steps(
                     pre_steps,
                     &producer_ctx,
                     &self.registry,
                     Some(&route_id),
-                    &super::step_resolution::FunctionStagingMode::DirectAdd,
-                ) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.discard_function_staging();
-                        return Err(e);
-                    }
-                };
+                    staging_mode,
+                )?;
                 let pre_procs: Vec<BoxProcessor> = pre_pairs.into_iter().map(|(p, _)| p).collect();
                 let pre_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
                     compose_pipeline(pre_procs),
                 )));
 
-                let post_pairs = match self.resolve_steps(
+                let post_pairs = self.resolve_steps(
                     post_steps,
                     &producer_ctx,
                     &self.registry,
                     Some(&route_id),
-                    &super::step_resolution::FunctionStagingMode::DirectAdd,
-                ) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.discard_function_staging();
-                        return Err(e);
-                    }
-                };
+                    staging_mode,
+                )?;
                 let post_procs: Vec<BoxProcessor> =
                     post_pairs.into_iter().map(|(p, _)| p).collect();
                 let post_pipeline = Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(
@@ -623,19 +637,13 @@ impl DefaultRouteController {
 
                 vec![]
             }
-            None => match self.resolve_steps(
+            None => self.resolve_steps(
                 steps,
                 &producer_ctx,
                 &self.registry,
                 Some(&route_id),
-                &super::step_resolution::FunctionStagingMode::DirectAdd,
-            ) {
-                Ok(p) => p,
-                Err(e) => {
-                    self.discard_function_staging();
-                    return Err(e);
-                }
-            },
+                staging_mode,
+            )?,
         };
         let route_id_for_tracing = route_id.clone();
         let mut pipeline = if processors_with_contracts.is_empty() {
@@ -650,13 +658,11 @@ impl DefaultRouteController {
             )
         };
 
-        // Apply circuit breaker if configured
         if let Some(cb_config) = circuit_breaker {
             let cb_layer = CircuitBreakerLayer::new(cb_config);
             pipeline = BoxProcessor::new(cb_layer.layer(pipeline));
         }
 
-        // Determine which error handler config to use (per-route takes precedence)
         let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
 
         if let Some(config) = eh_config {
@@ -672,7 +678,6 @@ impl DefaultRouteController {
             pipeline = BoxProcessor::new(layer.layer(pipeline));
         }
 
-        // Apply UoW layer outermost (after error handler)
         let uow_counter = if let Some(uow_config) = &unit_of_work {
             let component_ctx = ControllerComponentContext::new(
                 Arc::clone(&self.registry),
@@ -690,16 +695,9 @@ impl DefaultRouteController {
             None
         };
 
-        if let Some(invoker) = &self.function_invoker {
-            invoker
-                .commit_staged()
-                .await
-                .map_err(|e| CamelError::Config(e.to_string()))?;
-        }
-
-        self.routes.insert(
-            route_id.clone(),
-            ManagedRoute {
+        Ok(PreparedRoute {
+            route_id,
+            managed: ManagedRoute {
                 definition: definition_info,
                 from_uri,
                 pipeline: Arc::new(ArcSwap::from_pointee(SyncBoxProcessor(pipeline))),
@@ -713,15 +711,79 @@ impl DefaultRouteController {
                 aggregate_split,
                 agg_service: None,
             },
+        })
+    }
+
+    pub fn insert_prepared_route(&mut self, prepared: PreparedRoute) -> Result<(), CamelError> {
+        if self.routes.contains_key(&prepared.route_id) {
+            return Err(CamelError::RouteError(format!(
+                "Route '{}' already exists",
+                prepared.route_id
+            )));
+        }
+        self.routes.insert(prepared.route_id.clone(), prepared.managed);
+        Ok(())
+    }
+
+    pub async fn add_route_with_generation(
+        &mut self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<(), CamelError> {
+        let route_id = definition.route_id().to_string();
+
+        if self.routes.contains_key(&route_id) {
+            return Err(CamelError::RouteError(format!(
+                "Route '{}' already exists",
+                route_id
+            )));
+        }
+
+        info!(route_id = %route_id, generation, "Adding route to controller with generation");
+
+        let prepared = self.build_managed_route(definition, &super::step_resolution::FunctionStagingMode::HotReload { generation })?;
+
+        self.routes.insert(
+            prepared.route_id.clone(),
+            prepared.managed,
         );
 
         Ok(())
     }
 
-    /// Compile a `RouteDefinition` into a `BoxProcessor` without inserting into the route map.
-    ///
-    /// Used by hot-reload to prepare a new pipeline for atomic swap without disrupting
-    /// the running route. The caller is responsible for swapping via `swap_pipeline`.
+    pub fn prepare_route_definition(
+        &self,
+        definition: RouteDefinition,
+    ) -> Result<PreparedRoute, CamelError> {
+        self.build_managed_route(definition, &super::step_resolution::FunctionStagingMode::DryCompile)
+    }
+
+    pub fn prepare_route_definition_with_generation(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<PreparedRoute, CamelError> {
+        self.build_managed_route(definition, &super::step_resolution::FunctionStagingMode::HotReload { generation })
+    }
+
+    pub async fn remove_route_preserving_functions(&mut self, route_id: &str) -> Result<(), CamelError> {
+        let managed = self.routes.get(route_id).ok_or_else(|| {
+            CamelError::RouteError(format!("Route '{}' not found for removal", route_id))
+        })?;
+        if handle_is_running(&managed.consumer_handle)
+            || handle_is_running(&managed.pipeline_handle)
+        {
+            return Err(CamelError::RouteError(format!(
+                "Route '{}' must be stopped before removal (current execution lifecycle: {})",
+                route_id,
+                inferred_lifecycle_label(managed)
+            )));
+        }
+        self.routes.remove(route_id);
+        info!(route_id = %route_id, "Route removed from controller (functions preserved for reload finalize)");
+        Ok(())
+    }
+
     pub fn compile_route_definition(
         &self,
         def: RouteDefinition,

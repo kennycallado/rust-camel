@@ -103,6 +103,40 @@ impl RuntimeExecutionHandle {
             .await
     }
 
+    pub(crate) async fn prepare_route_definition_with_generation(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<crate::lifecycle::adapters::route_controller::PreparedRoute, CamelError> {
+        self.controller
+            .prepare_route_definition_with_generation(definition, generation)
+            .await
+    }
+
+    pub(crate) async fn insert_prepared_route(
+        &self,
+        prepared: crate::lifecycle::adapters::route_controller::PreparedRoute,
+    ) -> Result<(), CamelError> {
+        self.controller.insert_prepared_route(prepared).await
+    }
+
+    pub(crate) async fn remove_route_preserving_functions(
+        &self,
+        route_id: String,
+    ) -> Result<(), CamelError> {
+        self.controller.remove_route_preserving_functions(route_id).await
+    }
+
+    pub(crate) async fn add_route_definition_with_generation(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<(), CamelError> {
+        self.controller
+            .add_route_definition_with_generation(definition, generation)
+            .await
+    }
+
     pub(crate) async fn swap_route_pipeline(
         &self,
         route_id: &str,
