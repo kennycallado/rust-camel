@@ -382,6 +382,11 @@ async fn run(
     #[cfg(feature = "kafka")]
     register_bundle!(ctx, camel_config, camel_component_kafka::KafkaBundle);
     register_bundle!(ctx, camel_config, camel_master::MasterBundle);
+    register_bundle!(
+        ctx,
+        camel_config,
+        camel_component_opensearch::OpenSearchBundle
+    );
     register_bundle!(ctx, camel_config, camel_component_redis::RedisBundle);
     register_bundle!(ctx, camel_config, camel_component_sql::SqlBundle);
     #[cfg(feature = "grpc")]

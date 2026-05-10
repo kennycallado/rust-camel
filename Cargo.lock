@@ -234,6 +234,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-compression"
+version = "0.4.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e79b3f8a79cccc2898f31920fc69f304859b3bd567490f75ebf51ae1c792a9ac"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "async-lock"
 version = "3.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -905,6 +917,7 @@ dependencies = [
  "camel-component-kafka",
  "camel-component-log",
  "camel-component-mock",
+ "camel-component-opensearch",
  "camel-component-redis",
  "camel-component-sql",
  "camel-component-timer",
@@ -1169,6 +1182,21 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "camel-component-opensearch"
+version = "0.9.0"
+dependencies = [
+ "camel-component-api",
+ "futures-util",
+ "opensearch",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tower",
+ "url",
 ]
 
 [[package]]
@@ -1670,6 +1698,7 @@ dependencies = [
  "camel-component-kafka",
  "camel-component-log",
  "camel-component-mock",
+ "camel-component-opensearch",
  "camel-component-redis",
  "camel-component-sql",
  "camel-component-timer",
@@ -2011,6 +2040,23 @@ dependencies = [
  "tokio",
  "tokio-util",
 ]
+
+[[package]]
+name = "compression-codecs"
+version = "0.4.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce2548391e9c1929c21bf6aa2680af86fe4c1b33e6cea9ac1cfeec0bd11218cf"
+dependencies = [
+ "compression-core",
+ "flate2",
+ "memchr",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 
 [[package]]
 name = "concurrent-queue"
@@ -5270,6 +5316,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
+name = "opensearch"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af6815a23449a0860c8fe049a828c3589d3ad56d3b5875d0d1f340d1291871e"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "dyn-clone",
+ "lazy_static",
+ "percent-encoding",
+ "reqwest 0.13.3",
+ "rustc_version 0.4.1",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "url",
+ "void",
+]
+
+[[package]]
+name = "opensearch-example"
+version = "0.9.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-opensearch",
+ "camel-component-timer",
+ "camel-core",
+ "chrono",
+ "reqwest 0.13.3",
+ "serde_json",
+ "testcontainers",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6500,6 +6584,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -8176,15 +8261,20 @@ version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
 dependencies = [
+ "async-compression",
  "base64 0.22.1",
  "bitflags 2.11.1",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "iri-string",
  "mime",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
@@ -8599,6 +8689,12 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "void"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 
 [[package]]
 name = "vsimd"

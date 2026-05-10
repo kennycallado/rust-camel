@@ -190,6 +190,7 @@ publish_crate "camel-xslt" "crates/components/camel-xslt"
 publish_crate "camel-xj" "crates/components/camel-xj"
 publish_crate "camel-component-cxf" "crates/components/camel-cxf"
 publish_crate "camel-master" "crates/components/camel-master"
+publish_crate "camel-component-opensearch" "crates/components/camel-opensearch"
 
 # camel-config depends on camel-otel, camel-prometheus and many component crates
 publish_crate "camel-config" "crates/camel-config"

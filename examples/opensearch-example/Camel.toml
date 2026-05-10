@@ -1,0 +1,3 @@
+[default]
+routes = ["routes/**/*.yaml"]
+log_level = "INFO"

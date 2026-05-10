@@ -8,7 +8,7 @@ A Rust-native, Tower-native integration framework inspired by [Apache Camel](htt
 
 rust-camel lets you define message routes between components using a fluent builder API. The data plane (exchange processing, EIP patterns, middleware) is Tower-native — every processor and producer is a `Service<Exchange>`. The control plane (components, endpoints, consumers, lifecycle) uses its own trait hierarchy.
 
-Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`.
+Current components: `timer`, `log`, `direct`, `mock`, `file`, `http`, `ws`/`wss`, `kafka`, `redis`, `sql`, `jms`, `cxf`, `container`, `controlbus`, `validator`, `xslt`, `xj`, `master`, `opensearch`.
 
 ## Architecture
 
@@ -43,7 +43,7 @@ rust-camel separates two planes:
 ┌─────────▼──────────┐   ┌───────────▼────────────────┐
 │   camel-processor  │   │   Components               │
 │   EIP patterns     │   │   timer, log, http, file,  │
-│   (Tower layers)   │   │   kafka, redis, sql, ...,  │
+│   (Tower layers)   │   │   kafka, redis, sql, opensearch, ...,  │
 └────────────────────┘   └────────────────────────────┘
 ```
 
@@ -187,6 +187,7 @@ cargo run
 | `camel-file`                | File producer and consumer                                                                                                                                                        |
 | `camel-kafka`               | Kafka producer and consumer with SSL/SASL and manual commit                                                                                                                       |
 | `camel-redis`               | Redis producer and consumer                                                                                                                                                       |
+| `camel-opensearch`          | OpenSearch producer with 7 operations (INDEX, SEARCH, GET, DELETE, UPDATE, BULK, MULTIGET)                                                                                       |
 | `camel-sql`                 | SQL producer/consumer with IN clause separator, SSL/TLS, streaming result support                                                                                                 |
 | `camel-jms`                 | JMS producer and consumer via native-image bridge (ActiveMQ Classic, Artemis)                                                                                                     |
 | `camel-component-cxf`       | SOAP/Web Services via Apache CXF native-image bridge: SOAP 1.1/1.2, WSDL, WS-Security, multi-tenant profiles, PAYLOAD mode                                               |
@@ -264,6 +265,7 @@ Run an example:
  cargo run -p http-streaming
  cargo run -p kafka-example
  cargo run -p jms-example
+ cargo run -p opensearch-example
  cargo run -p language-rhai
  cargo run -p language-simple
  cargo run -p lazy-route
@@ -572,6 +574,10 @@ group_id = "camel"
 [default.components.redis]
 host = "localhost"
 port = 6379
+
+[default.components.opensearch]
+host = "localhost"
+port = 9200
 
 [default.components.sql]
 max_connections = 5

@@ -35,6 +35,7 @@ camel-component-sql = { workspace = true, optional = true }
 camel-component-jms = { workspace = true, optional = true }
 camel-component-cxf = { workspace = true, optional = true }
 camel-component-container = { workspace = true, optional = true }
+camel-component-opensearch = { workspace = true, optional = true }
 bollard = { version = "0.20", optional = true }
 camel-component-validator = { workspace = true, optional = true }
 camel-xslt = { workspace = true, optional = true }
@@ -79,6 +80,7 @@ integration-tests = [
     "dep:camel-component-jms",
     "dep:camel-component-cxf",
     "dep:camel-component-container",
+    "dep:camel-component-opensearch",
     "dep:bollard",
     "dep:camel-component-validator",
     "dep:camel-xslt",
