@@ -98,6 +98,15 @@ impl DenoRunner {
             .await
             .expect("decode health response")
     }
+
+    async fn unregister(&self, function_id: &str) -> reqwest::Response {
+        self.client
+            .post(self.url("/unregister"))
+            .json(&serde_json::json!({ "function_id": function_id }))
+            .send()
+            .await
+            .expect("unregister request")
+    }
 }
 
 impl Drop for DenoRunner {
@@ -305,8 +314,30 @@ async fn test_invoke_not_registered() {
 }
 
 #[tokio::test]
-async fn test_shutdown() {
+async fn test_unregister_removes_function() {
     let runner = DenoRunner::spawn().await;
+    let req = make_register_request("f1", "export default (c) => { c.setBody('ok'); }");
+    let register = runner.register(&req).await;
+    assert_eq!(register.status().as_u16(), 204);
+
+    let health_before = runner.health().await;
+    assert!(health_before.registered.contains(&"f1".to_string()));
+
+    let unregister = runner.unregister("f1").await;
+    assert_eq!(unregister.status().as_u16(), 204);
+
+    let health_after = runner.health().await;
+    assert!(!health_after.registered.contains(&"f1".to_string()));
+
+    let invoke = runner.invoke(&make_exchange("f1")).await;
+    assert!(!invoke.ok);
+    let err = invoke.error.expect("invoke error");
+    assert_eq!(err.kind, "not_registered");
+}
+
+#[tokio::test]
+async fn test_shutdown() {
+    let mut runner = DenoRunner::spawn().await;
     let resp = runner
         .client
         .post(runner.url("/shutdown"))

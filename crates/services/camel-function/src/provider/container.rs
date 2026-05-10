@@ -216,6 +216,14 @@ impl ContainerProvider {
         FunctionProvider::register(self, handle, def).await
     }
 
+    pub async fn unregister_function(
+        &self,
+        handle: &RunnerHandle,
+        id: &FunctionId,
+    ) -> Result<(), ProviderError> {
+        FunctionProvider::unregister(self, handle, id).await
+    }
+
     pub async fn invoke_function(
         &self,
         handle: &RunnerHandle,
@@ -414,10 +422,18 @@ impl FunctionProvider for ContainerProvider {
 
     async fn unregister(
         &self,
-        _handle: &RunnerHandle,
-        _id: &FunctionId,
+        handle: &RunnerHandle,
+        id: &FunctionId,
     ) -> Result<(), ProviderError> {
-        Ok(())
+        let endpoint = self
+            .containers_by_handle
+            .get(&handle.id)
+            .ok_or_else(|| {
+                ProviderError::UnregisterFailed(format!("unknown handle {}", handle.id))
+            })?
+            .endpoint
+            .clone();
+        self.client.unregister(&endpoint, id).await
     }
 
     async fn invoke(

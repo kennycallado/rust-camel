@@ -136,12 +136,29 @@ async function handleInvoke(req: Request): Promise<Response> {
   }
 }
 
+async function handleUnregister(req: Request): Promise<Response> {
+  let body: { function_id?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return jsonResponse({ error: "invalid JSON", kind: "compile_error" }, 400);
+  }
+
+  if (!body.function_id) {
+    return jsonResponse({ error: "missing function_id", kind: "compile_error" }, 400);
+  }
+
+  registrations.delete(body.function_id);
+  return new Response(null, { status: 204 });
+}
+
 const port = Number(Deno.env.get("PORT") ?? "8000");
 Deno.serve({ hostname: "0.0.0.0", port }, async (req: Request) => {
   const url = new URL(req.url);
   if (req.method === "GET" && url.pathname === "/health") return handleHealth();
   if (req.method === "POST" && url.pathname === "/register") return await handleRegister(req);
   if (req.method === "POST" && url.pathname === "/invoke") return await handleInvoke(req);
+  if (req.method === "POST" && url.pathname === "/unregister") return await handleUnregister(req);
   if (req.method === "POST" && url.pathname === "/shutdown") {
     setTimeout(() => Deno.exit(0), 100);
     return new Response(null, { status: 204 });

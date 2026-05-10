@@ -138,3 +138,39 @@ async fn test_cleanup_all() {
     provider.cleanup_all().await;
     assert_clean(&provider).await;
 }
+
+#[tokio::test]
+async fn test_unregister_removes_function_from_container_runner() {
+    build_runner_image().await;
+    let provider = create_provider("unregister_runner");
+    let handle = provider.spawn_runner("deno").await.expect("spawn");
+    wait_for_health(&provider, &handle, Duration::from_secs(10))
+        .await
+        .expect("health");
+
+    let def = make_definition("f1", "export default (c) => { c.setBody('ok'); }");
+    provider
+        .register_function(&handle, &def)
+        .await
+        .expect("register");
+
+    let exchange = Exchange::new(Message::new(Body::Empty));
+    let patch = provider
+        .invoke_function(&handle, &def.id, &exchange)
+        .await
+        .expect("invoke before unregister");
+    assert!(matches!(patch.body, Some(PatchBody::Text(ref s)) if s == "ok"));
+
+    provider
+        .unregister_function(&handle, &def.id)
+        .await
+        .expect("unregister");
+
+    let invoke_after = provider.invoke_function(&handle, &def.id, &exchange).await;
+    assert!(invoke_after.is_err());
+    let msg = invoke_after.expect_err("invoke should fail").to_string();
+    assert!(msg.contains("not_registered"));
+
+    provider.shutdown_runner(handle).await.expect("shutdown");
+    assert_clean(&provider).await;
+}
