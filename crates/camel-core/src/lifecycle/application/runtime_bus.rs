@@ -71,7 +71,6 @@ impl RuntimeBus {
         }
         let (aggregate, events) =
             crate::lifecycle::domain::RouteRuntimeAggregate::register(route_id.clone());
-        let _ = aggregate;
         if let Some(uow) = &deps.uow {
             uow.persist_upsert(
                 aggregate.clone(),
