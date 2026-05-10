@@ -23,8 +23,8 @@ pub use model::{
     DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRedeliveryPolicy, DeclarativeRoute,
     DeclarativeStep, FilterStepDef, LanguageExpressionDef, LogLevelDef, LogStepDef,
     MulticastAggregationDef, MulticastStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef,
-    SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ToStepDef,
-    ValueSourceDef, WhenStepDef, WireTapStepDef,
+    SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef,
+    ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use yaml::{
     YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_canonical,

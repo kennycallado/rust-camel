@@ -22,6 +22,7 @@ pub const CANONICAL_CONTRACT_DECLARATIVE_ONLY_STEPS: &[&str] =
     &["script", "filter", "choice", "split"];
 pub const CANONICAL_CONTRACT_EXCLUDED_DECLARATIVE_STEPS: &[&str] = &[
     "set_header",
+    "set_property",
     "set_body",
     "multicast",
     "convert_body_to",
@@ -531,9 +532,11 @@ mod tests {
         assert!(canonical_contract_supports_step("to"));
         assert!(canonical_contract_supports_step("split"));
         assert!(!canonical_contract_supports_step("set_header"));
+        assert!(!canonical_contract_supports_step("set_property"));
 
         assert!(CANONICAL_CONTRACT_DECLARATIVE_ONLY_STEPS.contains(&"split"));
         assert!(CANONICAL_CONTRACT_EXCLUDED_DECLARATIVE_STEPS.contains(&"set_header"));
+        assert!(CANONICAL_CONTRACT_EXCLUDED_DECLARATIVE_STEPS.contains(&"set_property"));
         assert!(CANONICAL_CONTRACT_RUST_ONLY_STEPS.contains(&"processor"));
     }
 
@@ -542,6 +545,10 @@ mod tests {
         let set_header_reason = canonical_contract_rejection_reason("set_header")
             .expect("set_header should have explicit reason");
         assert!(set_header_reason.contains("out-of-scope"));
+
+        let set_property_reason = canonical_contract_rejection_reason("set_property")
+            .expect("set_property should have explicit reason");
+        assert!(set_property_reason.contains("out-of-scope"));
 
         let processor_reason = canonical_contract_rejection_reason("processor")
             .expect("processor should be rust-only");

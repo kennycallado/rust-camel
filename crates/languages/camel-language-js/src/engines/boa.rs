@@ -176,6 +176,14 @@ mod tests {
     }
 
     #[test]
+    fn test_eval_property_function_access() {
+        let engine = BoaEngine::new();
+        let ex = make_exchange();
+        let result = engine.eval("camel.property('key')", ex).unwrap();
+        assert_eq!(result.return_value.as_str().unwrap(), "val");
+    }
+
+    #[test]
     fn test_eval_runtime_error_returns_err() {
         let engine = BoaEngine::new();
         let result = engine.eval("throw new Error('boom')", JsExchange::default());
@@ -210,6 +218,20 @@ mod tests {
         let ex = make_exchange();
         let result = engine
             .eval("camel.properties.set('newprop', 'newval'); 'done'", ex)
+            .unwrap();
+        assert_eq!(result.return_value.as_str().unwrap(), "done");
+        assert_eq!(
+            result.properties.get("newprop").unwrap().as_str().unwrap(),
+            "newval"
+        );
+    }
+
+    #[test]
+    fn test_set_property_function_mutation_propagates() {
+        let engine = BoaEngine::new();
+        let ex = make_exchange();
+        let result = engine
+            .eval("camel.set_property('newprop', 'newval'); 'done'", ex)
             .unwrap();
         assert_eq!(result.return_value.as_str().unwrap(), "done");
         assert_eq!(

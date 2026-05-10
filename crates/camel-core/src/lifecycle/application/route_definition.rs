@@ -41,6 +41,10 @@ pub enum BuilderStep {
         key: String,
         value: ValueSourceDef,
     },
+    DeclarativeSetProperty {
+        key: String,
+        value_source: ValueSourceDef,
+    },
     /// Declarative set_body (literal or language-based value), resolved at route-add time.
     DeclarativeSetBody {
         value: ValueSourceDef,
@@ -191,6 +195,12 @@ impl std::fmt::Debug for BuilderStep {
             }
             BuilderStep::DeclarativeSetBody { .. } => {
                 write!(f, "BuilderStep::DeclarativeSetBody {{ .. }}")
+            }
+            BuilderStep::DeclarativeSetProperty { key, .. } => {
+                write!(
+                    f,
+                    "BuilderStep::DeclarativeSetProperty {{ key: {key:?}, .. }}"
+                )
             }
             BuilderStep::DeclarativeFilter { steps, .. } => {
                 write!(

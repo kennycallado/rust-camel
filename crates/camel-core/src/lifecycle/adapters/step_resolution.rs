@@ -215,6 +215,27 @@ pub(crate) fn resolve_steps(
                     processors.push((BoxProcessor::new(svc), None));
                 }
             },
+            BuilderStep::DeclarativeSetProperty { key, value_source } => match value_source {
+                ValueSourceDef::Literal(value) => {
+                    let svc = camel_processor::set_property::SetProperty::new(
+                        IdentityProcessor,
+                        key,
+                        value,
+                    );
+                    processors.push((BoxProcessor::new(svc), None));
+                }
+                ValueSourceDef::Expression(expression) => {
+                    let expression = compile_language_expression(languages, &expression)?;
+                    let svc = camel_processor::DynamicSetProperty::new(
+                        IdentityProcessor,
+                        key,
+                        move |exchange: &Exchange| {
+                            expression.evaluate(exchange).unwrap_or(Value::Null)
+                        },
+                    );
+                    processors.push((BoxProcessor::new(svc), None));
+                }
+            },
             BuilderStep::DeclarativeSetBody { value } => match value {
                 ValueSourceDef::Literal(value) => {
                     let body = value_to_body(value);

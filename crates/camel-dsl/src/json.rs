@@ -455,4 +455,33 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
+    #[test]
+    fn test_set_property_step_json_parses_to_declarative() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "property-json-route",
+                    "from": "direct:start",
+                    "steps": [
+                        {"set_property": {"name": "traceId", "value": "abc-123"}}
+                    ]
+                }
+            ]
+        }"#;
+        let routes = parse_json_to_declarative(json).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::SetProperty(def) => {
+                assert_eq!(def.key, "traceId");
+                assert_eq!(
+                    def.value,
+                    crate::model::ValueSourceDef::Literal(serde_json::Value::String(
+                        "abc-123".into()
+                    ))
+                );
+            }
+            other => panic!("expected SetProperty, got {other:?}"),
+        }
+    }
 }

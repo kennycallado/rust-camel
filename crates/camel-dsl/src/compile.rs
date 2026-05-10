@@ -34,7 +34,8 @@ use crate::model::{
     LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
     MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
     ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef,
-    SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WireTapStepDef,
+    SetPropertyStepDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
+    ValueSourceDef, WireTapStepDef,
 };
 
 pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinition, CamelError> {
@@ -475,6 +476,9 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::SetHeader(SetHeaderStepDef { key, value }) => {
             compile_set_header_step(key, value)
         }
+        DeclarativeStep::SetProperty(SetPropertyStepDef { key, value }) => {
+            compile_set_property_step(key, value)
+        }
         DeclarativeStep::SetBody(SetBodyStepDef { value }) => compile_set_body_step(value),
         DeclarativeStep::Script(ScriptStepDef { expression }) => {
             Ok(BuilderStep::DeclarativeScript { expression })
@@ -909,6 +913,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::To(_) => "to",
         DeclarativeStep::Log(_) => "log",
         DeclarativeStep::SetHeader(_) => "set_header",
+        DeclarativeStep::SetProperty(_) => "set_property",
         DeclarativeStep::SetBody(_) => "set_body",
         DeclarativeStep::Filter(_) => "filter",
         DeclarativeStep::Choice(_) => "choice",
@@ -1073,6 +1078,13 @@ fn compile_filter_step(
 
 fn compile_set_header_step(key: String, value: ValueSourceDef) -> Result<BuilderStep, CamelError> {
     Ok(BuilderStep::DeclarativeSetHeader { key, value })
+}
+
+fn compile_set_property_step(
+    key: String,
+    value: ValueSourceDef,
+) -> Result<BuilderStep, CamelError> {
+    Ok(BuilderStep::DeclarativeSetProperty { key, value_source: value })
 }
 
 fn compile_set_body_step(value: ValueSourceDef) -> Result<BuilderStep, CamelError> {

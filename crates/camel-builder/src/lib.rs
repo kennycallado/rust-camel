@@ -980,6 +980,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::DeclarativeRoutingSlip { .. } => "declarative_routing_slip",
         BuilderStep::RecipientList { .. } => "recipient_list",
         BuilderStep::DeclarativeRecipientList { .. } => "declarative_recipient_list",
+        BuilderStep::DeclarativeSetProperty { .. } => "set_property",
     }
 }
 

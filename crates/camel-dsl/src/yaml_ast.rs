@@ -174,6 +174,7 @@ pub struct LoopWhileExpr {
 pub enum YamlStep {
     To(ToStep),
     SetHeader(SetHeaderStep),
+    SetProperty(SetPropertyStep),
     SetBody(SetBodyStep),
     Bean(BeanStep),
     Choice(ChoiceStep),
@@ -227,9 +228,34 @@ pub struct SetHeaderStep {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct SetPropertyStep {
+    pub set_property: SetPropertyData,
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct SetHeaderData {
     pub key: String,
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub simple: Option<String>,
+    #[serde(default)]
+    pub rhai: Option<String>,
+    #[serde(default)]
+    pub jsonpath: Option<String>,
+    #[serde(default)]
+    pub xpath: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct SetPropertyData {
+    pub name: String,
     #[serde(default)]
     pub value: Option<serde_json::Value>,
     #[serde(default)]

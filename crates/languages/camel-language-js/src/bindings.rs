@@ -78,7 +78,60 @@ pub fn build_camel_global(
     camel
         .set(
             js_string!("properties"),
-            JsValue::from(properties),
+            JsValue::from(properties.clone()),
+            false,
+            ctx,
+        )
+        .map_err(|e| JsLanguageError::Execution {
+            message: e.to_string(),
+        })?;
+
+    let properties_get = properties.clone();
+    let property_fn = NativeFunction::from_copy_closure_with_captures(
+        move |_this, args, props, ctx| {
+            let key = args
+                .first()
+                .unwrap_or(&JsValue::undefined())
+                .to_string(ctx)?
+                .to_std_string_escaped();
+            let data = props.get(js_string!("__data"), ctx)?;
+            let data_obj = data
+                .as_object()
+                .ok_or_else(|| boa_engine::JsNativeError::typ().with_message("properties.__data missing"))?;
+            data_obj.get(js_string!(key.as_str()), ctx)
+        },
+        properties_get,
+    );
+    let property_js = property_fn.to_js_function(ctx.realm());
+    camel
+        .set(js_string!("property"), JsValue::from(property_js), false, ctx)
+        .map_err(|e| JsLanguageError::Execution {
+            message: e.to_string(),
+        })?;
+
+    let properties_set = properties.clone();
+    let set_property_fn = NativeFunction::from_copy_closure_with_captures(
+        move |_this, args, props, ctx| {
+            let key = args
+                .first()
+                .unwrap_or(&JsValue::undefined())
+                .to_string(ctx)?
+                .to_std_string_escaped();
+            let val = args.get(1).cloned().unwrap_or(JsValue::undefined());
+            let data = props.get(js_string!("__data"), ctx)?;
+            let data_obj = data
+                .as_object()
+                .ok_or_else(|| boa_engine::JsNativeError::typ().with_message("properties.__data missing"))?;
+            data_obj.set(js_string!(key.as_str()), val, false, ctx)?;
+            Ok(JsValue::undefined())
+        },
+        properties_set,
+    );
+    let set_property_js = set_property_fn.to_js_function(ctx.realm());
+    camel
+        .set(
+            js_string!("set_property"),
+            JsValue::from(set_property_js),
             false,
             ctx,
         )

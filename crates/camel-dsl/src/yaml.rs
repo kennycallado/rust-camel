@@ -17,8 +17,9 @@ use crate::model::{
     DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
     LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
     MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
-    SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef,
-    ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
+    StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef,
+    WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
@@ -26,17 +27,19 @@ pub use crate::yaml_ast::{
     LoadBalanceStep, LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep,
     MulticastData, MulticastStep, PredicateBlock, RecipientListData, RecipientListStep,
     RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig, SetBodyData,
-    SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitExpressionConfig,
+    SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep, SplitData,
+    SplitExpressionConfig,
     SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep,
     ThrottleData, ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
     YamlRoute, YamlRoutes, YamlStep,
 };
 use crate::yaml_ast::{LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 23] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 24] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
+    DeclarativeStepKind::SetProperty,
     DeclarativeStepKind::SetBody,
     DeclarativeStepKind::Filter,
     DeclarativeStepKind::Function,
@@ -272,6 +275,22 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             )?;
             Ok(DeclarativeStep::SetHeader(SetHeaderStepDef {
                 key: set_header.key,
+                value,
+            }))
+        }
+        YamlStep::SetProperty(SetPropertyStep { set_property }) => {
+            let value = parse_value_source(
+                set_property.value,
+                set_property.language,
+                set_property.source,
+                set_property.simple,
+                set_property.rhai,
+                set_property.jsonpath,
+                set_property.xpath,
+                "set_property",
+            )?;
+            Ok(DeclarativeStep::SetProperty(SetPropertyStepDef {
+                key: set_property.name,
                 value,
             }))
         }
@@ -1489,6 +1508,30 @@ routes:
 "#;
         let defs = parse_yaml(yaml).unwrap();
         assert_eq!(defs.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_set_property_literal() {
+        let yaml = r#"
+routes:
+  - id: "property-route"
+    from: "direct:start"
+    steps:
+      - set_property:
+          name: "traceId"
+          value: "abc-123"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::SetProperty(def) => {
+                assert_eq!(def.key, "traceId");
+                assert_eq!(
+                    def.value,
+                    ValueSourceDef::Literal(serde_json::Value::String("abc-123".into()))
+                );
+            }
+            other => panic!("expected SetProperty step, got {other:?}"),
+        }
     }
 
     #[test]

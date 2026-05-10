@@ -249,6 +249,29 @@ mod tests {
     }
 
     #[test]
+    fn test_mutating_expression_propagates_property() {
+        let expr = JsMutatingExpression::new(
+            "camel.set_property('newkey', 'newval'); 'done'".to_string(),
+            engine(),
+        );
+        let mut ex = make_exchange();
+        let result = expr.evaluate(&mut ex).unwrap();
+        assert_eq!(result.as_str().unwrap(), "done");
+        assert_eq!(
+            ex.properties.get("newkey").unwrap().as_str().unwrap(),
+            "newval"
+        );
+    }
+
+    #[test]
+    fn test_expression_reads_property_function() {
+        let expr = JsExpression::new("camel.property('key')".to_string(), engine());
+        let ex = make_exchange();
+        let result = expr.evaluate(&ex).unwrap();
+        assert_eq!(result.as_str().unwrap(), "val");
+    }
+
+    #[test]
     fn test_mutating_expression_propagates_body() {
         let expr =
             JsMutatingExpression::new("camel.body = 'modified'; camel.body".to_string(), engine());

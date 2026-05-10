@@ -102,6 +102,21 @@ impl SetHeaderStepDef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SetPropertyStepDef {
+    pub key: String,
+    pub value: ValueSourceDef,
+}
+
+impl SetPropertyStepDef {
+    pub fn literal(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: ValueSourceDef::Literal(serde_json::Value::String(value.into())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SetBodyStepDef {
     pub value: ValueSourceDef,
 }
@@ -313,6 +328,7 @@ pub struct StreamCacheStepDef {
 pub enum DeclarativeStep {
     To(ToStepDef),
     SetHeader(SetHeaderStepDef),
+    SetProperty(SetPropertyStepDef),
     SetBody(SetBodyStepDef),
     ConvertBodyTo(BodyTypeDef),
     DynamicRouter(DynamicRouterStepDef),
