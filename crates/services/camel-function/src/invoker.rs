@@ -17,6 +17,7 @@ pub(crate) struct DefaultFunctionInvoker {
     pub(crate) next_generation: AtomicU64,
     pub(crate) current_generation: AtomicU64,
     pub(crate) started: AtomicBool,
+    pub(crate) register_lock: tokio::sync::Mutex<()>,
 }
 
 type StagedEntries = Vec<(FunctionDefinition, Option<String>)>;
@@ -37,6 +38,7 @@ impl DefaultFunctionInvoker {
             next_generation: AtomicU64::new(0),
             current_generation: AtomicU64::new(0),
             started: AtomicBool::new(false),
+            register_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -160,6 +162,7 @@ impl FunctionInvoker for DefaultFunctionInvoker {
         let key = RunnerPoolKey {
             runtime: def.runtime.clone(),
         };
+        let _guard = self.register_lock.lock().await;
         let handle = {
             let existing = self.pool.handles.get(&key).map(|h| h.clone());
             match existing {

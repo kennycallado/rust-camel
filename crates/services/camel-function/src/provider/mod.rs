@@ -55,6 +55,7 @@ pub mod container;
 pub mod fake {
     use super::*;
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
@@ -83,6 +84,7 @@ pub mod fake {
         pub spawned: Arc<Mutex<Vec<RunnerPoolKey>>>,
         pub shutdowns: Arc<Mutex<Vec<RunnerPoolKey>>>,
         register_ok_count: Arc<Mutex<usize>>,
+        spawn_count: AtomicUsize,
     }
 
     impl FakeProvider {
@@ -94,7 +96,12 @@ pub mod fake {
                 spawned: Arc::new(Mutex::new(Vec::new())),
                 shutdowns: Arc::new(Mutex::new(Vec::new())),
                 register_ok_count: Arc::new(Mutex::new(0)),
+                spawn_count: AtomicUsize::new(0),
             }
+        }
+
+        pub fn spawn_count(&self) -> usize {
+            self.spawn_count.load(Ordering::SeqCst)
         }
     }
 
@@ -103,6 +110,7 @@ pub mod fake {
     #[async_trait::async_trait]
     impl FunctionProvider for FakeProvider {
         async fn spawn(&self, key: &RunnerPoolKey) -> Result<RunnerHandle, ProviderError> {
+            self.spawn_count.fetch_add(1, Ordering::SeqCst);
             self.calls
                 .lock()
                 .expect("calls")

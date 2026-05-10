@@ -169,3 +169,48 @@ async fn failed_state_invoke_returns_unavailable() {
         .unwrap_err();
     assert!(err.to_string().contains("runner unavailable"));
 }
+
+#[tokio::test]
+async fn concurrent_register_spawns_single_runner_per_runtime() {
+    let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
+    let mut service = FunctionRuntimeService::with_fake_provider(
+        FunctionConfig::default(),
+        Arc::clone(&provider),
+    );
+    service.start().await.unwrap();
+    let inv = service.invoker();
+
+    let defs: Vec<FunctionDefinition> = (0..10)
+        .map(|i| {
+            let name = format!("c{i}");
+            FunctionDefinition {
+                id: FunctionId::compute("deno", &name, 5000),
+                runtime: "deno".into(),
+                source: name,
+                timeout_ms: 5000,
+                route_id: Some("r1".into()),
+                step_index: Some(i),
+            }
+        })
+        .collect();
+
+    let mut tasks = Vec::new();
+    for def in defs.clone() {
+        let inv = Arc::clone(&inv);
+        tasks.push(tokio::spawn(
+            async move { inv.register(def, Some("r1")).await },
+        ));
+    }
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    assert_eq!(provider.spawn_count(), 1);
+    assert!(provider.shutdowns.lock().expect("shutdowns").is_empty());
+
+    for def in &defs {
+        inv.invoke(&def.id, &Exchange::new(Message::new("x")))
+            .await
+            .unwrap();
+    }
+}

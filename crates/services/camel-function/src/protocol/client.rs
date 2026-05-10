@@ -106,6 +106,22 @@ impl ProtocolClient {
         Ok(invoke_resp)
     }
 
+    pub async fn unregister(&self, endpoint: &str, id: &FunctionId) -> Result<(), ProviderError> {
+        let url = format!("{}/unregister", endpoint);
+        let body = serde_json::json!({ "function_id": id.0.as_str() });
+        let resp = self.http.post(&url).json(&body).send().await.map_err(|e| {
+            ProviderError::UnregisterFailed(format!("unregister request failed: {e}"))
+        })?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(ProviderError::UnregisterFailed(format!(
+                "status {}",
+                resp.status()
+            )))
+        }
+    }
+
     pub async fn shutdown(&self, endpoint: &str) -> Result<(), ProviderError> {
         let url = format!("{}/shutdown", endpoint);
         let resp =
