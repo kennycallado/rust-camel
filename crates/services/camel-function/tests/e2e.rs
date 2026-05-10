@@ -13,7 +13,7 @@ async fn build_runner_image() {
         .args([
             "build",
             "-t",
-            "rustcamel/deno-runner:e2e",
+            "kennycallado/deno-runner:e2e",
             &format!("{}/runner", env!("CARGO_MANIFEST_DIR")),
         ])
         .output()
@@ -28,7 +28,7 @@ async fn build_runner_image() {
 
 fn create_provider() -> ContainerProvider {
     ContainerProvider::builder()
-        .image("rustcamel/deno-runner:e2e")
+        .image("kennycallado/deno-runner:e2e")
         .pull_policy(PullPolicy::Never)
         .boot_timeout(Duration::from_secs(15))
         .instance_id("e2e_yaml")

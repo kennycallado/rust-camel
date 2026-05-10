@@ -6,7 +6,7 @@
 //!
 //! ```bash
 //! cd crates/services/camel-function
-//! docker build -t rustcamel/deno-runner:latest runner/
+//! docker build -t kennycallado/deno-runner:latest runner/
 //! ```
 //!
 //! ## Running
@@ -34,7 +34,7 @@ async fn main() -> Result<(), CamelError> {
     println!();
 
     let provider = ContainerProvider::builder()
-        .image("rustcamel/deno-runner:latest")
+        .image("kennycallado/deno-runner:latest")
         .build()
         .map_err(|e| CamelError::Config(e.to_string()))?;
 

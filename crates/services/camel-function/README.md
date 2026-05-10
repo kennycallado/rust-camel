@@ -15,7 +15,7 @@ use camel_core::context::CamelContext;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = ContainerProvider::builder()
-        .image("rustcamel/deno-runner:latest")
+        .image("kennycallado/deno-runner:latest")
         .build()?;
 
     let service = FunctionRuntimeService::with_container_provider(
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 cd crates/services/camel-function
-docker build -t rustcamel/deno-runner:latest runner/
+docker build -t kennycallado/deno-runner:latest runner/
 ```
 
 Endpoints on port 8080: `GET /health`, `POST /register`, `POST /invoke`, `POST /shutdown`.

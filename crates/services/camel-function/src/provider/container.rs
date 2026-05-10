@@ -42,7 +42,7 @@ pub struct ContainerProviderBuilder {
 impl Default for ContainerProviderBuilder {
     fn default() -> Self {
         Self {
-            image: "rustcamel/deno-runner:latest".to_string(),
+            image: "kennycallado/deno-runner:latest".to_string(),
             boot_timeout: std::time::Duration::from_secs(10),
             pull_policy: PullPolicy::IfMissing,
             instance_id: None,

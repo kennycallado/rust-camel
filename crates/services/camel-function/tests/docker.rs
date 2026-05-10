@@ -10,7 +10,7 @@ async fn build_runner_image() {
         .args([
             "build",
             "-t",
-            "rustcamel/deno-runner:test",
+            "kennycallado/deno-runner:test",
             &format!("{}/runner", env!("CARGO_MANIFEST_DIR")),
         ])
         .output()
@@ -25,7 +25,7 @@ async fn build_runner_image() {
 
 fn create_provider(test_id: &str) -> ContainerProvider {
     ContainerProvider::builder()
-        .image("rustcamel/deno-runner:test")
+        .image("kennycallado/deno-runner:test")
         .pull_policy(PullPolicy::Never)
         .boot_timeout(Duration::from_secs(15))
         .instance_id(test_id)
