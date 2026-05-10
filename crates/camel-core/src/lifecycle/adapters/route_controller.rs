@@ -559,16 +559,22 @@ impl DefaultRouteController {
 
         info!(route_id = %route_id, "Adding route to controller");
 
-        let prepared = self.build_managed_route(
+        let prepared = match self.build_managed_route(
             definition,
             &super::step_resolution::FunctionStagingMode::DirectAdd,
-        )?;
+        ) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                self.discard_function_staging();
+                return Err(err);
+            }
+        };
 
         if let Some(invoker) = &self.function_invoker {
-            invoker
-                .commit_staged()
-                .await
-                .map_err(|e| CamelError::Config(e.to_string()))?;
+            if let Err(err) = invoker.commit_staged().await {
+                invoker.discard_staging(0);
+                return Err(CamelError::Config(err.to_string()));
+            }
         }
 
         self.routes
