@@ -54,6 +54,7 @@ camel-language-jsonpath.workspace = true
 camel-language-xpath.workspace = true
 camel-dsl.workspace = true
 camel-bean.workspace = true
+camel-function.workspace = true
 serde.workspace = true
 tokio-util.workspace = true
 serde_json.workspace = true

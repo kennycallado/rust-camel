@@ -50,7 +50,6 @@ lang-xpath = ["camel-language-xpath"]
 [dev-dependencies]
 futures = "0.3"
 tempfile = "3"
-camel-function.workspace = true
 camel-component-timer.workspace = true
 camel-component-log.workspace = true
 camel-component-mock.workspace = true

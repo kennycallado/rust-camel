@@ -212,8 +212,7 @@ impl RuntimeExecutionHandle {
         self.controller.start_route(route_id).await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn controller_route_count_for_test(&self) -> usize {
+    pub async fn controller_route_count_for_test(&self) -> usize {
         self.controller.route_count().await.unwrap_or(0)
     }
 }

@@ -86,6 +86,7 @@ pub mod reload_watcher {
 }
 
 pub use crate::hot_reload::adapters::ReloadWatcher;
+pub use crate::hot_reload::{execute_reload_actions, FunctionReloadContext, ReloadAction, ReloadError};
 pub use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
 pub use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
 pub use crate::lifecycle::adapters::controller_actor::spawn_supervision_task;

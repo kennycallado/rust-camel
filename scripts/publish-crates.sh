@@ -153,6 +153,10 @@ publish_crate "camel-dataformat-protobuf" "crates/dataformats/camel-dataformat-p
 
 # DSL & builder (camel-dsl depends on camel-dataformat-protobuf via protobuf feature)
 publish_crate "camel-dsl" "crates/camel-dsl"
+
+# Function runtime service
+publish_crate "camel-function" "crates/services/camel-function"
+
 publish_crate "camel-builder" "crates/camel-builder"
 
 # OTel (must come before camel-config which depends on it)

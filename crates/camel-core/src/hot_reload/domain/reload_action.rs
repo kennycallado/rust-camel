@@ -1,6 +1,6 @@
 /// Actions the coordinator can take per route.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ReloadAction {
+pub enum ReloadAction {
     /// Pipeline may have changed — atomic swap (zero-downtime).
     ///
     /// This action is taken when the route exists and `from_uri` is unchanged.

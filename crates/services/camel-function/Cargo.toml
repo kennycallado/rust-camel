@@ -33,11 +33,6 @@ tokio = { workspace = true, features = ["macros", "rt", "time", "process"] }
 reqwest = { workspace = true, features = ["json"] }
 serde_json.workspace = true
 futures.workspace = true
-camel-core = { workspace = true }
-camel-dsl = { workspace = true }
-camel-component-direct = { workspace = true }
-camel-component-log = { workspace = true }
-tower = { workspace = true }
 
 [features]
 runner-tests = []
