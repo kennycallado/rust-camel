@@ -1,0 +1,44 @@
+[package]
+name = "camel-function"
+description = "Function runtime service for out-of-process function execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-function"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "process", "macros", "rt"] }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+blake3.workspace = true
+dashmap.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+reqwest = { workspace = true, features = ["json"] }
+bollard = "0.20"
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time", "process"] }
+reqwest = { workspace = true, features = ["json"] }
+serde_json.workspace = true
+futures.workspace = true
+camel-core = { workspace = true }
+camel-dsl = { workspace = true }
+camel-component-direct = { workspace = true }
+camel-component-log = { workspace = true }
+tower = { workspace = true }
+
+[features]
+runner-tests = []
+docker-tests = []

@@ -1,3 +1,4 @@
+pub mod canonical;
 pub mod compile;
 pub mod contract;
 pub mod discovery;
@@ -7,6 +8,7 @@ pub mod model;
 pub mod yaml;
 pub mod yaml_ast;
 
+pub use canonical::{parse_canonical_json, parse_canonical_route};
 pub use compile::{
     compile_declarative_route, compile_declarative_route_to_canonical,
     compile_declarative_route_with_stream_cache_threshold, compile_declarative_step,

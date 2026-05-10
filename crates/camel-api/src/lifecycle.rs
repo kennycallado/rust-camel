@@ -49,6 +49,10 @@ pub trait Lifecycle: Send + Sync {
         None
     }
 
+    fn as_function_invoker(&self) -> Option<Arc<dyn crate::function::FunctionInvoker>> {
+        None
+    }
+
     /// Current status of the service.
     fn status(&self) -> ServiceStatus {
         ServiceStatus::Stopped

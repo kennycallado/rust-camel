@@ -12,6 +12,7 @@ pub mod error_handler;
 pub mod exchange;
 pub mod filter;
 pub mod from_body;
+pub mod function;
 pub mod health;
 pub mod lifecycle;
 pub mod load_balancer;
@@ -55,6 +56,10 @@ pub use error_handler::ExponentialBackoff;
 pub use exchange::{Exchange, ExchangePattern};
 pub use filter::FilterPredicate;
 pub use from_body::FromBody;
+pub use function::{
+    ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId, FunctionInvocationError,
+    FunctionInvoker, FunctionInvokerSync, PatchBody,
+};
 pub use health::{HealthChecker, HealthReport, HealthSource, ServiceHealth};
 pub use lifecycle::{HealthStatus, Lifecycle, ServiceStatus};
 pub use load_balancer::{LoadBalanceStrategy, LoadBalancerConfig};

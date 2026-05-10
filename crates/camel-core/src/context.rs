@@ -8,9 +8,9 @@ use tracing::{info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    CamelError, HealthReport, HealthStatus, Lifecycle, MetricsCollector, NoOpMetrics,
-    NoopPlatformService, PlatformIdentity, PlatformService, ReadinessGate, RuntimeCommandBus,
-    RuntimeQueryBus, ServiceHealth, ServiceStatus, SupervisionConfig,
+    CamelError, FunctionInvoker, HealthReport, HealthStatus, Lifecycle, MetricsCollector,
+    NoOpMetrics, NoopPlatformService, PlatformIdentity, PlatformService, ReadinessGate,
+    RuntimeCommandBus, RuntimeQueryBus, ServiceHealth, ServiceStatus, SupervisionConfig,
 };
 use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;
@@ -40,6 +40,8 @@ pub struct CamelContextBuilder {
     runtime_store: Option<crate::lifecycle::adapters::InMemoryRuntimeStore>,
     shutdown_timeout: std::time::Duration,
     beans: Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>,
+    function_invoker: Option<Arc<dyn FunctionInvoker>>,
+    lifecycle_services: Vec<Box<dyn Lifecycle>>,
 }
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
@@ -63,6 +65,7 @@ pub struct CamelContext {
     shutdown_timeout: std::time::Duration,
     services: Vec<Box<dyn Lifecycle>>,
     component_configs: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    function_invoker: Option<Arc<dyn FunctionInvoker>>,
 }
 
 /// Opaque handle for runtime side-effect execution operations.
@@ -72,6 +75,7 @@ pub struct CamelContext {
 pub struct RuntimeExecutionHandle {
     controller: RouteControllerHandle,
     runtime: Arc<RuntimeBus>,
+    function_invoker: Option<Arc<dyn FunctionInvoker>>,
 }
 
 impl RuntimeExecutionHandle {
@@ -88,6 +92,49 @@ impl RuntimeExecutionHandle {
         definition: RouteDefinition,
     ) -> Result<camel_api::BoxProcessor, CamelError> {
         self.controller.compile_route_definition(definition).await
+    }
+
+    pub(crate) async fn compile_route_definition_with_generation(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<camel_api::BoxProcessor, CamelError> {
+        self.controller
+            .compile_route_definition_with_generation(definition, generation)
+            .await
+    }
+
+    pub(crate) async fn prepare_route_definition_with_generation(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<crate::lifecycle::adapters::route_controller::PreparedRoute, CamelError> {
+        self.controller
+            .prepare_route_definition_with_generation(definition, generation)
+            .await
+    }
+
+    pub(crate) async fn insert_prepared_route(
+        &self,
+        prepared: crate::lifecycle::adapters::route_controller::PreparedRoute,
+    ) -> Result<(), CamelError> {
+        self.controller.insert_prepared_route(prepared).await
+    }
+
+    pub(crate) async fn remove_route_preserving_functions(
+        &self,
+        route_id: String,
+    ) -> Result<(), CamelError> {
+        self.controller
+            .remove_route_preserving_functions(route_id)
+            .await
+    }
+
+    pub(crate) async fn register_route_aggregate(
+        &self,
+        route_id: String,
+    ) -> Result<(), CamelError> {
+        self.runtime.register_aggregate_only(route_id).await
     }
 
     pub(crate) async fn swap_route_pipeline(
@@ -151,6 +198,10 @@ impl RuntimeExecutionHandle {
             .in_flight_count(route_id)
             .await?
             .unwrap_or(0))
+    }
+
+    pub(crate) fn function_invoker(&self) -> Option<Arc<dyn FunctionInvoker>> {
+        self.function_invoker.clone()
     }
 
     #[cfg(test)]
@@ -269,10 +320,22 @@ impl CamelContext {
     }
 
     /// Register a lifecycle service (Apache Camel: addService pattern)
+    ///
+    /// For services exposing `as_function_invoker()`, the invoker is propagated
+    /// to the route controller so that subsequent route definitions with function
+    /// steps work correctly.
+    ///
+    /// Prefer [`CamelContextBuilder::with_lifecycle`] when possible, which wires
+    /// the invoker at build time before any routes are added.
     pub fn with_lifecycle<L: Lifecycle + 'static>(mut self, service: L) -> Self {
-        // Auto-register MetricsCollector if available
         if let Some(collector) = service.as_metrics_collector() {
             self.metrics = collector;
+        }
+        if let Some(invoker) = service.as_function_invoker() {
+            self.function_invoker = Some(invoker.clone());
+            if let Err(e) = self.route_controller.try_set_function_invoker(invoker) {
+                tracing::warn!("Failed to propagate function invoker to route controller: {e}");
+            }
         }
 
         self.services.push(Box::new(service));
@@ -358,6 +421,7 @@ impl CamelContext {
         RuntimeExecutionHandle {
             controller: self.route_controller.clone(),
             runtime: Arc::clone(&self.runtime),
+            function_invoker: self.function_invoker.clone(),
         }
     }
 
@@ -636,6 +700,8 @@ impl CamelContextBuilder {
             runtime_store: None,
             shutdown_timeout: std::time::Duration::from_secs(30),
             beans: None,
+            function_invoker: None,
+            lifecycle_services: Vec::new(),
         }
     }
 
@@ -684,6 +750,22 @@ impl CamelContextBuilder {
         self
     }
 
+    /// Register a lifecycle service (e.g., FunctionRuntimeService) at builder time.
+    ///
+    /// This is the recommended path for services that need to be wired into the
+    /// route controller before any routes are added. The function invoker (if any)
+    /// is extracted and passed to the `DefaultRouteController` during `build()`.
+    pub fn with_lifecycle<L: Lifecycle + 'static>(mut self, service: L) -> Self {
+        if let Some(collector) = service.as_metrics_collector() {
+            self.metrics = Some(collector);
+        }
+        if let Some(invoker) = service.as_function_invoker() {
+            self.function_invoker = Some(invoker);
+        }
+        self.lifecycle_services.push(Box::new(service));
+        self
+    }
+
     pub async fn build(self) -> Result<CamelContext, CamelError> {
         let registry = self
             .registry
@@ -728,6 +810,9 @@ impl CamelContextBuilder {
                         Arc::clone(&platform_service),
                     )
                 };
+                if let Some(invoker) = self.function_invoker.clone() {
+                    controller_impl = controller_impl.with_function_invoker(invoker);
+                }
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 let supervision_join = spawn_supervision_task(
@@ -738,7 +823,7 @@ impl CamelContextBuilder {
                 );
                 (controller, actor_join, Some(supervision_join))
             } else {
-                let controller_impl = if let Some(ref beans) = self.beans {
+                let mut controller_impl = if let Some(ref beans) = self.beans {
                     DefaultRouteController::with_languages_and_beans(
                         Arc::clone(&registry),
                         Arc::clone(&languages),
@@ -752,6 +837,9 @@ impl CamelContextBuilder {
                         Arc::clone(&platform_service),
                     )
                 };
+                if let Some(invoker) = self.function_invoker.clone() {
+                    controller_impl = controller_impl.with_function_invoker(invoker);
+                }
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)
             };
@@ -774,8 +862,9 @@ impl CamelContextBuilder {
             platform_service,
             languages,
             shutdown_timeout: self.shutdown_timeout,
-            services: Vec::new(),
+            services: self.lifecycle_services,
             component_configs: HashMap::new(),
+            function_invoker: self.function_invoker,
         })
     }
 }

@@ -45,6 +45,8 @@ enum Commands {
         #[arg(long)]
         no_cache: bool,
     },
+    /// Generate canonical route spec artifacts (JSON Schema, TypeScript types)
+    Schema,
 }
 
 fn main() {
@@ -64,6 +66,12 @@ fn main() {
         }
         Commands::BuildCxfBridge { version, no_cache } => {
             if let Err(e) = build_cxf_bridge(version, no_cache) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Schema => {
+            if let Err(e) = generate_schema() {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -373,6 +381,50 @@ pub fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn generate_schema() -> Result<(), String> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root =
+        find_workspace_root_from(&manifest_dir).ok_or("Cannot locate workspace root")?;
+    let schemas_dir = workspace_root.join("schemas");
+    std::fs::create_dir_all(&schemas_dir)
+        .map_err(|e| format!("Failed to create schemas dir: {e}"))?;
+
+    let schema = schemars::schema_for!(camel_api::CanonicalRouteSpec);
+    let schema_json = serde_json::to_string_pretty(&schema)
+        .map_err(|e| format!("Failed to serialize schema: {e}"))?;
+    let schema_path = schemas_dir.join("canonical-route-spec.json");
+    std::fs::write(&schema_path, &schema_json)
+        .map_err(|e| format!("Failed to write schema: {e}"))?;
+    println!("Generated: {}", schema_path.display());
+
+    let ts_dir = schemas_dir.join("ts");
+    std::fs::create_dir_all(&ts_dir).map_err(|e| format!("Failed to create ts dir: {e}"))?;
+
+    let ts_config = ts_rs::Config::new().with_out_dir(&ts_dir);
+    <camel_api::CanonicalRouteSpec as ts_rs::TS>::export(&ts_config)
+        .map_err(|e| format!("Failed to export CanonicalRouteSpec: {e}"))?;
+    <camel_api::runtime::CanonicalStepSpec as ts_rs::TS>::export(&ts_config)
+        .map_err(|e| format!("Failed to export CanonicalStepSpec: {e}"))?;
+    <camel_api::runtime::CanonicalWhenSpec as ts_rs::TS>::export(&ts_config)
+        .map_err(|e| format!("Failed to export CanonicalWhenSpec: {e}"))?;
+    <camel_api::runtime::CanonicalCircuitBreakerSpec as ts_rs::TS>::export(&ts_config)
+        .map_err(|e| format!("Failed to export CanonicalCircuitBreakerSpec: {e}"))?;
+    <camel_api::runtime::CanonicalSplitExpressionSpec as ts_rs::TS>::export(&ts_config)
+        .map_err(|e| format!("Failed to export CanonicalSplitExpressionSpec: {e}"))?;
+    <camel_api::runtime::CanonicalSplitAggregationSpec as ts_rs::TS>::export(&ts_config)
+        .map_err(|e| format!("Failed to export CanonicalSplitAggregationSpec: {e}"))?;
+    <camel_api::runtime::CanonicalAggregateStrategySpec as ts_rs::TS>::export(&ts_config)
+        .map_err(|e| format!("Failed to export CanonicalAggregateStrategySpec: {e}"))?;
+    <camel_api::runtime::CanonicalAggregateSpec as ts_rs::TS>::export(&ts_config)
+        .map_err(|e| format!("Failed to export CanonicalAggregateSpec: {e}"))?;
+    <camel_api::declarative::LanguageExpressionDef as ts_rs::TS>::export(&ts_config)
+        .map_err(|e| format!("Failed to export LanguageExpressionDef: {e}"))?;
+    println!("Generated TypeScript types in: {}", ts_dir.display());
+
+    println!("Done! Run `quicktype` manually for Go/Python types.");
+    Ok(())
 }
 
 fn sha256_hex(data: &[u8]) -> String {

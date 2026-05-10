@@ -1,6 +1,6 @@
 use crate::error::CamelError;
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 
 fn check_root_element(depth: usize, root_count: &mut usize) -> Result<(), CamelError> {
     if depth == 0 {

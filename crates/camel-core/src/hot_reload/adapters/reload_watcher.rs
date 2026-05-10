@@ -1,6 +1,6 @@
 //! File-watching hot-reload loop.
 //!
-//! Watches YAML route files for changes and triggers pipeline reloads.
+//! Watches YAML/JSON route files for changes and triggers pipeline reloads.
 //!
 //! # Circular dependency avoidance
 //!
@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use camel_api::CamelError;
 
 use crate::context::RuntimeExecutionHandle;
+use crate::hot_reload::application::reload::FunctionReloadContext;
 use crate::hot_reload::application::{
     compute_reload_actions_from_runtime_snapshot, execute_reload_actions,
 };
@@ -219,7 +220,21 @@ where
 
         tracing::info!("hot-reload: applying {} reload action(s)", actions.len());
 
-        let errors = execute_reload_actions(actions, new_defs, &controller, drain_timeout).await;
+        let function_ctx = controller.function_invoker().map(|invoker| {
+            let generation = invoker.begin_reload();
+            FunctionReloadContext {
+                invoker,
+                generation,
+            }
+        });
+        let errors = execute_reload_actions(
+            actions,
+            new_defs,
+            &controller,
+            drain_timeout,
+            function_ctx.as_ref(),
+        )
+        .await;
         for err in &errors {
             tracing::warn!(
                 "hot-reload: error on route '{}' ({}): {}",
@@ -233,12 +248,12 @@ where
 
 /// Returns `true` if this notify event should trigger a reload.
 ///
-/// Only events affecting `.yaml` or `.yml` files are considered, to avoid
+/// Only events affecting `.yaml`, `.yml`, or `.json` files are considered, to avoid
 /// triggering reloads on editor swap files (`.swp`, `~`, `.tmp`, etc.).
 fn is_reload_event(event: &Event) -> bool {
     let has_yaml = event.paths.iter().any(|p| {
         p.extension()
-            .map(|e| e == "yaml" || e == "yml")
+            .map(|e| e == "yaml" || e == "yml" || e == "json")
             .unwrap_or(false)
     });
     has_yaml
@@ -287,4 +302,68 @@ pub fn resolve_watch_dirs(patterns: &[String]) -> Vec<PathBuf> {
     }
 
     dirs.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use notify::{Event, EventKind};
+
+    use super::is_reload_event;
+
+    fn make_event(paths: &[&str], kind: EventKind) -> Event {
+        Event {
+            kind,
+            paths: paths.iter().map(PathBuf::from).collect(),
+            attrs: Default::default(),
+        }
+    }
+
+    #[test]
+    fn is_reload_event_accepts_yaml() {
+        let ev = make_event(
+            &["routes/test.yaml"],
+            EventKind::Create(notify::event::CreateKind::File),
+        );
+        assert!(is_reload_event(&ev));
+    }
+
+    #[test]
+    fn is_reload_event_accepts_yml() {
+        let ev = make_event(
+            &["routes/test.yml"],
+            EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )),
+        );
+        assert!(is_reload_event(&ev));
+    }
+
+    #[test]
+    fn is_reload_event_accepts_json() {
+        let ev = make_event(
+            &["routes/test.json"],
+            EventKind::Create(notify::event::CreateKind::File),
+        );
+        assert!(is_reload_event(&ev));
+    }
+
+    #[test]
+    fn is_reload_event_rejects_other_extensions() {
+        let ev = make_event(
+            &["routes/test.toml"],
+            EventKind::Create(notify::event::CreateKind::File),
+        );
+        assert!(!is_reload_event(&ev));
+    }
+
+    #[test]
+    fn is_reload_event_rejects_swap_files() {
+        let ev = make_event(
+            &["routes/.test.yaml.swp"],
+            EventKind::Create(notify::event::CreateKind::File),
+        );
+        assert!(!is_reload_event(&ev));
+    }
 }

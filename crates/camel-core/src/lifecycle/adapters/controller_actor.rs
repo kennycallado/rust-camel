@@ -3,13 +3,14 @@ use std::time::Instant;
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    BoxProcessor, CamelError, MetricsCollector, RouteController, RuntimeHandle, SupervisionConfig,
+    BoxProcessor, CamelError, FunctionInvoker, MetricsCollector, RouteController, RuntimeHandle,
+    SupervisionConfig,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
-use super::route_controller::{CrashNotification, DefaultRouteController};
+use super::route_controller::{CrashNotification, DefaultRouteController, PreparedRoute};
 use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::shared::observability::domain::TracerConfig;
 
@@ -57,6 +58,24 @@ pub(crate) enum RouteControllerCommand {
         definition: RouteDefinition,
         reply: oneshot::Sender<Result<BoxProcessor, CamelError>>,
     },
+    CompileRouteDefinitionWithGeneration {
+        definition: RouteDefinition,
+        generation: u64,
+        reply: oneshot::Sender<Result<BoxProcessor, CamelError>>,
+    },
+    PrepareRouteDefinitionWithGeneration {
+        definition: RouteDefinition,
+        generation: u64,
+        reply: oneshot::Sender<Result<PreparedRoute, CamelError>>,
+    },
+    InsertPreparedRoute {
+        prepared: PreparedRoute,
+        reply: oneshot::Sender<Result<(), CamelError>>,
+    },
+    RemoveRoutePreservingFunctions {
+        route_id: String,
+        reply: oneshot::Sender<Result<(), CamelError>>,
+    },
     RouteFromUri {
         route_id: String,
         reply: oneshot::Sender<Option<String>>,
@@ -101,6 +120,9 @@ pub(crate) enum RouteControllerCommand {
     },
     SetRuntimeHandle {
         runtime: Arc<dyn RuntimeHandle>,
+    },
+    SetFunctionInvoker {
+        invoker: Arc<dyn FunctionInvoker>,
     },
     RouteSourceHash {
         route_id: String,
@@ -262,6 +284,82 @@ impl RouteControllerHandle {
         self.tx
             .send(RouteControllerCommand::CompileRouteDefinition {
                 definition,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+    }
+
+    pub async fn compile_route_definition_with_generation(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<BoxProcessor, CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(
+                RouteControllerCommand::CompileRouteDefinitionWithGeneration {
+                    definition,
+                    generation,
+                    reply: reply_tx,
+                },
+            )
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+    }
+
+    pub(crate) async fn prepare_route_definition_with_generation(
+        &self,
+        definition: RouteDefinition,
+        generation: u64,
+    ) -> Result<PreparedRoute, CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(
+                RouteControllerCommand::PrepareRouteDefinitionWithGeneration {
+                    definition,
+                    generation,
+                    reply: reply_tx,
+                },
+            )
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+    }
+
+    pub(crate) async fn insert_prepared_route(
+        &self,
+        prepared: PreparedRoute,
+    ) -> Result<(), CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::InsertPreparedRoute {
+                prepared,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor dropped reply".into()))?
+    }
+
+    pub async fn remove_route_preserving_functions(
+        &self,
+        route_id: String,
+    ) -> Result<(), CamelError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(RouteControllerCommand::RemoveRoutePreservingFunctions {
+                route_id,
                 reply: reply_tx,
             })
             .await
@@ -443,6 +541,27 @@ impl RouteControllerHandle {
             })
     }
 
+    pub async fn set_function_invoker(
+        &self,
+        invoker: Arc<dyn FunctionInvoker>,
+    ) -> Result<(), CamelError> {
+        self.tx
+            .send(RouteControllerCommand::SetFunctionInvoker { invoker })
+            .await
+            .map_err(|_| CamelError::ProcessorError("controller actor stopped".into()))
+    }
+
+    pub fn try_set_function_invoker(
+        &self,
+        invoker: Arc<dyn FunctionInvoker>,
+    ) -> Result<(), CamelError> {
+        self.tx
+            .try_send(RouteControllerCommand::SetFunctionInvoker { invoker })
+            .map_err(|err| {
+                CamelError::ProcessorError(format!("controller actor mailbox full: {err}"))
+            })
+    }
+
     pub async fn route_source_hash(&self, route_id: impl Into<String>) -> Option<u64> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -493,10 +612,10 @@ pub fn spawn_controller_actor(
                     let _ = reply.send(controller.stop_all_routes().await);
                 }
                 RouteControllerCommand::AddRoute { definition, reply } => {
-                    let _ = reply.send(controller.add_route(definition));
+                    let _ = reply.send(controller.add_route(definition).await);
                 }
                 RouteControllerCommand::RemoveRoute { route_id, reply } => {
-                    let _ = reply.send(controller.remove_route(&route_id));
+                    let _ = reply.send(controller.remove_route(&route_id).await);
                 }
                 RouteControllerCommand::SwapPipeline {
                     route_id,
@@ -507,6 +626,34 @@ pub fn spawn_controller_actor(
                 }
                 RouteControllerCommand::CompileRouteDefinition { definition, reply } => {
                     let _ = reply.send(controller.compile_route_definition(definition));
+                }
+                RouteControllerCommand::CompileRouteDefinitionWithGeneration {
+                    definition,
+                    generation,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        controller.compile_route_definition_with_generation(definition, generation),
+                    );
+                }
+                RouteControllerCommand::PrepareRouteDefinitionWithGeneration {
+                    definition,
+                    generation,
+                    reply,
+                } => {
+                    let _ = reply.send(
+                        controller.prepare_route_definition_with_generation(definition, generation),
+                    );
+                }
+                RouteControllerCommand::InsertPreparedRoute { prepared, reply } => {
+                    let _ = reply.send(controller.insert_prepared_route(prepared));
+                }
+                RouteControllerCommand::RemoveRoutePreservingFunctions { route_id, reply } => {
+                    let _ = reply.send(
+                        controller
+                            .remove_route_preserving_functions(&route_id)
+                            .await,
+                    );
                 }
                 RouteControllerCommand::RouteFromUri { route_id, reply } => {
                     let _ = reply.send(controller.route_from_uri(&route_id));
@@ -546,6 +693,9 @@ pub fn spawn_controller_actor(
                 }
                 RouteControllerCommand::SetRuntimeHandle { runtime } => {
                     controller.set_runtime_handle(runtime);
+                }
+                RouteControllerCommand::SetFunctionInvoker { invoker } => {
+                    controller.set_function_invoker(invoker);
                 }
                 RouteControllerCommand::RouteSourceHash { route_id, reply } => {
                     let _ = reply.send(controller.route_source_hash(&route_id));

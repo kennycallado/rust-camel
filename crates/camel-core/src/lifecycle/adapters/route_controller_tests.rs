@@ -71,22 +71,24 @@ fn helper_functions_cover_non_async_branches() {
     }
 }
 
-#[test]
-fn add_route_detects_duplicates() {
+#[tokio::test]
+async fn add_route_detects_duplicates() {
     let mut controller = build_controller();
 
     controller
         .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
+        .await
         .expect("add route");
 
     let dup_err = controller
         .add_route(RouteDefinition::new("timer:tick", vec![]).with_route_id("r1"))
+        .await
         .expect_err("duplicate must fail");
     assert!(dup_err.to_string().contains("already exists"));
 }
 
-#[test]
-fn route_introspection_and_ordering_helpers_work() {
+#[tokio::test]
+async fn route_introspection_and_ordering_helpers_work() {
     let mut controller = build_controller();
 
     controller
@@ -95,6 +97,7 @@ fn route_introspection_and_ordering_helpers_work() {
                 .with_route_id("a")
                 .with_startup_order(20),
         )
+        .await
         .unwrap();
     controller
         .add_route(
@@ -102,6 +105,7 @@ fn route_introspection_and_ordering_helpers_work() {
                 .with_route_id("b")
                 .with_startup_order(10),
         )
+        .await
         .unwrap();
     controller
         .add_route(
@@ -110,6 +114,7 @@ fn route_introspection_and_ordering_helpers_work() {
                 .with_auto_startup(false)
                 .with_startup_order(5),
         )
+        .await
         .unwrap();
 
     assert_eq!(controller.route_count(), 3);
@@ -125,12 +130,13 @@ fn route_introspection_and_ordering_helpers_work() {
     );
 }
 
-#[test]
-fn swap_pipeline_and_remove_route_behaviors() {
+#[tokio::test]
+async fn swap_pipeline_and_remove_route_behaviors() {
     let mut controller = build_controller();
 
     controller
         .add_route(RouteDefinition::new("timer:a", vec![]).with_route_id("swap"))
+        .await
         .unwrap();
 
     controller
@@ -138,11 +144,12 @@ fn swap_pipeline_and_remove_route_behaviors() {
         .unwrap();
     assert!(controller.get_pipeline("swap").is_some());
 
-    controller.remove_route("swap").unwrap();
+    controller.remove_route("swap").await.unwrap();
     assert_eq!(controller.route_count(), 0);
 
     let err = controller
         .remove_route("swap")
+        .await
         .expect_err("missing route must fail");
     assert!(err.to_string().contains("not found"));
 }
@@ -258,7 +265,13 @@ fn resolve_steps_covers_declarative_and_eip_variants() {
 
     let producer_ctx = ProducerContext::new();
     let resolved = controller
-        .resolve_steps(steps, &producer_ctx, &controller.registry)
+        .resolve_steps(
+            steps,
+            &producer_ctx,
+            &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
+        )
         .expect("resolve should succeed");
     assert!(!resolved.is_empty());
 }
@@ -276,7 +289,13 @@ fn resolve_steps_script_requires_mutating_language_support() {
     }];
 
     let err = controller
-        .resolve_steps(steps, &ProducerContext::new(), &controller.registry)
+        .resolve_steps(
+            steps,
+            &ProducerContext::new(),
+            &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
+        )
         .expect_err("simple script should fail for mutating expression");
     assert!(err.to_string().contains("does not support"));
 
@@ -285,7 +304,13 @@ fn resolve_steps_script_requires_mutating_language_support() {
         method: "run".into(),
     }];
     let bean_err = controller
-        .resolve_steps(bean_missing, &ProducerContext::new(), &controller.registry)
+        .resolve_steps(
+            bean_missing,
+            &ProducerContext::new(),
+            &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
+        )
         .expect_err("missing bean must fail");
     assert!(bean_err.to_string().contains("Bean not found"));
 
@@ -300,6 +325,8 @@ fn resolve_steps_script_requires_mutating_language_support() {
             bad_declarative,
             &ProducerContext::new(),
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect_err("unknown language must fail");
     assert!(lang_err.to_string().contains("not registered"));
@@ -324,13 +351,13 @@ async fn start_stop_route_happy_path_with_timer_and_mock() {
         vec![BuilderStep::To("mock:out".into())],
     )
     .with_route_id("rt-1");
-    controller.add_route(route).unwrap();
+    controller.add_route(route).await.unwrap();
 
     controller.start_route("rt-1").await.unwrap();
     tokio::time::sleep(Duration::from_millis(40)).await;
     controller.stop_route("rt-1").await.unwrap();
 
-    controller.remove_route("rt-1").unwrap();
+    controller.remove_route("rt-1").await.unwrap();
 }
 
 #[tokio::test]
@@ -352,6 +379,7 @@ async fn start_route_spawns_pipeline_before_consumer_for_eager_consumers() {
             )
             .with_route_id("startup-order"),
         )
+        .await
         .unwrap();
 
     controller.start_route("startup-order").await.unwrap();
@@ -383,7 +411,7 @@ async fn suspend_resume_and_restart_cover_execution_transitions() {
         vec![BuilderStep::To("mock:out".into())],
     )
     .with_route_id("rt-2");
-    controller.add_route(route).unwrap();
+    controller.add_route(route).await.unwrap();
 
     controller.start_route("rt-2").await.unwrap();
     controller.suspend_route("rt-2").await.unwrap();
@@ -401,16 +429,17 @@ async fn remove_route_rejects_running_route() {
         vec![BuilderStep::To("mock:out".into())],
     )
     .with_route_id("rt-running");
-    controller.add_route(route).unwrap();
+    controller.add_route(route).await.unwrap();
     controller.start_route("rt-running").await.unwrap();
 
     let err = controller
         .remove_route("rt-running")
+        .await
         .expect_err("running route removal must fail");
     assert!(err.to_string().contains("must be stopped before removal"));
 
     controller.stop_route("rt-running").await.unwrap();
-    controller.remove_route("rt-running").unwrap();
+    controller.remove_route("rt-running").await.unwrap();
 }
 
 #[tokio::test]
@@ -422,7 +451,7 @@ async fn start_route_on_suspended_state_returns_guidance_error() {
         vec![BuilderStep::To("mock:out".into())],
     )
     .with_route_id("rt-suspend");
-    controller.add_route(route).unwrap();
+    controller.add_route(route).await.unwrap();
 
     controller.start_route("rt-suspend").await.unwrap();
     controller.suspend_route("rt-suspend").await.unwrap();
@@ -443,6 +472,7 @@ async fn suspend_and_resume_validate_execution_state() {
 
     controller
         .add_route(RouteDefinition::new("timer:tick?period=50", vec![]).with_route_id("rt-state"))
+        .await
         .unwrap();
 
     let suspend_err = controller
@@ -472,7 +502,7 @@ async fn concurrent_concurrency_override_path_executes() {
     .with_route_id("rt-concurrent")
     .with_concurrency(ConcurrencyModel::Concurrent { max: Some(2) });
 
-    controller.add_route(route).unwrap();
+    controller.add_route(route).await.unwrap();
     controller.start_route("rt-concurrent").await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     controller.stop_route("rt-concurrent").await.unwrap();
@@ -492,6 +522,7 @@ async fn add_route_with_circuit_breaker_and_error_handler_compiles() {
 
     controller
         .add_route(route)
+        .await
         .expect("route with layers should compile");
     controller.start_route("rt-eh").await.unwrap();
     controller.stop_route("rt-eh").await.unwrap();
@@ -532,6 +563,8 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             vec![BuilderStep::Processor(BoxProcessor::new(IdentityProcessor))],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect("processor step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -543,6 +576,8 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect("delay step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -554,6 +589,8 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect("declarative set body null should resolve");
     assert_eq!(resolved.len(), 1);
@@ -565,6 +602,8 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect("declarative set body string should resolve");
     assert_eq!(resolved.len(), 1);
@@ -576,6 +615,8 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect("declarative set body json should resolve");
     assert_eq!(resolved.len(), 1);
@@ -587,6 +628,8 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect("routing slip step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -601,6 +644,8 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect("declarative routing slip step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -614,6 +659,8 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect("recipient list step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -630,6 +677,8 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect("declarative recipient list step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -645,6 +694,8 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect("declarative dynamic router step should resolve");
     assert_eq!(resolved.len(), 1);
@@ -714,6 +765,8 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             vec![BuilderStep::To("missing:out".into())],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect_err("unknown scheme in to should fail");
     assert!(err.to_string().contains("missing"));
@@ -725,6 +778,8 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect_err("unknown scheme in wiretap should fail");
     assert!(err.to_string().contains("missing"));
@@ -740,6 +795,8 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect_err("unknown language in declarative filter should fail");
     assert!(err.to_string().contains("not registered"));
@@ -760,6 +817,8 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect_err("unknown language in declarative choice should fail");
     assert!(err.to_string().contains("not registered"));
@@ -775,6 +834,8 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect_err("unknown language in declarative log should fail");
     assert!(err.to_string().contains("not registered"));
@@ -789,6 +850,8 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
             }],
             &producer_ctx,
             &controller.registry,
+            None,
+            &crate::lifecycle::adapters::step_resolution::FunctionStagingMode::DirectAdd,
         )
         .expect_err("declarative script generic language error should fail");
     assert!(
@@ -819,5 +882,181 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
     assert!(
         err.to_string()
             .contains("failed to compile simple expression `${unknown}`")
+    );
+}
+
+#[tokio::test]
+async fn compile_route_definition_does_not_contaminate_staging_for_later_add_route() {
+    use camel_api::{FunctionDefinition, FunctionId, Lifecycle};
+    use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
+    use camel_function::{FunctionConfig, FunctionRuntimeService};
+
+    let provider = std::sync::Arc::new(FakeProvider::new(FakeProviderConfig::default()));
+    let mut service =
+        FunctionRuntimeService::with_fake_provider(FunctionConfig::default(), provider.clone());
+    Lifecycle::start(&mut service).await.unwrap();
+    let invoker = service.invoker();
+
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let mut controller = DefaultRouteController::new(
+        Arc::clone(&registry),
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+    controller.set_function_invoker(invoker.clone());
+
+    let compile_fn_id = FunctionId::compute("deno", "compile-only", 5000);
+    let compile_def = RouteDefinition::new(
+        "timer:tick",
+        vec![BuilderStep::DeclarativeFunction {
+            definition: FunctionDefinition {
+                id: compile_fn_id.clone(),
+                runtime: "fake".into(),
+                source: "compile-only".into(),
+                timeout_ms: 5000,
+                route_id: None,
+                step_index: None,
+            },
+        }],
+    )
+    .with_route_id("compile-route");
+
+    let _pipeline = controller.compile_route_definition(compile_def).unwrap();
+
+    let real_fn_id = FunctionId::compute("deno", "real-function", 5000);
+    let add_def = RouteDefinition::new(
+        "timer:tick",
+        vec![BuilderStep::DeclarativeFunction {
+            definition: FunctionDefinition {
+                id: real_fn_id.clone(),
+                runtime: "fake".into(),
+                source: "real-function".into(),
+                timeout_ms: 5000,
+                route_id: None,
+                step_index: None,
+            },
+        }],
+    )
+    .with_route_id("real-route");
+
+    controller.add_route(add_def).await.unwrap();
+
+    let register_calls: Vec<_> = provider
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|c| match c {
+            FakeCall::Register(_, id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        register_calls.len(),
+        1,
+        "only real-route function should be registered via provider"
+    );
+    assert_eq!(
+        register_calls[0], real_fn_id,
+        "compile_route_definition's function must NOT leak into register calls"
+    );
+}
+
+#[tokio::test]
+async fn failed_add_route_discards_direct_add_function_staging() {
+    use camel_api::{FunctionDefinition, FunctionId, Lifecycle};
+    use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
+    use camel_function::{FunctionConfig, FunctionRuntimeService};
+
+    let provider = std::sync::Arc::new(FakeProvider::new(FakeProviderConfig::default()));
+    let mut service =
+        FunctionRuntimeService::with_fake_provider(FunctionConfig::default(), provider.clone());
+    Lifecycle::start(&mut service).await.unwrap();
+    let invoker = service.invoker();
+
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("registry lock");
+        guard.register(std::sync::Arc::new(
+            camel_component_timer::TimerComponent::new(),
+        ));
+        guard.register(std::sync::Arc::new(
+            camel_component_mock::MockComponent::new(),
+        ));
+    }
+    let mut controller = DefaultRouteController::new(
+        Arc::clone(&registry),
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+    controller.set_function_invoker(invoker.clone());
+
+    let failed_fn_id = FunctionId::compute("deno", "fn-failed-route", 5000);
+    let failed_def = RouteDefinition::new(
+        "timer:tick?period=1s",
+        vec![
+            BuilderStep::DeclarativeFunction {
+                definition: FunctionDefinition {
+                    id: failed_fn_id.clone(),
+                    runtime: "fake".into(),
+                    source: "fn-failed-route".into(),
+                    timeout_ms: 5000,
+                    route_id: None,
+                    step_index: None,
+                },
+            },
+            BuilderStep::To("unknown:out".into()),
+        ],
+    )
+    .with_route_id("failed-route");
+
+    let err = controller
+        .add_route(failed_def)
+        .await
+        .expect_err("failed route must return error");
+    assert!(!err.to_string().is_empty());
+
+    let failed_staged = invoker.staged_refs_for_route("failed-route", 0);
+    assert!(
+        failed_staged.is_empty(),
+        "failed-route staging[0] must be discarded, got: {:?}",
+        failed_staged
+    );
+
+    let valid_fn_id = FunctionId::compute("deno", "fn-valid-route", 5000);
+    let valid_def = RouteDefinition::new(
+        "timer:tick?period=1s",
+        vec![BuilderStep::DeclarativeFunction {
+            definition: FunctionDefinition {
+                id: valid_fn_id.clone(),
+                runtime: "fake".into(),
+                source: "fn-valid-route".into(),
+                timeout_ms: 5000,
+                route_id: None,
+                step_index: None,
+            },
+        }],
+    )
+    .with_route_id("valid-route");
+
+    controller.add_route(valid_def).await.unwrap();
+
+    let register_calls: Vec<_> = provider
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|c| match c {
+            FakeCall::Register(_, id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        register_calls.contains(&valid_fn_id),
+        "valid-route function must be registered"
+    );
+    assert!(
+        !register_calls.contains(&failed_fn_id),
+        "failed-route function must not be registered"
     );
 }

@@ -17,6 +17,7 @@ bytes.workspace = true
 chrono = { workspace = true }
 futures = { workspace = true }
 rand.workspace = true
+blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -26,6 +27,8 @@ tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
 opentelemetry = { workspace = true }
 quick-xml = { workspace = true }
+schemars.workspace = true
+ts-rs.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

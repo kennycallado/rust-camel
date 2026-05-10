@@ -12,6 +12,7 @@ members = [
     "crates/camel-processor",
     "crates/camel-health",
     "crates/services/camel-bridge",
+    "crates/services/camel-function",
     "crates/camel-config",
     "crates/camel-dsl",
     "crates/camel-builder",
@@ -98,6 +99,7 @@ members = [
     "examples/validator",
     "examples/xslt-example",
     "examples/xj-example",
+    "examples/function-deno-enrich",
     "examples/bean-demo",
     "examples/prometheus-demo",
     "examples/health-demo",
@@ -154,6 +156,7 @@ camel-support = { path = "crates/camel-support", version = "=0.8.2" }
 camel-processor = { path = "crates/camel-processor", version = "=0.8.2" }
 camel-health = { path = "crates/camel-health", version = "=0.8.2" }
 camel-bridge = { path = "crates/services/camel-bridge", version = "=0.8.2" }
+camel-function = { path = "crates/services/camel-function", version = "=0.8.2" }
 camel-dsl = { path = "crates/camel-dsl", version = "=0.8.2" }
 camel-builder = { path = "crates/camel-builder", version = "=0.8.2" }
 camel-component-api = { path = "crates/components/camel-component-api", version = "=0.8.2" }
@@ -214,6 +217,7 @@ tracing = "0.1"
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 tokio-stream = "0.1"
 dashmap = "6"
+blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 kube = { version = "3", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.27", features = ["v1_31"] }
@@ -252,6 +256,8 @@ sxd-document = "0.3"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
 serde_yml = "0.0.12"
 toml = "1"
+schemars = "1"
+ts-rs = "12"
 
 # WASM dependencies
 wit-bindgen = "0.57"

@@ -825,9 +825,9 @@ fn canonicalize_step(step: BuilderStep) -> Result<CanonicalStepSpec, CamelError>
             stop_on_exception,
             steps: canonicalize_steps(steps)?,
         }),
-        BuilderStep::Aggregate { config } => Ok(CanonicalStepSpec::Aggregate {
-            config: canonicalize_aggregate(config)?,
-        }),
+        BuilderStep::Aggregate { config } => Ok(CanonicalStepSpec::Aggregate(
+            canonicalize_aggregate(config)?,
+        )),
         other => {
             let step_name = canonical_step_name(&other);
             let detail = camel_api::canonical_contract_rejection_reason(step_name)
@@ -959,6 +959,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::DeclarativeFilter { .. } => "filter",
         BuilderStep::DeclarativeChoice { .. } => "choice",
         BuilderStep::DeclarativeScript { .. } => "script",
+        BuilderStep::DeclarativeFunction { .. } => "function",
         BuilderStep::DeclarativeSplit { .. } => "split",
         BuilderStep::Split { .. } => "split",
         BuilderStep::Loop { .. } | BuilderStep::DeclarativeLoop { .. } => "loop",

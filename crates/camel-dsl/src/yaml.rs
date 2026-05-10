@@ -22,22 +22,24 @@ use crate::model::{
 };
 pub use crate::yaml_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
-    DelayStep, DynamicRouterData, DynamicRouterStep, FilterStep, LoadBalanceData, LoadBalanceStep,
-    LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep,
-    PredicateBlock, RecipientListData, RecipientListStep, RoutingSlipData, RoutingSlipStep,
-    ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep,
-    SplitData, SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody,
-    StreamCacheConfig, StreamCacheStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
-    UnmarshalStep, ValidateStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
+    DelayStep, DynamicRouterData, DynamicRouterStep, FilterStep, FunctionStep, LoadBalanceData,
+    LoadBalanceStep, LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep,
+    MulticastData, MulticastStep, PredicateBlock, RecipientListData, RecipientListStep,
+    RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig, SetBodyData,
+    SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitExpressionConfig,
+    SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep,
+    ThrottleData, ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
+    YamlRoute, YamlRoutes, YamlStep,
 };
 use crate::yaml_ast::{LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 22] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 23] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
     DeclarativeStepKind::SetBody,
     DeclarativeStepKind::Filter,
+    DeclarativeStepKind::Function,
     DeclarativeStepKind::Choice,
     DeclarativeStepKind::Split,
     DeclarativeStepKind::Aggregate,
@@ -329,6 +331,36 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             Ok(DeclarativeStep::Filter(crate::model::FilterStepDef {
                 predicate,
                 steps,
+            }))
+        }
+        YamlStep::Function(FunctionStep { function: data }) => {
+            if data.runtime.is_empty() {
+                return Err(CamelError::RouteError(
+                    "function: 'runtime' must not be empty".into(),
+                ));
+            }
+            if data.source.is_empty() {
+                return Err(CamelError::RouteError(
+                    "function: 'source' must not be empty".into(),
+                ));
+            }
+            if let Some(t) = data.timeout_ms
+                && t == 0
+            {
+                return Err(CamelError::RouteError(
+                    "function: 'timeout_ms' must be greater than 0".into(),
+                ));
+            }
+            if data.runtime != "deno" {
+                return Err(CamelError::RouteError(format!(
+                    "function: unsupported runtime '{}'. Supported runtimes: [\"deno\"]",
+                    data.runtime
+                )));
+            }
+            Ok(DeclarativeStep::Function(crate::model::FunctionStepDef {
+                runtime: data.runtime,
+                source: data.source,
+                timeout_ms: data.timeout_ms,
             }))
         }
         YamlStep::Choice(ChoiceStep {
@@ -1751,6 +1783,110 @@ routes:
         assert!(
             msg.contains("stream_cache: false"),
             "expected rejection message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_parse_function_step_happy_path() {
+        let yaml = r#"
+routes:
+  - id: "fn-ok"
+    from: "direct:start"
+    steps:
+      - function:
+          runtime: deno
+          source: "return { body: \"ok\" };"
+          timeout_ms: 5000
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::Function(def) => {
+                assert_eq!(def.runtime, "deno");
+                assert_eq!(def.source, "return { body: \"ok\" };");
+                assert_eq!(def.timeout_ms, Some(5000));
+            }
+            other => panic!("expected Function, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_function_step_rejects_bad_runtime() {
+        let yaml = r#"
+routes:
+  - id: "fn-bad-runtime"
+    from: "direct:start"
+    steps:
+      - function:
+          runtime: node
+          source: "return {};"
+"#;
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(err.contains("unsupported runtime 'node'"));
+        assert!(err.contains("[\"deno\"]"));
+    }
+
+    #[test]
+    fn test_parse_function_step_rejects_empty_runtime_and_source() {
+        let empty_runtime = r#"
+routes:
+  - id: "fn-empty-runtime"
+    from: "direct:start"
+    steps:
+      - function:
+          runtime: ""
+          source: "return {};"
+"#;
+        let err = parse_yaml_to_declarative(empty_runtime)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("function: 'runtime' must not be empty"));
+
+        let empty_source = r#"
+routes:
+  - id: "fn-empty-source"
+    from: "direct:start"
+    steps:
+      - function:
+          runtime: deno
+          source: ""
+"#;
+        let err = parse_yaml_to_declarative(empty_source)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("function: 'source' must not be empty"));
+    }
+
+    #[test]
+    fn test_parse_function_step_rejects_unknown_v1_keys() {
+        let yaml = r#"
+routes:
+  - id: "fn-unknown"
+    from: "direct:start"
+    steps:
+      - function:
+          runtime: deno
+          source: "return {};"
+          provider: docker
+"#;
+        assert!(parse_yaml_to_declarative(yaml).is_err());
+    }
+
+    #[test]
+    fn test_function_step_rejected_by_canonical_yaml() {
+        let yaml = r#"
+routes:
+  - id: "fn-canonical-reject"
+    from: "direct:start"
+    steps:
+      - function:
+          runtime: deno
+          source: "return {};"
+          timeout_ms: 1000
+"#;
+        let err = parse_yaml_to_canonical(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("canonical v1 does not support step `function`"),
+            "unexpected error: {err}"
         );
     }
 }

@@ -1,0 +1,476 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CanonicalRouteSpec",
+  "type": "object",
+  "properties": {
+    "circuit_breaker": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CanonicalCircuitBreakerSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "from": {
+      "type": "string"
+    },
+    "route_id": {
+      "description": "Stable minimal route representation for runtime command registration.\n\nScope note (v1):\n- This is intentionally a partial model and does not mirror every `BuilderStep`.\n- Not included in v1: auto_startup, startup_order, concurrency, error_handler,\n  unit_of_work. These are set to defaults when compiling from canonical.\n- Round-trip (YAML → Canonical → YAML) loses these fields.\n- Advanced EIPs continue to use the existing RouteDefinition/BuilderStep path.",
+      "type": "string"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CanonicalStepSpec"
+      }
+    },
+    "version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "route_id",
+    "from",
+    "steps",
+    "version"
+  ],
+  "$defs": {
+    "CanonicalAggregateSpec": {
+      "type": "object",
+      "properties": {
+        "bucket_ttl_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "completion_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "completion_timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "correlation_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discard_on_timeout": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "force_completion_on_stop": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "header": {
+          "type": "string"
+        },
+        "max_buckets": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "strategy": {
+          "$ref": "#/$defs/CanonicalAggregateStrategySpec"
+        }
+      },
+      "required": [
+        "header",
+        "strategy"
+      ]
+    },
+    "CanonicalAggregateStrategySpec": {
+      "type": "string",
+      "enum": [
+        "collect_all"
+      ]
+    },
+    "CanonicalCircuitBreakerSpec": {
+      "type": "object",
+      "properties": {
+        "failure_threshold": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "open_duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "failure_threshold",
+        "open_duration_ms"
+      ]
+    },
+    "CanonicalSplitAggregationSpec": {
+      "type": "string",
+      "enum": [
+        "last_wins",
+        "collect_all",
+        "original"
+      ]
+    },
+    "CanonicalSplitExpressionSpec": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "body_lines",
+            "body_json_array"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "language": {
+              "$ref": "#/$defs/LanguageExpressionDef"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "language"
+          ]
+        }
+      ]
+    },
+    "CanonicalStepSpec": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "uri": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "uri"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "to"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "log"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "uri": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "uri"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "wire_tap"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "expression": {
+                  "$ref": "#/$defs/LanguageExpressionDef"
+                }
+              },
+              "required": [
+                "expression"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "script"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "predicate": {
+                  "$ref": "#/$defs/LanguageExpressionDef"
+                },
+                "steps": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/CanonicalStepSpec"
+                  }
+                }
+              },
+              "required": [
+                "predicate",
+                "steps"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "filter"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "otherwise": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "$ref": "#/$defs/CanonicalStepSpec"
+                  }
+                },
+                "whens": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/CanonicalWhenSpec"
+                  }
+                }
+              },
+              "required": [
+                "whens"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "choice"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "aggregation": {
+                  "$ref": "#/$defs/CanonicalSplitAggregationSpec"
+                },
+                "expression": {
+                  "$ref": "#/$defs/CanonicalSplitExpressionSpec"
+                },
+                "parallel": {
+                  "type": "boolean"
+                },
+                "parallel_limit": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint",
+                  "minimum": 0
+                },
+                "steps": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/CanonicalStepSpec"
+                  }
+                },
+                "stop_on_exception": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "expression",
+                "aggregation",
+                "parallel",
+                "stop_on_exception",
+                "steps"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "split"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "$ref": "#/$defs/CanonicalAggregateSpec"
+            },
+            "step": {
+              "type": "string",
+              "const": "aggregate"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "step": {
+              "type": "string",
+              "const": "stop"
+            }
+          },
+          "required": [
+            "step"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "config": {
+              "type": "object",
+              "properties": {
+                "delay_ms": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "dynamic_header": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "delay_ms"
+              ]
+            },
+            "step": {
+              "type": "string",
+              "const": "delay"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        }
+      ]
+    },
+    "CanonicalWhenSpec": {
+      "type": "object",
+      "properties": {
+        "predicate": {
+          "$ref": "#/$defs/LanguageExpressionDef"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CanonicalStepSpec"
+          }
+        }
+      },
+      "required": [
+        "predicate",
+        "steps"
+      ]
+    },
+    "LanguageExpressionDef": {
+      "description": "A language expression/predicate reference resolved by the runtime.",
+      "type": "object",
+      "properties": {
+        "language": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "language",
+        "source"
+      ]
+    }
+  }
+}

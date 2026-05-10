@@ -373,4 +373,86 @@ mod tests {
             "expected file read error, got: {err}"
         );
     }
+
+    #[test]
+    fn test_function_step_json_parses_and_compiles() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "fn-json-route",
+                    "from": "direct:start",
+                    "steps": [
+                        {
+                            "function": {
+                                "runtime": "deno",
+                                "source": "return { body: 'ok' };",
+                                "timeout_ms": 3000
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let defs = parse_json(json).unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].route_id(), "fn-json-route");
+    }
+
+    #[test]
+    fn test_function_step_json_compiles_to_declarative_function() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "fn-decl",
+                    "from": "direct:start",
+                    "steps": [
+                        {
+                            "function": {
+                                "runtime": "deno",
+                                "source": "return { body: 1 };"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let routes = parse_json_to_declarative(json).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::Function(def) => {
+                assert_eq!(def.runtime, "deno");
+                assert_eq!(def.source, "return { body: 1 };");
+                assert_eq!(def.timeout_ms, None);
+            }
+            other => panic!("expected Function, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_function_step_rejected_by_canonical_json() {
+        let json = r#"
+        {
+            "routes": [
+                {
+                    "id": "fn-canonical-reject",
+                    "from": "direct:start",
+                    "steps": [
+                        {
+                            "function": {
+                                "runtime": "deno",
+                                "source": "return {};",
+                                "timeout_ms": 1000
+                            }
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let err = parse_json_to_canonical(json).unwrap_err().to_string();
+        assert!(
+            err.contains("canonical v1 does not support step `function`"),
+            "unexpected error: {err}"
+        );
+    }
 }

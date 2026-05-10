@@ -21,6 +21,7 @@ If you're building custom components or processors for rust-camel, you'll need t
 - **Route control**: Route controller traits for lifecycle management
 - **Streaming**: Lazy `Body::Stream` variant with `materialize()`, `into_bytes()`, and `into_async_read()` for zero-copy I/O
 - **Health monitoring**: Service health status tracking and Kubernetes-ready endpoints
+- **Canonical Route Spec**: Serializable cross-language route IR (`CanonicalRouteSpec`) with JSON Schema (schemars) and TypeScript type generation (ts-rs). All `Canonical*` types support `Serialize`/`Deserialize`/`JsonSchema`/`TS` derives.
 
 ## Unit of Work (UoW)
 

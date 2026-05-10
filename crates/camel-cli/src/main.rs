@@ -204,6 +204,13 @@ async fn run(
         std::process::exit(1);
     });
 
+    match camel_function::FunctionRuntimeService::with_default_container_provider(
+        camel_function::FunctionConfig::default(),
+    ) {
+        Ok(svc) => ctx = ctx.with_lifecycle(svc),
+        Err(e) => tracing::warn!("Function runtime disabled: {e}"),
+    }
+
     // Load WASM beans after context is created (needs component registry)
     #[cfg(feature = "wasm")]
     if let Some(ref bean_reg) = beans_registry {

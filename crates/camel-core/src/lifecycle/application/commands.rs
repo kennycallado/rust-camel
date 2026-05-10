@@ -340,7 +340,7 @@ async fn remove_runtime_route_with_recovery(
     }
 }
 
-fn project_from_aggregate(aggregate: &RouteRuntimeAggregate) -> RouteStatusProjection {
+pub(crate) fn project_from_aggregate(aggregate: &RouteRuntimeAggregate) -> RouteStatusProjection {
     RouteStatusProjection {
         route_id: aggregate.route_id().to_string(),
         status: state_label(aggregate.state()).to_string(),
@@ -359,7 +359,7 @@ fn state_label(state: &RouteRuntimeState) -> &'static str {
     }
 }
 
-async fn upsert_projection_with_reconciliation(
+pub(crate) async fn upsert_projection_with_reconciliation(
     projections: &dyn ProjectionStorePort,
     status: RouteStatusProjection,
 ) -> Result<Option<String>, CamelError> {
@@ -495,9 +495,23 @@ fn canonical_step_to_builder_step(
                 }
             }
         }
-        camel_api::runtime::CanonicalStepSpec::Aggregate { config } => {
-            let mut builder = AggregatorConfig::correlate_by(config.header)
-                .complete_when_size(config.completion_size.unwrap_or(1));
+        camel_api::runtime::CanonicalStepSpec::Aggregate(config) => {
+            let completion_size = config.completion_size.unwrap_or(1);
+            let mut builder = AggregatorConfig::correlate_by(&config.header);
+
+            match (config.completion_timeout_ms, completion_size) {
+                (Some(timeout_ms), size) if timeout_ms > 0 && size > 1 => {
+                    builder = builder
+                        .complete_on_size_or_timeout(size, Duration::from_millis(timeout_ms));
+                }
+                (Some(timeout_ms), _) if timeout_ms > 0 => {
+                    builder = builder.complete_on_timeout(Duration::from_millis(timeout_ms));
+                }
+                (_, size) => {
+                    builder = builder.complete_when_size(size);
+                }
+            }
+
             builder = match config.strategy {
                 camel_api::runtime::CanonicalAggregateStrategySpec::CollectAll => {
                     builder.strategy(CanonicalAggregateStrategy::CollectAll)
@@ -509,9 +523,23 @@ fn canonical_step_to_builder_step(
             if let Some(ttl_ms) = config.bucket_ttl_ms {
                 builder = builder.bucket_ttl(Duration::from_millis(ttl_ms));
             }
-            Ok(BuilderStep::Aggregate {
-                config: builder.build(),
-            })
+            if let Some(force) = config.force_completion_on_stop {
+                builder = builder.force_completion_on_stop(force);
+            }
+            if let Some(discard) = config.discard_on_timeout {
+                builder = builder.discard_on_timeout(discard);
+            }
+
+            let mut agg_config = builder.build();
+            if let Some(expr) = config.correlation_key {
+                use camel_api::aggregator::CorrelationStrategy;
+                agg_config.correlation = CorrelationStrategy::Expression {
+                    expr,
+                    language: "simple".to_string(),
+                };
+            }
+
+            Ok(BuilderStep::Aggregate { config: agg_config })
         }
         camel_api::runtime::CanonicalStepSpec::Stop => Ok(BuilderStep::Stop),
         camel_api::runtime::CanonicalStepSpec::Delay {
@@ -1005,6 +1033,44 @@ mod tests {
             split_language,
             BuilderStep::DeclarativeSplit { .. }
         ));
+
+        let wire_tap = canonical_step_to_builder_step(CanonicalStepSpec::WireTap {
+            uri: "direct:audit".into(),
+        })
+        .unwrap();
+        assert!(matches!(wire_tap, BuilderStep::WireTap { .. }));
+
+        let script = canonical_step_to_builder_step(CanonicalStepSpec::Script {
+            expression: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${body}".into(),
+            },
+        })
+        .unwrap();
+        assert!(matches!(script, BuilderStep::DeclarativeScript { .. }));
+
+        let delay = canonical_step_to_builder_step(CanonicalStepSpec::Delay {
+            delay_ms: 500,
+            dynamic_header: None,
+        })
+        .unwrap();
+        assert!(matches!(delay, BuilderStep::Delay { .. }));
+
+        let aggregate = canonical_step_to_builder_step(CanonicalStepSpec::Aggregate(
+            camel_api::runtime::CanonicalAggregateSpec {
+                header: "corr-id".into(),
+                completion_size: Some(5),
+                completion_timeout_ms: Some(1000),
+                correlation_key: None,
+                force_completion_on_stop: Some(true),
+                discard_on_timeout: Some(false),
+                strategy: camel_api::runtime::CanonicalAggregateStrategySpec::CollectAll,
+                max_buckets: Some(100),
+                bucket_ttl_ms: Some(60000),
+            },
+        ))
+        .unwrap();
+        assert!(matches!(aggregate, BuilderStep::Aggregate { .. }));
     }
 
     #[test]

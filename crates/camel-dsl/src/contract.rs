@@ -5,6 +5,7 @@ pub enum DeclarativeStepKind {
     SetHeader,
     SetBody,
     Filter,
+    Function,
     Choice,
     Split,
     Aggregate,
@@ -29,12 +30,13 @@ pub enum DeclarativeStepKind {
     StreamCache,
 }
 
-pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 22] = [
+pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 23] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
     DeclarativeStepKind::SetBody,
     DeclarativeStepKind::Filter,
+    DeclarativeStepKind::Function,
     DeclarativeStepKind::Choice,
     DeclarativeStepKind::Split,
     DeclarativeStepKind::Aggregate,
@@ -114,9 +116,9 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_kinds_has_22_entries() {
-        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 22);
-        assert_eq!(mandatory_declarative_step_kinds().len(), 22);
+    fn mandatory_kinds_has_23_entries() {
+        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 23);
+        assert_eq!(mandatory_declarative_step_kinds().len(), 23);
     }
 
     #[test]

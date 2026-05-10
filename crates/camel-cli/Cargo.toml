@@ -58,6 +58,7 @@ camel-xslt = { workspace = true }
 camel-xj = { workspace = true }
 camel-component-wasm = { workspace = true, optional = true }
 camel-component-cxf = { workspace = true }
+camel-function = { workspace = true }
 camel-language-js.workspace = true
 camel-language-jsonpath.workspace = true
 camel-language-rhai.workspace = true

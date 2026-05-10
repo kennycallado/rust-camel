@@ -247,6 +247,39 @@ let routes = discover_routes(&[
 ])?;
 ```
 
+## Canonical Route Spec
+
+The `canonical` module provides direct parsing of the cross-language route IR, bypassing the YAML/JSON DSL input formats:
+
+```rust
+use camel_dsl::canonical::{parse_canonical_json, parse_canonical_route};
+
+// Parse a batch of canonical routes from JSON
+let routes = parse_canonical_json(r#"{
+    "routes": [{
+        "route_id": "my-route",
+        "from": "timer:tick?period=1000",
+        "steps": [
+            { "step": "log", "config": { "message": "Hello" } },
+            { "step": "to", "config": { "uri": "log:info" } }
+        ],
+        "version": 1
+    }]
+}"#)?;
+
+// Or compile a single CanonicalRouteSpec
+let spec = CanonicalRouteSpec::new("my-route", "timer:tick");
+let route = parse_canonical_route(spec)?;
+```
+
+### Generate Type Artifacts
+
+```bash
+cargo run -p xtask schema
+```
+
+Produces JSON Schema and TypeScript types in `schemas/`.
+
 ## Available Step Types
 
 | Step | Description | Example |

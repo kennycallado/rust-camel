@@ -64,12 +64,26 @@ pub fn canonical_contract_rejection_reason(step: &str) -> Option<&'static str> {
     None
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub struct CanonicalRouteSpec {
     /// Stable minimal route representation for runtime command registration.
     ///
-    /// Scope note:
-    /// - This is intentionally a partial model (v1) and does not mirror every `BuilderStep`.
+    /// Scope note (v1):
+    /// - This is intentionally a partial model and does not mirror every `BuilderStep`.
+    /// - Not included in v1: auto_startup, startup_order, concurrency, error_handler,
+    ///   unit_of_work. These are set to defaults when compiling from canonical.
+    /// - Round-trip (YAML → Canonical → YAML) loses these fields.
     /// - Advanced EIPs continue to use the existing RouteDefinition/BuilderStep path.
     pub route_id: String,
     pub from: String,
@@ -78,7 +92,18 @@ pub struct CanonicalRouteSpec {
     pub version: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(tag = "step", content = "config", rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub enum CanonicalStepSpec {
     To {
         uri: String,
@@ -108,57 +133,125 @@ pub enum CanonicalStepSpec {
         stop_on_exception: bool,
         steps: Vec<CanonicalStepSpec>,
     },
-    Aggregate {
-        config: CanonicalAggregateSpec,
-    },
+    Aggregate(CanonicalAggregateSpec),
     Stop,
     Delay {
+        #[ts(type = "number")]
         delay_ms: u64,
         dynamic_header: Option<String>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub struct CanonicalWhenSpec {
     pub predicate: LanguageExpressionDef,
     pub steps: Vec<CanonicalStepSpec>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub enum CanonicalSplitExpressionSpec {
     BodyLines,
     BodyJsonArray,
     Language(LanguageExpressionDef),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub enum CanonicalSplitAggregationSpec {
     LastWins,
     CollectAll,
     Original,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub enum CanonicalAggregateStrategySpec {
     CollectAll,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub struct CanonicalAggregateSpec {
     pub header: String,
     pub completion_size: Option<usize>,
+    #[ts(type = "number")]
     pub completion_timeout_ms: Option<u64>,
     pub correlation_key: Option<String>,
     pub force_completion_on_stop: Option<bool>,
     pub discard_on_timeout: Option<bool>,
     pub strategy: CanonicalAggregateStrategySpec,
     pub max_buckets: Option<usize>,
+    #[ts(type = "number")]
     pub bucket_ttl_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 pub struct CanonicalCircuitBreakerSpec {
     pub failure_threshold: u32,
+    #[ts(type = "number")]
     pub open_duration_ms: u64,
 }
 
@@ -243,7 +336,7 @@ fn validate_steps(steps: &[CanonicalStepSpec]) -> Result<(), CamelError> {
                 }
                 validate_steps(steps)?;
             }
-            CanonicalStepSpec::Aggregate { config } => {
+            CanonicalStepSpec::Aggregate(config) => {
                 if config.header.trim().is_empty() {
                     return Err(CamelError::RouteError(
                         "canonical contract violation: aggregate.header cannot be empty"
@@ -507,35 +600,31 @@ mod tests {
     #[test]
     fn canonical_contract_rejects_invalid_aggregate_and_circuit_breaker() {
         let mut spec = CanonicalRouteSpec::new("r1", "timer:tick");
-        spec.steps = vec![CanonicalStepSpec::Aggregate {
-            config: CanonicalAggregateSpec {
-                header: " ".to_string(),
-                completion_size: Some(1),
-                completion_timeout_ms: None,
-                correlation_key: None,
-                force_completion_on_stop: None,
-                discard_on_timeout: None,
-                strategy: CanonicalAggregateStrategySpec::CollectAll,
-                max_buckets: None,
-                bucket_ttl_ms: None,
-            },
-        }];
+        spec.steps = vec![CanonicalStepSpec::Aggregate(CanonicalAggregateSpec {
+            header: " ".to_string(),
+            completion_size: Some(1),
+            completion_timeout_ms: None,
+            correlation_key: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+            strategy: CanonicalAggregateStrategySpec::CollectAll,
+            max_buckets: None,
+            bucket_ttl_ms: None,
+        })];
         let err = spec.validate_contract().unwrap_err().to_string();
         assert!(err.contains("aggregate.header cannot be empty"));
 
-        spec.steps = vec![CanonicalStepSpec::Aggregate {
-            config: CanonicalAggregateSpec {
-                header: "k".to_string(),
-                completion_size: Some(0),
-                completion_timeout_ms: None,
-                correlation_key: None,
-                force_completion_on_stop: None,
-                discard_on_timeout: None,
-                strategy: CanonicalAggregateStrategySpec::CollectAll,
-                max_buckets: None,
-                bucket_ttl_ms: None,
-            },
-        }];
+        spec.steps = vec![CanonicalStepSpec::Aggregate(CanonicalAggregateSpec {
+            header: "k".to_string(),
+            completion_size: Some(0),
+            completion_timeout_ms: None,
+            correlation_key: None,
+            force_completion_on_stop: None,
+            discard_on_timeout: None,
+            strategy: CanonicalAggregateStrategySpec::CollectAll,
+            max_buckets: None,
+            bucket_ttl_ms: None,
+        })];
         let err = spec.validate_contract().unwrap_err().to_string();
         assert!(err.contains("aggregate.completion_size must be > 0"));
 
@@ -612,5 +701,70 @@ mod tests {
         assert_eq!(ids, vec!["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]);
         assert_eq!(cmds[0].causation_id(), Some("root"));
         assert_eq!(cmds[1].causation_id(), None);
+    }
+
+    #[test]
+    fn canonical_route_spec_serde_roundtrip() {
+        let mut spec = CanonicalRouteSpec::new("test-route", "timer:tick?period=1000");
+        spec.steps.push(CanonicalStepSpec::Log {
+            message: "Hello".into(),
+        });
+        spec.steps.push(CanonicalStepSpec::To {
+            uri: "log:info".into(),
+        });
+        spec.steps.push(CanonicalStepSpec::Stop);
+
+        let json = serde_json::to_string(&spec).unwrap();
+        let deserialized: CanonicalRouteSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec, deserialized);
+    }
+
+    #[test]
+    fn canonical_step_spec_serde_variants() {
+        let steps = vec![
+            CanonicalStepSpec::To {
+                uri: "direct:a".into(),
+            },
+            CanonicalStepSpec::Log {
+                message: "msg".into(),
+            },
+            CanonicalStepSpec::WireTap {
+                uri: "direct:audit".into(),
+            },
+            CanonicalStepSpec::Stop,
+            CanonicalStepSpec::Delay {
+                delay_ms: 100,
+                dynamic_header: None,
+            },
+        ];
+        let json = serde_json::to_string_pretty(&steps).unwrap();
+        let back: Vec<CanonicalStepSpec> = serde_json::from_str(&json).unwrap();
+        assert_eq!(steps, back);
+    }
+
+    #[test]
+    fn canonical_route_spec_json_schema_generates() {
+        let schema = schemars::schema_for!(CanonicalRouteSpec);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(json.contains("CanonicalRouteSpec"));
+        assert!(json.contains("route_id"));
+    }
+
+    #[test]
+    fn canonical_json_schema_has_no_function_step() {
+        let schema = schemars::schema_for!(CanonicalRouteSpec);
+        let json = serde_json::to_string(&schema).unwrap();
+        assert!(
+            !json.contains("\"function\""),
+            "canonical JSON schema must not contain 'function' step"
+        );
+    }
+
+    #[test]
+    fn canonical_contract_does_not_support_function() {
+        assert!(
+            !canonical_contract_supports_step("function"),
+            "function must not be in CANONICAL_CONTRACT_SUPPORTED_STEPS"
+        );
     }
 }
