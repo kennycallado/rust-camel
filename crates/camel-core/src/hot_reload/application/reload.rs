@@ -811,6 +811,40 @@ mod tests {
     }
 
     #[test]
+    fn helper_next_reload_command_id_increments_and_keeps_prefix() {
+        let one = next_reload_command_id("restart-stop", "r1");
+        let two = next_reload_command_id("restart-stop", "r1");
+        assert!(one.starts_with("reload:restart-stop:r1:"));
+        assert!(two.starts_with("reload:restart-stop:r1:"));
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    fn helper_should_stop_before_mutation_respects_status() {
+        assert!(!should_stop_before_mutation(Some("Registered")));
+        assert!(!should_stop_before_mutation(Some("Stopped")));
+        assert!(should_stop_before_mutation(Some("Started")));
+        assert!(should_stop_before_mutation(None));
+    }
+
+    #[test]
+    fn helper_should_start_after_restart_respects_status() {
+        assert!(!should_start_after_restart(Some("Registered")));
+        assert!(!should_start_after_restart(Some("Stopped")));
+        assert!(should_start_after_restart(Some("Started")));
+        assert!(should_start_after_restart(None));
+    }
+
+    #[test]
+    fn helper_invalid_stop_transition_detects_marker() {
+        let err = CamelError::RouteError("invalid transition: Started -> Started".into());
+        assert!(is_invalid_stop_transition(&err));
+
+        let other = CamelError::RouteError("route missing".into());
+        assert!(!is_invalid_stop_transition(&other));
+    }
+
+    #[test]
     fn test_new_route_detected_as_add() {
         let controller = make_controller();
         let defs = vec![RouteDefinition::new("timer:tick", vec![]).with_route_id("new-route")];
@@ -993,6 +1027,113 @@ mod tests {
             actions,
             vec![ReloadAction::Skip {
                 route_id: "r1".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn test_runtime_snapshot_mixed_actions_cover_all_decisions() {
+        let defs = vec![
+            RouteDefinition::new("timer:tick", vec![])
+                .with_route_id("existing-same")
+                .with_source_hash(10),
+            RouteDefinition::new("timer:tock", vec![])
+                .with_route_id("existing-diff")
+                .with_source_hash(20),
+            RouteDefinition::new("timer:new", vec![])
+                .with_route_id("brand-new")
+                .with_source_hash(30),
+        ];
+        let runtime_ids = vec![
+            "existing-same".to_string(),
+            "existing-diff".to_string(),
+            "orphan".to_string(),
+        ];
+        let runtime_hashes = std::collections::HashMap::from([
+            ("existing-same".to_string(), 10u64),
+            ("existing-diff".to_string(), 999u64),
+            ("orphan".to_string(), 77u64),
+        ]);
+
+        let actions =
+            compute_reload_actions_from_runtime_snapshot(&defs, &runtime_ids, &|id: &str| {
+                runtime_hashes.get(id).copied()
+            });
+
+        assert_eq!(
+            actions,
+            vec![
+                ReloadAction::Skip {
+                    route_id: "existing-same".into()
+                },
+                ReloadAction::Restart {
+                    route_id: "existing-diff".into()
+                },
+                ReloadAction::Add {
+                    route_id: "brand-new".into()
+                },
+                ReloadAction::Remove {
+                    route_id: "orphan".into()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn test_runtime_snapshot_missing_runtime_hash_for_existing_route_restarts() {
+        let defs = vec![
+            RouteDefinition::new("timer:tick", vec![])
+                .with_route_id("r1")
+                .with_source_hash(42),
+        ];
+        let runtime_ids = vec!["r1".to_string()];
+
+        let actions =
+            compute_reload_actions_from_runtime_snapshot(&defs, &runtime_ids, &|_id: &str| None);
+
+        assert_eq!(
+            actions,
+            vec![ReloadAction::Restart {
+                route_id: "r1".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn test_runtime_snapshot_missing_new_hash_for_existing_route_restarts() {
+        let defs = vec![RouteDefinition::new("timer:tick", vec![]).with_route_id("r1")];
+        let runtime_ids = vec!["r1".to_string()];
+        let runtime_hashes = std::collections::HashMap::from([("r1".to_string(), 42u64)]);
+
+        let actions =
+            compute_reload_actions_from_runtime_snapshot(&defs, &runtime_ids, &|id: &str| {
+                runtime_hashes.get(id).copied()
+            });
+
+        assert_eq!(
+            actions,
+            vec![ReloadAction::Restart {
+                route_id: "r1".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn test_runtime_snapshot_new_only_route_maps_to_add() {
+        let defs = vec![
+            RouteDefinition::new("timer:tick", vec![])
+                .with_route_id("new-only")
+                .with_source_hash(1),
+        ];
+        let runtime_ids: Vec<String> = vec![];
+
+        let actions =
+            compute_reload_actions_from_runtime_snapshot(&defs, &runtime_ids, &|_id: &str| None);
+
+        assert_eq!(
+            actions,
+            vec![ReloadAction::Add {
+                route_id: "new-only".into()
             }]
         );
     }
@@ -1265,5 +1406,24 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].action, "Restart");
         assert_eq!(errors[0].route_id, "missing-restart-def");
+    }
+
+    #[tokio::test]
+    async fn test_execute_skip_action_returns_no_errors() {
+        use crate::CamelContext;
+
+        let ctx = CamelContext::builder().build().await.unwrap();
+        let errors = execute_reload_actions(
+            vec![ReloadAction::Skip {
+                route_id: "skip-only-route".into(),
+            }],
+            vec![],
+            &ctx.runtime_execution_handle(),
+            Duration::from_millis(1),
+            None,
+        )
+        .await;
+
+        assert!(errors.is_empty());
     }
 }

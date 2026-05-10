@@ -304,6 +304,18 @@ mod tests {
     }
 
     #[test]
+    fn plugin_type_display_values() {
+        assert_eq!(PluginType::Processor.to_string(), "processor");
+        assert_eq!(PluginType::Bean.to_string(), "bean");
+    }
+
+    #[test]
+    fn plugin_action_rejects_invalid_type() {
+        let result = TestCli::try_parse_from(["test", "new", "my-plugin", "--type", "unknown"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn find_camel_root_finds_camel_toml() {
         let root = tempdir().expect("tempdir");
         std::fs::write(root.path().join("Camel.toml"), "name = \"x\"\n").expect("write");
@@ -340,6 +352,32 @@ mod tests {
     }
 
     #[test]
+    fn find_camel_root_prefers_nearest_ancestor_marker() {
+        let root = tempdir().expect("tempdir");
+        std::fs::write(root.path().join("Camel.toml"), "name = \"x\"\n").expect("write");
+        let mid = root.path().join("mid");
+        std::fs::create_dir_all(&mid).expect("mkdir");
+        std::fs::write(mid.join("Cargo.toml"), "[workspace]\nmembers = []\n").expect("write");
+        let nested = mid.join("deep");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+
+        let found = find_camel_root(&nested).expect("find root");
+        assert_eq!(found, mid);
+    }
+
+    #[test]
+    fn find_camel_root_returns_parse_error_for_invalid_workspace_toml() {
+        let root = tempdir().expect("tempdir");
+        std::fs::write(root.path().join("Cargo.toml"), "[workspace\ninvalid").expect("write");
+        let nested = root.path().join("x").join("y");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+
+        let err = find_camel_root(&nested).expect_err("expected error");
+        assert!(err.contains("failed to parse"));
+        assert!(err.contains("Cargo.toml"));
+    }
+
+    #[test]
     fn build_output_path_release() {
         let dir = Path::new("/tmp/project");
         let path = build_output_path(dir, "my-plugin", false);
@@ -356,6 +394,17 @@ mod tests {
         let path = build_output_path(dir, "my-plugin", true);
         assert!(
             path.ends_with(Path::new("target/wasm32-wasip2/debug/my_plugin.wasm")),
+            "got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn build_output_path_keeps_existing_underscores() {
+        let dir = Path::new("/tmp/project");
+        let path = build_output_path(dir, "my_plugin", false);
+        assert!(
+            path.ends_with(Path::new("target/wasm32-wasip2/release/my_plugin.wasm")),
             "got: {}",
             path.display()
         );

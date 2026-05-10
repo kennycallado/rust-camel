@@ -48,6 +48,7 @@ mod tests {
         RuntimeQueryResult,
     };
     use async_trait::async_trait;
+    use futures::executor::block_on;
 
     struct NoopRuntime;
 
@@ -93,5 +94,44 @@ mod tests {
         let cloned = ctx.clone();
 
         assert!(Arc::ptr_eq(cloned.runtime().unwrap(), &runtime));
+    }
+
+    #[test]
+    fn producer_context_with_runtime_can_execute_command() {
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(NoopRuntime);
+        let ctx = ProducerContext::new().with_runtime(runtime);
+        let result = block_on(ctx.runtime().unwrap().execute(RuntimeCommand::StartRoute {
+            route_id: "r1".into(),
+            command_id: "c1".into(),
+            causation_id: None,
+        }))
+        .unwrap();
+
+        assert_eq!(result, RuntimeCommandResult::Accepted);
+    }
+
+    #[test]
+    fn producer_context_with_runtime_can_execute_query() {
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(NoopRuntime);
+        let ctx = ProducerContext::new().with_runtime(runtime);
+        let result = block_on(ctx.runtime().unwrap().ask(RuntimeQuery::ListRoutes)).unwrap();
+
+        assert_eq!(
+            result,
+            RuntimeQueryResult::Routes {
+                route_ids: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn producer_context_with_runtime_replaces_previous_runtime() {
+        let first: Arc<dyn RuntimeHandle> = Arc::new(NoopRuntime);
+        let second: Arc<dyn RuntimeHandle> = Arc::new(NoopRuntime);
+        let ctx = ProducerContext::new()
+            .with_runtime(first)
+            .with_runtime(second.clone());
+
+        assert!(Arc::ptr_eq(ctx.runtime().unwrap(), &second));
     }
 }

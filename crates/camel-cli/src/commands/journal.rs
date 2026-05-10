@@ -87,3 +87,125 @@ fn event_parts(event: &camel_core::RuntimeEvent) -> (&'static str, &str) {
         camel_core::RuntimeEvent::RouteRemoved { route_id } => ("RouteRemoved", route_id),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: JournalInspectArgs,
+    }
+
+    #[test]
+    fn journal_inspect_args_parse_defaults() {
+        let cli = TestCli::try_parse_from(["test", "runtime.db"]).expect("expected parse success");
+        assert_eq!(cli.args.path, std::path::PathBuf::from("runtime.db"));
+        assert_eq!(cli.args.limit, 100);
+        assert!(cli.args.route.is_none());
+        assert!(matches!(cli.args.format, OutputFormat::Table));
+    }
+
+    #[test]
+    fn journal_inspect_args_parse_all_options() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "runtime.db",
+            "--limit",
+            "7",
+            "--route",
+            "orders",
+            "--format",
+            "json",
+        ])
+        .expect("expected parse success");
+        assert_eq!(cli.args.path, std::path::PathBuf::from("runtime.db"));
+        assert_eq!(cli.args.limit, 7);
+        assert_eq!(cli.args.route.as_deref(), Some("orders"));
+        assert!(matches!(cli.args.format, OutputFormat::Json));
+    }
+
+    #[test]
+    fn journal_inspect_args_reject_invalid_format() {
+        let result = TestCli::try_parse_from(["test", "runtime.db", "--format", "xml"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn event_parts_maps_all_variants() {
+        let cases = vec![
+            (
+                camel_core::RuntimeEvent::RouteRegistered {
+                    route_id: "r1".to_string(),
+                },
+                "RouteRegistered",
+                "r1",
+            ),
+            (
+                camel_core::RuntimeEvent::RouteStartRequested {
+                    route_id: "r2".to_string(),
+                },
+                "RouteStartRequested",
+                "r2",
+            ),
+            (
+                camel_core::RuntimeEvent::RouteStarted {
+                    route_id: "r3".to_string(),
+                },
+                "RouteStarted",
+                "r3",
+            ),
+            (
+                camel_core::RuntimeEvent::RouteFailed {
+                    route_id: "r4".to_string(),
+                    error: "boom".to_string(),
+                },
+                "RouteFailed",
+                "r4",
+            ),
+            (
+                camel_core::RuntimeEvent::RouteStopped {
+                    route_id: "r5".to_string(),
+                },
+                "RouteStopped",
+                "r5",
+            ),
+            (
+                camel_core::RuntimeEvent::RouteSuspended {
+                    route_id: "r6".to_string(),
+                },
+                "RouteSuspended",
+                "r6",
+            ),
+            (
+                camel_core::RuntimeEvent::RouteResumed {
+                    route_id: "r7".to_string(),
+                },
+                "RouteResumed",
+                "r7",
+            ),
+            (
+                camel_core::RuntimeEvent::RouteReloaded {
+                    route_id: "r8".to_string(),
+                },
+                "RouteReloaded",
+                "r8",
+            ),
+            (
+                camel_core::RuntimeEvent::RouteRemoved {
+                    route_id: "r9".to_string(),
+                },
+                "RouteRemoved",
+                "r9",
+            ),
+        ];
+
+        for (event, expected_name, expected_route) in cases {
+            let (name, route_id) = event_parts(&event);
+            assert_eq!(name, expected_name);
+            assert_eq!(route_id, expected_route);
+        }
+    }
+}

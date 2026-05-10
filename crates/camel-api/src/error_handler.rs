@@ -390,4 +390,45 @@ mod tests {
         assert_eq!(cloned.retry.as_ref().unwrap().max_attempts, 2);
         assert_eq!(cloned.handled_by.as_deref(), Some("log:route-errors"));
     }
+
+    #[test]
+    fn test_delay_for_respects_max_delay_with_jitter() {
+        let policy = RedeliveryPolicy::new(5)
+            .with_initial_delay(Duration::from_millis(200))
+            .with_multiplier(10.0)
+            .with_max_delay(Duration::from_millis(500))
+            .with_jitter(0.2);
+
+        for _ in 0..30 {
+            let delay = policy.delay_for(4);
+            assert!(delay <= Duration::from_millis(600));
+            assert!(delay >= Duration::from_millis(400));
+        }
+    }
+
+    #[test]
+    fn test_exception_policy_builder_keeps_dlc_and_policy_order() {
+        let config = ErrorHandlerConfig::dead_letter_channel("log:dlc")
+            .on_exception(|e| matches!(e, CamelError::Io(_)))
+            .retry(1)
+            .build()
+            .on_exception(|e| matches!(e, CamelError::RouteError(_)))
+            .handled_by("log:routes")
+            .build();
+
+        assert_eq!(config.dlc_uri.as_deref(), Some("log:dlc"));
+        assert_eq!(config.policies.len(), 2);
+        assert!((config.policies[0].matches)(&CamelError::Io("x".into())));
+        assert!((config.policies[1].matches)(&CamelError::RouteError("x".into())));
+    }
+
+    #[test]
+    fn test_backoff_without_retry_does_not_create_retry_config() {
+        let config = ErrorHandlerConfig::log_only()
+            .on_exception(|_| true)
+            .with_backoff(Duration::from_millis(1), 3.0, Duration::from_millis(9))
+            .build();
+
+        assert!(config.policies[0].retry.is_none());
+    }
 }

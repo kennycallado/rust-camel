@@ -923,3 +923,158 @@ pub(crate) fn resolve_steps(
     }
     Ok(processors)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lifecycle::application::route_definition::LanguageExpressionDef;
+    use crate::shared::components::domain::Registry;
+
+    fn languages_with_simple() -> SharedLanguageRegistry {
+        let mut map: std::collections::HashMap<String, Arc<dyn Language>> =
+            std::collections::HashMap::new();
+        map.insert(
+            "simple".to_string(),
+            Arc::new(camel_language_simple::SimpleLanguage::new()),
+        );
+        Arc::new(std::sync::Mutex::new(map))
+    }
+
+    #[test]
+    fn resolve_language_returns_error_for_unregistered_name() {
+        let languages = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let err = match resolve_language(&languages, "missing") {
+            Ok(_) => panic!("resolve_language should fail for unregistered language"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn compile_language_expression_and_predicate_work_for_simple_language() {
+        let languages = languages_with_simple();
+        let expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${header.answer}".into(),
+        };
+        let predicate_expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${header.answer} == '42'".into(),
+        };
+
+        let compiled_expression = compile_language_expression(&languages, &expression).unwrap();
+        let compiled_predicate = compile_language_predicate(&languages, &predicate_expression).unwrap();
+
+        let mut msg = camel_api::message::Message::default();
+        msg.set_header("answer", Value::String("42".into()));
+        let exchange = Exchange::new(msg);
+
+        assert_eq!(
+            compiled_expression.evaluate(&exchange).unwrap(),
+            Value::String("42".into())
+        );
+        assert!(compiled_predicate.matches(&exchange).unwrap());
+    }
+
+    #[test]
+    fn compile_filter_predicate_returns_boolean_result() {
+        let languages = languages_with_simple();
+        let expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${header.flag} == 'yes'".into(),
+        };
+        let predicate = compile_filter_predicate(&languages, &expression).unwrap();
+
+        let mut msg = camel_api::message::Message::default();
+        msg.set_header("flag", Value::String("yes".into()));
+        let exchange = Exchange::new(msg);
+        assert!(predicate(&exchange));
+    }
+
+    #[test]
+    fn value_to_body_covers_null_string_and_json() {
+        assert!(matches!(value_to_body(Value::Null), Body::Empty));
+        assert!(matches!(
+            value_to_body(Value::String("x".into())),
+            Body::Text(ref s) if s == "x"
+        ));
+        assert!(matches!(
+            value_to_body(Value::Number(serde_json::Number::from(7))),
+            Body::Json(Value::Number(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_steps_validates_declarative_loop_shape() {
+        let languages = languages_with_simple();
+        let producer_ctx = ProducerContext::new();
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> =
+            Arc::new(camel_component_api::NoOpComponentContext);
+
+        let both = resolve_steps(
+            vec![BuilderStep::DeclarativeLoop {
+                count: Some(2),
+                while_predicate: Some(LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: "${header.k} == 'v'".into(),
+                }),
+                steps: vec![],
+            }],
+            &producer_ctx,
+            &registry,
+            &languages,
+            &beans,
+            None,
+            Arc::clone(&component_ctx),
+            Some("r1"),
+            &FunctionStagingMode::DirectAdd,
+        )
+        .unwrap_err();
+        assert!(both.to_string().contains("cannot specify both 'count' and 'while'"));
+
+        let neither = resolve_steps(
+            vec![BuilderStep::DeclarativeLoop {
+                count: None,
+                while_predicate: None,
+                steps: vec![],
+            }],
+            &producer_ctx,
+            &registry,
+            &languages,
+            &beans,
+            None,
+            component_ctx,
+            Some("r1"),
+            &FunctionStagingMode::DirectAdd,
+        )
+        .unwrap_err();
+        assert!(neither.to_string().contains("must specify either 'count' or 'while'"));
+    }
+
+    #[test]
+    fn resolve_steps_returns_component_not_found_for_to_step() {
+        let languages = languages_with_simple();
+        let producer_ctx = ProducerContext::new();
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> =
+            Arc::new(camel_component_api::NoOpComponentContext);
+
+        let err = resolve_steps(
+            vec![BuilderStep::To("unknown:dest".into())],
+            &producer_ctx,
+            &registry,
+            &languages,
+            &beans,
+            None,
+            component_ctx,
+            Some("r1"),
+            &FunctionStagingMode::DirectAdd,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown"));
+    }
+}

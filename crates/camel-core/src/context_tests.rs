@@ -1019,3 +1019,57 @@ async fn builder_shutdown_timeout_is_applied() {
         .unwrap();
     assert_eq!(ctx.shutdown_timeout(), std::time::Duration::from_secs(7));
 }
+
+#[tokio::test]
+async fn builder_default_shutdown_timeout_is_30_seconds() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    assert_eq!(ctx.shutdown_timeout(), std::time::Duration::from_secs(30));
+}
+
+#[tokio::test]
+async fn context_platform_identity_matches_platform_service_identity() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    let via_context = ctx.platform_identity();
+    let via_service = ctx.platform_service().identity();
+    assert_eq!(via_context.node_id, via_service.node_id);
+}
+
+#[tokio::test]
+async fn context_leadership_start_is_idempotent_for_same_group() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    let leadership = ctx.leadership();
+    let first = leadership.start("coverage-group-dup").await.unwrap();
+    let second = leadership.start("coverage-group-dup").await.unwrap();
+    assert!(first.is_leader());
+    assert!(second.is_leader());
+}
+
+#[tokio::test]
+async fn context_set_shutdown_timeout_updates_value() {
+    let mut ctx = CamelContext::builder().build().await.unwrap();
+    ctx.set_shutdown_timeout(std::time::Duration::from_secs(13));
+    assert_eq!(ctx.shutdown_timeout(), std::time::Duration::from_secs(13));
+}
+
+#[tokio::test]
+async fn context_registry_arc_points_to_same_registry() {
+    let mut ctx = CamelContext::builder().build().await.unwrap();
+    ctx.register_component(MockComponent);
+
+    let original = ctx.registry_arc();
+    let cloned = ctx.registry_arc();
+    assert!(Arc::ptr_eq(&original, &cloned));
+}
+
+#[tokio::test]
+async fn builder_default_matches_new() {
+    let ctx_from_default = CamelContextBuilder::default().build().await.unwrap();
+    let ctx_from_new = CamelContextBuilder::new().build().await.unwrap();
+
+    assert_eq!(
+        ctx_from_default.shutdown_timeout(),
+        ctx_from_new.shutdown_timeout()
+    );
+    assert!(ctx_from_default.resolve_language("simple").is_some());
+    assert!(ctx_from_new.resolve_language("simple").is_some());
+}

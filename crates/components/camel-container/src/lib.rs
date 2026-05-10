@@ -2693,6 +2693,140 @@ mod tests {
         assert_eq!(binds, vec!["./data:/app/data:rw"]);
     }
 
+    #[test]
+    fn test_container_config_from_uri_parses_false_flags() {
+        let config = ContainerConfig::from_uri(
+            "container:logs?containerId=a&follow=false&timestamps=FALSE&autoPull=false&autoRemove=False&detach=TRUE&force=true",
+        )
+        .unwrap();
+        assert!(!config.follow);
+        assert!(!config.timestamps);
+        assert!(!config.auto_pull);
+        assert!(!config.auto_remove);
+        assert!(config.detach);
+        assert!(config.force);
+    }
+
+    #[test]
+    fn test_docker_socket_path_validation() {
+        let unix_cfg = ContainerConfig::from_uri("container:list?host=unix:///tmp/docker.sock").unwrap();
+        assert_eq!(unix_cfg.docker_socket_path().unwrap(), "unix:///tmp/docker.sock");
+
+        let npipe_cfg =
+            ContainerConfig::from_uri("container:list?host=npipe:////./pipe/docker_engine").unwrap();
+        assert_eq!(
+            npipe_cfg.docker_socket_path().unwrap(),
+            "npipe:////./pipe/docker_engine"
+        );
+
+        let plain_cfg = ContainerConfig::from_uri("container:list?host=/var/run/docker.sock").unwrap();
+        assert_eq!(plain_cfg.docker_socket_path().unwrap(), "/var/run/docker.sock");
+
+        let bad_cfg = ContainerConfig::from_uri("container:list?host=http://localhost:2375").unwrap();
+        assert!(bad_cfg.docker_socket_path().is_err());
+    }
+
+    #[test]
+    fn test_parse_ports_invalid_and_whitespace_entries() {
+        let cfg = ContainerConfig::from_uri("container:run?ports= , ,8080").unwrap();
+        assert!(cfg.parse_ports().is_none());
+
+        let cfg = ContainerConfig::from_uri("container:run?ports= 8080:80 ,  5353:53/udp ").unwrap();
+        let (exposed, bindings) = cfg.parse_ports().unwrap();
+        assert!(exposed.contains(&"80/tcp".to_string()));
+        assert!(exposed.contains(&"53/udp".to_string()));
+        assert_eq!(bindings.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_env_trims_and_filters_empty_items() {
+        let cfg = ContainerConfig::from_uri("container:run?env= FOO=bar , ,BAZ=qux, ").unwrap();
+        let env = cfg.parse_env().unwrap();
+        assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
+
+        let cfg = ContainerConfig::from_uri("container:run?env= , , ").unwrap();
+        assert!(cfg.parse_env().is_none());
+    }
+
+    #[test]
+    fn test_parse_volume_str_rejects_invalid_mode_and_accepts_mixed() {
+        assert!(parse_volume_str("/host:/ctr:badmode").is_none());
+        let (binds, anon) = parse_volume_str("a:/b:rw,/tmp/cache,/tmp/logs:ro").unwrap();
+        assert!(binds.contains(&"a:/b:rw".to_string()));
+        assert!(anon.contains(&"/tmp/cache".to_string()));
+        assert!(anon.contains(&"/tmp/logs".to_string()));
+    }
+
+    #[test]
+    fn test_format_docker_event_variants_and_timestamp_extraction() {
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("name".to_string(), "demo".to_string());
+        attrs.insert("image".to_string(), "alpine:latest".to_string());
+        attrs.insert("exitCode".to_string(), "137".to_string());
+        let actor = bollard::models::EventActor {
+            id: None,
+            attributes: Some(attrs),
+        };
+
+        let create_event = bollard::models::EventMessage {
+            action: Some("create".to_string()),
+            actor: Some(actor.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_docker_event(&create_event),
+            "[CREATE] Container demo (alpine:latest)"
+        );
+
+        let die_event = bollard::models::EventMessage {
+            action: Some("die".to_string()),
+            actor: Some(actor),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_docker_event(&die_event),
+            "[DIE]    Container demo (exit: 137)"
+        );
+
+        let other_event = bollard::models::EventMessage {
+            action: Some("oom".to_string()),
+            actor: None,
+            ..Default::default()
+        };
+        assert_eq!(format_docker_event(&other_event), "[OOM] Container unknown");
+
+        assert_eq!(
+            extract_timestamp("2024-01-01T00:00:00Z hello"),
+            Some("2024-01-01T00:00:00Z".to_string())
+        );
+        assert_eq!(extract_timestamp("hello world"), None);
+    }
+
+    #[tokio::test]
+    async fn test_run_container_with_cleanup_error_paths() {
+        let create_fail = run_container_with_cleanup(
+            || async { Err(CamelError::ProcessorError("create-fail".to_string())) },
+            |_id| async move { Ok(()) },
+            |_id| async move { Ok(()) },
+        )
+        .await;
+        assert!(matches!(create_fail, Err(CamelError::ProcessorError(msg)) if msg == "create-fail"));
+
+        let cleanup_fail = run_container_with_cleanup(
+            || async { Ok("cid-1".to_string()) },
+            |_id| async move { Err(CamelError::ProcessorError("start-fail".to_string())) },
+            |_id| async move { Err(CamelError::ProcessorError("remove-fail".to_string())) },
+        )
+        .await;
+        match cleanup_fail {
+            Err(CamelError::ProcessorError(msg)) => {
+                assert!(msg.contains("Failed to start container"));
+                assert!(msg.contains("Cleanup failed"));
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
     #[tokio::test]
     async fn test_container_producer_network_lifecycle() {
         let docker = match Docker::connect_with_local_defaults() {

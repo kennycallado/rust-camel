@@ -498,6 +498,51 @@ impl<T> RuntimeHandle for T where T: RuntimeCommandBus + RuntimeQueryBus {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use futures::executor::block_on;
+
+    struct NoopRuntime;
+
+    #[async_trait]
+    impl RuntimeCommandBus for NoopRuntime {
+        async fn execute(&self, cmd: RuntimeCommand) -> Result<RuntimeCommandResult, CamelError> {
+            Ok(match cmd {
+                RuntimeCommand::RegisterRoute { spec, .. } => RuntimeCommandResult::RouteRegistered {
+                    route_id: spec.route_id,
+                },
+                RuntimeCommand::StartRoute { route_id, .. }
+                | RuntimeCommand::StopRoute { route_id, .. }
+                | RuntimeCommand::SuspendRoute { route_id, .. }
+                | RuntimeCommand::ResumeRoute { route_id, .. }
+                | RuntimeCommand::ReloadRoute { route_id, .. }
+                | RuntimeCommand::FailRoute { route_id, .. }
+                | RuntimeCommand::RemoveRoute { route_id, .. } => {
+                    RuntimeCommandResult::RouteStateChanged {
+                        route_id,
+                        status: "ok".to_string(),
+                    }
+                }
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeQueryBus for NoopRuntime {
+        async fn ask(&self, query: RuntimeQuery) -> Result<RuntimeQueryResult, CamelError> {
+            Ok(match query {
+                RuntimeQuery::GetRouteStatus { route_id } => RuntimeQueryResult::RouteStatus {
+                    route_id,
+                    status: "Started".to_string(),
+                },
+                RuntimeQuery::InFlightCount { route_id } => {
+                    RuntimeQueryResult::InFlightCount { route_id, count: 0 }
+                }
+                RuntimeQuery::ListRoutes => RuntimeQueryResult::Routes {
+                    route_ids: vec!["r1".to_string()],
+                },
+            })
+        }
+    }
 
     #[test]
     fn command_and_query_ids_are_exposed() {
@@ -773,5 +818,66 @@ mod tests {
             !canonical_contract_supports_step("function"),
             "function must not be in CANONICAL_CONTRACT_SUPPORTED_STEPS"
         );
+    }
+
+    #[test]
+    fn runtime_command_result_all_variants_are_distinct() {
+        let accepted = RuntimeCommandResult::Accepted;
+        let dup = RuntimeCommandResult::Duplicate { command_id: "c1".into() };
+        let registered = RuntimeCommandResult::RouteRegistered { route_id: "r1".into() };
+        let changed = RuntimeCommandResult::RouteStateChanged { route_id: "r1".into(), status: "Started".into() };
+
+        assert_ne!(accepted, dup);
+        assert_ne!(dup, registered);
+        assert_ne!(registered, changed);
+
+        let dup2 = RuntimeCommandResult::Duplicate { command_id: "c1".into() };
+        assert_eq!(dup, dup2);
+    }
+
+    #[test]
+    fn runtime_event_serialization_round_trip() {
+        let event = RuntimeEvent::RouteFailed {
+            route_id: "route-a".to_string(),
+            error: "boom".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: RuntimeEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn noop_runtime_execute_and_ask_return_expected_shapes() {
+        let rt = NoopRuntime;
+        let cmd = RuntimeCommand::RegisterRoute {
+            spec: CanonicalRouteSpec::new("r2", "timer:tick"),
+            command_id: "c1".into(),
+            causation_id: None,
+        };
+        let cmd_result = block_on(rt.execute(cmd)).unwrap();
+        assert_eq!(
+            cmd_result,
+            RuntimeCommandResult::RouteRegistered {
+                route_id: "r2".into()
+            }
+        );
+
+        let query_result = block_on(rt.ask(RuntimeQuery::GetRouteStatus {
+            route_id: "r2".into(),
+        }))
+        .unwrap();
+        assert_eq!(
+            query_result,
+            RuntimeQueryResult::RouteStatus {
+                route_id: "r2".into(),
+                status: "Started".into()
+            }
+        );
+    }
+
+    #[test]
+    fn canonical_contract_name_and_version_constants_match() {
+        assert_eq!(CANONICAL_CONTRACT_NAME, "canonical-v1");
+        assert_eq!(CANONICAL_CONTRACT_VERSION, 1);
     }
 }

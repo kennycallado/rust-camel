@@ -354,4 +354,46 @@ mod tests {
         let f = CorrelationStrategy::Fn(Arc::new(|_| Some("k".to_string())));
         assert_eq!(format!("{:?}", f), "Fn(..)");
     }
+
+    #[test]
+    fn test_complete_on_size_or_timeout_contains_both_conditions() {
+        let config = AggregatorConfig::correlate_by("k")
+            .complete_on_size_or_timeout(4, Duration::from_millis(250))
+            .build();
+
+        match config.completion {
+            CompletionMode::Any(conditions) => {
+                assert!(matches!(conditions[0], CompletionCondition::Size(4)));
+                assert!(matches!(
+                    conditions[1],
+                    CompletionCondition::Timeout(d) if d == Duration::from_millis(250)
+                ));
+            }
+            _ => panic!("expected CompletionMode::Any"),
+        }
+    }
+
+    #[test]
+    fn test_correlation_strategy_fn_clone_shares_same_arc() {
+        let f: Arc<dyn Fn(&Exchange) -> Option<String> + Send + Sync> =
+            Arc::new(|_| Some("shared".to_string()));
+        let strategy = CorrelationStrategy::Fn(f.clone());
+        let cloned = strategy.clone();
+
+        match cloned {
+            CorrelationStrategy::Fn(cloned_fn) => assert!(Arc::ptr_eq(&f, &cloned_fn)),
+            _ => panic!("expected fn strategy"),
+        }
+    }
+
+    #[test]
+    fn test_builder_correlate_by_overrides_previous() {
+        let config = AggregatorConfig::correlate_by("first")
+            .correlate_by("second")
+            .complete_when_size(2)
+            .build();
+
+        assert_eq!(config.header_name, "second");
+        assert!(matches!(config.correlation, CorrelationStrategy::HeaderName(ref h) if h == "second"));
+    }
 }

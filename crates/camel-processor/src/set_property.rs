@@ -65,3 +65,67 @@ where
         Box::pin(fut)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camel_api::{IdentityProcessor, Message};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn test_set_property_adds_property() {
+        let exchange = Exchange::new(Message::default());
+
+        let processor = SetProperty::new(IdentityProcessor, "source", Value::String("timer".into()));
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property("source"),
+            Some(&Value::String("timer".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_property_overwrites_existing() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange.set_property("key", Value::String("old".into()));
+
+        let processor = SetProperty::new(IdentityProcessor, "key", Value::String("new".into()));
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property("key"),
+            Some(&Value::String("new".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_property_preserves_body() {
+        let exchange = Exchange::new(Message::new("body content"));
+
+        let processor = SetProperty::new(IdentityProcessor, "prop", Value::Bool(true));
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(result.input.body.as_text(), Some("body content"));
+        assert_eq!(result.property("prop"), Some(&Value::Bool(true)));
+    }
+
+    #[tokio::test]
+    async fn test_set_property_layer_composes() {
+        use tower::ServiceBuilder;
+
+        let svc = ServiceBuilder::new()
+            .layer(super::SetPropertyLayer::new(
+                "env",
+                Value::String("test".into()),
+            ))
+            .service(IdentityProcessor);
+
+        let exchange = Exchange::new(Message::default());
+        let result = svc.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property("env"),
+            Some(&Value::String("test".into()))
+        );
+    }
+}

@@ -866,4 +866,458 @@ port = 8080
         let msg = err.to_string();
         assert!(msg.contains("Invalid health bind address"));
     }
+
+    #[tokio::test]
+    async fn configure_context_with_valid_prometheus_succeeds() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.prometheus]
+enabled = true
+host = "127.0.0.1"
+port = 29090
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn configure_context_with_valid_health_succeeds() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.health]
+enabled = true
+host = "127.0.0.1"
+port = 28081
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn configure_context_with_prometheus_and_health_succeeds() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.prometheus]
+enabled = true
+host = "127.0.0.1"
+port = 29091
+
+[observability.health]
+enabled = true
+host = "127.0.0.1"
+port = 28082
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn configure_context_with_beans_succeeds() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str("", FileFormat::Toml))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let beans = Arc::new(std::sync::Mutex::new(camel_bean::BeanRegistry::default()));
+        let result = CamelConfig::configure_context_with_beans(&cfg, Some(beans)).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn load_routes_with_yaml_route_file() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let yaml_file = dir.path().join("route.yaml");
+        std::fs::write(
+            &yaml_file,
+            r#"
+routes:
+  - id: yaml-route
+    from: timer:tick
+    steps:
+      - to: log:info
+"#,
+        )
+        .unwrap();
+
+        let pattern = dir.path().join("*.yaml").to_string_lossy().to_string();
+        let mut cfg_file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            cfg_file,
+            r#"
+routes = ["{}"]
+"#,
+            pattern.replace('\\', "\\\\")
+        )
+        .unwrap();
+
+        let routes = CamelConfig::load_routes(cfg_file.path().to_str().unwrap()).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "yaml-route");
+    }
+
+    #[test]
+    fn load_routes_with_yml_extension() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let yml_file = dir.path().join("route.yml");
+        std::fs::write(
+            &yml_file,
+            r#"
+routes:
+  - id: yml-route
+    from: timer:tick
+    steps:
+      - to: log:info
+"#,
+        )
+        .unwrap();
+
+        let pattern = dir.path().join("*.yml").to_string_lossy().to_string();
+        let mut cfg_file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            cfg_file,
+            r#"
+routes = ["{}"]
+"#,
+            pattern.replace('\\', "\\\\")
+        )
+        .unwrap();
+
+        let routes = CamelConfig::load_routes(cfg_file.path().to_str().unwrap()).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "yml-route");
+    }
+
+    #[test]
+    fn load_routes_with_multiple_route_files() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let json_file = dir.path().join("route1.json");
+        std::fs::write(
+            &json_file,
+            r#"{"routes":[{"id":"multi-json","from":"timer:tick","steps":[{"to":"log:info"}]}]}"#,
+        )
+        .unwrap();
+
+        let yaml_file = dir.path().join("route2.yaml");
+        std::fs::write(
+            &yaml_file,
+            r#"
+routes:
+  - id: multi-yaml
+    from: timer:tick
+    steps:
+      - to: log:info
+"#,
+        )
+        .unwrap();
+
+        let json_pattern = dir.path().join("*.json").to_string_lossy().to_string();
+        let yaml_pattern = dir.path().join("*.yaml").to_string_lossy().to_string();
+        let mut cfg_file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            cfg_file,
+            r#"
+routes = ["{}", "{}"]
+"#,
+            json_pattern.replace('\\', "\\\\"),
+            yaml_pattern.replace('\\', "\\\\")
+        )
+        .unwrap();
+
+        let routes = CamelConfig::load_routes(cfg_file.path().to_str().unwrap()).unwrap();
+        assert_eq!(routes.len(), 2);
+    }
+
+    #[test]
+    fn load_routes_with_glob_matching_no_files_returns_empty() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pattern = dir.path().join("*.yaml").to_string_lossy().to_string();
+        let mut cfg_file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            cfg_file,
+            r#"
+routes = ["{}"]
+"#,
+            pattern.replace('\\', "\\\\")
+        )
+        .unwrap();
+
+        let routes = CamelConfig::load_routes(cfg_file.path().to_str().unwrap()).unwrap();
+        assert!(routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn configure_context_with_tracer_file_output_json_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("trace.json");
+
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                &format!(
+                    r#"
+[observability.tracer]
+enabled = true
+
+[observability.tracer.outputs.file]
+enabled = true
+path = "{}"
+format = "json"
+"#,
+                    trace_path.to_str().unwrap()
+                ),
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn configure_context_with_tracer_file_output_plain_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("trace.log");
+
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                &format!(
+                    r#"
+[observability.tracer]
+enabled = true
+
+[observability.tracer.outputs.file]
+enabled = true
+path = "{}"
+format = "plain"
+"#,
+                    trace_path.to_str().unwrap()
+                ),
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn configure_context_with_tracer_stdout_plain_succeeds() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.tracer]
+enabled = true
+
+[observability.tracer.outputs.stdout]
+enabled = true
+format = "plain"
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn configure_context_with_tracer_file_and_stdout_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace_path = dir.path().join("trace-both.json");
+
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                &format!(
+                    r#"
+[observability.tracer]
+enabled = true
+
+[observability.tracer.outputs.stdout]
+enabled = true
+format = "json"
+
+[observability.tracer.outputs.file]
+enabled = true
+path = "{}"
+format = "plain"
+"#,
+                    trace_path.to_str().unwrap()
+                ),
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "otel")]
+    #[tokio::test]
+    async fn configure_context_with_otel_grpc_protocol_succeeds() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.otel]
+enabled = true
+endpoint = "http://localhost:4317"
+service_name = "test-service"
+protocol = "grpc"
+sampler = "always_on"
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "otel")]
+    #[tokio::test]
+    async fn configure_context_with_otel_http_protocol_succeeds() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.otel]
+enabled = true
+endpoint = "http://localhost:4318"
+service_name = "test-service"
+protocol = "http"
+sampler = "always_off"
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "otel")]
+    #[tokio::test]
+    async fn configure_context_with_otel_sampler_ratio_succeeds() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.otel]
+enabled = true
+endpoint = "http://localhost:4317"
+service_name = "test-service"
+sampler = "ratio"
+sampler_ratio = 0.5
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "otel")]
+    #[tokio::test]
+    async fn configure_context_with_otel_resource_attrs_succeeds() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.otel]
+enabled = true
+endpoint = "http://localhost:4317"
+service_name = "test-service"
+sampler = "always_on"
+
+[observability.otel.resource_attrs]
+"service.version" = "1.0.0"
+"deployment.environment" = "test"
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let result = CamelConfig::configure_context(&cfg).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn configure_context_with_tracer_file_open_error_fails() {
+        let cfg = config::Config::builder()
+            .add_source(config::File::from_str(
+                r#"
+[observability.tracer]
+enabled = true
+
+[observability.tracer.outputs.file]
+enabled = true
+path = "/nonexistent-dir/trace.log"
+format = "json"
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<CamelConfig>()
+            .unwrap();
+
+        let err = CamelConfig::configure_context(&cfg).await.err().unwrap();
+        let msg = err.to_string();
+        assert!(msg.contains("Failed to open trace file"));
+    }
 }

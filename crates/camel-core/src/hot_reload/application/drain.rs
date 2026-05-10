@@ -143,4 +143,34 @@ mod tests {
         .await;
         assert!(matches!(result, DrainResult::Drained));
     }
+
+    #[tokio::test]
+    async fn drain_with_zero_timeout_on_missing_route_is_drained() {
+        use crate::CamelContext;
+
+        let ctx = CamelContext::builder().build().await.unwrap();
+        let result = drain_route(
+            "missing-route-zero-timeout",
+            "stop",
+            &ctx.runtime_execution_handle(),
+            Duration::from_millis(0),
+        )
+        .await;
+        assert!(matches!(result, DrainResult::Drained));
+    }
+
+    #[tokio::test]
+    async fn drain_with_unknown_action_on_missing_route_is_drained() {
+        use crate::CamelContext;
+
+        let ctx = CamelContext::builder().build().await.unwrap();
+        let result = drain_route(
+            "missing-route-unknown-action",
+            "custom-action",
+            &ctx.runtime_execution_handle(),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(result, DrainResult::Drained));
+    }
 }

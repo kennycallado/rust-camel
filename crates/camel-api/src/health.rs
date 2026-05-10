@@ -165,4 +165,62 @@ mod tests {
         assert_eq!(s.liveness(), HealthStatus::Healthy);
         assert_eq!(s.readiness(), HealthStatus::Unhealthy);
     }
+
+    #[test]
+    fn test_health_report_serialization_round_trip() {
+        let report = HealthReport {
+            status: HealthStatus::Unhealthy,
+            services: vec![
+                ServiceHealth {
+                    name: "db".to_string(),
+                    status: ServiceStatus::Started,
+                },
+                ServiceHealth {
+                    name: "queue".to_string(),
+                    status: ServiceStatus::Stopped,
+                },
+            ],
+            timestamp: chrono::Utc::now(),
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        let back: HealthReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, HealthStatus::Unhealthy);
+        assert_eq!(back.services.len(), 2);
+        assert_eq!(back.services[0].name, "db");
+        assert_eq!(back.services[1].status, ServiceStatus::Stopped);
+    }
+
+    #[test]
+    fn test_health_checker_can_be_cloned_and_reused() {
+        let checker: HealthChecker = Arc::new(HealthReport::default);
+        let checker2 = Arc::clone(&checker);
+        let r1 = checker();
+        let r2 = checker2();
+        assert_eq!(r1.status, HealthStatus::Healthy);
+        assert_eq!(r2.status, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_health_source_startup_override_independent_from_readiness() {
+        struct StartupOnly;
+        impl HealthSource for StartupOnly {
+            fn liveness(&self) -> HealthStatus {
+                HealthStatus::Healthy
+            }
+
+            fn readiness(&self) -> HealthStatus {
+                HealthStatus::Unhealthy
+            }
+
+            fn startup(&self) -> HealthStatus {
+                HealthStatus::Healthy
+            }
+        }
+
+        let source = StartupOnly;
+        assert_eq!(source.liveness(), HealthStatus::Healthy);
+        assert_eq!(source.readiness(), HealthStatus::Unhealthy);
+        assert_eq!(source.startup(), HealthStatus::Healthy);
+    }
 }

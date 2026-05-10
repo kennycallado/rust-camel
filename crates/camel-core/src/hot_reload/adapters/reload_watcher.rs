@@ -306,11 +306,16 @@ pub fn resolve_watch_dirs(patterns: &[String]) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use notify::{Event, EventKind};
+    use tokio_util::sync::CancellationToken;
 
-    use super::is_reload_event;
+    use crate::CamelContext;
+
+    use super::{is_reload_event, resolve_watch_dirs, watch_and_reload};
 
     fn make_event(paths: &[&str], kind: EventKind) -> Event {
         Event {
@@ -365,5 +370,109 @@ mod tests {
             EventKind::Create(notify::event::CreateKind::File),
         );
         assert!(!is_reload_event(&ev));
+    }
+
+    #[test]
+    fn is_reload_event_accepts_remove_kind() {
+        let ev = make_event(
+            &["routes/test.yaml"],
+            EventKind::Remove(notify::event::RemoveKind::File),
+        );
+        assert!(is_reload_event(&ev));
+    }
+
+    #[test]
+    fn is_reload_event_rejects_non_reload_kind_even_with_yaml() {
+        let ev = make_event(
+            &["routes/test.yaml"],
+            EventKind::Access(notify::event::AccessKind::Read),
+        );
+        assert!(!is_reload_event(&ev));
+    }
+
+    #[test]
+    fn is_reload_event_accepts_when_any_path_matches() {
+        let ev = make_event(
+            &["routes/test.tmp", "routes/real.json"],
+            EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )),
+        );
+        assert!(is_reload_event(&ev));
+    }
+
+    #[test]
+    fn resolve_watch_dirs_returns_existing_dir_pattern_and_ignores_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "camel-reload-watch-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        ));
+        let existing = root.join("routes");
+        fs::create_dir_all(&existing).expect("create temp dir");
+
+        let patterns = vec![
+            existing.to_string_lossy().to_string(),
+            root.join("missing").to_string_lossy().to_string(),
+        ];
+
+        let dirs = resolve_watch_dirs(&patterns);
+
+        assert!(dirs.contains(&existing));
+        assert_eq!(dirs.len(), 1);
+
+        fs::remove_dir_all(&root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn resolve_watch_dirs_walks_up_glob_segments() {
+        let root = std::env::temp_dir().join(format!(
+            "camel-reload-watch-glob-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        ));
+        let nested = root.join("a").join("b");
+        fs::create_dir_all(&nested).expect("create nested temp dir");
+
+        let pattern = nested
+            .join("**")
+            .join("*.yaml")
+            .to_string_lossy()
+            .to_string();
+
+        let dirs = resolve_watch_dirs(&[pattern]);
+
+        assert!(dirs.contains(&nested));
+
+        fs::remove_dir_all(&root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn resolve_watch_dirs_uses_current_dir_for_relative_no_parent_pattern() {
+        let dirs = resolve_watch_dirs(&["*.yaml".to_string()]);
+        assert_eq!(dirs, vec![PathBuf::from(".")]);
+    }
+
+    #[tokio::test]
+    async fn watch_and_reload_returns_immediately_when_shutdown_is_cancelled() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let ctx = CamelContext::builder().build().await.unwrap();
+        let result = watch_and_reload(
+            vec![],
+            ctx.runtime_execution_handle(),
+            || Ok(vec![]),
+            Some(token),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(result.is_ok());
     }
 }

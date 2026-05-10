@@ -782,9 +782,12 @@ mod tests {
     use crate::lifecycle::application::route_definition::RouteDefinition;
     use crate::shared::components::domain::Registry;
     use crate::shared::observability::domain::TracerConfig;
+    use camel_api::function::PrepareToken;
     use camel_api::{
-        CamelError, ErrorHandlerConfig, RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult,
-        RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult, SupervisionConfig,
+        CamelError, ErrorHandlerConfig, Exchange, ExchangePatch, FunctionDefinition, FunctionDiff,
+        FunctionId, FunctionInvocationError, FunctionInvoker, FunctionInvokerSync,
+        RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult, RuntimeQuery, RuntimeQueryBus,
+        RuntimeQueryResult, SupervisionConfig,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -822,6 +825,7 @@ mod tests {
     }
 
     struct NoopRuntime;
+    struct NoopInvoker;
 
     #[async_trait::async_trait]
     impl RuntimeCommandBus for NoopRuntime {
@@ -843,6 +847,26 @@ mod tests {
                 },
             })
         }
+    }
+
+    impl FunctionInvokerSync for NoopInvoker {
+        fn stage_pending(&self, _def: FunctionDefinition, _route_id: Option<&str>, _generation: u64) {}
+        fn discard_staging(&self, _generation: u64) {}
+        fn begin_reload(&self) -> u64 { 1 }
+        fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> { vec![] }
+        fn staged_refs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionId, Option<String>)> { vec![] }
+        fn staged_defs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionDefinition, Option<String>)> { vec![] }
+    }
+
+    #[async_trait::async_trait]
+    impl FunctionInvoker for NoopInvoker {
+        async fn register(&self, _def: FunctionDefinition, _route_id: Option<&str>) -> Result<(), FunctionInvocationError> { Ok(()) }
+        async fn unregister(&self, _id: &FunctionId, _route_id: Option<&str>) -> Result<(), FunctionInvocationError> { Ok(()) }
+        async fn invoke(&self, _id: &FunctionId, _exchange: &Exchange) -> Result<ExchangePatch, FunctionInvocationError> { Ok(ExchangePatch::default()) }
+        async fn prepare_reload(&self, _diff: FunctionDiff, _generation: u64) -> Result<PrepareToken, FunctionInvocationError> { Ok(PrepareToken::default()) }
+        async fn finalize_reload(&self, _diff: &FunctionDiff, _generation: u64) -> Result<(), FunctionInvocationError> { Ok(()) }
+        async fn rollback_reload(&self, _token: PrepareToken, _generation: u64) -> Result<(), FunctionInvocationError> { Ok(()) }
+        async fn commit_staged(&self) -> Result<(), FunctionInvocationError> { Ok(()) }
     }
 
     #[tokio::test]
@@ -1121,5 +1145,111 @@ mod tests {
         let result = handle.shutdown().await;
 
         assert!(matches!(result, Err(CamelError::ProcessorError(_))));
+    }
+
+    #[tokio::test]
+    async fn handle_methods_send_expected_commands_and_receive_replies() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let handle = RouteControllerHandle { tx };
+
+        let stop_task = tokio::spawn({
+            let h = handle.clone();
+            async move { h.stop_route("r-1").await }
+        });
+        let cmd = rx.recv().await.expect("stop command");
+        match cmd {
+            RouteControllerCommand::StopRoute { route_id, reply } => {
+                assert_eq!(route_id, "r-1");
+                let _ = reply.send(Ok(()));
+            }
+            _ => panic!("unexpected command"),
+        }
+        assert!(stop_task.await.expect("join").is_ok());
+
+        let exists_task = tokio::spawn({
+            let h = handle.clone();
+            async move { h.route_exists("r-2").await }
+        });
+        let cmd = rx.recv().await.expect("exists command");
+        match cmd {
+            RouteControllerCommand::RouteExists { route_id, reply } => {
+                assert_eq!(route_id, "r-2");
+                let _ = reply.send(true);
+            }
+            _ => panic!("unexpected command"),
+        }
+        assert_eq!(exists_task.await.expect("join").expect("ok"), true);
+
+        let hash_task = tokio::spawn({
+            let h = handle.clone();
+            async move { h.route_source_hash("r-3").await }
+        });
+        let cmd = rx.recv().await.expect("hash command");
+        match cmd {
+            RouteControllerCommand::RouteSourceHash { route_id, reply } => {
+                assert_eq!(route_id, "r-3");
+                let _ = reply.send(Some(77));
+            }
+            _ => panic!("unexpected command"),
+        }
+        assert_eq!(hash_task.await.expect("join"), Some(77));
+    }
+
+    #[tokio::test]
+    async fn handle_methods_error_on_dropped_reply_channel() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let handle = RouteControllerHandle { tx };
+
+        let count_task = tokio::spawn({
+            let h = handle.clone();
+            async move { h.route_count().await }
+        });
+        let cmd = rx.recv().await.expect("route_count command");
+        match cmd {
+            RouteControllerCommand::RouteCount { reply } => drop(reply),
+            _ => panic!("unexpected command"),
+        }
+        assert!(matches!(
+            count_task.await.expect("join"),
+            Err(CamelError::ProcessorError(_))
+        ));
+
+        let stop_task = tokio::spawn({
+            let h = handle.clone();
+            async move { h.stop_route("x").await }
+        });
+        let cmd = rx.recv().await.expect("stop command");
+        match cmd {
+            RouteControllerCommand::StopRoute { reply, .. } => drop(reply),
+            _ => panic!("unexpected command"),
+        }
+        assert!(matches!(
+            stop_task.await.expect("join"),
+            Err(CamelError::ProcessorError(_))
+        ));
+
+        let maybe_hash = tokio::spawn({
+            let h = handle.clone();
+            async move { h.route_source_hash("x").await }
+        });
+        let cmd = rx.recv().await.expect("hash command");
+        match cmd {
+            RouteControllerCommand::RouteSourceHash { reply, .. } => drop(reply),
+            _ => panic!("unexpected command"),
+        }
+        assert_eq!(maybe_hash.await.expect("join"), None);
+    }
+
+    #[test]
+    fn try_set_function_invoker_returns_mailbox_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(RouteControllerCommand::Shutdown)
+            .expect("fill mailbox");
+        let handle = RouteControllerHandle { tx };
+
+        let result = handle.try_set_function_invoker(Arc::new(NoopInvoker));
+        assert!(matches!(result, Err(CamelError::ProcessorError(_))));
+
+        rx.try_recv().expect("mailbox still has first message");
     }
 }
