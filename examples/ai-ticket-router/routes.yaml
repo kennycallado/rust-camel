@@ -1,12 +1,25 @@
 routes:
-  - id: "ticket-classifier"
-    from: "timer:tick?period=5000&repeatCount=1"
+  - id: "ticket-classifier_1"
+    from: "timer:tick_1?period=100"
+    steps:
+      - set_body:
+          value: "Can I talk to your manager?"
+      - to: "direct:ai-staffs"
+      - to: "log:info?showHeaders=true&showBody=false"
+
+  - id: "ticket-classifier_2"
+    from: "timer:tick_2?period=100"
     steps:
       - set_body:
           value: "I can't log into my account, my billing is wrong"
+      - to: "direct:ai-staffs"
+      - to: "log:info?showHeaders=true&showBody=false"
+
+  - id: "ai-staffs"
+    from: "direct:ai-staffs"
+    steps:
       - ai_classify:
           model: "llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b"
           labels: ["billing", "technical", "legal", "spam"]
           output_header: "category"
-      - log:
-          message: "Ticket classified"
+      - log: "Ticket classified"

@@ -59,6 +59,7 @@ dependencies = [
 name = "ai-ticket-router"
 version = "0.8.2"
 dependencies = [
+ "camel-component-direct",
  "camel-component-llm",
  "camel-component-log",
  "camel-component-timer",
@@ -6393,6 +6394,22 @@ dependencies = [
  "camel-component-llm",
  "camel-component-log",
  "camel-component-timer",
+ "camel-component-vector",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rag-file"
+version = "0.8.2"
+dependencies = [
+ "camel-component-embedding",
+ "camel-component-file",
+ "camel-component-http",
+ "camel-component-llm",
+ "camel-component-log",
  "camel-component-vector",
  "camel-core",
  "camel-dsl",

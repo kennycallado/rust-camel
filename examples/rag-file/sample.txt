@@ -1,0 +1,6 @@
+rust-camel is a Rust implementation of the Apache Camel integration framework.
+It provides a DSL for defining integration routes using components like file, http, timer, and more.
+The framework supports AI capabilities through components for LLM (language models), embeddings, and vector databases.
+Routes are defined in YAML and loaded at runtime. Components are registered programmatically in main.rs.
+rust-camel supports Ollama for local AI models and Qdrant for vector storage.
+The framework follows the Enterprise Integration Patterns (EIPs) pioneered by Apache Camel.

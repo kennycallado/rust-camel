@@ -127,6 +127,7 @@ members = [
     "examples/wasm-bean-example",
     "examples/ai-ticket-router",
     "examples/rag-basic",
+    "examples/rag-file",
 ]
 exclude = ["examples/wasm-bean-example/guest"]
 

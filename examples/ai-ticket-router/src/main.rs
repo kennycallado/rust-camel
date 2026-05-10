@@ -1,3 +1,4 @@
+use camel_component_direct::DirectComponent;
 use camel_component_llm::LlmComponent;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
@@ -14,6 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let mut ctx = CamelContext::builder().build().await?;
+    ctx.register_component(DirectComponent::new());
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(LlmComponent);

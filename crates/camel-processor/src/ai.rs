@@ -123,10 +123,22 @@ impl Service<Exchange> for AiExtractService {
             };
 
             let resp = model.complete(req).await?;
-            let json_val: serde_json::Value =
-                serde_json::from_str(resp.content.trim()).map_err(|e| {
-                    CamelError::RouteError(format!("AI extract: invalid JSON response: {e}"))
-                })?;
+            let raw = resp.content.trim();
+            // Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+            let json_str = if let Some(inner) = raw
+                .strip_prefix("```json")
+                .or_else(|| raw.strip_prefix("```"))
+            {
+                inner.trim_start().trim_end_matches("```").trim()
+            } else {
+                raw
+            };
+            tracing::debug!(response = %json_str, "ai_extract LLM response");
+            let json_val: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
+                tracing::warn!(raw = %raw, "ai_extract: failed to parse LLM response as JSON");
+                tracing::info!(llm_raw = %raw, "ai_extract raw LLM output");
+                CamelError::RouteError(format!("AI extract: invalid JSON response: {e}"))
+            })?;
 
             exchange.input.headers.insert(output_header, json_val);
             Ok(exchange)
