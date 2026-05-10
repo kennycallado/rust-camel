@@ -1284,7 +1284,6 @@ mod tests {
     async fn test_execute_swap_with_function_steps_replaces_function() {
         use crate::CamelContext;
         use crate::lifecycle::application::route_definition::BuilderStep;
-        use camel_api::Lifecycle;
         use camel_api::function::FunctionId;
         use camel_component_timer::TimerComponent;
         use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
@@ -1370,7 +1369,7 @@ mod tests {
             .collect();
         let new_fn_id = FunctionId::compute("deno", "fn-new", 5000);
         assert!(
-            register_calls.iter().any(|id| *id == new_fn_id),
+            register_calls.contains(&new_fn_id),
             "fn-new should be registered, calls: {:?}",
             register_calls
         );
@@ -1386,7 +1385,7 @@ mod tests {
             })
             .collect();
         assert!(
-            unregister_calls.iter().any(|id| *id == old_fn_id),
+            unregister_calls.contains(&old_fn_id),
             "fn-old should be unregistered, calls: {:?}",
             unregister_calls
         );
@@ -1398,7 +1397,6 @@ mod tests {
     async fn test_execute_add_with_function_step_registers_function() {
         use crate::CamelContext;
         use crate::lifecycle::application::route_definition::BuilderStep;
-        use camel_api::Lifecycle;
         use camel_api::function::FunctionId;
         use camel_component_timer::TimerComponent;
         use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
@@ -1461,7 +1459,7 @@ mod tests {
             })
             .collect();
         assert!(
-            register_calls.iter().any(|id| *id == fn_a_id),
+            register_calls.contains(&fn_a_id),
             "fn-a should be registered, calls: {:?}",
             register_calls
         );
@@ -1473,7 +1471,6 @@ mod tests {
     async fn test_execute_remove_with_function_step_unregisters_function() {
         use crate::CamelContext;
         use crate::lifecycle::application::route_definition::BuilderStep;
-        use camel_api::Lifecycle;
         use camel_api::function::FunctionId;
         use camel_component_timer::TimerComponent;
         use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
@@ -1513,7 +1510,7 @@ mod tests {
             })
             .collect();
         assert!(
-            register_calls.iter().any(|id| *id == old_fn_id),
+            register_calls.contains(&old_fn_id),
             "fn-old should be registered initially"
         );
 
@@ -1547,7 +1544,7 @@ mod tests {
             })
             .collect();
         assert!(
-            unregister_calls.iter().any(|id| *id == old_fn_id),
+            unregister_calls.contains(&old_fn_id),
             "fn-old should be unregistered after remove, calls: {:?}",
             unregister_calls
         );
@@ -1559,7 +1556,6 @@ mod tests {
     async fn test_swap_registers_new_function_before_pipeline_swap() {
         use crate::CamelContext;
         use crate::lifecycle::application::route_definition::BuilderStep;
-        use camel_api::Lifecycle;
         use camel_api::function::FunctionId;
         use camel_component_timer::TimerComponent;
         use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
@@ -1647,7 +1643,6 @@ mod tests {
     async fn test_swap_rollback_on_pipeline_failure() {
         use crate::CamelContext;
         use crate::lifecycle::application::route_definition::BuilderStep;
-        use camel_api::Lifecycle;
         use camel_api::function::FunctionId;
         use camel_component_timer::TimerComponent;
         use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
@@ -1727,7 +1722,6 @@ mod tests {
     async fn test_add_via_hot_reload_uses_generation_not_staging_zero() {
         use crate::CamelContext;
         use crate::lifecycle::application::route_definition::BuilderStep;
-        use camel_api::Lifecycle;
         use camel_api::function::FunctionId;
         use camel_component_timer::TimerComponent;
         use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
@@ -1800,7 +1794,6 @@ mod tests {
     async fn test_restart_registers_added_before_removing_old() {
         use crate::CamelContext;
         use crate::lifecycle::application::route_definition::BuilderStep;
-        use camel_api::Lifecycle;
         use camel_api::function::FunctionId;
         use camel_component_timer::TimerComponent;
         use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
@@ -1888,7 +1881,6 @@ mod tests {
     async fn test_restart_with_function_change_full_lifecycle() {
         use crate::CamelContext;
         use crate::lifecycle::application::route_definition::BuilderStep;
-        use camel_api::Lifecycle;
         use camel_api::function::FunctionId;
         use camel_component_timer::TimerComponent;
         use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
@@ -2002,7 +1994,6 @@ mod tests {
     async fn test_add_with_prepare_failure_never_inserts_route() {
         use crate::CamelContext;
         use crate::lifecycle::application::route_definition::BuilderStep;
-        use camel_api::Lifecycle;
         use camel_function::provider::fake::{FakeProvider, FakeProviderConfig};
         use camel_function::{FunctionConfig, FunctionRuntimeService};
 

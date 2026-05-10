@@ -570,11 +570,11 @@ impl DefaultRouteController {
             }
         };
 
-        if let Some(invoker) = &self.function_invoker {
-            if let Err(err) = invoker.commit_staged().await {
-                invoker.discard_staging(0);
-                return Err(CamelError::Config(err.to_string()));
-            }
+        if let Some(invoker) = &self.function_invoker
+            && let Err(err) = invoker.commit_staged().await
+        {
+            invoker.discard_staging(0);
+            return Err(CamelError::Config(err.to_string()));
         }
 
         self.routes
