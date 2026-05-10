@@ -5,7 +5,7 @@ use camel_api::function::FunctionId;
 use camel_api::{RuntimeQuery, RuntimeQueryResult};
 use camel_core::CamelContext;
 use camel_core::{
-    execute_reload_actions, BuilderStep, FunctionReloadContext, ReloadAction, RouteDefinition,
+    BuilderStep, FunctionReloadContext, ReloadAction, RouteDefinition, execute_reload_actions,
 };
 use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
 use camel_function::{FunctionConfig, FunctionRuntimeService};

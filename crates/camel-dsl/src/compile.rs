@@ -33,8 +33,8 @@ use crate::model::{
     DeclarativeStep, DelayStepDef, DynamicRouterStepDef, FunctionStepDef, LanguageExpressionDef,
     LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
     MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
-    ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef,
-    SetPropertyStepDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
+    ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef,
+    SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
     ValueSourceDef, WireTapStepDef,
 };
 
@@ -1084,7 +1084,10 @@ fn compile_set_property_step(
     key: String,
     value: ValueSourceDef,
 ) -> Result<BuilderStep, CamelError> {
-    Ok(BuilderStep::DeclarativeSetProperty { key, value_source: value })
+    Ok(BuilderStep::DeclarativeSetProperty {
+        key,
+        value_source: value,
+    })
 }
 
 fn compile_set_body_step(value: ValueSourceDef) -> Result<BuilderStep, CamelError> {

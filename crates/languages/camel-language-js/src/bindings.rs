@@ -95,16 +95,21 @@ pub fn build_camel_global(
                 .to_string(ctx)?
                 .to_std_string_escaped();
             let data = props.get(js_string!("__data"), ctx)?;
-            let data_obj = data
-                .as_object()
-                .ok_or_else(|| boa_engine::JsNativeError::typ().with_message("properties.__data missing"))?;
+            let data_obj = data.as_object().ok_or_else(|| {
+                boa_engine::JsNativeError::typ().with_message("properties.__data missing")
+            })?;
             data_obj.get(js_string!(key.as_str()), ctx)
         },
         properties_get,
     );
     let property_js = property_fn.to_js_function(ctx.realm());
     camel
-        .set(js_string!("property"), JsValue::from(property_js), false, ctx)
+        .set(
+            js_string!("property"),
+            JsValue::from(property_js),
+            false,
+            ctx,
+        )
         .map_err(|e| JsLanguageError::Execution {
             message: e.to_string(),
         })?;
@@ -119,9 +124,9 @@ pub fn build_camel_global(
                 .to_std_string_escaped();
             let val = args.get(1).cloned().unwrap_or(JsValue::undefined());
             let data = props.get(js_string!("__data"), ctx)?;
-            let data_obj = data
-                .as_object()
-                .ok_or_else(|| boa_engine::JsNativeError::typ().with_message("properties.__data missing"))?;
+            let data_obj = data.as_object().ok_or_else(|| {
+                boa_engine::JsNativeError::typ().with_message("properties.__data missing")
+            })?;
             data_obj.set(js_string!(key.as_str()), val, false, ctx)?;
             Ok(JsValue::undefined())
         },
