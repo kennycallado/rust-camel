@@ -794,7 +794,10 @@ mod tests {
             Ok(())
         }
 
-        async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError> {
+        async fn in_flight_count(
+            &self,
+            route_id: &str,
+        ) -> Result<InFlightCountResult, DomainError> {
             Ok(InFlightCountResult::RouteNotFound {
                 route_id: route_id.to_string(),
             })
@@ -858,7 +861,10 @@ mod tests {
             Ok(())
         }
 
-        async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError> {
+        async fn in_flight_count(
+            &self,
+            route_id: &str,
+        ) -> Result<InFlightCountResult, DomainError> {
             Ok(InFlightCountResult::RouteNotFound {
                 route_id: route_id.to_string(),
             })

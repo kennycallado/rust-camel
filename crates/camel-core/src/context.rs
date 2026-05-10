@@ -89,7 +89,10 @@ impl RuntimeExecutionHandle {
         definition: RouteDefinition,
     ) -> Result<(), CamelError> {
         use crate::lifecycle::ports::RouteRegistrationPort;
-        self.runtime.register_route(definition).await.map_err(Into::into)
+        self.runtime
+            .register_route(definition)
+            .await
+            .map_err(Into::into)
     }
 
     pub(crate) async fn compile_route_definition(
@@ -405,7 +408,10 @@ impl CamelContext {
             route_id = %definition.route_id(),
             "Adding route definition"
         );
-        self.runtime.register_route(definition).await.map_err(Into::into)
+        self.runtime
+            .register_route(definition)
+            .await
+            .map_err(Into::into)
     }
 
     fn next_context_command_id(op: &str, route_id: &str) -> String {
@@ -863,7 +869,8 @@ impl CamelContextBuilder {
             };
 
         let store = self.runtime_store.unwrap_or_default();
-        let runtime = CamelContext::build_runtime(controller.clone(), store, self.execution_factory);
+        let runtime =
+            CamelContext::build_runtime(controller.clone(), store, self.execution_factory);
         let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
         controller
             .try_set_runtime_handle(runtime_handle)

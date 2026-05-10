@@ -464,7 +464,10 @@ mod tests {
         async fn remove_route(&self, _route_id: &str) -> Result<(), DomainError> {
             Ok(())
         }
-        async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError> {
+        async fn in_flight_count(
+            &self,
+            route_id: &str,
+        ) -> Result<InFlightCountResult, DomainError> {
             if route_id == "known" {
                 Ok(InFlightCountResult::InFlightCount {
                     route_id: route_id.to_string(),
