@@ -2918,4 +2918,963 @@ mod tests {
 
         assert!(format!("{err}").contains("does not support step `processor`"));
     }
+
+    // ── LoadBalance strategy-specific tests ─────────────────────────────────────
+
+    #[test]
+    fn test_load_balance_builder_weighted_strategy() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("lb-weighted")
+            .load_balance()
+            .weighted(vec![
+                ("direct:a".to_string(), 5),
+                ("direct:b".to_string(), 2),
+                ("direct:c".to_string(), 1),
+            ])
+            .to("mock:result")
+            .end_load_balance()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::LoadBalance { config, .. } = &route.steps()[0] {
+            assert!(matches!(config.strategy, LoadBalanceStrategy::Weighted(_)));
+        } else {
+            panic!("Expected LoadBalance step");
+        }
+    }
+
+    #[test]
+    fn test_load_balance_builder_failover_strategy() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("lb-failover")
+            .load_balance()
+            .failover()
+            .to("mock:primary")
+            .end_load_balance()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::LoadBalance { config, .. } = &route.steps()[0] {
+            assert_eq!(config.strategy, LoadBalanceStrategy::Failover);
+            assert!(!config.parallel);
+        } else {
+            panic!("Expected LoadBalance step");
+        }
+    }
+
+    #[test]
+    fn test_load_balance_builder_parallel_false_explicit() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("lb-parallel-false")
+            .load_balance()
+            .round_robin()
+            .parallel(false)
+            .to("mock:result")
+            .end_load_balance()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::LoadBalance { config, .. } = &route.steps()[0] {
+            assert!(!config.parallel);
+        } else {
+            panic!("Expected LoadBalance step");
+        }
+    }
+
+    // ── FilterInSplitBuilder tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_filter_in_split_builder_typestate() {
+        use camel_api::splitter::{SplitterConfig, split_body_lines};
+
+        let definition = RouteBuilder::from("timer:test")
+            .route_id("filter-in-split")
+            .split(SplitterConfig::new(split_body_lines()))
+            .filter(|_ex| true)
+            .to("mock:filtered")
+            .end_filter()
+            .end_split()
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 1);
+        if let BuilderStep::Split { steps, .. } = &definition.steps()[0] {
+            assert_eq!(steps.len(), 1);
+            assert!(matches!(&steps[0], BuilderStep::Filter { .. }));
+        } else {
+            panic!("Expected Split step");
+        }
+    }
+
+    #[test]
+    fn test_filter_in_split_builder_multiple_steps() {
+        use camel_api::splitter::{SplitterConfig, split_body_lines};
+
+        let definition = RouteBuilder::from("timer:test")
+            .route_id("filter-in-split-multi")
+            .split(SplitterConfig::new(split_body_lines()))
+            .to("mock:before-filter")
+            .filter(|_ex| true)
+            .to("mock:inside-filter")
+            .end_filter()
+            .to("mock:after-filter")
+            .end_split()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Split { steps, .. } = &definition.steps()[0] {
+            // To("before-filter") + Filter{...} + To("after-filter") = 3
+            assert_eq!(steps.len(), 3);
+        } else {
+            panic!("Expected Split step");
+        }
+    }
+
+    // ── build_canonical tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_canonical_with_circuit_breaker() {
+        use camel_api::circuit_breaker::CircuitBreakerConfig;
+
+        let spec = RouteBuilder::from("direct:start")
+            .route_id("canonical-cb")
+            .circuit_breaker(CircuitBreakerConfig::new().failure_threshold(10))
+            .to("mock:result")
+            .build_canonical()
+            .unwrap();
+
+        let cb = spec.circuit_breaker.expect("circuit breaker should be set");
+        assert_eq!(cb.failure_threshold, 10);
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_custom_split_aggregation() {
+        use camel_api::splitter::{SplitterConfig, split_body_lines};
+
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-custom-split")
+            .split(
+                SplitterConfig::new(split_body_lines())
+                    .aggregation(camel_api::splitter::AggregationStrategy::Custom(Arc::new(|_, ex| ex))),
+            )
+            .to("mock:frag")
+            .end_split()
+            .build_canonical()
+            .unwrap_err();
+
+        // Split with closure-based expression is rejected in canonical v1.
+        assert!(format!("{err}").contains("canonical v1 does not support step `split`"));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_custom_aggregate_strategy() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-custom-agg")
+            .aggregate(
+                AggregatorConfig::correlate_by("key")
+                    .complete_when_size(2)
+                    .strategy(AggregationStrategy::Custom(Arc::new(|_, ex| ex)))
+                    .build(),
+            )
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("custom aggregate strategy"));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_fn_correlation_strategy() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-fn-corr")
+            .aggregate(
+                AggregatorConfig {
+                    header_name: "key".to_string(),
+                    completion: CompletionMode::Single(CompletionCondition::Size(1)),
+                    correlation: CorrelationStrategy::Fn(Arc::new(|_| Some("key".to_string()))),
+                    strategy: AggregationStrategy::CollectAll,
+                    max_buckets: None,
+                    bucket_ttl: None,
+                    force_completion_on_stop: false,
+                    discard_on_timeout: false,
+                },
+            )
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("Fn correlation strategy"));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_predicate_completion() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-pred-completion")
+            .aggregate(
+                AggregatorConfig {
+                    header_name: "key".to_string(),
+                    completion: CompletionMode::Single(CompletionCondition::Predicate(Arc::new(
+                        |_| false,
+                    ))),
+                    correlation: CorrelationStrategy::HeaderName("key".to_string()),
+                    strategy: AggregationStrategy::CollectAll,
+                    max_buckets: None,
+                    bucket_ttl: None,
+                    force_completion_on_stop: false,
+                    discard_on_timeout: false,
+                },
+            )
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("predicate completion"));
+    }
+
+    #[test]
+    fn test_build_canonical_with_expression_correlation() {
+        let spec = RouteBuilder::from("direct:start")
+            .route_id("canonical-expr-corr")
+            .aggregate(
+                AggregatorConfig {
+                    header_name: "key".to_string(),
+                    completion: CompletionMode::Single(CompletionCondition::Size(1)),
+                    correlation: CorrelationStrategy::Expression {
+                        expr: "header.key".to_string(),
+                        language: "simple".to_string(),
+                    },
+                    strategy: AggregationStrategy::CollectAll,
+                    max_buckets: None,
+                    bucket_ttl: None,
+                    force_completion_on_stop: false,
+                    discard_on_timeout: false,
+                },
+            )
+            .build_canonical()
+            .unwrap();
+
+        assert!(spec.steps.iter().any(|s| matches!(s, CanonicalStepSpec::Aggregate(a) if a.correlation_key == Some("header.key".to_string()))));
+    }
+
+    #[test]
+    fn test_build_canonical_split_rejected_with_closure_expression() {
+        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
+
+        // Builder-based split uses closure expressions, which are not serializable.
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-split-last")
+            .split(
+                SplitterConfig::new(split_body_lines())
+                    .aggregation(AggregationStrategy::LastWins),
+            )
+            .to("mock:frag")
+            .end_split()
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("canonical v1 does not support step `split`"));
+    }
+
+    // ── OnExceptionBuilder full chain tests ─────────────────────────────────────
+
+    #[test]
+    fn test_on_exception_full_chain_retry_backoff_jitter_handled_by() {
+        let definition = RouteBuilder::from("direct:start")
+            .route_id("on-exception-full")
+            .dead_letter_channel("log:dlc")
+            .on_exception(|e| matches!(e, CamelError::Io(_)))
+            .retry(5)
+            .with_backoff(
+                Duration::from_millis(10),
+                2.0,
+                Duration::from_millis(500),
+            )
+            .with_jitter(0.3)
+            .handled_by("log:io-handler")
+            .end_on_exception()
+            .to("mock:out")
+            .build()
+            .unwrap();
+
+        let cfg = definition
+            .error_handler_config()
+            .expect("error handler should be set");
+        assert_eq!(cfg.policies.len(), 1);
+        let policy = &cfg.policies[0];
+        let retry = policy.retry.as_ref().expect("retry should be set");
+        assert_eq!(retry.max_attempts, 5);
+        assert_eq!(retry.initial_delay, Duration::from_millis(10));
+        assert_eq!(retry.multiplier, 2.0);
+        assert_eq!(retry.max_delay, Duration::from_millis(500));
+        assert!((retry.jitter_factor - 0.3).abs() < f64::EPSILON);
+        assert_eq!(policy.handled_by.as_deref(), Some("log:io-handler"));
+    }
+
+    #[test]
+    fn test_on_exception_jitter_clamped_to_valid_range() {
+        let definition = RouteBuilder::from("direct:start")
+            .route_id("jitter-clamp")
+            .on_exception(|_e| true)
+            .retry(1)
+            .with_jitter(5.0)
+            .end_on_exception()
+            .to("mock:out")
+            .build()
+            .unwrap();
+
+        let cfg = definition.error_handler_config().unwrap();
+        let retry = cfg.policies[0].retry.as_ref().unwrap();
+        assert!((retry.jitter_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ── StepAccumulator: process_fn, convert_body_to, bean ──────────────────────
+
+    #[test]
+    fn test_builder_process_fn_adds_processor_step() {
+        use camel_api::BoxProcessorExt;
+        let processor = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("process-fn-test")
+            .process_fn(processor)
+            .build()
+            .unwrap();
+
+        assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn test_builder_convert_body_to_adds_processor_step() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("convert-body-test")
+            .convert_body_to(BodyType::Json)
+            .build()
+            .unwrap();
+
+        assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
+    }
+
+    #[test]
+    fn test_builder_bean_adds_bean_step() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("bean-test")
+            .bean("myBean", "process")
+            .build()
+            .unwrap();
+
+        assert!(
+            matches!(&definition.steps()[0], BuilderStep::Bean { name, method }
+            if name == "myBean" && method == "process")
+        );
+    }
+
+    // ── Throttle strategy-specific tests ────────────────────────────────────────
+
+    #[test]
+    fn test_throttle_builder_delay_strategy() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("throttle-delay")
+            .throttle(10, Duration::from_secs(1))
+            .strategy(ThrottleStrategy::Delay)
+            .to("mock:result")
+            .end_throttle()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Throttle { config, .. } = &definition.steps()[0] {
+            assert_eq!(config.strategy, ThrottleStrategy::Delay);
+        } else {
+            panic!("Expected Throttle step");
+        }
+    }
+
+    #[test]
+    fn test_throttle_builder_drop_strategy() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("throttle-drop")
+            .throttle(10, Duration::from_secs(1))
+            .strategy(ThrottleStrategy::Drop)
+            .to("mock:result")
+            .end_throttle()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Throttle { config, .. } = &definition.steps()[0] {
+            assert_eq!(config.strategy, ThrottleStrategy::Drop);
+        } else {
+            panic!("Expected Throttle step");
+        }
+    }
+
+    // ── LoopInLoopBuilder with loop_while ───────────────────────────────────────
+
+    #[test]
+    fn test_nested_loop_while_builder() {
+        use camel_api::loop_eip::LoopMode;
+
+        let def = RouteBuilder::from("direct:start")
+            .route_id("nested-loop-while")
+            .loop_count(2)
+            .to("mock:outer")
+            .loop_while(|_ex| true)
+            .to("mock:inner")
+            .end_loop()
+            .end_loop()
+            .build()
+            .unwrap();
+
+        assert_eq!(def.steps().len(), 1);
+        if let BuilderStep::Loop { steps, .. } = &def.steps()[0] {
+            assert_eq!(steps.len(), 2);
+            if let BuilderStep::Loop { config, .. } = &steps[1] {
+                assert!(matches!(config.mode, LoopMode::While(_)));
+            } else {
+                panic!("Expected inner Loop step");
+            }
+        } else {
+            panic!("Expected outer Loop step");
+        }
+    }
+
+    // ── Choice with multiple whens + otherwise ──────────────────────────────────
+
+    #[test]
+    fn test_choice_builder_multiple_whens_with_otherwise() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("choice-multi-otherwise")
+            .choice()
+            .when(|ex: &Exchange| ex.input.header("a").is_some())
+            .to("mock:a")
+            .end_when()
+            .when(|ex: &Exchange| ex.input.header("b").is_some())
+            .to("mock:b")
+            .end_when()
+            .when(|ex: &Exchange| ex.input.header("c").is_some())
+            .to("mock:c")
+            .end_when()
+            .otherwise()
+            .to("mock:fallback")
+            .end_otherwise()
+            .end_choice()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Choice { whens, otherwise } = &definition.steps()[0] {
+            assert_eq!(whens.len(), 3);
+            assert!(otherwise.is_some());
+            assert_eq!(otherwise.as_ref().unwrap().len(), 1);
+        } else {
+            panic!("Expected Choice step");
+        }
+    }
+
+    // ── Multicast individual config tests ───────────────────────────────────────
+
+    #[test]
+    fn test_multicast_builder_parallel_only() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("multicast-parallel")
+            .multicast()
+            .parallel(true)
+            .to("mock:a")
+            .end_multicast()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Multicast { config, .. } = &route.steps()[0] {
+            assert!(config.parallel);
+            assert_eq!(config.parallel_limit, None);
+        } else {
+            panic!("Expected Multicast step");
+        }
+    }
+
+    #[test]
+    fn test_multicast_builder_timeout_only() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("multicast-timeout")
+            .multicast()
+            .timeout(Duration::from_secs(5))
+            .to("mock:a")
+            .end_multicast()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Multicast { config, .. } = &route.steps()[0] {
+            assert_eq!(config.timeout, Some(Duration::from_secs(5)));
+        } else {
+            panic!("Expected Multicast step");
+        }
+    }
+
+    #[test]
+    fn test_multicast_builder_aggregation_collect_all() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("multicast-collect")
+            .multicast()
+            .aggregation(MulticastStrategy::CollectAll)
+            .to("mock:a")
+            .end_multicast()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Multicast { config, .. } = &route.steps()[0] {
+            assert!(matches!(config.aggregation, MulticastStrategy::CollectAll));
+        } else {
+            panic!("Expected Multicast step");
+        }
+    }
+
+    // ── extract_completion_fields: Any mode with multiple conditions ────────────
+
+    #[test]
+    fn test_build_canonical_aggregate_any_completion_mode() {
+        let spec = RouteBuilder::from("direct:start")
+            .route_id("canonical-any-completion")
+            .aggregate(
+                AggregatorConfig::correlate_by("key")
+                    .complete_on_size_or_timeout(10, Duration::from_secs(30))
+                    .build(),
+            )
+            .build_canonical()
+            .unwrap();
+
+        if let CanonicalStepSpec::Aggregate(agg) = &spec.steps[0] {
+            assert_eq!(agg.completion_size, Some(10));
+            assert_eq!(agg.completion_timeout_ms, Some(30_000));
+        } else {
+            panic!("Expected Aggregate step");
+        }
+    }
+
+    #[test]
+    fn test_build_canonical_aggregate_timeout_completion() {
+        let spec = RouteBuilder::from("direct:start")
+            .route_id("canonical-timeout-completion")
+            .aggregate(
+                AggregatorConfig::correlate_by("key")
+                    .complete_on_timeout(Duration::from_millis(500))
+                    .build(),
+            )
+            .build_canonical()
+            .unwrap();
+
+        if let CanonicalStepSpec::Aggregate(agg) = &spec.steps[0] {
+            assert_eq!(agg.completion_size, None);
+            assert_eq!(agg.completion_timeout_ms, Some(500));
+        } else {
+            panic!("Expected Aggregate step");
+        }
+    }
+
+    // ── canonicalize_aggregate: discard_on_timeout and force_completion_on_stop ─
+
+    #[test]
+    fn test_build_canonical_aggregate_discard_on_timeout() {
+        use camel_api::aggregator::AggregatorConfig;
+
+        let spec = RouteBuilder::from("direct:start")
+            .route_id("canonical-discard-timeout")
+            .aggregate(
+                AggregatorConfig::correlate_by("key")
+                    .complete_when_size(1)
+                    .discard_on_timeout(true)
+                    .build(),
+            )
+            .build_canonical()
+            .unwrap();
+
+        if let CanonicalStepSpec::Aggregate(agg) = &spec.steps[0] {
+            assert_eq!(agg.discard_on_timeout, Some(true));
+        } else {
+            panic!("Expected Aggregate step");
+        }
+    }
+
+    #[test]
+    fn test_build_canonical_aggregate_force_completion_on_stop() {
+        use camel_api::aggregator::AggregatorConfig;
+
+        let spec = RouteBuilder::from("direct:start")
+            .route_id("canonical-force-stop")
+            .aggregate(
+                AggregatorConfig::correlate_by("key")
+                    .complete_when_size(1)
+                    .force_completion_on_stop(true)
+                    .build(),
+            )
+            .build_canonical()
+            .unwrap();
+
+        if let CanonicalStepSpec::Aggregate(agg) = &spec.steps[0] {
+            assert_eq!(agg.force_completion_on_stop, Some(true));
+        } else {
+            panic!("Expected Aggregate step");
+        }
+    }
+
+    // ── build_canonical: max_buckets and bucket_ttl ─────────────────────────────
+
+    #[test]
+    fn test_build_canonical_aggregate_max_buckets_and_ttl() {
+        use camel_api::aggregator::AggregatorConfig;
+
+        let spec = RouteBuilder::from("direct:start")
+            .route_id("canonical-buckets-ttl")
+            .aggregate(
+                AggregatorConfig::correlate_by("key")
+                    .complete_when_size(1)
+                    .max_buckets(100)
+                    .bucket_ttl(Duration::from_secs(60))
+                    .build(),
+            )
+            .build_canonical()
+            .unwrap();
+
+        if let CanonicalStepSpec::Aggregate(agg) = &spec.steps[0] {
+            assert_eq!(agg.max_buckets, Some(100));
+            assert_eq!(agg.bucket_ttl_ms, Some(60_000));
+        } else {
+            panic!("Expected Aggregate step");
+        }
+    }
+
+    // ── SplitBuilder with filter inside ─────────────────────────────────────────
+
+    #[test]
+    fn test_split_builder_with_filter_inside() {
+        use camel_api::splitter::{SplitterConfig, split_body_lines};
+
+        let definition = RouteBuilder::from("timer:test")
+            .route_id("split-with-filter")
+            .split(SplitterConfig::new(split_body_lines()))
+            .filter(|_ex| true)
+            .to("mock:filtered-frag")
+            .end_filter()
+            .end_split()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Split { steps, .. } = &definition.steps()[0] {
+            assert_eq!(steps.len(), 1);
+            assert!(matches!(&steps[0], BuilderStep::Filter { .. }));
+        } else {
+            panic!("Expected Split step");
+        }
+    }
+
+    // ── WireTap additional tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_wire_tap_multiple_taps() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("multi-wire-tap")
+            .wire_tap("mock:tap1")
+            .wire_tap("mock:tap2")
+            .to("mock:result")
+            .build()
+            .unwrap();
+
+        assert_eq!(definition.steps().len(), 3);
+        assert!(
+            matches!(&definition.steps()[0], BuilderStep::WireTap { uri } if uri == "mock:tap1")
+        );
+        assert!(
+            matches!(&definition.steps()[1], BuilderStep::WireTap { uri } if uri == "mock:tap2")
+        );
+    }
+
+    // ── Error handler: explicit config after shorthand → Mixed mode ─────────────
+
+    #[test]
+    fn test_builder_shorthand_then_explicit_mixed_mode() {
+        let result = RouteBuilder::from("direct:start")
+            .route_id("mixed-mode-2")
+            .dead_letter_channel("log:dlc")
+            .error_handler(ErrorHandlerConfig::log_only())
+            .to("mock:out")
+            .build();
+
+        let err = result.err().expect("mixed mode should fail");
+        assert!(format!("{err}").contains("mixed error handler modes"));
+    }
+
+    // ── build_canonical: empty from_uri error ───────────────────────────────────
+
+    #[test]
+    fn test_build_canonical_empty_from_uri_errors() {
+        let result = RouteBuilder::from("").route_id("test").build_canonical();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_canonical_missing_route_id_errors() {
+        let result = RouteBuilder::from("direct:start").build_canonical();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("route_id"));
+    }
+
+    // ── SplitBuilder: aggregate inside split ────────────────────────────────────
+
+    #[test]
+    fn test_split_builder_with_aggregate_inside() {
+        use camel_api::aggregator::AggregatorConfig;
+        use camel_api::splitter::{SplitterConfig, split_body_lines};
+
+        let definition = RouteBuilder::from("timer:test")
+            .route_id("split-agg")
+            .split(SplitterConfig::new(split_body_lines()))
+            .aggregate(
+                AggregatorConfig::correlate_by("frag-key")
+                    .complete_when_size(3)
+                    .build(),
+            )
+            .end_split()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Split { steps, .. } = &definition.steps()[0] {
+            assert_eq!(steps.len(), 1);
+            assert!(matches!(&steps[0], BuilderStep::Aggregate { .. }));
+        } else {
+            panic!("Expected Split step");
+        }
+    }
+
+    // ── Throttle: steps collected inside throttle scope ─────────────────────────
+
+    #[test]
+    fn test_throttle_builder_with_steps_inside() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("throttle-steps")
+            .throttle(10, Duration::from_secs(1))
+            .set_header("throttled", Value::Bool(true))
+            .to("mock:throttled")
+            .end_throttle()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Throttle { steps, .. } = &definition.steps()[0] {
+            assert_eq!(steps.len(), 2);
+        } else {
+            panic!("Expected Throttle step");
+        }
+    }
+
+    // ── LoadBalance: steps collected inside scope ───────────────────────────────
+
+    #[test]
+    fn test_load_balance_builder_with_steps_inside() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("lb-steps")
+            .load_balance()
+            .round_robin()
+            .set_header("lb", Value::Bool(true))
+            .to("mock:lb")
+            .end_load_balance()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::LoadBalance { steps, .. } = &definition.steps()[0] {
+            assert_eq!(steps.len(), 2);
+        } else {
+            panic!("Expected LoadBalance step");
+        }
+    }
+
+    // ── Multicast: steps collected inside scope ─────────────────────────────────
+
+    #[test]
+    fn test_multicast_builder_with_steps_inside() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("multicast-steps")
+            .multicast()
+            .set_header("mc", Value::Bool(true))
+            .to("mock:multicast")
+            .end_multicast()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Multicast { steps, .. } = &definition.steps()[0] {
+            assert_eq!(steps.len(), 2);
+        } else {
+            panic!("Expected Multicast step");
+        }
+    }
+
+    // ── LoopBuilder: steps collected inside loop scope ──────────────────────────
+
+    #[test]
+    fn test_loop_builder_with_steps_inside() {
+        let definition = RouteBuilder::from("timer:tick")
+            .route_id("loop-steps")
+            .loop_count(3)
+            .set_header("loop", Value::Bool(true))
+            .to("mock:loop")
+            .end_loop()
+            .build()
+            .unwrap();
+
+        if let BuilderStep::Loop { steps, .. } = &definition.steps()[0] {
+            assert_eq!(steps.len(), 2);
+        } else {
+            panic!("Expected Loop step");
+        }
+    }
+
+    // ── canonical_step_name coverage for remaining variants ─────────────────────
+
+    #[test]
+    fn test_build_canonical_rejects_loop_step() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-loop")
+            .loop_count(3)
+            .to("mock:loop")
+            .end_loop()
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("does not support step `loop`"));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_multicast_step() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-multicast")
+            .multicast()
+            .to("mock:a")
+            .end_multicast()
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("does not support step `multicast`"));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_throttle_step() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-throttle")
+            .throttle(10, Duration::from_secs(1))
+            .to("mock:result")
+            .end_throttle()
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("does not support step `throttle`"));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_load_balancer_step() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-lb")
+            .load_balance()
+            .round_robin()
+            .to("mock:result")
+            .end_load_balance()
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("does not support step `load_balancer`"));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_bean_step() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-bean")
+            .bean("myBean", "process")
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("does not support step `bean`"));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_script_step() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-script")
+            .script("rhai", "x = 1")
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("does not support step `script`"));
+    }
+
+    #[test]
+    fn test_build_canonical_accepts_delay_step() {
+        let spec = RouteBuilder::from("direct:start")
+            .route_id("canonical-delay")
+            .delay(Duration::from_millis(100))
+            .build_canonical()
+            .unwrap();
+
+        assert!(spec.steps.iter().any(|s| matches!(s, CanonicalStepSpec::Delay { delay_ms, .. } if *delay_ms == 100)));
+    }
+
+    #[test]
+    fn test_build_canonical_accepts_wire_tap_step() {
+        let spec = RouteBuilder::from("direct:start")
+            .route_id("canonical-wiretap")
+            .wire_tap("mock:tap")
+            .build_canonical()
+            .unwrap();
+
+        assert!(spec.steps.iter().any(|s| matches!(s, CanonicalStepSpec::WireTap { uri } if uri == "mock:tap")));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_dynamic_router_step() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-dyn-router")
+            .dynamic_router(Arc::new(|_| Some("mock:a".to_string())))
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("does not support step `dynamic_router`"));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_routing_slip_step() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-routing-slip")
+            .routing_slip(Arc::new(|_| Some("mock:a".to_string())))
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("does not support step `routing_slip`"));
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_recipient_list_step() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-recipient")
+            .recipient_list(Arc::new(|_| "mock:a".to_string()))
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("does not support step `recipient_list`"));
+    }
+
+    // ── extract_completion_fields: Any mode with predicate → error ──────────────
+
+    #[test]
+    fn test_build_canonical_rejects_any_mode_with_predicate() {
+        let err = RouteBuilder::from("direct:start")
+            .route_id("canonical-any-pred")
+            .aggregate(
+                AggregatorConfig {
+                    header_name: "key".to_string(),
+                    completion: CompletionMode::Any(vec![
+                        CompletionCondition::Size(5),
+                        CompletionCondition::Predicate(Arc::new(|_| false)),
+                    ]),
+                    correlation: CorrelationStrategy::HeaderName("key".to_string()),
+                    strategy: AggregationStrategy::CollectAll,
+                    max_buckets: None,
+                    bucket_ttl: None,
+                    force_completion_on_stop: false,
+                    discard_on_timeout: false,
+                },
+            )
+            .build_canonical()
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("predicate completion"));
+    }
 }

@@ -1,7 +1,93 @@
 use super::*;
 use crate::lifecycle::application::route_definition::{BuilderStep, RouteDefinition};
 use crate::shared::components::domain::Registry;
-use camel_api::{Value, ValueSourceDef};
+use camel_api::function::PrepareToken;
+use camel_api::{
+    ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId, FunctionInvocationError,
+    FunctionInvoker, FunctionInvokerSync, Value, ValueSourceDef,
+};
+
+struct NoopInvoker;
+
+impl FunctionInvokerSync for NoopInvoker {
+    fn stage_pending(&self, _def: FunctionDefinition, _route_id: Option<&str>, _generation: u64) {}
+    fn discard_staging(&self, _generation: u64) {}
+    fn begin_reload(&self) -> u64 {
+        1
+    }
+    fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> {
+        vec![]
+    }
+    fn staged_refs_for_route(
+        &self,
+        _route_id: &str,
+        _generation: u64,
+    ) -> Vec<(FunctionId, Option<String>)> {
+        vec![]
+    }
+    fn staged_defs_for_route(
+        &self,
+        _route_id: &str,
+        _generation: u64,
+    ) -> Vec<(FunctionDefinition, Option<String>)> {
+        vec![]
+    }
+}
+
+#[async_trait::async_trait]
+impl FunctionInvoker for NoopInvoker {
+    async fn register(
+        &self,
+        _def: FunctionDefinition,
+        _route_id: Option<&str>,
+    ) -> Result<(), FunctionInvocationError> {
+        Ok(())
+    }
+
+    async fn unregister(
+        &self,
+        _id: &FunctionId,
+        _route_id: Option<&str>,
+    ) -> Result<(), FunctionInvocationError> {
+        Ok(())
+    }
+
+    async fn invoke(
+        &self,
+        _id: &FunctionId,
+        _exchange: &camel_api::Exchange,
+    ) -> Result<ExchangePatch, FunctionInvocationError> {
+        Ok(ExchangePatch::default())
+    }
+
+    async fn prepare_reload(
+        &self,
+        _diff: FunctionDiff,
+        _generation: u64,
+    ) -> Result<PrepareToken, FunctionInvocationError> {
+        Ok(PrepareToken::default())
+    }
+
+    async fn finalize_reload(
+        &self,
+        _diff: &FunctionDiff,
+        _generation: u64,
+    ) -> Result<(), FunctionInvocationError> {
+        Ok(())
+    }
+
+    async fn rollback_reload(
+        &self,
+        _token: PrepareToken,
+        _generation: u64,
+    ) -> Result<(), FunctionInvocationError> {
+        Ok(())
+    }
+
+    async fn commit_staged(&self) -> Result<(), FunctionInvocationError> {
+        Ok(())
+    }
+}
 
 fn build_controller() -> DefaultRouteController {
     DefaultRouteController::new(
@@ -883,4 +969,205 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
         err.to_string()
             .contains("failed to compile simple expression `${unknown}`")
     );
+}
+
+#[tokio::test]
+async fn add_route_with_generation_and_prepare_insert_behaviors() {
+    let mut controller = build_controller_with_components();
+
+    controller
+        .add_route_with_generation(
+            RouteDefinition::new("timer:tick?period=15", vec![BuilderStep::Stop]).with_route_id("g1"),
+            7,
+        )
+        .await
+        .expect("add with generation");
+
+    let dup = controller
+        .add_route_with_generation(
+            RouteDefinition::new("timer:tick?period=15", vec![BuilderStep::Stop]).with_route_id("g1"),
+            8,
+        )
+        .await
+        .expect_err("duplicate add with generation should fail");
+    assert!(dup.to_string().contains("already exists"));
+
+    let prepared = controller
+        .prepare_route_definition_with_generation(
+            RouteDefinition::new("timer:tick?period=20", vec![BuilderStep::Stop]).with_route_id("g2"),
+            9,
+        )
+        .expect("prepare route");
+
+    controller
+        .insert_prepared_route(prepared)
+        .expect("insert prepared route");
+
+    let prepared_dup = controller
+        .prepare_route_definition_with_generation(
+            RouteDefinition::new("timer:tick?period=21", vec![BuilderStep::Stop]).with_route_id("g2"),
+            10,
+        )
+        .expect("prepare duplicate route");
+
+    let err = controller
+        .insert_prepared_route(prepared_dup)
+        .expect_err("insert duplicate prepared route should fail");
+    assert!(err.to_string().contains("already exists"));
+}
+
+#[test]
+fn compile_route_definition_with_generation_and_global_error_handler_paths() {
+    use camel_api::error_handler::ErrorHandlerConfig;
+
+    let mut controller = build_controller_with_components();
+    controller.set_error_handler(ErrorHandlerConfig::dead_letter_channel("log:dlq"));
+
+    let _compiled = controller
+        .compile_route_definition_with_generation(
+            RouteDefinition::new("timer:tick?period=10", vec![BuilderStep::Stop]).with_route_id("cg"),
+            11,
+        )
+        .expect("compile with generation should work");
+
+    let mut failing = build_controller();
+    failing.set_error_handler(ErrorHandlerConfig::dead_letter_channel("missing:dlq"));
+
+    let err = failing
+        .compile_route_definition(
+            RouteDefinition::new("timer:tick?period=10", vec![BuilderStep::Stop]).with_route_id("fail-eh"),
+        )
+        .expect_err("missing dlc component should fail");
+    assert!(err.to_string().contains("missing"));
+}
+
+#[tokio::test]
+async fn start_route_state_guards_cover_already_started_and_inconsistent() {
+    let mut controller = build_controller_with_components();
+
+    controller
+        .add_route(RouteDefinition::new("timer:tick?period=30", vec![]).with_route_id("guard"))
+        .await
+        .unwrap();
+
+    controller.start_route("guard").await.unwrap();
+    controller.start_route("guard").await.unwrap();
+    controller.stop_route("guard").await.unwrap();
+
+    let running = tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    let managed = controller.routes.get_mut("guard").expect("route exists");
+    managed.consumer_handle = Some(running);
+    managed.pipeline_handle = None;
+
+    let err = controller
+        .start_route("guard")
+        .await
+        .expect_err("consumer-running pipeline-stopped should fail");
+    assert!(err.to_string().contains("inconsistent execution state"));
+
+    if let Some(handle) = controller
+        .routes
+        .get_mut("guard")
+        .expect("route exists")
+        .consumer_handle
+        .take()
+    {
+        let _ = handle.await;
+    }
+}
+
+#[tokio::test]
+async fn remove_route_preserving_functions_validates_states() {
+    let mut controller = build_controller_with_components();
+
+    controller
+        .add_route(RouteDefinition::new("timer:tick?period=25", vec![]).with_route_id("preserve"))
+        .await
+        .unwrap();
+    controller.start_route("preserve").await.unwrap();
+
+    let err = controller
+        .remove_route_preserving_functions("preserve")
+        .await
+        .expect_err("running route must fail");
+    assert!(err.to_string().contains("must be stopped before removal"));
+
+    controller.stop_route("preserve").await.unwrap();
+    controller
+        .remove_route_preserving_functions("preserve")
+        .await
+        .unwrap();
+
+    let missing = controller
+        .remove_route_preserving_functions("preserve")
+        .await
+        .expect_err("missing route should fail");
+    assert!(missing.to_string().contains("not found"));
+}
+
+#[tokio::test]
+async fn start_all_routes_reports_failures_and_stop_all_routes_succeeds() {
+    let mut controller = build_controller_with_components();
+
+    controller
+        .add_route(
+            RouteDefinition::new("timer:tick?period=10", vec![BuilderStep::Stop])
+                .with_route_id("ok-a")
+                .with_startup_order(2),
+        )
+        .await
+        .unwrap();
+    controller
+        .add_route(
+            RouteDefinition::new("missing:start", vec![BuilderStep::Stop])
+                .with_route_id("bad-b")
+                .with_startup_order(1),
+        )
+        .await
+        .unwrap();
+
+    let err = controller
+        .start_all_routes()
+        .await
+        .expect_err("one bad route should aggregate error");
+    assert!(err.to_string().contains("Failed to start routes"));
+    assert!(err.to_string().contains("bad-b"));
+
+    controller
+        .remove_route("bad-b")
+        .await
+        .expect("failed route should remain stopped and removable");
+
+    controller.start_all_routes().await.unwrap();
+    controller.stop_all_routes().await.unwrap();
+}
+
+#[test]
+fn constructors_and_reload_helpers_cover_accessors() {
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let langs: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let beans = Arc::new(std::sync::Mutex::new(camel_bean::BeanRegistry::new()));
+
+    let mut with_beans = DefaultRouteController::with_beans(Arc::clone(&registry), Arc::clone(&beans));
+    with_beans.set_function_invoker(Arc::new(NoopInvoker));
+
+    let with_langs = DefaultRouteController::with_languages(
+        Arc::clone(&registry),
+        Arc::clone(&langs),
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+
+    let _with_all = DefaultRouteController::with_languages_and_beans(
+        Arc::clone(&registry),
+        Arc::clone(&langs),
+        Arc::new(camel_api::NoopPlatformService::default()),
+        Arc::clone(&beans),
+    )
+    .with_function_invoker(Arc::new(NoopInvoker));
+
+    assert_eq!(with_beans.route_count(), 0);
+    assert_eq!(with_langs.route_ids().len(), 0);
 }

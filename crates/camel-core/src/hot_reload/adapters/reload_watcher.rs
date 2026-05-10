@@ -315,7 +315,7 @@ mod tests {
 
     use crate::CamelContext;
 
-    use super::{is_reload_event, resolve_watch_dirs, watch_and_reload};
+    use super::{is_reload_event, resolve_watch_dirs, watch_and_reload, ReloadWatcher};
 
     fn make_event(paths: &[&str], kind: EventKind) -> Event {
         Event {
@@ -474,5 +474,96 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn is_reload_event_rejects_no_extension() {
+        let ev = make_event(
+            &["routes/Makefile"],
+            EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )),
+        );
+        assert!(!is_reload_event(&ev));
+    }
+
+    #[test]
+    fn is_reload_event_rejects_any_event_with_no_matching_kind() {
+        let ev = make_event(
+            &["routes/test.yaml"],
+            EventKind::Other,
+        );
+        assert!(!is_reload_event(&ev));
+    }
+
+    #[test]
+    fn is_reload_event_rejects_empty_paths() {
+        let ev = Event {
+            kind: EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![],
+            attrs: Default::default(),
+        };
+        assert!(!is_reload_event(&ev));
+    }
+
+    #[test]
+    fn resolve_watch_dirs_deduplicates_same_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "camel-reload-watch-dedup-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+
+        let patterns = vec![
+            root.join("*.yaml").to_string_lossy().to_string(),
+            root.join("*.yml").to_string_lossy().to_string(),
+        ];
+
+        let dirs = resolve_watch_dirs(&patterns);
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs.contains(&root));
+
+        fs::remove_dir_all(&root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn resolve_watch_dirs_handles_absolute_glob_pattern() {
+        let root = std::env::temp_dir().join(format!(
+            "camel-reload-watch-abs-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        ));
+        let nested = root.join("routes").join("sub");
+        fs::create_dir_all(&nested).expect("create nested temp dir");
+
+        let pattern = root.join("routes").join("**").join("*.yaml")
+            .to_string_lossy().to_string();
+
+        let dirs = resolve_watch_dirs(&[pattern]);
+        assert!(dirs.iter().any(|d| d.starts_with(root.join("routes"))));
+
+        fs::remove_dir_all(&root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn resolve_watch_dirs_empty_patterns_returns_empty() {
+        let dirs = resolve_watch_dirs(&[]);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn resolve_watch_dirs_ignores_nonexistent_parent_of_glob() {
+        let dirs = resolve_watch_dirs(&["/nonexistent/path/**/*.yaml".to_string()]);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn reload_watcher_struct_is_unit() {
+        let _ = ReloadWatcher;
     }
 }

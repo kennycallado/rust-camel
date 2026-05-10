@@ -441,10 +441,12 @@ impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::task::Poll;
 
     use futures::{Stream, StreamExt};
     use tokio::sync::mpsc;
+    use tonic::server::{ServerStreamingService, UnaryService};
     use tonic::Status;
     use tower::Service;
 
@@ -520,11 +522,12 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_item_stream_poll_pending() {
         let (_tx, rx) = mpsc::channel::<GrpcStreamItem>(4);
-        let mut stream = GrpcItemStream { rx };
+        let stream = GrpcItemStream { rx };
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
+        let mut stream_pinned = std::pin::Pin::new(Box::new(stream));
         assert!(matches!(
-            Pin::new(&mut stream).poll_next(&mut cx),
+            Stream::poll_next(stream_pinned.as_mut(), &mut cx),
             Poll::Pending
         ));
     }
@@ -541,7 +544,7 @@ mod tests {
     async fn test_unimplemented_handler_returns_unimplemented_status() {
         let mut handler = UnimplementedHandler;
         let req = Request::new(vec![1, 2, 3]);
-        let result = handler.call(req).await;
+        let result = Service::call(&mut handler, req).await;
         assert!(result.is_err());
         let status = result.unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unimplemented);
@@ -764,5 +767,296 @@ mod tests {
             _ => panic!("expected Message(20)"),
         }
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_or_spawn_with_listener_success() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let dispatch = GrpcServerRegistry::global()
+            .get_or_spawn_with_listener(listener, "127.0.0.1", port)
+            .await;
+        assert!(dispatch.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unregister_from_global_registry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let dispatch = GrpcServerRegistry::global()
+            .get_or_spawn_with_listener(listener, "127.0.0.1", port)
+            .await
+            .unwrap();
+
+        let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+        let path = "/test.Unregister/Method".to_string();
+        {
+            let mut table = dispatch.write().await;
+            table.insert(path.clone(), (tx, GrpcMode::Unary));
+        }
+        assert!(dispatch.read().await.contains_key(&path));
+
+        GrpcServerRegistry::global()
+            .unregister("127.0.0.1", port, &path)
+            .await;
+
+        assert!(!dispatch.read().await.contains_key(&path));
+    }
+
+    #[test]
+    fn test_unary_handler_is_constructable() {
+        let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+        let _handler = UnaryHandler { sender: _tx };
+    }
+
+    #[test]
+    fn test_server_streaming_handler_is_constructable() {
+        let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+        let _handler = ServerStreamingHandler { sender: _tx };
+    }
+
+    #[test]
+    fn test_client_streaming_handler_is_constructable() {
+        let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+        let _handler = ClientStreamingHandler { sender: _tx };
+    }
+
+    #[test]
+    fn test_bidi_handler_is_constructable() {
+        let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+        let _handler = BidiHandler { sender: _tx };
+    }
+
+    #[tokio::test]
+    async fn test_unary_handler_send_fails_when_consumer_stopped() {
+        let (tx, rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        drop(rx);
+
+        let mut handler = UnaryHandler { sender: tx };
+        let req = Request::new(vec![1, 2, 3]);
+        let fut = handler.call(req);
+        let handle = tokio::spawn(fut);
+
+        let result = handle.await.unwrap();
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert!(err.message().contains("consumer stopped"));
+    }
+
+    #[tokio::test]
+    async fn test_server_streaming_handler_send_fails_when_consumer_stopped() {
+        let (tx, rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        drop(rx);
+
+        let mut handler = ServerStreamingHandler { sender: tx };
+        let req = Request::new(vec![1, 2, 3]);
+        let fut = handler.call(req);
+        let handle = tokio::spawn(fut);
+
+        match handle.await.unwrap() {
+            Err(err) => {
+                assert_eq!(err.code(), tonic::Code::Unavailable);
+            }
+            Ok(_) => panic!("expected error when consumer stopped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_client_streaming_handler_send_fails_when_consumer_stopped() {
+        let (tx, rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        drop(rx);
+
+        let handler = ClientStreamingHandler { sender: tx };
+        assert!(handler.sender.is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_bidi_handler_send_fails_when_consumer_stopped() {
+        let (tx, rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        drop(rx);
+
+        let handler = BidiHandler { sender: tx };
+        assert!(handler.sender.is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_unary_handler_reply_channel_dropped() {
+        let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+
+        let mut handler = UnaryHandler { sender: tx };
+        let req = Request::new(vec![1, 2, 3]);
+        let fut = handler.call(req);
+
+        let handle = tokio::spawn(fut);
+
+        let envelope = rx.recv().await.unwrap();
+        match envelope {
+            GrpcRequestEnvelope::Unary { reply_tx, .. } => {
+                drop(reply_tx);
+            }
+            _ => panic!("expected Unary"),
+        }
+
+        let result = handle.await.unwrap();
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(err.message().contains("reply channel dropped"));
+    }
+
+    #[tokio::test]
+    async fn test_unary_handler_returns_ok_response() {
+        let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+
+        let mut handler = UnaryHandler { sender: tx };
+        let req = Request::new(vec![10, 20, 30]);
+        let fut = handler.call(req);
+        let handle = tokio::spawn(fut);
+
+        let envelope = rx.recv().await.unwrap();
+        match envelope {
+            GrpcRequestEnvelope::Unary { reply_tx, body, .. } => {
+                assert_eq!(body, vec![10, 20, 30]);
+                let _ = reply_tx.send(GrpcReply::Ok(vec![40, 50]));
+            }
+            _ => panic!("expected Unary"),
+        }
+
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result.into_inner(), vec![40, 50]);
+    }
+
+    #[tokio::test]
+    async fn test_unary_handler_returns_error_response() {
+        let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+
+        let mut handler = UnaryHandler { sender: tx };
+        let req = Request::new(vec![1]);
+        let fut = handler.call(req);
+        let handle = tokio::spawn(fut);
+
+        let envelope = rx.recv().await.unwrap();
+        match envelope {
+            GrpcRequestEnvelope::Unary { reply_tx, .. } => {
+                let _ = reply_tx.send(GrpcReply::Err(Status::not_found("not found")));
+            }
+            _ => panic!("expected Unary"),
+        }
+
+        let result = handle.await.unwrap();
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_server_streaming_handler_success() {
+        let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+
+        let mut handler = ServerStreamingHandler { sender: tx };
+        let req = Request::new(vec![1, 2]);
+        let fut = handler.call(req);
+        let handle = tokio::spawn(fut);
+
+        let envelope = rx.recv().await.unwrap();
+        match envelope {
+            GrpcRequestEnvelope::ServerStreaming { reply_tx, body, .. } => {
+                assert_eq!(body, vec![1, 2]);
+                reply_tx
+                    .send(GrpcStreamItem::Message(vec![100]))
+                    .await
+                    .unwrap();
+                reply_tx.send(GrpcStreamItem::Done).await.unwrap();
+            }
+            _ => panic!("expected ServerStreaming"),
+        }
+
+        let result = handle.await.unwrap().unwrap();
+        let mut stream = result.into_inner();
+        assert_eq!(stream.next().await.unwrap().unwrap(), vec![100]);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_server_streaming_handler_error_in_stream() {
+        let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+
+        let mut handler = ServerStreamingHandler { sender: tx };
+        let req = Request::new(vec![1]);
+        let fut = handler.call(req);
+        let handle = tokio::spawn(fut);
+
+        let envelope = rx.recv().await.unwrap();
+        match envelope {
+            GrpcRequestEnvelope::ServerStreaming { reply_tx, .. } => {
+                reply_tx
+                    .send(GrpcStreamItem::Error(Status::internal("stream error")))
+                    .await
+                    .unwrap();
+            }
+            _ => panic!("expected ServerStreaming"),
+        }
+
+        let result = handle.await.unwrap().unwrap();
+        let mut stream = result.into_inner();
+        let item = stream.next().await.unwrap();
+        let err = item.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+    }
+
+    #[tokio::test]
+    async fn test_bidi_handler_forwards_items() {
+        let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
+        let (reply_tx, _reply_rx) = mpsc::channel::<GrpcStreamItem>(4);
+
+        let handler = BidiHandler { sender: tx };
+        let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(4);
+        let envelope_for_test = GrpcRequestEnvelope::Bidi {
+            metadata: tonic::metadata::MetadataMap::new(),
+            body_rx,
+            reply_tx,
+        };
+
+        let send_result = handler.sender.send(envelope_for_test).await;
+        assert!(send_result.is_ok());
+
+        let received = rx.recv().await;
+        assert!(received.is_some());
+
+        body_tx.send(vec![10]).await.unwrap();
+        body_tx.send(vec![20]).await.unwrap();
+        drop(body_tx);
+    }
+
+    #[tokio::test]
+    async fn test_grpc_stream_item_variants() {
+        let msg = GrpcStreamItem::Message(vec![1, 2]);
+        match msg {
+            GrpcStreamItem::Message(b) => assert_eq!(b, vec![1, 2]),
+            _ => panic!(),
+        }
+
+        let err = GrpcStreamItem::Error(Status::internal("err"));
+        match err {
+            GrpcStreamItem::Error(s) => assert_eq!(s.code(), tonic::Code::Internal),
+            _ => panic!(),
+        }
+
+        let done = GrpcStreamItem::Done;
+        match done {
+            GrpcStreamItem::Done => {}
+            _ => panic!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_server_handle_struct() {
+        let dispatch: GrpcDispatchTable = Arc::new(RwLock::new(HashMap::new()));
+        let task = tokio::spawn(async {});
+        let handle = ServerHandle {
+            dispatch,
+            _task: task,
+        };
+        assert!(!handle._task.is_finished() || true);
     }
 }

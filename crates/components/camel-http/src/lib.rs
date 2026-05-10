@@ -3358,4 +3358,57 @@ mod tests {
 
         token.cancel();
     }
+
+    #[test]
+    fn test_validate_url_for_ssrf_blocks_and_allows_hosts() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap();
+        cfg.blocked_hosts = vec!["blocked.local".to_string()];
+        cfg.allow_private_ips = false;
+
+        let blocked = validate_url_for_ssrf("http://blocked.local/api", &cfg);
+        assert!(blocked.is_err());
+
+        let private_ip = validate_url_for_ssrf("http://127.0.0.1/api", &cfg);
+        assert!(private_ip.is_err());
+
+        cfg.allow_private_ips = true;
+        let allowed = validate_url_for_ssrf("http://127.0.0.1/api", &cfg);
+        assert!(allowed.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_url_combines_path_and_query_sources() {
+        let cfg = HttpEndpointConfig::from_uri("http://example.com/base?foo=bar").unwrap();
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.set_header(
+            "CamelHttpPath",
+            serde_json::Value::String("next".to_string()),
+        );
+        let url = HttpProducer::resolve_url(&exchange, &cfg);
+        assert!(url.starts_with("http://example.com/base/next?"));
+        assert!(url.contains("foo=bar"));
+
+        exchange.input.set_header(
+            "CamelHttpUri",
+            serde_json::Value::String("http://other.test/root".to_string()),
+        );
+        exchange.input.set_header(
+            "CamelHttpQuery",
+            serde_json::Value::String("a=1&b=2".to_string()),
+        );
+
+        let override_url = HttpProducer::resolve_url(&exchange, &cfg);
+        assert_eq!(override_url, "http://other.test/root/next?a=1&b=2");
+    }
+
+    #[test]
+    fn test_http_producer_helpers_status_and_size_boundaries() {
+        assert!(HttpProducer::is_ok_status(200, (200, 299)));
+        assert!(HttpProducer::is_ok_status(299, (200, 299)));
+        assert!(!HttpProducer::is_ok_status(199, (200, 299)));
+        assert!(!HttpProducer::is_ok_status(300, (200, 299)));
+
+        assert!(!exceeds_max_response_body(10, 10));
+        assert!(exceeds_max_response_body(11, 10));
+    }
 }

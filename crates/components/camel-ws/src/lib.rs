@@ -1699,4 +1699,79 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn body_conversion_helpers_cover_text_and_binary_paths() {
+        let text_msg = body_to_axum_ws_message(CamelBody::Text("abc".into()), "text")
+            .await
+            .unwrap();
+        assert!(matches!(text_msg, WsMessage::Text(_)));
+
+        let bin_msg = body_to_axum_ws_message(CamelBody::Bytes(vec![1, 2, 3].into()), "binary")
+            .await
+            .unwrap();
+        assert!(matches!(bin_msg, WsMessage::Binary(_)));
+
+        let client_text = body_to_client_ws_message(CamelBody::Json(serde_json::json!({"k":"v"})), "text")
+            .await
+            .unwrap();
+        assert!(matches!(client_text, ClientWsMessage::Text(_)));
+
+        let client_bin = body_to_client_ws_message(CamelBody::Bytes(vec![7, 8].into()), "binary")
+            .await
+            .unwrap();
+        assert!(matches!(client_bin, ClientWsMessage::Binary(_)));
+    }
+
+    #[tokio::test]
+    async fn body_to_text_handles_empty_text_json_and_bytes() {
+        assert_eq!(body_to_text(CamelBody::Empty).await.unwrap(), "");
+        assert_eq!(body_to_text(CamelBody::Text("hello".into())).await.unwrap(), "hello");
+        assert_eq!(
+            body_to_text(CamelBody::Json(serde_json::json!({"n":1})))
+                .await
+                .unwrap(),
+            "{\"n\":1}"
+        );
+        assert_eq!(
+            body_to_text(CamelBody::Bytes(b"hi".to_vec().into()))
+                .await
+                .unwrap(),
+            "hi"
+        );
+    }
+
+    #[test]
+    fn try_send_with_backpressure_returns_false_when_channel_full() {
+        let (tx, _rx) = mpsc::channel::<WsMessage>(1);
+        assert!(try_send_with_backpressure(
+            &tx,
+            WsMessage::Text("first".into()),
+            "test"
+        ));
+        assert!(!try_send_with_backpressure(
+            &tx,
+            WsMessage::Text("second".into()),
+            "test"
+        ));
+    }
+
+    #[test]
+    fn map_connect_error_formats_connection_refused_and_generic_errors() {
+        let refused = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        let err = map_connect_error(tungstenite::Error::Io(refused), "ws://localhost:1/x");
+        assert!(err.to_string().contains("WebSocket connection refused"));
+
+        let generic = map_connect_error(
+            tungstenite::Error::Protocol(
+                tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+            ),
+            "ws://localhost:2/y",
+        );
+        assert!(
+            generic
+                .to_string()
+                .contains("WebSocket connection failed (ws://localhost:2/y)")
+        );
+    }
 }

@@ -2935,4 +2935,57 @@ mod tests {
             .and_then(|v| v.as_str());
         assert_eq!(action_result, Some("success"));
     }
+
+    #[tokio::test]
+    async fn test_logs_consumer_requires_container_id() {
+        use tokio::sync::mpsc;
+
+        let mut consumer = ContainerConsumer {
+            config: ContainerConfig::from_uri("container:logs").unwrap(),
+        };
+        let (tx, _rx) = mpsc::channel(4);
+        let context = ConsumerContext::new(tx, tokio_util::sync::CancellationToken::new());
+
+        let err = consumer.start(context).await.unwrap_err();
+        match err {
+            CamelError::EndpointCreationFailed(msg) => {
+                assert!(msg.contains("containerId is required for logs consumer"));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_events_consumer_stops_immediately_when_cancelled() {
+        use tokio::sync::mpsc;
+
+        let mut consumer = ContainerConsumer {
+            config: ContainerConfig::from_uri("container:events").unwrap(),
+        };
+
+        let (tx, _rx) = mpsc::channel(4);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let context = ConsumerContext::new(tx, cancel);
+
+        let result = consumer.start(context).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_global_config_constructors_and_endpoint_docker_host() {
+        let global = ContainerGlobalConfig::new().with_docker_host("unix:///tmp/docker.sock");
+        let mut cfg = ContainerConfig::from_uri("container:list").unwrap();
+        cfg.apply_global_defaults(&global);
+
+        let endpoint = ContainerEndpoint {
+            uri: "container:list".to_string(),
+            config: cfg,
+        };
+
+        assert_eq!(endpoint.docker_host(), Some("unix:///tmp/docker.sock"));
+
+        let component = ContainerComponent::with_config(global);
+        assert_eq!(component.scheme(), "container");
+    }
 }

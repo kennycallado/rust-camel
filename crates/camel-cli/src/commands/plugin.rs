@@ -378,6 +378,31 @@ mod tests {
     }
 
     #[test]
+    fn find_camel_root_ignores_non_workspace_cargo_toml() {
+        let root = tempdir().expect("tempdir");
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\nname = \"x\"\n")
+            .expect("write");
+        let nested = root.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+
+        let err = find_camel_root(&nested).expect_err("expected error");
+        assert!(err.contains("could not find Camel.toml or workspace Cargo.toml"));
+    }
+
+    #[test]
+    fn find_camel_root_returns_read_error_for_unreadable_workspace_marker() {
+        let root = tempdir().expect("tempdir");
+        let cargo_as_dir = root.path().join("Cargo.toml");
+        std::fs::create_dir_all(&cargo_as_dir).expect("mkdir");
+        let nested = root.path().join("x").join("y");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+
+        let err = find_camel_root(&nested).expect_err("expected read error");
+        assert!(err.contains("failed to read"), "got: {err}");
+        assert!(err.contains("Cargo.toml"), "got: {err}");
+    }
+
+    #[test]
     fn build_output_path_release() {
         let dir = Path::new("/tmp/project");
         let path = build_output_path(dir, "my-plugin", false);
@@ -405,6 +430,17 @@ mod tests {
         let path = build_output_path(dir, "my_plugin", false);
         assert!(
             path.ends_with(Path::new("target/wasm32-wasip2/release/my_plugin.wasm")),
+            "got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn build_output_path_replaces_all_hyphens() {
+        let dir = Path::new("/tmp/project");
+        let path = build_output_path(dir, "my-super-plugin", true);
+        assert!(
+            path.ends_with(Path::new("target/wasm32-wasip2/debug/my_super_plugin.wasm")),
             "got: {}",
             path.display()
         );

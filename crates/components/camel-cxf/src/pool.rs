@@ -542,6 +542,19 @@ impl CxfBridgePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tonic::transport::Endpoint;
+
+    fn test_pool_config() -> CxfPoolConfig {
+        CxfPoolConfig {
+            profiles: vec![],
+            max_bridges: 2,
+            bridge_start_timeout_ms: 15_000,
+            health_check_interval_ms: 3_000,
+            bridge_cache_dir: None,
+            version: "0.1.0".to_string(),
+            bind_address: None,
+        }
+    }
 
     #[test]
     fn slot_key_is_constant() {
@@ -551,19 +564,40 @@ mod tests {
 
     #[test]
     fn from_config_uses_defaults() {
-        let pool_config = CxfPoolConfig {
-            profiles: vec![],
-            max_bridges: 2,
-            bridge_start_timeout_ms: 15_000,
-            health_check_interval_ms: 3_000,
-            bridge_cache_dir: None,
-            version: "0.1.0".to_string(),
-            bind_address: None,
-        };
+        let pool_config = test_pool_config();
         let pool = CxfBridgePool::from_config(pool_config).expect("valid config");
         assert_eq!(pool.max_bridges, 2);
         assert_eq!(pool.bridge_start_timeout_ms, 15_000);
         assert_eq!(pool.bridge_version, "0.1.0");
+    }
+
+    #[test]
+    fn from_config_uses_explicit_cache_dir_and_bind_address() {
+        let mut pool_config = test_pool_config();
+        pool_config.bridge_cache_dir = Some(PathBuf::from("/tmp/cxf-cache"));
+        pool_config.bind_address = Some("http://127.0.0.1:9000/cxf".to_string());
+
+        let pool = CxfBridgePool::from_config(pool_config).expect("valid config");
+        assert_eq!(pool.bridge_cache_dir, PathBuf::from("/tmp/cxf-cache"));
+        assert_eq!(pool.bind_address.as_deref(), Some("http://127.0.0.1:9000/cxf"));
+    }
+
+    #[test]
+    fn from_config_rejects_invalid_profile_name() {
+        let mut pool_config = test_pool_config();
+        pool_config.profiles = vec![crate::config::CxfProfileConfig {
+            name: "Bad-Name".to_string(),
+            address: None,
+            wsdl_path: "service.wsdl".to_string(),
+            service_name: "MyService".to_string(),
+            port_name: "MyPort".to_string(),
+            security: crate::config::CxfSecurityFields::default(),
+        }];
+
+        let err = CxfBridgePool::from_config(pool_config)
+            .err()
+            .expect("expected invalid profile");
+        assert!(err.to_string().contains("must contain only lowercase letters"));
     }
 
     #[test]
@@ -584,15 +618,7 @@ mod tests {
 
     #[test]
     fn restart_slot_updates_state() {
-        let pool_config = CxfPoolConfig {
-            profiles: vec![],
-            max_bridges: 2,
-            bridge_start_timeout_ms: 15_000,
-            health_check_interval_ms: 3_000,
-            bridge_cache_dir: None,
-            version: "0.1.0".to_string(),
-            bind_address: None,
-        };
+        let pool_config = test_pool_config();
         let pool = CxfBridgePool::from_config(pool_config).expect("valid config");
 
         let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
@@ -623,20 +649,70 @@ mod tests {
 
     #[test]
     fn max_bridges_enforced() {
-        let pool_config = CxfPoolConfig {
-            profiles: vec![],
-            max_bridges: 0,
-            bridge_start_timeout_ms: 15_000,
-            health_check_interval_ms: 3_000,
-            bridge_cache_dir: None,
-            version: "0.1.0".to_string(),
-            bind_address: None,
-        };
+        let mut pool_config = test_pool_config();
+        pool_config.max_bridges = 0;
         let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("valid config"));
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(pool.get_or_create_slot("key"));
         assert!(result.is_err(), "should fail when max_bridges is 0");
         let err = result.unwrap_err();
         assert!(err.to_string().contains("max_bridges"), "got: {err}");
+    }
+
+    #[test]
+    fn get_or_create_slot_returns_existing_without_starting_bridge() {
+        let pool = Arc::new(CxfBridgePool::from_config(test_pool_config()).expect("valid config"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let slot = rt.block_on(async {
+            let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+            pool.insert_slot_for_test(
+                "existing".to_string(),
+                BridgeSlot::new_ready_for_test(channel),
+            );
+            pool.get_or_create_slot("existing").await
+        })
+        .expect("existing slot");
+        assert_eq!(slot.key, "test-slot");
+    }
+
+    #[test]
+    fn await_ready_channel_returns_error_when_stopped() {
+        let pool = CxfBridgePool::from_config(test_pool_config()).expect("valid config");
+        let (state_tx, state_rx) = watch::channel(BridgeState::Stopped);
+        let slot = Arc::new(BridgeSlot {
+            key: "stopped-slot".to_string(),
+            configured_profiles: vec![],
+            bind_address: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(pool.await_ready_channel(&slot))
+            .expect_err("expected stopped error");
+        assert!(err.to_string().contains("is stopped"));
+    }
+
+    #[test]
+    fn shutdown_marks_slot_stopped() {
+        let pool = Arc::new(CxfBridgePool::from_config(test_pool_config()).expect("valid config"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+            pool.insert_slot_for_test("slot1".to_string(), BridgeSlot::new_ready_for_test(channel));
+            pool.shutdown().await
+        })
+        .expect("shutdown ok");
+
+        let state = pool
+            .slots
+            .get("slot1")
+            .expect("slot exists")
+            .state_rx
+            .borrow()
+            .clone();
+        assert!(matches!(state, BridgeState::Stopped));
     }
 }

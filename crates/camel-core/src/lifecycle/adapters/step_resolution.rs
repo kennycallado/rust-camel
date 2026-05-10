@@ -1077,4 +1077,185 @@ mod tests {
 
         assert!(err.to_string().contains("unknown"));
     }
+
+    #[test]
+    fn compile_language_expression_and_predicate_propagate_compile_errors() {
+        let languages = languages_with_simple();
+        let bad_expr = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${header.a".into(),
+        };
+        let bad_pred = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${header.a == 'x'".into(),
+        };
+
+        let expr_err = match compile_language_expression(&languages, &bad_expr) {
+            Ok(_) => panic!("expression compile should fail"),
+            Err(err) => err,
+        };
+        assert!(expr_err.to_string().contains("failed to compile simple expression"));
+
+        let pred_err = match compile_language_predicate(&languages, &bad_pred) {
+            Ok(_) => panic!("predicate compile should fail"),
+            Err(err) => err,
+        };
+        assert!(pred_err.to_string().contains("failed to compile simple predicate"));
+    }
+
+    #[test]
+    fn resolve_steps_covers_non_endpoint_variants() {
+        use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
+        use std::time::Duration;
+
+        let expr = |source: &str| LanguageExpressionDef {
+            language: "simple".into(),
+            source: source.into(),
+        };
+
+        let languages = languages_with_simple();
+        let producer_ctx = ProducerContext::new();
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> =
+            Arc::new(camel_component_api::NoOpComponentContext);
+
+        let steps = vec![
+            BuilderStep::Processor(BoxProcessor::new(IdentityProcessor)),
+            BuilderStep::Stop,
+            BuilderStep::Delay {
+                config: camel_api::DelayConfig::new(1),
+            },
+            BuilderStep::Loop {
+                config: camel_api::loop_eip::LoopConfig::new(camel_api::loop_eip::LoopMode::Count(1)),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::DeclarativeLoop {
+                count: Some(1),
+                while_predicate: None,
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::Log {
+                level: camel_processor::LogLevel::Info,
+                message: "log".into(),
+            },
+            BuilderStep::DeclarativeSetHeader {
+                key: "k".into(),
+                value: ValueSourceDef::Literal(Value::String("v".into())),
+            },
+            BuilderStep::DeclarativeSetProperty {
+                key: "p".into(),
+                value_source: ValueSourceDef::Expression(expr("${header.k}")),
+            },
+            BuilderStep::DeclarativeSetBody {
+                value: ValueSourceDef::Expression(expr("${header.k}")),
+            },
+            BuilderStep::DeclarativeFilter {
+                predicate: expr("${header.k} == 'v'"),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::DeclarativeChoice {
+                whens: vec![crate::lifecycle::application::route_definition::DeclarativeWhenStep {
+                    predicate: expr("${header.k} == 'v'"),
+                    steps: vec![BuilderStep::Stop],
+                }],
+                otherwise: Some(vec![BuilderStep::Stop]),
+            },
+            BuilderStep::DeclarativeScript {
+                expression: expr("${header.k}"),
+            },
+            BuilderStep::Split {
+                config: SplitterConfig::new(split_body_lines())
+                    .aggregation(AggregationStrategy::CollectAll),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::DeclarativeSplit {
+                expression: expr("${body}"),
+                aggregation: AggregationStrategy::Original,
+                parallel: false,
+                parallel_limit: Some(2),
+                stop_on_exception: true,
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::Aggregate {
+                config: camel_api::AggregatorConfig::correlate_by("id")
+                    .complete_when_size(1)
+                    .build(),
+            },
+            BuilderStep::Filter {
+                predicate: Arc::new(|_| true),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::Choice {
+                whens: vec![crate::lifecycle::application::route_definition::WhenStep {
+                    predicate: Arc::new(|_| true),
+                    steps: vec![BuilderStep::Stop],
+                }],
+                otherwise: Some(vec![BuilderStep::Stop]),
+            },
+            BuilderStep::Multicast {
+                steps: vec![BuilderStep::Stop, BuilderStep::Stop],
+                config: camel_api::MulticastConfig::new(),
+            },
+            BuilderStep::DeclarativeLog {
+                level: camel_processor::LogLevel::Info,
+                message: ValueSourceDef::Expression(expr("${header.k}")),
+            },
+            BuilderStep::Throttle {
+                config: camel_api::ThrottlerConfig::new(10, Duration::from_millis(10)),
+                steps: vec![BuilderStep::Stop],
+            },
+            BuilderStep::LoadBalance {
+                config: camel_api::LoadBalancerConfig::round_robin(),
+                steps: vec![BuilderStep::Stop, BuilderStep::Stop],
+            },
+            BuilderStep::DynamicRouter {
+                config: camel_api::DynamicRouterConfig::new(Arc::new(|_| None)),
+            },
+            BuilderStep::DeclarativeDynamicRouter {
+                expression: expr("${header.routes}"),
+                uri_delimiter: ",".into(),
+                cache_size: 8,
+                ignore_invalid_endpoints: true,
+                max_iterations: 3,
+            },
+            BuilderStep::RoutingSlip {
+                config: camel_api::RoutingSlipConfig::new(Arc::new(|_| None)),
+            },
+            BuilderStep::DeclarativeRoutingSlip {
+                expression: expr("${header.routes}"),
+                uri_delimiter: ";".into(),
+                cache_size: 16,
+                ignore_invalid_endpoints: true,
+            },
+            BuilderStep::RecipientList {
+                config: camel_api::recipient_list::RecipientListConfig::new(Arc::new(|_| {
+                    String::new()
+                })),
+            },
+            BuilderStep::DeclarativeRecipientList {
+                expression: expr("${header.routes}"),
+                delimiter: ",".into(),
+                parallel: true,
+                parallel_limit: Some(2),
+                stop_on_exception: false,
+                aggregation: "noop".into(),
+            },
+        ];
+
+        let resolved = resolve_steps(
+            steps,
+            &producer_ctx,
+            &registry,
+            &languages,
+            &beans,
+            None,
+            component_ctx,
+            Some("r1"),
+            &FunctionStagingMode::DirectAdd,
+        )
+        .unwrap();
+
+        assert!(!resolved.is_empty());
+    }
 }

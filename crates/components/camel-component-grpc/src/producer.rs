@@ -319,10 +319,14 @@ impl Service<Exchange> for GrpcProducer {
 
 #[cfg(test)]
 mod tests {
-    use super::GrpcProducer;
+    use std::path::{Path, PathBuf};
+    use std::task::{Context, Poll};
+
+    use super::{GrpcProducer, json_to_protobuf, protobuf_to_json, proto_cache};
     use crate::GrpcMode;
     use camel_api::{Body, CamelError, Exchange, Message};
     use tonic::Request;
+    use tower::Service;
 
     fn exchange_with_headers(headers: &[(&str, serde_json::Value)]) -> Exchange {
         let mut msg = Message::default();
@@ -509,5 +513,223 @@ mod tests {
         assert_ne!(GrpcMode::ServerStreaming, GrpcMode::ClientStreaming);
         assert_ne!(GrpcMode::ServerStreaming, GrpcMode::Bidi);
         assert_ne!(GrpcMode::ClientStreaming, GrpcMode::Bidi);
+    }
+
+    #[test]
+    fn test_json_to_protobuf_roundtrip() {
+        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+        let cache = proto_cache();
+        let pool = cache.get_or_compile(&proto_path, std::iter::empty::<&Path>()).unwrap();
+        let svc = pool.get_service_by_name("helloworld.Greeter").unwrap();
+        let method = svc.methods().find(|m| m.name() == "SayHello").unwrap();
+        let desc = method.input();
+
+        let json = serde_json::json!({"name": "World"});
+        let bytes = json_to_protobuf(json, desc.clone()).unwrap();
+        assert!(!bytes.is_empty());
+
+        let decoded = protobuf_to_json(bytes, desc).unwrap();
+        assert_eq!(decoded["name"], "World");
+    }
+
+    #[test]
+    fn test_json_to_protobuf_invalid_field_type() {
+        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+        let cache = proto_cache();
+        let pool = cache.get_or_compile(&proto_path, std::iter::empty::<&Path>()).unwrap();
+        let svc = pool.get_service_by_name("helloworld.Greeter").unwrap();
+        let method = svc.methods().find(|m| m.name() == "SayHello").unwrap();
+        let desc = method.input();
+
+        let json = serde_json::json!({"name": 123});
+        let result = json_to_protobuf(json, desc);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("failed to parse JSON into protobuf"));
+    }
+
+    #[test]
+    fn test_protobuf_to_json_invalid_bytes() {
+        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+        let cache = proto_cache();
+        let pool = cache.get_or_compile(&proto_path, std::iter::empty::<&Path>()).unwrap();
+        let svc = pool.get_service_by_name("helloworld.Greeter").unwrap();
+        let method = svc.methods().find(|m| m.name() == "SayHello").unwrap();
+        let desc = method.input();
+
+        let result = protobuf_to_json(vec![0xFF, 0xFE, 0xFD], desc);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("failed to decode protobuf bytes"));
+    }
+
+    #[tokio::test]
+    async fn test_producer_new_invalid_endpoint() {
+        let result = GrpcProducer::new(
+            "not-a-valid-endpoint".to_string(),
+            PathBuf::from("/dev/null"),
+            "svc".to_string(),
+            "Method".to_string(),
+            GrpcMode::Unary,
+        );
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_producer_new_missing_proto_file() {
+        let result = GrpcProducer::new(
+            "http://localhost:50051".to_string(),
+            PathBuf::from("/nonexistent/file.proto"),
+            "svc".to_string(),
+            "Method".to_string(),
+            GrpcMode::Unary,
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(err.to_string().contains("failed to compile proto"));
+    }
+
+    #[tokio::test]
+    async fn test_producer_new_service_not_found() {
+        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+        let result = GrpcProducer::new(
+            "http://localhost:50051".to_string(),
+            proto_path,
+            "nonexistent.Service".to_string(),
+            "SayHello".to_string(),
+            GrpcMode::Unary,
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(err.to_string().contains("service descriptor not found"));
+    }
+
+    #[tokio::test]
+    async fn test_producer_new_method_not_found() {
+        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+        let result = GrpcProducer::new(
+            "http://localhost:50051".to_string(),
+            proto_path,
+            "helloworld.Greeter".to_string(),
+            "NonExistentMethod".to_string(),
+            GrpcMode::Unary,
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(err.to_string().contains("method descriptor not found"));
+    }
+
+    #[tokio::test]
+    async fn test_producer_poll_ready_always_ready() {
+        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+        let mut producer = GrpcProducer::new(
+            "http://localhost:50051".to_string(),
+            proto_path,
+            "helloworld.Greeter".to_string(),
+            "SayHello".to_string(),
+            GrpcMode::Unary,
+        )
+        .unwrap();
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(producer.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn test_producer_call_dispatches_by_mode() {
+        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+        let producer_unary = GrpcProducer::new(
+            "http://localhost:50051".to_string(),
+            proto_path.clone(),
+            "helloworld.Greeter".to_string(),
+            "SayHello".to_string(),
+            GrpcMode::Unary,
+        )
+        .unwrap();
+
+        let producer_streaming = GrpcProducer::new(
+            "http://localhost:50051".to_string(),
+            proto_path,
+            "helloworld.Greeter".to_string(),
+            "SayHello".to_string(),
+            GrpcMode::ServerStreaming,
+        )
+        .unwrap();
+
+        assert_eq!(producer_unary.mode, GrpcMode::Unary);
+        assert_eq!(producer_streaming.mode, GrpcMode::ServerStreaming);
+    }
+
+    #[test]
+    fn test_body_to_json_from_null_body() {
+        let body = Body::Json(serde_json::Value::Null);
+        let result = GrpcProducer::body_to_json(body).unwrap();
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_body_to_json_from_array_body() {
+        let body = Body::Json(serde_json::json!([1, 2, 3]));
+        let result = GrpcProducer::body_to_json(body).unwrap();
+        assert!(result.is_array());
+        assert_eq!(result.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_header_to_metadata_from_negative_number() {
+        let value = serde_json::Value::Number((-42).into());
+        let result = GrpcProducer::header_to_metadata(&value);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().to_str().unwrap(), "-42");
+    }
+
+    #[test]
+    fn test_header_to_metadata_from_float() {
+        let value = serde_json::Value::Number(serde_json::Number::from_f64(3.14).unwrap());
+        let result = GrpcProducer::header_to_metadata(&value);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_inject_headers_skips_invalid_metadata_key() {
+        let exchange = exchange_with_headers(&[
+            ("x-good", serde_json::Value::String("ok".to_string())),
+        ]);
+        let mut request = Request::new(());
+        GrpcProducer::inject_headers(&exchange, &mut request);
+        assert!(request.metadata().get("x-good").is_some());
+    }
+
+    #[test]
+    fn test_tonic_to_camel_error_various_codes() {
+        let codes = [
+            tonic::Status::invalid_argument("bad arg"),
+            tonic::Status::permission_denied("no access"),
+            tonic::Status::resource_exhausted("too many"),
+            tonic::Status::failed_precondition("bad state"),
+            tonic::Status::aborted("conflict"),
+            tonic::Status::out_of_range("oob"),
+            tonic::Status::unimplemented("no impl"),
+            tonic::Status::internal("oops"),
+            tonic::Status::data_loss("lost"),
+            tonic::Status::unauthenticated("who are you"),
+        ];
+        for status in codes {
+            let err = GrpcProducer::tonic_to_camel_error(status);
+            assert!(matches!(err, CamelError::ProcessorError(_)));
+            assert!(err.to_string().contains("grpc call failed"));
+        }
+    }
+
+    #[test]
+    fn test_proto_cache_returns_singleton() {
+        let first = proto_cache();
+        let second = proto_cache();
+        assert!(std::ptr::eq(first, second));
     }
 }

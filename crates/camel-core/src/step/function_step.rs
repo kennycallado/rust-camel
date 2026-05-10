@@ -524,4 +524,157 @@ mod tests {
         assert!(msg.contains("custom error"));
         assert!(msg.contains("at line 1"));
     }
+
+    #[tokio::test]
+    async fn function_step_maps_not_registered_error() {
+        let invoker = Arc::new(MockInvoker::new(vec![Err(
+            FunctionInvocationError::NotRegistered {
+                function_id: FunctionId("missing-fn".into()),
+            },
+        )]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let ex = Exchange::default();
+        let err = step.call(ex).await.unwrap_err();
+        let msg = match &err {
+            CamelError::ProcessorError(m) => m,
+            other => panic!("wrong error type: {:?}", other),
+        };
+        assert!(msg.contains("function:not_registered:"), "msg was: {}", msg);
+    }
+
+    #[tokio::test]
+    async fn function_step_maps_runner_unavailable_error() {
+        let invoker = Arc::new(MockInvoker::new(vec![Err(
+            FunctionInvocationError::RunnerUnavailable {
+                reason: "runtime crashed".into(),
+            },
+        )]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let ex = Exchange::default();
+        let err = step.call(ex).await.unwrap_err();
+        let msg = match &err {
+            CamelError::ProcessorError(m) => m,
+            _ => panic!("wrong error type"),
+        };
+        assert!(msg.contains("function:runner_unavailable:"));
+        assert!(msg.contains("runtime crashed"));
+    }
+
+    #[tokio::test]
+    async fn function_step_maps_transport_error() {
+        let invoker = Arc::new(MockInvoker::new(vec![Err(
+            FunctionInvocationError::Transport("connection refused".into()),
+        )]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let ex = Exchange::default();
+        let err = step.call(ex).await.unwrap_err();
+        let msg = match &err {
+            CamelError::ProcessorError(m) => m,
+            _ => panic!("wrong error type"),
+        };
+        assert!(msg.contains("function:transport:"));
+        assert!(msg.contains("connection refused"));
+    }
+
+    #[tokio::test]
+    async fn function_step_maps_invalid_patch_error() {
+        let invoker = Arc::new(MockInvoker::new(vec![Err(
+            FunctionInvocationError::InvalidPatch("missing field 'body'".into()),
+        )]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let ex = Exchange::default();
+        let err = step.call(ex).await.unwrap_err();
+        let msg = match &err {
+            CamelError::ProcessorError(m) => m,
+            _ => panic!("wrong error type"),
+        };
+        assert!(msg.contains("function:invalid_patch:"));
+        assert!(msg.contains("missing field 'body'"));
+    }
+
+    #[tokio::test]
+    async fn function_step_applies_patch_body_json() {
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch {
+            body: Some(PatchBody::Json(serde_json::json!({"key": "value"}))),
+            ..Default::default()
+        })]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let ex = Exchange::default();
+        let result = step.call(ex).await.unwrap();
+        match result.input.body {
+            camel_api::Body::Json(v) => assert_eq!(v.get("key").unwrap().as_str(), Some("value")),
+            other => panic!("expected Json body, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn function_step_applies_patch_body_empty() {
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch {
+            body: Some(PatchBody::Empty),
+            ..Default::default()
+        })]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let ex = Exchange::default();
+        let result = step.call(ex).await.unwrap();
+        assert!(matches!(result.input.body, camel_api::Body::Empty));
+    }
+
+    #[tokio::test]
+    async fn function_step_poll_ready_always_ready() {
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch::default())]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        let poll = step.poll_ready(&mut cx);
+        assert!(matches!(poll, std::task::Poll::Ready(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn function_step_user_error_with_empty_stack() {
+        let invoker = Arc::new(MockInvoker::new(vec![Err(
+            FunctionInvocationError::UserError {
+                function_id: FunctionId("x".into()),
+                message: "no stack".into(),
+                stack: Some("".into()),
+            },
+        )]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let ex = Exchange::default();
+        let err = step.call(ex).await.unwrap_err();
+        let msg = match &err {
+            CamelError::ProcessorError(m) => m,
+            _ => panic!("wrong error type"),
+        };
+        assert!(msg.contains("function:user_error:"));
+        assert!(msg.contains("no stack"));
+        assert!(!msg.contains("\n"));
+    }
+
+    #[tokio::test]
+    async fn function_step_preserves_exchange_properties_not_in_patch() {
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch {
+            body: Some(PatchBody::Text("new body".into())),
+            ..Default::default()
+        })]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let mut ex = Exchange::default();
+        ex.properties.insert("existing".into(), serde_json::json!("keep"));
+        let result = step.call(ex).await.unwrap();
+        assert_eq!(result.properties.get("existing").unwrap().as_str(), Some("keep"));
+        assert_eq!(result.input.body.as_text(), Some("new body"));
+    }
+
+    #[tokio::test]
+    async fn function_step_removes_header_not_in_set() {
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch {
+            headers_removed: vec!["to-remove".into()],
+            ..Default::default()
+        })]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let mut ex = Exchange::default();
+        ex.input.headers.insert("to-remove".into(), serde_json::json!("old"));
+        ex.input.headers.insert("to-keep".into(), serde_json::json!("stay"));
+        let result = step.call(ex).await.unwrap();
+        assert!(!result.input.headers.contains_key("to-remove"));
+        assert!(result.input.headers.contains_key("to-keep"));
+    }
 }
