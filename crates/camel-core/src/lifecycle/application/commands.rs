@@ -559,7 +559,7 @@ mod tests {
     use crate::lifecycle::domain::DomainError;
 
     use super::*;
-    use camel_api::RuntimeQueryResult;
+    use crate::lifecycle::ports::InFlightCountResult;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -794,8 +794,8 @@ mod tests {
             Ok(())
         }
 
-        async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, DomainError> {
-            Ok(RuntimeQueryResult::RouteNotFound {
+        async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError> {
+            Ok(InFlightCountResult::RouteNotFound {
                 route_id: route_id.to_string(),
             })
         }
@@ -858,8 +858,8 @@ mod tests {
             Ok(())
         }
 
-        async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, DomainError> {
-            Ok(RuntimeQueryResult::RouteNotFound {
+        async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError> {
+            Ok(InFlightCountResult::RouteNotFound {
                 route_id: route_id.to_string(),
             })
         }

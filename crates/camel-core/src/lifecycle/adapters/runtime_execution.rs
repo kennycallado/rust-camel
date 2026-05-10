@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 
-use camel_api::{CamelError, RuntimeQueryResult};
+use camel_api::CamelError;
 
 use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
 use crate::lifecycle::application::RouteDefinition;
 use crate::lifecycle::domain::DomainError;
-use crate::lifecycle::ports::RuntimeExecutionPort;
+use crate::lifecycle::ports::{InFlightCountResult, RuntimeExecutionPort};
 
 /// Runtime side-effect adapter backed by the technical route controller.
 #[derive(Clone)]
@@ -74,7 +74,7 @@ impl RuntimeExecutionPort for RuntimeExecutionAdapter {
             .map_err(to_domain)
     }
 
-    async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, DomainError> {
+    async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError> {
         Ok(
             match self
                 .controller
@@ -82,11 +82,11 @@ impl RuntimeExecutionPort for RuntimeExecutionAdapter {
                 .await
                 .map_err(to_domain)?
             {
-                Some(count) => RuntimeQueryResult::InFlightCount {
+                Some(count) => InFlightCountResult::InFlightCount {
                     route_id: route_id.to_string(),
                     count,
                 },
-                None => RuntimeQueryResult::RouteNotFound {
+                None => InFlightCountResult::RouteNotFound {
                     route_id: route_id.to_string(),
                 },
             },

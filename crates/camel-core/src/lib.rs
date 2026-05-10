@@ -64,6 +64,7 @@ pub mod lifecycle;
 pub(crate) mod shared;
 pub mod step;
 
+#[cfg(feature = "internal-adapters")]
 pub mod route {
     pub use crate::lifecycle::adapters::route_compiler::{
         compose_pipeline, compose_pipeline_with_contracts, compose_traced_pipeline,
@@ -73,6 +74,7 @@ pub mod route {
     pub use crate::lifecycle::domain::route::RouteSpec;
 }
 
+#[cfg(feature = "internal-adapters")]
 pub mod route_controller {
     pub use crate::lifecycle::adapters::route_controller::*;
 }
@@ -83,20 +85,30 @@ pub mod supervising_route_controller {
 
 pub mod reload_watcher {
     pub use crate::hot_reload::adapters::reload_watcher::*;
+    pub use crate::hot_reload::application::FunctionReloadContext;
+    pub use crate::hot_reload::domain::ReloadAction;
+    pub use crate::hot_reload::application::execute_reload_actions;
 }
 
 pub use crate::hot_reload::adapters::ReloadWatcher;
-pub use crate::hot_reload::{execute_reload_actions, FunctionReloadContext, ReloadAction, ReloadError};
+pub use crate::hot_reload::application::execute_reload_actions;
+pub use crate::hot_reload::application::FunctionReloadContext;
+pub use crate::hot_reload::domain::ReloadAction;
 pub use crate::lifecycle::adapters::controller_actor::RouteControllerHandle;
 pub use crate::lifecycle::adapters::controller_actor::spawn_controller_actor;
 pub use crate::lifecycle::adapters::controller_actor::spawn_supervision_task;
+#[cfg(feature = "internal-adapters")]
 pub use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
+#[cfg(feature = "internal-adapters")]
 pub use crate::lifecycle::adapters::redb_journal::{
     JournalDurability, JournalEntry, JournalInspectFilter, RedbJournalOptions,
     RedbRuntimeEventJournal,
 };
+#[cfg(feature = "internal-adapters")]
 pub use crate::lifecycle::adapters::route_controller::DefaultRouteController;
+#[cfg(feature = "internal-adapters")]
 pub use crate::lifecycle::adapters::route_types::Route;
+#[cfg(feature = "internal-adapters")]
 pub use crate::lifecycle::adapters::{
     InMemoryCommandDedup, InMemoryEventPublisher, InMemoryProjectionStore, InMemoryRouteRepository,
     InMemoryRuntimeStore, RuntimeExecutionAdapter,
@@ -108,8 +120,9 @@ pub use crate::lifecycle::domain::{
     RuntimeEvent,
 };
 pub use crate::lifecycle::ports::{
-    CommandDedupPort, EventPublisherPort, ProjectionStorePort, RouteRepositoryPort,
-    RouteStatusProjection, RuntimeEventJournalPort, RuntimeExecutionPort, RuntimeUnitOfWorkPort,
+    CommandDedupPort, EventPublisherPort, InFlightCountResult, ProjectionStorePort,
+    RouteRepositoryPort, RouteStatusProjection, RuntimeEventJournalPort, RuntimeExecutionPort,
+    RuntimeUnitOfWorkPort,
 };
 pub use crate::shared::components::domain::Registry;
 pub use crate::shared::observability::adapters::TracingProcessor;
@@ -121,3 +134,15 @@ pub use context::CamelContext;
 // Re-export route controller types from camel-api (they live there to avoid cyclic dependencies).
 pub use camel_api::CamelError;
 pub use camel_api::{RouteAction, RouteController, RouteStatus};
+
+impl From<lifecycle::domain::DomainError> for CamelError {
+    fn from(e: lifecycle::domain::DomainError) -> Self {
+        CamelError::RouteError(e.to_string())
+    }
+}
+
+impl From<lifecycle::domain::LanguageRegistryError> for CamelError {
+    fn from(e: lifecycle::domain::LanguageRegistryError) -> Self {
+        CamelError::Config(e.to_string())
+    }
+}

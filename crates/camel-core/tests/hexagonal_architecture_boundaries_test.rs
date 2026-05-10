@@ -240,7 +240,7 @@ fn reload_runtime_path_does_not_use_controller_local_status_heuristics() {
         &reload,
         &["pub(crate) fn compute_reload_actions_from_runtime_snapshot"],
     );
-    assert_file_contains(&reload, &["pub(crate) async fn execute_reload_actions"]);
+    assert_file_contains(&reload, &["pub async fn execute_reload_actions"]);
     assert_file_prefix_not_contains(&reload, "#[cfg(test)]", &[".route_status("]);
 }
 

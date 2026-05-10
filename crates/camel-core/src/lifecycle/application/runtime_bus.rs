@@ -13,11 +13,25 @@ use crate::lifecycle::application::commands::{
 };
 use crate::lifecycle::application::queries::{QueryDeps, execute_query};
 use crate::lifecycle::application::route_definition::RouteDefinition;
+use crate::lifecycle::domain::DomainError;
 use crate::lifecycle::ports::RouteRegistrationPort;
 use crate::lifecycle::ports::{
-    CommandDedupPort, EventPublisherPort, ProjectionStorePort, RouteRepositoryPort,
-    RuntimeExecutionPort, RuntimeUnitOfWorkPort,
+    CommandDedupPort, EventPublisherPort, InFlightCountResult, ProjectionStorePort,
+    RouteRepositoryPort, RuntimeExecutionPort, RuntimeUnitOfWorkPort,
 };
+
+impl From<InFlightCountResult> for RuntimeQueryResult {
+    fn from(r: InFlightCountResult) -> Self {
+        match r {
+            InFlightCountResult::InFlightCount { route_id, count } => {
+                RuntimeQueryResult::InFlightCount { route_id, count }
+            }
+            InFlightCountResult::RouteNotFound { route_id } => {
+                RuntimeQueryResult::RouteNotFound { route_id }
+            }
+        }
+    }
+}
 
 pub struct RuntimeBus {
     repo: Arc<dyn RouteRepositoryPort>,
@@ -159,6 +173,7 @@ impl RuntimeQueryBus for RuntimeBus {
                     execution
                         .in_flight_count(&route_id)
                         .await
+                        .map(|r| r.into())
                         .map_err(Into::into)
                 } else {
                     Ok(RuntimeQueryResult::RouteNotFound { route_id })
@@ -174,10 +189,18 @@ impl RuntimeQueryBus for RuntimeBus {
 
 #[async_trait]
 impl RouteRegistrationPort for RuntimeBus {
-    async fn register_route(&self, def: RouteDefinition) -> Result<(), CamelError> {
-        self.ensure_journal_recovered().await?;
+    async fn register_route(&self, def: RouteDefinition) -> Result<(), DomainError> {
+        self.ensure_journal_recovered()
+            .await
+            .map_err(|e| DomainError::InvalidState(e.to_string()))?;
         let deps = self.deps();
-        handle_register_internal(&deps, def).await.map(|_| ())
+        handle_register_internal(&deps, def)
+            .await
+            .map(|_| ())
+            .map_err(|e| match e {
+                CamelError::RouteError(msg) => DomainError::InvalidState(msg),
+                other => DomainError::InvalidState(other.to_string()),
+            })
     }
 }
 
@@ -441,14 +464,14 @@ mod tests {
         async fn remove_route(&self, _route_id: &str) -> Result<(), DomainError> {
             Ok(())
         }
-        async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, DomainError> {
+        async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError> {
             if route_id == "known" {
-                Ok(RuntimeQueryResult::InFlightCount {
+                Ok(InFlightCountResult::InFlightCount {
                     route_id: route_id.to_string(),
                     count: 3,
                 })
             } else {
-                Ok(RuntimeQueryResult::RouteNotFound {
+                Ok(InFlightCountResult::RouteNotFound {
                     route_id: route_id.to_string(),
                 })
             }

@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use camel_api::RuntimeQueryResult;
 
 use crate::lifecycle::domain::DomainError;
 use crate::lifecycle::domain::{RouteRuntimeAggregate, RuntimeEvent};
@@ -10,6 +9,12 @@ use crate::lifecycle::application::route_definition::RouteDefinition;
 pub struct RouteStatusProjection {
     pub route_id: String,
     pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InFlightCountResult {
+    InFlightCount { route_id: String, count: u64 },
+    RouteNotFound { route_id: String },
 }
 
 #[async_trait]
@@ -116,7 +121,7 @@ pub trait RuntimeExecutionPort: Send + Sync {
     async fn resume_route(&self, route_id: &str) -> Result<(), DomainError>;
     async fn reload_route(&self, route_id: &str) -> Result<(), DomainError>;
     async fn remove_route(&self, route_id: &str) -> Result<(), DomainError>;
-    async fn in_flight_count(&self, route_id: &str) -> Result<RuntimeQueryResult, DomainError>;
+    async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError>;
 }
 
 #[cfg(test)]

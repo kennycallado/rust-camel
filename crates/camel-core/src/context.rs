@@ -25,10 +25,14 @@ use crate::lifecycle::adapters::route_controller::{
 use crate::lifecycle::application::route_definition::RouteDefinition;
 use crate::lifecycle::application::runtime_bus::RuntimeBus;
 use crate::lifecycle::domain::LanguageRegistryError;
+use crate::lifecycle::ports::RuntimeExecutionPort;
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::TracerConfig;
 
 static CONTEXT_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
+
+type ExecutionFactory =
+    Arc<dyn Fn(RouteControllerHandle) -> Arc<dyn RuntimeExecutionPort> + Send + Sync>;
 
 pub struct CamelContextBuilder {
     registry: Option<Arc<std::sync::Mutex<Registry>>>,
@@ -42,6 +46,7 @@ pub struct CamelContextBuilder {
     beans: Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>,
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
     lifecycle_services: Vec<Box<dyn Lifecycle>>,
+    execution_factory: Option<ExecutionFactory>,
 }
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
@@ -84,7 +89,7 @@ impl RuntimeExecutionHandle {
         definition: RouteDefinition,
     ) -> Result<(), CamelError> {
         use crate::lifecycle::ports::RouteRegistrationPort;
-        self.runtime.register_route(definition).await
+        self.runtime.register_route(definition).await.map_err(Into::into)
     }
 
     pub(crate) async fn compile_route_definition(
@@ -255,8 +260,13 @@ impl CamelContext {
     fn build_runtime(
         controller: RouteControllerHandle,
         store: crate::lifecycle::adapters::InMemoryRuntimeStore,
+        execution_factory: Option<ExecutionFactory>,
     ) -> Arc<RuntimeBus> {
-        let execution = Arc::new(RuntimeExecutionAdapter::new(controller));
+        let execution: Arc<dyn RuntimeExecutionPort> = if let Some(factory) = execution_factory {
+            factory(controller.clone())
+        } else {
+            Arc::new(RuntimeExecutionAdapter::new(controller))
+        };
         Arc::new(
             RuntimeBus::new(
                 Arc::new(store.clone()),
@@ -395,7 +405,7 @@ impl CamelContext {
             route_id = %definition.route_id(),
             "Adding route definition"
         );
-        self.runtime.register_route(definition).await
+        self.runtime.register_route(definition).await.map_err(Into::into)
     }
 
     fn next_context_command_id(op: &str, route_id: &str) -> String {
@@ -701,6 +711,7 @@ impl CamelContextBuilder {
             beans: None,
             function_invoker: None,
             lifecycle_services: Vec::new(),
+            execution_factory: None,
         }
     }
 
@@ -711,6 +722,14 @@ impl CamelContextBuilder {
 
     pub fn languages(mut self, languages: SharedLanguageRegistry) -> Self {
         self.languages = Some(languages);
+        self
+    }
+
+    pub fn with_execution_factory(
+        mut self,
+        factory: impl Fn(RouteControllerHandle) -> Arc<dyn RuntimeExecutionPort> + Send + Sync + 'static,
+    ) -> Self {
+        self.execution_factory = Some(Arc::new(factory));
         self
     }
 
@@ -844,7 +863,7 @@ impl CamelContextBuilder {
             };
 
         let store = self.runtime_store.unwrap_or_default();
-        let runtime = CamelContext::build_runtime(controller.clone(), store);
+        let runtime = CamelContext::build_runtime(controller.clone(), store, self.execution_factory);
         let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
         controller
             .try_set_runtime_handle(runtime_handle)

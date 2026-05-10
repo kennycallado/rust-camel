@@ -4,13 +4,13 @@
 // It is intentionally NOT serializable — in-process Rust API only.
 
 use async_trait::async_trait;
-use camel_api::CamelError;
 
 use crate::lifecycle::application::route_definition::RouteDefinition;
+use crate::lifecycle::domain::DomainError;
 
 /// Port for in-process route registration with compiled pipeline.
 /// Non-serializable — in-process only. Implemented by RuntimeBus.
 #[async_trait]
 pub(crate) trait RouteRegistrationPort: Send + Sync {
-    async fn register_route(&self, def: RouteDefinition) -> Result<(), CamelError>;
+    async fn register_route(&self, def: RouteDefinition) -> Result<(), DomainError>;
 }
