@@ -810,6 +810,7 @@ dependencies = [
  "camel-dsl",
  "serde",
  "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

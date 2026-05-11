@@ -1,0 +1,25 @@
+routes:
+  - id: "rag-ingest"
+    from: "timer:tick?period=60000&repeatCount=1"
+    steps:
+      - set_body:
+          value: "rust-camel is a Rust integration framework with AI support"
+      - to: "embedding:create?base_url=http://localhost:11434&model=embeddinggemma"
+      - to: "vector:upsert?url=http://localhost:6334&collection=docs"
+      - log:
+          message: "Ingested sample document"
+
+  - id: "rag-query"
+    from: "timer:tick?period=75000&repeatCount=1"
+    steps:
+      - set_body:
+          value: "What is rust-camel?"
+      - to: "embedding:create?base_url=http://localhost:11434&model=embeddinggemma"
+      - to: "vector:search?url=http://localhost:6334&collection=docs&top_k=3"
+      - ai_extract:
+          model: "llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b"
+          schema: '{"type":"object","properties":{"answer":{"type":"string"}}}'
+          output_header: "rag_result"
+      - log:
+          message:
+            simple: "RAG answer: ${header.rag_result}"

@@ -139,7 +139,9 @@ fn contains_any(value: &str, patterns: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{build_system_snapshot, parse_routes_yaml};
+    use crate::snapshot::{
+        build_system_snapshot, build_system_snapshot_from_yaml, parse_routes_yaml,
+    };
 
     fn snapshot_from_yaml(yaml: &str) -> SystemSnapshot {
         let routes = parse_routes_yaml(yaml).expect("valid declarative YAML");
@@ -159,9 +161,11 @@ routes:
         );
 
         let proposals = MaintainerAgent.analyze(&snapshot);
-        assert!(proposals
-            .iter()
-            .any(|p| p.kind == ProposalKind::RouteReliability));
+        assert!(
+            proposals
+                .iter()
+                .any(|p| p.kind == ProposalKind::RouteReliability)
+        );
     }
 
     #[test]
@@ -221,9 +225,11 @@ routes:
         );
 
         let proposals = MaintainerAgent.analyze(&snapshot);
-        assert!(proposals
-            .iter()
-            .any(|p| p.kind == ProposalKind::Documentation));
+        assert!(
+            proposals
+                .iter()
+                .any(|p| p.kind == ProposalKind::Documentation)
+        );
     }
 
     #[test]
@@ -239,8 +245,34 @@ routes:
         );
 
         let proposals = MaintainerAgent.analyze(&snapshot);
-        assert!(proposals
-            .iter()
-            .any(|p| { p.finding.contains("secret") || p.recommendation.contains("env/config") }));
+        assert!(
+            proposals.iter().any(|p| {
+                p.finding.contains("secret") || p.recommendation.contains("env/config")
+            })
+        );
+    }
+
+    #[test]
+    fn proposes_secret_hardening_for_ai_model_uri_with_api_key() {
+        let snapshot = build_system_snapshot_from_yaml(
+            r#"
+routes:
+  - id: "r6"
+    from: "direct:start"
+    steps:
+      - ai_extract:
+          model: "llm:ollama?base_url=https://api.local&api_key=plain-text"
+          schema: '{"type":"object"}'
+          output_header: "result"
+"#,
+        )
+        .expect("valid ai yaml");
+
+        let proposals = MaintainerAgent.analyze(&snapshot);
+        assert!(
+            proposals
+                .iter()
+                .any(|p| p.finding.contains("secret") || p.recommendation.contains("env/config"))
+        );
     }
 }

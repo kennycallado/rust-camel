@@ -1,0 +1,26 @@
+routes:
+  - id: "rag-file-ingest"
+    from: "file:docs?delay=2000&initialDelay=2000"
+    steps:
+      - convert_body_to: text
+      - log:
+          message:
+            simple: "Indexing file: ${header.CamelFileName}"
+      - to: "embedding:create?base_url=http://localhost:11434&model=embeddinggemma"
+      - to: "vector:upsert?url=http://localhost:6334&collection=rag-file"
+      - log:
+          message:
+            simple: "Indexed: ${header.CamelFileName}"
+
+  - id: "rag-file-query"
+    from: "http://0.0.0.0:8080/ask"
+    steps:
+      - convert_body_to: text
+      - set_header:
+          key: question
+          simple: "${body}"
+      - to: "embedding:create?base_url=http://localhost:11434&model=embeddinggemma"
+      - to: "vector:search?url=http://localhost:6334&collection=rag-file&top_k=3"
+      - set_body:
+          simple: "Answer the question using only the context below. Be concise.\n\nQuestion: ${header.question}\n\nContext: ${body}"
+      - to: "llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b&think=false"

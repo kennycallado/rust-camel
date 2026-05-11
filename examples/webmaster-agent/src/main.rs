@@ -1,10 +1,9 @@
 use std::error::Error;
 
-use camel_agent::{build_system_snapshot, parse_routes_yaml, MaintainerAgent};
+use camel_agent::{MaintainerAgent, build_system_snapshot_from_yaml};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let routes = parse_routes_yaml(include_str!("../routes.yaml"))?;
-    let snapshot = build_system_snapshot(&routes);
+    let snapshot = build_system_snapshot_from_yaml(include_str!("../routes.yaml"))?;
     let proposals = MaintainerAgent.analyze(&snapshot);
 
     println!("=== Camel Webmaster Agent POC ===");
