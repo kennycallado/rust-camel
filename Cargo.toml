@@ -270,6 +270,7 @@ sxd-document = "0.3"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
 serde_yml = "0.0.12"
 toml = "1"
+qdrant-client = { version = "1.13", default-features = false, features = ["serde"] }
 schemars = "1"
 ts-rs = "12"
 

@@ -11,34 +11,37 @@ use crate::compile::{
 };
 use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, AiClassifyStepDef, AiExtractStepDef, BeanStepDef,
-    BodyTypeDef, ChoiceStepDef, DataFormatDef, DeclarativeCircuitBreaker, DeclarativeConcurrency,
-    DeclarativeErrorHandler, DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
-    DeclarativeStep, DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
+    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
+    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
+    DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep,
+    DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
     LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
     MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
-    SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef,
-    ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    SetHeaderStepDef, AiClassifyStepDef, AiExtractStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
+    StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef,
+    WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
-    AggregateData, AggregateStep, AiClassifyStep, AiExtractStep, BeanStep, BeanStepData,
-    ChoiceData, ChoiceStep, DelayBody, DelayStep, DynamicRouterData, DynamicRouterStep, FilterStep,
-    LoadBalanceData, LoadBalanceStep, LogConfig, LogMessageData, LogMessageExpr, LogStep,
-    MarshalStep, MulticastData, MulticastStep, PredicateBlock, RecipientListData,
-    RecipientListStep, RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig,
-    SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SplitData, SplitExpressionConfig,
-    SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep,
-    ThrottleData, ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
-    YamlRoute, YamlRoutes, YamlStep,
+    AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
+    DelayStep, DynamicRouterData, DynamicRouterStep, FilterStep, FunctionStep, LoadBalanceData,
+    LoadBalanceStep, LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep,
+    MulticastData, MulticastStep, PredicateBlock, RecipientListData, RecipientListStep,
+    RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig, SetBodyData,
+    SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep, AiClassifyStep, AiExtractStep, SplitData,
+    SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody,
+    StreamCacheConfig, StreamCacheStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
+    UnmarshalStep, ValidateStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
 };
 use crate::yaml_ast::{LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 22] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 24] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
+    DeclarativeStepKind::SetProperty,
     DeclarativeStepKind::SetBody,
     DeclarativeStepKind::Filter,
+    DeclarativeStepKind::Function,
     DeclarativeStepKind::Choice,
     DeclarativeStepKind::Split,
     DeclarativeStepKind::Aggregate,
@@ -97,7 +100,9 @@ pub fn parse_yaml_to_canonical(yaml: &str) -> Result<Vec<CanonicalRouteSpec>, Ca
         .collect()
 }
 
-fn yaml_route_to_declarative_route(route: YamlRoute) -> Result<DeclarativeRoute, CamelError> {
+pub(crate) fn yaml_route_to_declarative_route(
+    route: YamlRoute,
+) -> Result<DeclarativeRoute, CamelError> {
     if route.id.is_empty() {
         return Err(CamelError::RouteError(
             "route 'id' must not be empty".into(),
@@ -182,7 +187,7 @@ fn yaml_route_to_declarative_route(route: YamlRoute) -> Result<DeclarativeRoute,
     })
 }
 
-fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, CamelError> {
+pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, CamelError> {
     match step {
         YamlStep::To(ToStep { to }) => Ok(DeclarativeStep::To(ToStepDef::new(to))),
         YamlStep::WireTap(WireTapStep { wire_tap }) => {
@@ -272,6 +277,37 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
                 value,
             }))
         }
+        YamlStep::AiClassify(AiClassifyStep { ai_classify }) => {
+            Ok(DeclarativeStep::AiClassify(AiClassifyStepDef {
+                model_uri: ai_classify.model,
+                labels: ai_classify.labels,
+                output_header: ai_classify.output_header,
+            }))
+        }
+        YamlStep::AiExtract(AiExtractStep { ai_extract }) => {
+            Ok(DeclarativeStep::AiExtract(AiExtractStepDef {
+                model_uri: ai_extract.model,
+                schema: ai_extract.schema,
+                output_header: ai_extract.output_header,
+                prompt: ai_extract.prompt,
+            }))
+        }
+        YamlStep::SetProperty(SetPropertyStep { set_property }) => {
+            let value = parse_value_source(
+                set_property.value,
+                set_property.language,
+                set_property.source,
+                set_property.simple,
+                set_property.rhai,
+                set_property.jsonpath,
+                set_property.xpath,
+                "set_property",
+            )?;
+            Ok(DeclarativeStep::SetProperty(SetPropertyStepDef {
+                key: set_property.name,
+                value,
+            }))
+        }
         YamlStep::SetBody(SetBodyStep { set_body }) => {
             let value = match set_body {
                 SetBodyData::Literal(value) => ValueSourceDef::Literal(value),
@@ -313,21 +349,6 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
             };
             Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
         }
-        YamlStep::AiClassify(AiClassifyStep { ai_classify }) => {
-            Ok(DeclarativeStep::AiClassify(AiClassifyStepDef {
-                model_uri: ai_classify.model,
-                labels: ai_classify.labels,
-                output_header: ai_classify.output_header,
-            }))
-        }
-        YamlStep::AiExtract(AiExtractStep { ai_extract }) => {
-            Ok(DeclarativeStep::AiExtract(AiExtractStepDef {
-                model_uri: ai_extract.model,
-                schema: ai_extract.schema,
-                output_header: ai_extract.output_header,
-                prompt: ai_extract.prompt,
-            }))
-        }
         YamlStep::Script(ScriptStep {
             script: ScriptData { language, source },
         }) => Ok(DeclarativeStep::Script(ScriptStepDef {
@@ -343,6 +364,36 @@ fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, Came
             Ok(DeclarativeStep::Filter(crate::model::FilterStepDef {
                 predicate,
                 steps,
+            }))
+        }
+        YamlStep::Function(FunctionStep { function: data }) => {
+            if data.runtime.is_empty() {
+                return Err(CamelError::RouteError(
+                    "function: 'runtime' must not be empty".into(),
+                ));
+            }
+            if data.source.is_empty() {
+                return Err(CamelError::RouteError(
+                    "function: 'source' must not be empty".into(),
+                ));
+            }
+            if let Some(t) = data.timeout_ms
+                && t == 0
+            {
+                return Err(CamelError::RouteError(
+                    "function: 'timeout_ms' must be greater than 0".into(),
+                ));
+            }
+            if data.runtime != "deno" {
+                return Err(CamelError::RouteError(format!(
+                    "function: unsupported runtime '{}'. Supported runtimes: [\"deno\"]",
+                    data.runtime
+                )));
+            }
+            Ok(DeclarativeStep::Function(crate::model::FunctionStepDef {
+                runtime: data.runtime,
+                source: data.source,
+                timeout_ms: data.timeout_ms,
             }))
         }
         YamlStep::Choice(ChoiceStep {
@@ -1474,6 +1525,30 @@ routes:
     }
 
     #[test]
+    fn test_parse_set_property_literal() {
+        let yaml = r#"
+routes:
+  - id: "property-route"
+    from: "direct:start"
+    steps:
+      - set_property:
+          name: "traceId"
+          value: "abc-123"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::SetProperty(def) => {
+                assert_eq!(def.key, "traceId");
+                assert_eq!(
+                    def.value,
+                    ValueSourceDef::Literal(serde_json::Value::String("abc-123".into()))
+                );
+            }
+            other => panic!("expected SetProperty step, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_parse_set_body_jsonpath() {
         let yaml = r#"
 routes:
@@ -1769,37 +1844,106 @@ routes:
     }
 
     #[test]
-    fn parse_ai_classify_step() {
+    fn test_parse_function_step_happy_path() {
         let yaml = r#"
 routes:
-  - id: test
-    from: "direct:in"
+  - id: "fn-ok"
+    from: "direct:start"
     steps:
-      - ai_classify:
-          model: "llm:ollama?model=qwen3.5:4b"
-          labels: ["billing", "technical"]
-          output_header: "category"
+      - function:
+          runtime: deno
+          source: "return { body: \"ok\" };"
+          timeout_ms: 5000
 "#;
         let routes = parse_yaml_to_declarative(yaml).unwrap();
-        assert!(matches!(
-            &routes[0].steps[0],
-            DeclarativeStep::AiClassify(_)
-        ));
+        match &routes[0].steps[0] {
+            DeclarativeStep::Function(def) => {
+                assert_eq!(def.runtime, "deno");
+                assert_eq!(def.source, "return { body: \"ok\" };");
+                assert_eq!(def.timeout_ms, Some(5000));
+            }
+            other => panic!("expected Function, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_ai_extract_step() {
+    fn test_parse_function_step_rejects_bad_runtime() {
         let yaml = r#"
 routes:
-  - id: test
-    from: "direct:in"
+  - id: "fn-bad-runtime"
+    from: "direct:start"
     steps:
-      - ai_extract:
-          model: "llm:ollama?model=qwen3.5:4b"
-          schema: '{"type":"object"}'
-          output_header: "result"
+      - function:
+          runtime: node
+          source: "return {};"
 "#;
-        let routes = parse_yaml_to_declarative(yaml).unwrap();
-        assert!(matches!(&routes[0].steps[0], DeclarativeStep::AiExtract(_)));
+        let err = parse_yaml_to_declarative(yaml).unwrap_err().to_string();
+        assert!(err.contains("unsupported runtime 'node'"));
+        assert!(err.contains("[\"deno\"]"));
+    }
+
+    #[test]
+    fn test_parse_function_step_rejects_empty_runtime_and_source() {
+        let empty_runtime = r#"
+routes:
+  - id: "fn-empty-runtime"
+    from: "direct:start"
+    steps:
+      - function:
+          runtime: ""
+          source: "return {};"
+"#;
+        let err = parse_yaml_to_declarative(empty_runtime)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("function: 'runtime' must not be empty"));
+
+        let empty_source = r#"
+routes:
+  - id: "fn-empty-source"
+    from: "direct:start"
+    steps:
+      - function:
+          runtime: deno
+          source: ""
+"#;
+        let err = parse_yaml_to_declarative(empty_source)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("function: 'source' must not be empty"));
+    }
+
+    #[test]
+    fn test_parse_function_step_rejects_unknown_v1_keys() {
+        let yaml = r#"
+routes:
+  - id: "fn-unknown"
+    from: "direct:start"
+    steps:
+      - function:
+          runtime: deno
+          source: "return {};"
+          provider: docker
+"#;
+        assert!(parse_yaml_to_declarative(yaml).is_err());
+    }
+
+    #[test]
+    fn test_function_step_rejected_by_canonical_yaml() {
+        let yaml = r#"
+routes:
+  - id: "fn-canonical-reject"
+    from: "direct:start"
+    steps:
+      - function:
+          runtime: deno
+          source: "return {};"
+          timeout_ms: 1000
+"#;
+        let err = parse_yaml_to_canonical(yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("canonical v1 does not support step `function`"),
+            "unexpected error: {err}"
+        );
     }
 }
