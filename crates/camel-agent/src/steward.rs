@@ -100,7 +100,7 @@ fn touches_http_endpoint(route: &RouteSnapshot) -> bool {
         || route
             .steps
             .iter()
-            .any(|step| contains_any(step, &["http://", "https://", "to: http:", "to:https:"]))
+            .any(|step| contains_any(step, &["http://", "https://", "to: http://", "to: https://"]))
 }
 
 fn has_ai_classifier_steps(route: &RouteSnapshot) -> bool {

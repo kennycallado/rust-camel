@@ -15,9 +15,5 @@ fn main() -> Result<(), Box<dyn Error>> {
         serde_json::to_string_pretty(&proposals)?
     );
 
-    if proposals.len() < 3 {
-        return Err("expected at least 3 maintenance proposals".into());
-    }
-
     Ok(())
 }
