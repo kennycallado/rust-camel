@@ -126,6 +126,8 @@ members = [
     "crates/components/camel-component-wasm",
     "crates/components/camel-component-grpc",
     "examples/wasm-bean-example",
+    "examples/webmaster-agent",
+    "crates/camel-agent",
 ]
 exclude = ["examples/wasm-bean-example/guest"]
 
@@ -149,6 +151,7 @@ categories = ["network-programming", "asynchronous", "development-tools"]
 # Exact pinning (=) ensures cargo publish verifies against the exact version
 # being released, not an older one already on crates.io.
 camel-api = { path = "crates/camel-api", version = "=0.9.0" }
+camel-agent = { path = "crates/camel-agent", version = "=0.9.0" }
 camel-bean = { path = "crates/camel-bean", version = "=0.9.0" }
 camel-bean-macros = { path = "crates/camel-bean-macros", version = "=0.9.0" }
 camel-cli = { path = "crates/camel-cli", version = "=0.9.0" }
