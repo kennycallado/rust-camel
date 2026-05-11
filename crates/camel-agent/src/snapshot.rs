@@ -1,10 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use camel_api::CamelError;
-use camel_dsl::{
-    parse_yaml_to_declarative, DeclarativeRoute, DeclarativeStep, MulticastStepDef,
-};
-use camel_dsl::model::{LoadBalanceStepDef, LoopStepDef, ThrottleStepDef};
+use camel_dsl::{parse_yaml_to_declarative, DeclarativeRoute, DeclarativeStep};
 use serde_json::json;
 
 use crate::types::{ComponentSnapshot, RouteSnapshot, SystemSnapshot};
@@ -117,12 +114,17 @@ fn collect_step_facts(
             }
             DeclarativeStep::Multicast(def) => {
                 step_descriptions.push("multicast".to_string());
-                collect_nested_multicast(def, step_descriptions, route_components, component_usage);
+                collect_step_facts(
+                    &def.steps,
+                    step_descriptions,
+                    route_components,
+                    component_usage,
+                );
             }
             DeclarativeStep::LoadBalance(def) => {
                 step_descriptions.push("load_balance".to_string());
-                collect_nested_load_balance(
-                    def,
+                collect_step_facts(
+                    &def.steps,
                     step_descriptions,
                     route_components,
                     component_usage,
@@ -130,73 +132,27 @@ fn collect_step_facts(
             }
             DeclarativeStep::Throttle(def) => {
                 step_descriptions.push("throttle".to_string());
-                collect_nested_throttle(def, step_descriptions, route_components, component_usage);
+                collect_step_facts(
+                    &def.steps,
+                    step_descriptions,
+                    route_components,
+                    component_usage,
+                );
             }
             DeclarativeStep::Loop(def) => {
                 step_descriptions.push("loop".to_string());
-                collect_nested_loop(def, step_descriptions, route_components, component_usage);
+                collect_step_facts(
+                    &def.steps,
+                    step_descriptions,
+                    route_components,
+                    component_usage,
+                );
             }
             _ => {
-                step_descriptions.push(normalize_step_debug(step));
+                step_descriptions.push(step_kind(step).to_string());
             }
         }
     }
-}
-
-fn collect_nested_multicast(
-    step: &MulticastStepDef,
-    step_descriptions: &mut Vec<String>,
-    route_components: &mut BTreeSet<String>,
-    component_usage: &mut BTreeMap<String, usize>,
-) {
-    collect_step_facts(
-        &step.steps,
-        step_descriptions,
-        route_components,
-        component_usage,
-    );
-}
-
-fn collect_nested_load_balance(
-    step: &LoadBalanceStepDef,
-    step_descriptions: &mut Vec<String>,
-    route_components: &mut BTreeSet<String>,
-    component_usage: &mut BTreeMap<String, usize>,
-) {
-    collect_step_facts(
-        &step.steps,
-        step_descriptions,
-        route_components,
-        component_usage,
-    );
-}
-
-fn collect_nested_throttle(
-    step: &ThrottleStepDef,
-    step_descriptions: &mut Vec<String>,
-    route_components: &mut BTreeSet<String>,
-    component_usage: &mut BTreeMap<String, usize>,
-) {
-    collect_step_facts(
-        &step.steps,
-        step_descriptions,
-        route_components,
-        component_usage,
-    );
-}
-
-fn collect_nested_loop(
-    step: &LoopStepDef,
-    step_descriptions: &mut Vec<String>,
-    route_components: &mut BTreeSet<String>,
-    component_usage: &mut BTreeMap<String, usize>,
-) {
-    collect_step_facts(
-        &step.steps,
-        step_descriptions,
-        route_components,
-        component_usage,
-    );
 }
 
 fn collect_uri_component(
@@ -222,13 +178,24 @@ fn component_from_uri(uri: &str) -> Option<String> {
     Some(scheme.to_ascii_lowercase())
 }
 
-fn normalize_step_debug(step: &DeclarativeStep) -> String {
-    let debug = format!("{step:?}");
-    let kind = debug
-        .split_once('(')
-        .map(|(prefix, _)| prefix)
-        .unwrap_or(debug.as_str());
-    kind.to_ascii_lowercase()
+fn step_kind(step: &DeclarativeStep) -> &'static str {
+    match step {
+        DeclarativeStep::To(_) => "to",
+        DeclarativeStep::SetHeader(_) => "set_header",
+        DeclarativeStep::SetProperty(_) => "set_property",
+        DeclarativeStep::SetBody(_) => "set_body",
+        DeclarativeStep::Filter(_) => "filter",
+        DeclarativeStep::LoadBalance(_) => "load_balance",
+        DeclarativeStep::Log(_) => "log",
+        DeclarativeStep::Choice(_) => "choice",
+        DeclarativeStep::Split(_) => "split",
+        DeclarativeStep::WireTap(_) => "wire_tap",
+        DeclarativeStep::Multicast(_) => "multicast",
+        DeclarativeStep::Stop => "stop",
+        DeclarativeStep::Throttle(_) => "throttle",
+        DeclarativeStep::Loop(_) => "loop",
+        _ => "custom_step",
+    }
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
