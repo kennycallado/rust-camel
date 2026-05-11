@@ -7,6 +7,9 @@ use serde_yaml::Value as YamlValue;
 
 use crate::types::{ComponentSnapshot, RouteSnapshot, SystemSnapshot};
 
+const YAML_ROUTES_KEY: &str = "routes";
+const YAML_STEPS_KEY: &str = "steps";
+
 pub fn parse_routes_yaml(input: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
     parse_yaml_to_declarative(input)
 }
@@ -15,7 +18,13 @@ pub fn build_system_snapshot_from_yaml(input: &str) -> Result<SystemSnapshot, Ca
     let route_hints = extract_route_hints_from_yaml(input)?;
     match parse_yaml_to_declarative(input) {
         Ok(routes) => Ok(build_system_snapshot_with_hints(&routes, &route_hints)),
-        Err(_err) if !route_hints.is_empty() => Ok(build_system_snapshot_from_hints(&route_hints)),
+        Err(err) if !route_hints.is_empty() => {
+            let mut snapshot = build_system_snapshot_from_hints(&route_hints);
+            snapshot.findings_context["yaml_parse_fallback"] = serde_json::Value::Bool(true);
+            snapshot.findings_context["yaml_parse_error"] =
+                serde_json::Value::String(err.to_string());
+            Ok(snapshot)
+        }
         Err(err) => Err(err),
     }
 }
@@ -48,9 +57,10 @@ fn build_system_snapshot_with_hints(
             &mut component_usage,
         );
 
+        let mut known_steps = step_descriptions.iter().cloned().collect::<BTreeSet<_>>();
         if let Some(hint) = hints_by_id.get(route.route_id.as_str()) {
             for step in &hint.step_descriptions {
-                if !step_descriptions.iter().any(|existing| existing == step) {
+                if known_steps.insert(step.clone()) {
                     step_descriptions.push(step.clone());
                 }
             }
@@ -290,7 +300,7 @@ struct RouteHints {
 fn extract_route_hints_from_yaml(input: &str) -> Result<Vec<RouteHints>, CamelError> {
     let root: YamlValue = serde_yaml::from_str(input)
         .map_err(|e| CamelError::RouteError(format!("YAML parse error: {e}")))?;
-    let Some(routes) = root.get("routes").and_then(YamlValue::as_sequence) else {
+    let Some(routes) = root.get(YAML_ROUTES_KEY).and_then(YamlValue::as_sequence) else {
         return Ok(Vec::new());
     };
 
@@ -308,7 +318,7 @@ fn extract_route_hints_from_yaml(input: &str) -> Result<Vec<RouteHints>, CamelEr
         hint.has_circuit_breaker = route_map.contains_key(YamlValue::from("circuit_breaker"));
 
         collect_uri_component(&hint.from, &mut hint.components, &mut BTreeMap::new());
-        if let Some(steps) = route_map.get(YamlValue::from("steps")) {
+        if let Some(steps) = route_map.get(YamlValue::from(YAML_STEPS_KEY)) {
             collect_step_hints(steps, &mut hint);
         }
 
@@ -385,7 +395,7 @@ fn collect_choice_steps(choice: &YamlValue, hint: &mut RouteHints) {
         .and_then(YamlValue::as_sequence)
     {
         for when in whens {
-            if let Some(when_steps) = when.get("steps") {
+            if let Some(when_steps) = when.get(YAML_STEPS_KEY) {
                 collect_step_hints(when_steps, hint);
             }
         }
@@ -399,7 +409,7 @@ fn collect_nested_steps(node: &YamlValue, hint: &mut RouteHints) {
     let Some(node_map) = node.as_mapping() else {
         return;
     };
-    if let Some(nested_steps) = node_map.get(YamlValue::from("steps")) {
+    if let Some(nested_steps) = node_map.get(YamlValue::from(YAML_STEPS_KEY)) {
         collect_step_hints(nested_steps, hint);
     }
 }
@@ -410,6 +420,8 @@ fn collect_ai_step_hint(step_map: &serde_yaml::Mapping, step_name: &str, hint: &
     };
     hint.uses_ai = true;
 
+    // `model_uri` is used in newer DSL variants, while `model` is used in existing AI POC YAML.
+    // Supporting both keeps this phase-0 observer compatible across branch targets.
     let model_uri = step_data
         .as_mapping()
         .and_then(|map| map_string(map, "model_uri").or_else(|| map_string(map, "model")));
