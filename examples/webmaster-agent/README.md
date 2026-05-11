@@ -1,10 +1,13 @@
-# Webmaster Agent POC
+# Webmaster Agent POC (Phase 0)
 
-Minimal vertical slice for a **Camel Webmaster Agent** that:
+Minimal observer-only slice for a **Camel Webmaster Agent** that:
 
-- builds a structured `SystemSnapshot` from a demo route file,
+- parses real rust-camel DSL YAML (`camel_dsl::parse_yaml_to_declarative`),
+- builds a structured `SystemSnapshot` from declarative routes,
 - runs heuristic maintenance analysis,
 - prints structured JSON proposals.
+
+This phase does not execute routes or integrate an `agent:` runtime component yet.
 
 ## Run
 

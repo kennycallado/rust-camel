@@ -2,12 +2,15 @@ routes:
   - id: "webmaster-review"
     from: "timer:webmaster?period=5000&repeatCount=1"
     steps:
-      - "to: http://inventory.internal/api/orders?api_key=demo-key"
-      - "ai_classify: classify order urgency"
-      - "to: embedding:sentence-transformer"
-      - "to: vector:qdrant://orders-index"
-      - "to: llm:chat?model=local-demo"
-      - "to: log:info?showBody=true"
-      - "to: log:audit"
-    has_error_handler: false
-    has_circuit_breaker: false
+      - to: "http://inventory.internal/api/orders?api_key=demo-key"
+      - to: "embedding:sentence-transformer"
+      - to: "vector:qdrant://orders-index"
+      - to: "llm:chat?model=local-demo"
+      - choice:
+          when:
+            - simple: "${header.priority} == 'high'"
+              steps:
+                - to: "log:priority"
+          otherwise:
+            - to: "log:normal"
+      - to: "log:audit"

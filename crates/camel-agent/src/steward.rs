@@ -97,10 +97,12 @@ impl MaintainerAgent {
 
 fn touches_http_endpoint(route: &RouteSnapshot) -> bool {
     starts_with_any(&route.from, &["http:", "https:"])
-        || route
-            .steps
-            .iter()
-            .any(|step| contains_any(step, &["http://", "https://", "to: http://", "to: https://"]))
+        || route.steps.iter().any(|step| {
+            contains_any(
+                step,
+                &["http://", "https://", "to: http://", "to: https://"],
+            )
+        })
 }
 
 fn has_ai_classifier_steps(route: &RouteSnapshot) -> bool {
@@ -137,35 +139,23 @@ fn contains_any(value: &str, patterns: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::{build_system_snapshot, parse_routes_yaml};
 
-    fn snapshot_for_steps(
-        id: &str,
-        from: &str,
-        steps: Vec<&str>,
-        components: Vec<&str>,
-    ) -> SystemSnapshot {
-        SystemSnapshot {
-            routes: vec![RouteSnapshot {
-                id: id.into(),
-                from: from.into(),
-                steps: steps.into_iter().map(str::to_string).collect(),
-                components: components.into_iter().map(str::to_string).collect(),
-                has_error_handler: false,
-                has_circuit_breaker: false,
-                uses_ai: false,
-            }],
-            components: Vec::new(),
-            findings_context: serde_json::json!({}),
-        }
+    fn snapshot_from_yaml(yaml: &str) -> SystemSnapshot {
+        let routes = parse_routes_yaml(yaml).expect("valid declarative YAML");
+        build_system_snapshot(&routes)
     }
 
     #[test]
     fn proposes_reliability_for_http_without_error_handler() {
-        let snapshot = snapshot_for_steps(
-            "r1",
-            "timer:tick",
-            vec!["to: http://service.local/orders"],
-            vec!["timer", "http"],
+        let snapshot = snapshot_from_yaml(
+            r#"
+routes:
+  - id: "r1"
+    from: "timer:tick"
+    steps:
+      - to: "http://service.local/orders"
+"#,
         );
 
         let proposals = MaintainerAgent.analyze(&snapshot);
@@ -175,12 +165,17 @@ mod tests {
     }
 
     #[test]
-    fn proposes_ai_safety_for_ai_classifier_step() {
-        let snapshot = snapshot_for_steps(
-            "r2",
-            "direct:start",
-            vec!["ai_classify: sentiment"],
-            vec!["direct"],
+    fn proposes_ai_safety_for_route_with_ai_components() {
+        let snapshot = snapshot_from_yaml(
+            r#"
+routes:
+  - id: "r2"
+    from: "direct:start"
+    steps:
+      - to: "embedding:model"
+      - to: "vector:index"
+      - to: "llm:chat"
+"#,
         );
 
         let proposals = MaintainerAgent.analyze(&snapshot);
@@ -189,11 +184,16 @@ mod tests {
 
     #[test]
     fn proposes_refactor_for_rag_shape() {
-        let snapshot = snapshot_for_steps(
-            "r3",
-            "direct:start",
-            vec!["to: embedding:model", "to: vector:index", "to: llm:chat"],
-            vec!["direct", "embedding", "vector", "llm"],
+        let snapshot = snapshot_from_yaml(
+            r#"
+routes:
+  - id: "r3"
+    from: "direct:start"
+    steps:
+      - to: "embedding:model"
+      - to: "vector:index"
+      - to: "llm:chat"
+"#,
         );
 
         let proposals = MaintainerAgent.analyze(&snapshot);
@@ -204,19 +204,20 @@ mod tests {
 
     #[test]
     fn proposes_documentation_for_long_routes() {
-        let snapshot = snapshot_for_steps(
-            "r4",
-            "direct:start",
-            vec![
-                "to: log:1",
-                "to: log:2",
-                "to: log:3",
-                "to: log:4",
-                "to: log:5",
-                "to: log:6",
-                "to: log:7",
-            ],
-            vec!["direct", "log"],
+        let snapshot = snapshot_from_yaml(
+            r#"
+routes:
+  - id: "r4"
+    from: "direct:start"
+    steps:
+      - to: "log:1"
+      - to: "log:2"
+      - to: "log:3"
+      - to: "log:4"
+      - to: "log:5"
+      - to: "log:6"
+      - to: "log:7"
+"#,
         );
 
         let proposals = MaintainerAgent.analyze(&snapshot);
@@ -227,11 +228,14 @@ mod tests {
 
     #[test]
     fn proposes_secret_hardening_when_api_key_is_present() {
-        let snapshot = snapshot_for_steps(
-            "r5",
-            "direct:start",
-            vec!["to: https://api.local/orders?api_key=plain-text"],
-            vec!["direct", "http"],
+        let snapshot = snapshot_from_yaml(
+            r#"
+routes:
+  - id: "r5"
+    from: "direct:start"
+    steps:
+      - to: "https://api.local/orders?api_key=plain-text"
+"#,
         );
 
         let proposals = MaintainerAgent.analyze(&snapshot);
