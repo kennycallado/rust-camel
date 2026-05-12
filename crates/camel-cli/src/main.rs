@@ -215,7 +215,14 @@ async fn run(
     #[cfg(feature = "wasm")]
     if let Some(ref bean_reg) = beans_registry {
         let component_registry = ctx.registry_arc();
-        let plugins_dir = std::path::PathBuf::from("plugins");
+        let plugins_dir = camel_config
+            .components
+            .raw
+            .get("wasm")
+            .and_then(|v| v.get("plugins_dir"))
+            .and_then(|v| v.as_str())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
         for (bean_name, bean_cfg) in &camel_config.beans {
             tracing::info!(bean = %bean_name, plugin = %bean_cfg.plugin, "registering WASM bean");
 
