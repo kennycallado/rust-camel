@@ -25,7 +25,7 @@ impl Host for WasmHostState {
         }
 
         let registry = self.registry.clone();
-        let result = tokio::runtime::Handle::current().block_on(async {
+        let async_work = async {
             let scheme = uri.split(':').next().unwrap_or("").to_string();
             if scheme.is_empty() {
                 return Err(WasmError::ProcessorError(format!(
@@ -79,7 +79,16 @@ impl Host for WasmHostState {
             };
 
             Ok(body_str)
-        });
+        };
+
+        let result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(async_work)),
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| WasmError::Io(format!("failed to create tokio runtime: {}", e)))?;
+                rt.block_on(async_work)
+            }
+        };
 
         NESTING_DEPTH.fetch_sub(1, Ordering::Relaxed);
         result
@@ -223,5 +232,15 @@ mod tests {
         assert_eq!("log:info".split(':').next().unwrap_or(""), "log");
         assert_eq!("noscheme".split(':').next().unwrap_or(""), "noscheme");
         assert_eq!("".split(':').next().unwrap_or(""), "");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_camel_call_does_not_panic_inside_tokio_runtime() {
+        let mut state = make_state(0);
+        let result = Host::camel_call(&mut state, "noscheme".to_string(), "{}".to_string());
+        assert!(
+            result.is_err(),
+            "should return error for empty scheme, not panic"
+        );
     }
 }
