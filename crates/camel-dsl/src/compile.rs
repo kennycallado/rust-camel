@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use camel_ai::resolve_chat_model;
+
 const DEFAULT_FUNCTION_TIMEOUT_MS: u64 = 5000;
 
 use camel_api::aggregator::{AggregationStrategy as AggregatorStrategy, AggregatorConfig};
@@ -2522,48 +2524,5 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(step, BuilderStep::Aggregate { .. }));
-    }
-}
-
-fn resolve_chat_model(model_uri: &str) -> Result<std::sync::Arc<dyn camel_ai::ChatModel>, CamelError> {
-    use std::sync::Arc;
-    use camel_ai::{OllamaAdapter, OpenAiAdapter};
-    use camel_ai::{OllamaConfig, OpenAiConfig};
-
-    let (scheme, query) = model_uri.split_once('?').unwrap_or((model_uri, ""));
-    let params: std::collections::HashMap<String, String> = query
-        .split('&')
-        .filter_map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            let k = parts.next()?.to_string();
-            let v = parts.next().unwrap_or("").to_string();
-            if k.is_empty() { None } else { Some((k, v)) }
-        })
-        .collect();
-
-    let variant = scheme.split(':').nth(1).unwrap_or("");
-    let is_ollama = variant == "ollama";
-
-    let base_url = params
-        .get("base_url")
-        .cloned()
-        .unwrap_or_else(|| "http://localhost:11434".into());
-    let model = params
-        .get("model")
-        .cloned()
-        .unwrap_or_else(|| "qwen3.5:4b".into());
-
-    if is_ollama {
-        Ok(Arc::new(OllamaAdapter::new(OllamaConfig { base_url, model })))
-    } else {
-        let api_key = params
-            .get("api_key")
-            .cloned()
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-        Ok(Arc::new(OpenAiAdapter::new(OpenAiConfig {
-            api_key,
-            base_url: Some(base_url),
-            model,
-        })))
     }
 }
