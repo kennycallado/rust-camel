@@ -17,7 +17,7 @@ use crate::model::{
     DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
     LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
     MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
-    SetHeaderStepDef, AiClassifyStepDef, AiExtractStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
+    SetHeaderStepDef, AiClassifyStepDef, AiExtractStepDef, PromptTemplateStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
     StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef,
     WhenStepDef, WireTapStepDef,
 };
@@ -27,7 +27,7 @@ pub use crate::yaml_ast::{
     LoadBalanceStep, LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep,
     MulticastData, MulticastStep, PredicateBlock, RecipientListData, RecipientListStep,
     RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig, SetBodyData,
-    SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep, AiClassifyStep, AiExtractStep, SplitData,
+    SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep, AiClassifyStep, AiExtractStep, PromptTemplateStep, SplitData,
     SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody,
     StreamCacheConfig, StreamCacheStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
     UnmarshalStep, ValidateStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
@@ -290,6 +290,11 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 schema: ai_extract.schema,
                 output_header: ai_extract.output_header,
                 prompt: ai_extract.prompt,
+            }))
+        }
+        YamlStep::PromptTemplate(PromptTemplateStep { prompt_template }) => {
+            Ok(DeclarativeStep::PromptTemplate(PromptTemplateStepDef {
+                template: prompt_template.template,
             }))
         }
         YamlStep::SetProperty(SetPropertyStep { set_property }) => {

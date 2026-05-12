@@ -339,6 +339,11 @@ pub struct AiExtractStepDef {
     pub prompt: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptTemplateStepDef {
+    pub template: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclarativeStep {
     To(ToStepDef),
@@ -367,6 +372,7 @@ pub enum DeclarativeStep {
     Bean(BeanStepDef),
     AiClassify(AiClassifyStepDef),
     AiExtract(AiExtractStepDef),
+    PromptTemplate(PromptTemplateStepDef),
     Delay(DelayStepDef),
     Loop(LoopStepDef),
 }

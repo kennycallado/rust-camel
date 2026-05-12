@@ -208,6 +208,17 @@ fn default_ai_extract_header() -> String {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct PromptTemplateStep {
+    pub prompt_template: PromptTemplateData,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct PromptTemplateData {
+    pub template: String,
+}
+
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
 pub enum YamlStep {
     To(ToStep),
@@ -239,6 +250,7 @@ pub enum YamlStep {
     Loop(LoopStep),
     AiClassify(AiClassifyStep),
     AiExtract(AiExtractStep),
+    PromptTemplate(PromptTemplateStep),
     Validate(ValidateStep),
 }
 

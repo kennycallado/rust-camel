@@ -23,7 +23,7 @@ use camel_api::{
 use camel_component_api::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{
-    ConvertBodyTo, LogLevel, MarshalService, StopService, StreamCacheService, UnmarshalService,
+    ConvertBodyTo, LogLevel, MarshalService, PromptTemplateService, StopService, StreamCacheService, UnmarshalService,
     ai::{AiClassifyService, AiExtractService},
     builtin_data_format,
 };
@@ -34,7 +34,7 @@ use crate::model::{
     DeclarativeStep, DelayStepDef, DynamicRouterStepDef, FunctionStepDef, LanguageExpressionDef,
     LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
     MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
-    ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, AiClassifyStepDef, AiExtractStepDef, SetPropertyStepDef, SplitAggregationDef,
+    ScriptStepDef, SetBodyStepDef,     SetHeaderStepDef, AiClassifyStepDef, AiExtractStepDef, PromptTemplateStepDef, SetPropertyStepDef, SplitAggregationDef,
     SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
     ValueSourceDef, WireTapStepDef,
 };
@@ -507,6 +507,11 @@ fn compile_declarative_step_with_threshold(
                 },
             )))
         }
+        DeclarativeStep::PromptTemplate(PromptTemplateStepDef { template }) => {
+            Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
+                PromptTemplateService { template },
+            )))
+        }
         DeclarativeStep::SetProperty(SetPropertyStepDef { key, value }) => {
             compile_set_property_step(key, value)
         }
@@ -848,7 +853,7 @@ fn compile_declarative_step_to_canonical(
             delay_ms,
             dynamic_header,
         }),
-        DeclarativeStep::AiClassify(_) | DeclarativeStep::AiExtract(_) => {
+        DeclarativeStep::AiClassify(_) | DeclarativeStep::AiExtract(_) | DeclarativeStep::PromptTemplate(_) => {
             Err(CamelError::RouteError("ai steps are not canonical".into()))
         }
         DeclarativeStep::Loop(_) => {
@@ -971,6 +976,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Loop(_) => "loop",
         DeclarativeStep::AiClassify(_) => "ai_classify",
         DeclarativeStep::AiExtract(_) => "ai_extract",
+        DeclarativeStep::PromptTemplate(_) => "prompt_template",
         DeclarativeStep::Function(_) => "function",
     }
 }
