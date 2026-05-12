@@ -329,6 +329,8 @@ pub struct AiClassifyStepDef {
     pub model_uri: String,
     pub labels: Vec<String>,
     pub output_header: String,
+    pub on_unknown: Option<String>,
+    pub fallback_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -181,6 +181,8 @@ pub struct AiClassifyData {
     pub labels: Vec<String>,
     #[serde(default = "default_ai_classify_header")]
     pub output_header: String,
+    pub on_unknown: Option<String>,
+    pub fallback_label: Option<String>,
 }
 
 fn default_ai_classify_header() -> String {

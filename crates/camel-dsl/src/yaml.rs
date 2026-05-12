@@ -282,6 +282,8 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 model_uri: ai_classify.model,
                 labels: ai_classify.labels,
                 output_header: ai_classify.output_header,
+                on_unknown: ai_classify.on_unknown,
+                fallback_label: ai_classify.fallback_label,
             }))
         }
         YamlStep::AiExtract(AiExtractStep { ai_extract }) => {

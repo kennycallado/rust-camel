@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use camel_ai::resolve_chat_model;
+use camel_ai::{resolve_chat_model, AiModelUri};
 
 const DEFAULT_FUNCTION_TIMEOUT_MS: u64 = 5000;
 
@@ -483,13 +483,20 @@ fn compile_declarative_step_with_threshold(
             model_uri,
             labels,
             output_header,
+            on_unknown,
+            fallback_label,
         }) => {
+            let parsed = camel_ai::AiModelUri::parse(&model_uri)?;
             let model = resolve_chat_model(&model_uri)?;
             Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
                 AiClassifyService {
                     model,
+                    provider_name: format!("{:?}", parsed.provider).to_lowercase(),
+                    model_name: parsed.model,
                     labels,
                     output_header,
+                    on_unknown,
+                    fallback_label,
                 },
             )))
         }
@@ -499,10 +506,13 @@ fn compile_declarative_step_with_threshold(
             output_header,
             prompt,
         }) => {
+            let parsed = AiModelUri::parse(&model_uri)?;
             let model = resolve_chat_model(&model_uri)?;
             Ok(BuilderStep::Processor(camel_api::BoxProcessor::new(
                 AiExtractService {
                     model,
+                    provider_name: format!("{:?}", parsed.provider).to_lowercase(),
+                    model_name: parsed.model,
                     schema,
                     output_header,
                     prompt,
