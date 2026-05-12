@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use camel_ai::uri::resolve_embedding_model;
+use camel_ai::uri::{resolve_embedding_model, AiModelUri};
 use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 
 use crate::endpoint::EmbeddingEndpoint;
@@ -30,11 +30,14 @@ impl Component for EmbeddingComponent {
         uri: &str,
         _ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
+        let parsed = AiModelUri::parse(uri)?;
         let model = resolve_embedding_model(uri)?;
 
         Ok(Box::new(EmbeddingEndpoint {
             uri: uri.to_string(),
             model,
+            provider_name: format!("{:?}", parsed.provider).to_lowercase(),
+            model_name: parsed.model,
         }))
     }
 }
