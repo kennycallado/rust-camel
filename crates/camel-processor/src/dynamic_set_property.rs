@@ -110,10 +110,7 @@ mod tests {
         });
 
         let result = svc.oneshot(exchange).await.unwrap();
-        assert_eq!(
-            result.property("key"),
-            Some(&Value::String("new".into()))
-        );
+        assert_eq!(result.property("key"), Some(&Value::String("new".into())));
     }
 
     #[tokio::test]
@@ -135,9 +132,10 @@ mod tests {
         use tower::ServiceBuilder;
 
         let svc = ServiceBuilder::new()
-            .layer(DynamicSetPropertyLayer::new("computed", |_ex: &Exchange| {
-                Value::Bool(true)
-            }))
+            .layer(DynamicSetPropertyLayer::new(
+                "computed",
+                |_ex: &Exchange| Value::Bool(true),
+            ))
             .service(IdentityProcessor);
 
         let exchange = Exchange::new(Message::default());

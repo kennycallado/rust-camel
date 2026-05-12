@@ -74,14 +74,35 @@ pub fn set_ai_headers(
     latency_ms: u64,
     usage: Option<&TokenUsage>,
 ) {
-    headers.insert(HEADER_CAMEL_AI_PROVIDER.into(), serde_json::Value::String(provider.into()));
-    headers.insert(HEADER_CAMEL_AI_MODEL.into(), serde_json::Value::String(model.into()));
-    headers.insert(HEADER_CAMEL_AI_OPERATION.into(), serde_json::Value::String(operation.into()));
-    headers.insert(HEADER_CAMEL_AI_LATENCY_MS.into(), serde_json::json!(latency_ms));
+    headers.insert(
+        HEADER_CAMEL_AI_PROVIDER.into(),
+        serde_json::Value::String(provider.into()),
+    );
+    headers.insert(
+        HEADER_CAMEL_AI_MODEL.into(),
+        serde_json::Value::String(model.into()),
+    );
+    headers.insert(
+        HEADER_CAMEL_AI_OPERATION.into(),
+        serde_json::Value::String(operation.into()),
+    );
+    headers.insert(
+        HEADER_CAMEL_AI_LATENCY_MS.into(),
+        serde_json::json!(latency_ms),
+    );
     if let Some(u) = usage {
-        headers.insert(HEADER_CAMEL_AI_PROMPT_TOKENS.into(), serde_json::json!(u.prompt_tokens));
-        headers.insert(HEADER_CAMEL_AI_COMPLETION_TOKENS.into(), serde_json::json!(u.completion_tokens));
-        headers.insert(HEADER_CAMEL_AI_TOTAL_TOKENS.into(), serde_json::json!(u.total_tokens));
+        headers.insert(
+            HEADER_CAMEL_AI_PROMPT_TOKENS.into(),
+            serde_json::json!(u.prompt_tokens),
+        );
+        headers.insert(
+            HEADER_CAMEL_AI_COMPLETION_TOKENS.into(),
+            serde_json::json!(u.completion_tokens),
+        );
+        headers.insert(
+            HEADER_CAMEL_AI_TOTAL_TOKENS.into(),
+            serde_json::json!(u.total_tokens),
+        );
     }
 }
 
@@ -140,7 +161,14 @@ mod tests {
             completion_tokens: 5,
             total_tokens: 15,
         };
-        set_ai_headers(&mut headers, "openai", "gpt-4o", "extract", 100, Some(&usage));
+        set_ai_headers(
+            &mut headers,
+            "openai",
+            "gpt-4o",
+            "extract",
+            100,
+            Some(&usage),
+        );
         assert_eq!(headers["CamelAiPromptTokens"], 10);
         assert_eq!(headers["CamelAiCompletionTokens"], 5);
         assert_eq!(headers["CamelAiTotalTokens"], 15);

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use camel_ai::{set_ai_headers, ChatMessage, ChatModel, ChatRequest, ChatRole};
+use camel_ai::{ChatMessage, ChatModel, ChatRequest, ChatRole, set_ai_headers};
 use camel_api::{CamelError, Exchange};
 use tower::Service;
 
@@ -75,7 +75,10 @@ impl Service<Exchange> for AiClassifyService {
                     category
                 });
 
-            let final_label = if !labels.iter().any(|l| l.to_lowercase() == matched.to_lowercase()) {
+            let final_label = if !labels
+                .iter()
+                .any(|l| l.to_lowercase() == matched.to_lowercase())
+            {
                 match on_unknown.as_deref().unwrap_or("raw") {
                     "error" => {
                         return Err(CamelError::RouteError(format!(
@@ -218,13 +221,11 @@ fn strip_markdown_fences(raw: &str) -> &str {
 }
 
 fn validate_json_schema(schema_str: &str, value: &serde_json::Value) -> Result<(), CamelError> {
-    let schema: serde_json::Value = serde_json::from_str(schema_str).map_err(|e| {
-        CamelError::RouteError(format!("AI extract: invalid schema JSON: {e}"))
-    })?;
+    let schema: serde_json::Value = serde_json::from_str(schema_str)
+        .map_err(|e| CamelError::RouteError(format!("AI extract: invalid schema JSON: {e}")))?;
 
-    let validator = jsonschema::validator_for(&schema).map_err(|e| {
-        CamelError::RouteError(format!("AI extract: invalid JSON Schema: {e}"))
-    })?;
+    let validator = jsonschema::validator_for(&schema)
+        .map_err(|e| CamelError::RouteError(format!("AI extract: invalid JSON Schema: {e}")))?;
 
     let msgs: Vec<String> = validator
         .iter_errors(value)
@@ -244,8 +245,8 @@ fn validate_json_schema(schema_str: &str, value: &serde_json::Value) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_ai::{ChatResponse, ChatRequest};
     use async_trait::async_trait;
+    use camel_ai::{ChatRequest, ChatResponse};
 
     struct MockChatModel {
         response: String,
@@ -255,7 +256,11 @@ mod tests {
     #[async_trait]
     impl ChatModel for MockChatModel {
         async fn complete(&self, req: ChatRequest) -> Result<ChatResponse, CamelError> {
-            assert_eq!(req.think, Some(false), "think must be false for AI processors");
+            assert_eq!(
+                req.think,
+                Some(false),
+                "think must be false for AI processors"
+            );
             Ok(ChatResponse {
                 content: self.response.clone(),
                 usage: self.usage.clone(),
@@ -269,7 +274,10 @@ mod tests {
 
     #[test]
     fn strip_fences_json() {
-        assert_eq!(strip_markdown_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(
+            strip_markdown_fences("```json\n{\"a\":1}\n```"),
+            "{\"a\":1}"
+        );
     }
 
     #[test]
@@ -346,7 +354,9 @@ mod tests {
             model,
             provider_name: "ollama".into(),
             model_name: "qwen3.5:4b".into(),
-            schema: r#"{"type":"object","properties":{"age":{"type":"number"}},"required":["age"]}"#.into(),
+            schema:
+                r#"{"type":"object","properties":{"age":{"type":"number"}},"required":["age"]}"#
+                    .into(),
             output_header: "result".into(),
             prompt: None,
         };
@@ -429,7 +439,10 @@ mod tests {
             fallback_label: None,
         };
         let ex = svc.call(mock_exchange("text")).await.unwrap();
-        assert_eq!(ex.input.headers.get("cat").unwrap().as_str(), Some("billing"));
+        assert_eq!(
+            ex.input.headers.get("cat").unwrap().as_str(),
+            Some("billing")
+        );
     }
 
     #[tokio::test]
@@ -467,7 +480,10 @@ mod tests {
             fallback_label: Some("billing".into()),
         };
         let ex = svc.call(mock_exchange("text")).await.unwrap();
-        assert_eq!(ex.input.headers.get("cat").unwrap().as_str(), Some("billing"));
+        assert_eq!(
+            ex.input.headers.get("cat").unwrap().as_str(),
+            Some("billing")
+        );
     }
 
     #[tokio::test]
@@ -486,7 +502,10 @@ mod tests {
             fallback_label: None,
         };
         let ex = svc.call(mock_exchange("text")).await.unwrap();
-        assert_eq!(ex.input.headers.get("cat").unwrap().as_str(), Some("something_else"));
+        assert_eq!(
+            ex.input.headers.get("cat").unwrap().as_str(),
+            Some("something_else")
+        );
     }
 
     #[tokio::test]

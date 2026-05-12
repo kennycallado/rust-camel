@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use camel_ai::uri::{resolve_embedding_model, AiModelUri};
+use camel_ai::uri::{AiModelUri, resolve_embedding_model};
 use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 
 use crate::endpoint::EmbeddingEndpoint;

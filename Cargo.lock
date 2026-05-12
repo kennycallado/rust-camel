@@ -914,6 +914,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1790,6 +1791,7 @@ dependencies = [
  "camel-util",
  "criterion",
  "futures",
+ "jsonschema",
  "rand 0.10.1",
  "serde_json",
  "thiserror 2.0.18",

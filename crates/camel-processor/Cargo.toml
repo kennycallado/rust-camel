@@ -26,6 +26,7 @@ tokio-util.workspace = true
 tower.workspace = true
 tracing.workspace = true
 rand.workspace = true
+jsonschema.workspace = true
 
 [dev-dependencies]
 bytes.workspace = true

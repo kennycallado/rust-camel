@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use camel_ai::{resolve_chat_model, AiModelUri};
+use camel_ai::{AiModelUri, resolve_chat_model};
 
 const DEFAULT_FUNCTION_TIMEOUT_MS: u64 = 5000;
 
@@ -25,20 +25,21 @@ use camel_api::{
 use camel_component_api::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
 use camel_processor::{
-    ConvertBodyTo, LogLevel, MarshalService, PromptTemplateService, StopService, StreamCacheService, UnmarshalService,
+    ConvertBodyTo, LogLevel, MarshalService, PromptTemplateService, StopService,
+    StreamCacheService, UnmarshalService,
     ai::{AiClassifyService, AiExtractService},
     builtin_data_format,
 };
 
 use crate::model::{
-    AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
-    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
-    DeclarativeStep, DelayStepDef, DynamicRouterStepDef, FunctionStepDef, LanguageExpressionDef,
-    LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
-    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
-    ScriptStepDef, SetBodyStepDef,     SetHeaderStepDef, AiClassifyStepDef, AiExtractStepDef, PromptTemplateStepDef, SetPropertyStepDef, SplitAggregationDef,
-    SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
-    ValueSourceDef, WireTapStepDef,
+    AggregateStepDef, AggregateStrategyDef, AiClassifyStepDef, AiExtractStepDef, BeanStepDef,
+    BodyTypeDef, ChoiceStepDef, DataFormatDef, DeclarativeCircuitBreaker, DeclarativeConcurrency,
+    DeclarativeErrorHandler, DeclarativeRoute, DeclarativeStep, DelayStepDef, DynamicRouterStepDef,
+    FunctionStepDef, LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef,
+    LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef, MulticastStepDef,
+    PromptTemplateStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
+    SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
+    ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WireTapStepDef,
 };
 
 pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinition, CamelError> {
@@ -865,7 +866,9 @@ fn compile_declarative_step_to_canonical(
             delay_ms,
             dynamic_header,
         }),
-        DeclarativeStep::AiClassify(_) | DeclarativeStep::AiExtract(_) | DeclarativeStep::PromptTemplate(_) => {
+        DeclarativeStep::AiClassify(_)
+        | DeclarativeStep::AiExtract(_)
+        | DeclarativeStep::PromptTemplate(_) => {
             Err(CamelError::RouteError("ai steps are not canonical".into()))
         }
         DeclarativeStep::Loop(_) => {

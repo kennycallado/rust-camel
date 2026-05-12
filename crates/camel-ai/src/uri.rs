@@ -42,7 +42,7 @@ impl AiModelUri {
             other => {
                 return Err(CamelError::RouteError(format!(
                     "unknown AI capability '{other}' in URI: {uri}"
-                )))
+                )));
             }
         };
 
@@ -58,7 +58,7 @@ impl AiModelUri {
             other => {
                 return Err(CamelError::RouteError(format!(
                     "unknown AI provider '{other}' in URI: {uri}"
-                )))
+                )));
             }
         };
 
@@ -86,9 +86,7 @@ impl AiModelUri {
         });
 
         if params.contains_key("api_key") {
-            tracing::warn!(
-                "api_key in URI is for demos only — prefer OPENAI_API_KEY env var"
-            );
+            tracing::warn!("api_key in URI is for demos only — prefer OPENAI_API_KEY env var");
         }
 
         Ok(Self {
@@ -154,11 +152,7 @@ fn parse_query_params(query: &str) -> HashMap<String, String> {
             let mut parts = pair.splitn(2, '=');
             let k = parts.next()?.to_string();
             let v = parts.next().unwrap_or("").to_string();
-            if k.is_empty() {
-                None
-            } else {
-                Some((k, v))
-            }
+            if k.is_empty() { None } else { Some((k, v)) }
         })
         .collect()
 }
@@ -169,7 +163,8 @@ mod tests {
 
     #[test]
     fn parse_llm_ollama() {
-        let uri = AiModelUri::parse("llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b").unwrap();
+        let uri = AiModelUri::parse("llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b")
+            .unwrap();
         assert_eq!(uri.provider, AiProvider::Ollama);
         assert_eq!(uri.capability, AiCapability::Chat);
         assert_eq!(uri.base_url, "http://localhost:11434");
@@ -187,7 +182,10 @@ mod tests {
 
     #[test]
     fn parse_embedding_ollama() {
-        let uri = AiModelUri::parse("embedding:ollama?base_url=http://localhost:11434&model=embeddinggemma").unwrap();
+        let uri = AiModelUri::parse(
+            "embedding:ollama?base_url=http://localhost:11434&model=embeddinggemma",
+        )
+        .unwrap();
         assert_eq!(uri.provider, AiProvider::Ollama);
         assert_eq!(uri.capability, AiCapability::Embedding);
     }
@@ -246,14 +244,18 @@ mod tests {
 
     #[test]
     fn parse_create_alias_backward_compat() {
-        let uri = AiModelUri::parse("embedding:create?base_url=http://localhost:11434&model=embeddinggemma").unwrap();
+        let uri = AiModelUri::parse(
+            "embedding:create?base_url=http://localhost:11434&model=embeddinggemma",
+        )
+        .unwrap();
         assert_eq!(uri.provider, AiProvider::Ollama);
         assert_eq!(uri.capability, AiCapability::Embedding);
     }
 
     #[test]
     fn parse_llm_create_alias_backward_compat() {
-        let uri = AiModelUri::parse("llm:create?base_url=http://localhost:11434&model=qwen3.5:4b").unwrap();
+        let uri = AiModelUri::parse("llm:create?base_url=http://localhost:11434&model=qwen3.5:4b")
+            .unwrap();
         assert_eq!(uri.provider, AiProvider::Ollama);
         assert_eq!(uri.capability, AiCapability::Chat);
     }

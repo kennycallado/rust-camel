@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use camel_ai::uri::{resolve_chat_model, AiModelUri};
+use camel_ai::uri::{AiModelUri, resolve_chat_model};
 use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 
 use crate::endpoint::LlmEndpoint;
@@ -23,7 +23,9 @@ impl Component for LlmComponent {
 
         let parsed = AiModelUri::parse(uri)?;
         let model = resolve_chat_model(uri)?;
-        let temperature = params.get("temperature").and_then(|v| v.parse::<f32>().ok());
+        let temperature = params
+            .get("temperature")
+            .and_then(|v| v.parse::<f32>().ok());
         let system_prompt = params.get("system_prompt").cloned();
         let think = params.get("think").and_then(|v| match v.as_str() {
             "true" => Some(true),

@@ -76,7 +76,8 @@ mod tests {
     async fn test_set_property_adds_property() {
         let exchange = Exchange::new(Message::default());
 
-        let processor = SetProperty::new(IdentityProcessor, "source", Value::String("timer".into()));
+        let processor =
+            SetProperty::new(IdentityProcessor, "source", Value::String("timer".into()));
 
         let result = processor.oneshot(exchange).await.unwrap();
         assert_eq!(
@@ -93,10 +94,7 @@ mod tests {
         let processor = SetProperty::new(IdentityProcessor, "key", Value::String("new".into()));
 
         let result = processor.oneshot(exchange).await.unwrap();
-        assert_eq!(
-            result.property("key"),
-            Some(&Value::String("new".into()))
-        );
+        assert_eq!(result.property("key"), Some(&Value::String("new".into())));
     }
 
     #[tokio::test]
@@ -123,9 +121,6 @@ mod tests {
 
         let exchange = Exchange::new(Message::default());
         let result = svc.oneshot(exchange).await.unwrap();
-        assert_eq!(
-            result.property("env"),
-            Some(&Value::String("test".into()))
-        );
+        assert_eq!(result.property("env"), Some(&Value::String("test".into())));
     }
 }
