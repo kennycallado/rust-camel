@@ -1,9 +1,19 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Header name carrying embedding vector (JSON Value array) between steps.
 /// Lives here (not in components) so both camel-component-embedding and
 /// camel-component-vector can import without cross-component coupling.
 pub const HEADER_CAMEL_AI_EMBEDDING: &str = "CamelAiEmbedding";
+
+pub const HEADER_CAMEL_AI_PROVIDER: &str = "CamelAiProvider";
+pub const HEADER_CAMEL_AI_MODEL: &str = "CamelAiModel";
+pub const HEADER_CAMEL_AI_OPERATION: &str = "CamelAiOperation";
+pub const HEADER_CAMEL_AI_LATENCY_MS: &str = "CamelAiLatencyMs";
+pub const HEADER_CAMEL_AI_PROMPT_TOKENS: &str = "CamelAiPromptTokens";
+pub const HEADER_CAMEL_AI_COMPLETION_TOKENS: &str = "CamelAiCompletionTokens";
+pub const HEADER_CAMEL_AI_TOTAL_TOKENS: &str = "CamelAiTotalTokens";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -54,6 +64,25 @@ pub struct VectorHit {
     pub id: String,
     pub score: f32,
     pub payload: serde_json::Value,
+}
+
+pub fn set_ai_headers(
+    headers: &mut HashMap<String, serde_json::Value>,
+    provider: &str,
+    model: &str,
+    operation: &str,
+    latency_ms: u64,
+    usage: Option<&TokenUsage>,
+) {
+    headers.insert(HEADER_CAMEL_AI_PROVIDER.into(), serde_json::Value::String(provider.into()));
+    headers.insert(HEADER_CAMEL_AI_MODEL.into(), serde_json::Value::String(model.into()));
+    headers.insert(HEADER_CAMEL_AI_OPERATION.into(), serde_json::Value::String(operation.into()));
+    headers.insert(HEADER_CAMEL_AI_LATENCY_MS.into(), serde_json::json!(latency_ms));
+    if let Some(u) = usage {
+        headers.insert(HEADER_CAMEL_AI_PROMPT_TOKENS.into(), serde_json::json!(u.prompt_tokens));
+        headers.insert(HEADER_CAMEL_AI_COMPLETION_TOKENS.into(), serde_json::json!(u.completion_tokens));
+        headers.insert(HEADER_CAMEL_AI_TOTAL_TOKENS.into(), serde_json::json!(u.total_tokens));
+    }
 }
 
 #[cfg(test)]
