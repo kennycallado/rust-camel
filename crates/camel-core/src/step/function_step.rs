@@ -657,9 +657,13 @@ mod tests {
         })]));
         let mut step = FunctionStep::new(invoker, test_definition());
         let mut ex = Exchange::default();
-        ex.properties.insert("existing".into(), serde_json::json!("keep"));
+        ex.properties
+            .insert("existing".into(), serde_json::json!("keep"));
         let result = step.call(ex).await.unwrap();
-        assert_eq!(result.properties.get("existing").unwrap().as_str(), Some("keep"));
+        assert_eq!(
+            result.properties.get("existing").unwrap().as_str(),
+            Some("keep")
+        );
         assert_eq!(result.input.body.as_text(), Some("new body"));
     }
 
@@ -671,8 +675,12 @@ mod tests {
         })]));
         let mut step = FunctionStep::new(invoker, test_definition());
         let mut ex = Exchange::default();
-        ex.input.headers.insert("to-remove".into(), serde_json::json!("old"));
-        ex.input.headers.insert("to-keep".into(), serde_json::json!("stay"));
+        ex.input
+            .headers
+            .insert("to-remove".into(), serde_json::json!("old"));
+        ex.input
+            .headers
+            .insert("to-keep".into(), serde_json::json!("stay"));
         let result = step.call(ex).await.unwrap();
         assert!(!result.input.headers.contains_key("to-remove"));
         assert!(result.input.headers.contains_key("to-keep"));

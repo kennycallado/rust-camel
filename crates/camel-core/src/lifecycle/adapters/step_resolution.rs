@@ -963,7 +963,8 @@ mod tests {
         };
 
         let compiled_expression = compile_language_expression(&languages, &expression).unwrap();
-        let compiled_predicate = compile_language_predicate(&languages, &predicate_expression).unwrap();
+        let compiled_predicate =
+            compile_language_predicate(&languages, &predicate_expression).unwrap();
 
         let mut msg = camel_api::message::Message::default();
         msg.set_header("answer", Value::String("42".into()));
@@ -1032,7 +1033,10 @@ mod tests {
             &FunctionStagingMode::DirectAdd,
         )
         .unwrap_err();
-        assert!(both.to_string().contains("cannot specify both 'count' and 'while'"));
+        assert!(
+            both.to_string()
+                .contains("cannot specify both 'count' and 'while'")
+        );
 
         let neither = resolve_steps(
             vec![BuilderStep::DeclarativeLoop {
@@ -1050,7 +1054,11 @@ mod tests {
             &FunctionStagingMode::DirectAdd,
         )
         .unwrap_err();
-        assert!(neither.to_string().contains("must specify either 'count' or 'while'"));
+        assert!(
+            neither
+                .to_string()
+                .contains("must specify either 'count' or 'while'")
+        );
     }
 
     #[test]
@@ -1094,13 +1102,21 @@ mod tests {
             Ok(_) => panic!("expression compile should fail"),
             Err(err) => err,
         };
-        assert!(expr_err.to_string().contains("failed to compile simple expression"));
+        assert!(
+            expr_err
+                .to_string()
+                .contains("failed to compile simple expression")
+        );
 
         let pred_err = match compile_language_predicate(&languages, &bad_pred) {
             Ok(_) => panic!("predicate compile should fail"),
             Err(err) => err,
         };
-        assert!(pred_err.to_string().contains("failed to compile simple predicate"));
+        assert!(
+            pred_err
+                .to_string()
+                .contains("failed to compile simple predicate")
+        );
     }
 
     #[test]
@@ -1127,7 +1143,9 @@ mod tests {
                 config: camel_api::DelayConfig::new(1),
             },
             BuilderStep::Loop {
-                config: camel_api::loop_eip::LoopConfig::new(camel_api::loop_eip::LoopMode::Count(1)),
+                config: camel_api::loop_eip::LoopConfig::new(camel_api::loop_eip::LoopMode::Count(
+                    1,
+                )),
                 steps: vec![BuilderStep::Stop],
             },
             BuilderStep::DeclarativeLoop {
@@ -1155,10 +1173,12 @@ mod tests {
                 steps: vec![BuilderStep::Stop],
             },
             BuilderStep::DeclarativeChoice {
-                whens: vec![crate::lifecycle::application::route_definition::DeclarativeWhenStep {
-                    predicate: expr("${header.k} == 'v'"),
-                    steps: vec![BuilderStep::Stop],
-                }],
+                whens: vec![
+                    crate::lifecycle::application::route_definition::DeclarativeWhenStep {
+                        predicate: expr("${header.k} == 'v'"),
+                        steps: vec![BuilderStep::Stop],
+                    },
+                ],
                 otherwise: Some(vec![BuilderStep::Stop]),
             },
             BuilderStep::DeclarativeScript {

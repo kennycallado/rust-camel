@@ -3053,10 +3053,9 @@ mod tests {
 
         let err = RouteBuilder::from("direct:start")
             .route_id("canonical-custom-split")
-            .split(
-                SplitterConfig::new(split_body_lines())
-                    .aggregation(camel_api::splitter::AggregationStrategy::Custom(Arc::new(|_, ex| ex))),
-            )
+            .split(SplitterConfig::new(split_body_lines()).aggregation(
+                camel_api::splitter::AggregationStrategy::Custom(Arc::new(|_, ex| ex)),
+            ))
             .to("mock:frag")
             .end_split()
             .build_canonical()
@@ -3086,18 +3085,16 @@ mod tests {
     fn test_build_canonical_rejects_fn_correlation_strategy() {
         let err = RouteBuilder::from("direct:start")
             .route_id("canonical-fn-corr")
-            .aggregate(
-                AggregatorConfig {
-                    header_name: "key".to_string(),
-                    completion: CompletionMode::Single(CompletionCondition::Size(1)),
-                    correlation: CorrelationStrategy::Fn(Arc::new(|_| Some("key".to_string()))),
-                    strategy: AggregationStrategy::CollectAll,
-                    max_buckets: None,
-                    bucket_ttl: None,
-                    force_completion_on_stop: false,
-                    discard_on_timeout: false,
-                },
-            )
+            .aggregate(AggregatorConfig {
+                header_name: "key".to_string(),
+                completion: CompletionMode::Single(CompletionCondition::Size(1)),
+                correlation: CorrelationStrategy::Fn(Arc::new(|_| Some("key".to_string()))),
+                strategy: AggregationStrategy::CollectAll,
+                max_buckets: None,
+                bucket_ttl: None,
+                force_completion_on_stop: false,
+                discard_on_timeout: false,
+            })
             .build_canonical()
             .unwrap_err();
 
@@ -3108,20 +3105,18 @@ mod tests {
     fn test_build_canonical_rejects_predicate_completion() {
         let err = RouteBuilder::from("direct:start")
             .route_id("canonical-pred-completion")
-            .aggregate(
-                AggregatorConfig {
-                    header_name: "key".to_string(),
-                    completion: CompletionMode::Single(CompletionCondition::Predicate(Arc::new(
-                        |_| false,
-                    ))),
-                    correlation: CorrelationStrategy::HeaderName("key".to_string()),
-                    strategy: AggregationStrategy::CollectAll,
-                    max_buckets: None,
-                    bucket_ttl: None,
-                    force_completion_on_stop: false,
-                    discard_on_timeout: false,
-                },
-            )
+            .aggregate(AggregatorConfig {
+                header_name: "key".to_string(),
+                completion: CompletionMode::Single(CompletionCondition::Predicate(Arc::new(
+                    |_| false,
+                ))),
+                correlation: CorrelationStrategy::HeaderName("key".to_string()),
+                strategy: AggregationStrategy::CollectAll,
+                max_buckets: None,
+                bucket_ttl: None,
+                force_completion_on_stop: false,
+                discard_on_timeout: false,
+            })
             .build_canonical()
             .unwrap_err();
 
@@ -3132,21 +3127,19 @@ mod tests {
     fn test_build_canonical_with_expression_correlation() {
         let spec = RouteBuilder::from("direct:start")
             .route_id("canonical-expr-corr")
-            .aggregate(
-                AggregatorConfig {
-                    header_name: "key".to_string(),
-                    completion: CompletionMode::Single(CompletionCondition::Size(1)),
-                    correlation: CorrelationStrategy::Expression {
-                        expr: "header.key".to_string(),
-                        language: "simple".to_string(),
-                    },
-                    strategy: AggregationStrategy::CollectAll,
-                    max_buckets: None,
-                    bucket_ttl: None,
-                    force_completion_on_stop: false,
-                    discard_on_timeout: false,
+            .aggregate(AggregatorConfig {
+                header_name: "key".to_string(),
+                completion: CompletionMode::Single(CompletionCondition::Size(1)),
+                correlation: CorrelationStrategy::Expression {
+                    expr: "header.key".to_string(),
+                    language: "simple".to_string(),
                 },
-            )
+                strategy: AggregationStrategy::CollectAll,
+                max_buckets: None,
+                bucket_ttl: None,
+                force_completion_on_stop: false,
+                discard_on_timeout: false,
+            })
             .build_canonical()
             .unwrap();
 
@@ -3161,8 +3154,7 @@ mod tests {
         let err = RouteBuilder::from("direct:start")
             .route_id("canonical-split-last")
             .split(
-                SplitterConfig::new(split_body_lines())
-                    .aggregation(AggregationStrategy::LastWins),
+                SplitterConfig::new(split_body_lines()).aggregation(AggregationStrategy::LastWins),
             )
             .to("mock:frag")
             .end_split()
@@ -3181,11 +3173,7 @@ mod tests {
             .dead_letter_channel("log:dlc")
             .on_exception(|e| matches!(e, CamelError::Io(_)))
             .retry(5)
-            .with_backoff(
-                Duration::from_millis(10),
-                2.0,
-                Duration::from_millis(500),
-            )
+            .with_backoff(Duration::from_millis(10), 2.0, Duration::from_millis(500))
             .with_jitter(0.3)
             .handled_by("log:io-handler")
             .end_on_exception()
@@ -3804,7 +3792,11 @@ mod tests {
             .build_canonical()
             .unwrap();
 
-        assert!(spec.steps.iter().any(|s| matches!(s, CanonicalStepSpec::Delay { delay_ms, .. } if *delay_ms == 100)));
+        assert!(
+            spec.steps.iter().any(
+                |s| matches!(s, CanonicalStepSpec::Delay { delay_ms, .. } if *delay_ms == 100)
+            )
+        );
     }
 
     #[test]
@@ -3815,7 +3807,11 @@ mod tests {
             .build_canonical()
             .unwrap();
 
-        assert!(spec.steps.iter().any(|s| matches!(s, CanonicalStepSpec::WireTap { uri } if uri == "mock:tap")));
+        assert!(
+            spec.steps
+                .iter()
+                .any(|s| matches!(s, CanonicalStepSpec::WireTap { uri } if uri == "mock:tap"))
+        );
     }
 
     #[test]
@@ -3857,21 +3853,19 @@ mod tests {
     fn test_build_canonical_rejects_any_mode_with_predicate() {
         let err = RouteBuilder::from("direct:start")
             .route_id("canonical-any-pred")
-            .aggregate(
-                AggregatorConfig {
-                    header_name: "key".to_string(),
-                    completion: CompletionMode::Any(vec![
-                        CompletionCondition::Size(5),
-                        CompletionCondition::Predicate(Arc::new(|_| false)),
-                    ]),
-                    correlation: CorrelationStrategy::HeaderName("key".to_string()),
-                    strategy: AggregationStrategy::CollectAll,
-                    max_buckets: None,
-                    bucket_ttl: None,
-                    force_completion_on_stop: false,
-                    discard_on_timeout: false,
-                },
-            )
+            .aggregate(AggregatorConfig {
+                header_name: "key".to_string(),
+                completion: CompletionMode::Any(vec![
+                    CompletionCondition::Size(5),
+                    CompletionCondition::Predicate(Arc::new(|_| false)),
+                ]),
+                correlation: CorrelationStrategy::HeaderName("key".to_string()),
+                strategy: AggregationStrategy::CollectAll,
+                max_buckets: None,
+                bucket_ttl: None,
+                force_completion_on_stop: false,
+                discard_on_timeout: false,
+            })
             .build_canonical()
             .unwrap_err();
 

@@ -785,9 +785,9 @@ mod tests {
     use camel_api::function::PrepareToken;
     use camel_api::{
         CamelError, ErrorHandlerConfig, Exchange, ExchangePatch, FunctionDefinition, FunctionDiff,
-        FunctionId, FunctionInvocationError, FunctionInvoker, FunctionInvokerSync,
-        RuntimeCommand, RuntimeCommandBus, RuntimeCommandResult, RuntimeQuery, RuntimeQueryBus,
-        RuntimeQueryResult, SupervisionConfig,
+        FunctionId, FunctionInvocationError, FunctionInvoker, FunctionInvokerSync, RuntimeCommand,
+        RuntimeCommandBus, RuntimeCommandResult, RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult,
+        SupervisionConfig,
     };
     use std::sync::Arc;
     use std::time::Duration;
@@ -850,23 +850,83 @@ mod tests {
     }
 
     impl FunctionInvokerSync for NoopInvoker {
-        fn stage_pending(&self, _def: FunctionDefinition, _route_id: Option<&str>, _generation: u64) {}
+        fn stage_pending(
+            &self,
+            _def: FunctionDefinition,
+            _route_id: Option<&str>,
+            _generation: u64,
+        ) {
+        }
         fn discard_staging(&self, _generation: u64) {}
-        fn begin_reload(&self) -> u64 { 1 }
-        fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> { vec![] }
-        fn staged_refs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionId, Option<String>)> { vec![] }
-        fn staged_defs_for_route(&self, _route_id: &str, _generation: u64) -> Vec<(FunctionDefinition, Option<String>)> { vec![] }
+        fn begin_reload(&self) -> u64 {
+            1
+        }
+        fn function_refs_for_route(&self, _route_id: &str) -> Vec<(FunctionId, Option<String>)> {
+            vec![]
+        }
+        fn staged_refs_for_route(
+            &self,
+            _route_id: &str,
+            _generation: u64,
+        ) -> Vec<(FunctionId, Option<String>)> {
+            vec![]
+        }
+        fn staged_defs_for_route(
+            &self,
+            _route_id: &str,
+            _generation: u64,
+        ) -> Vec<(FunctionDefinition, Option<String>)> {
+            vec![]
+        }
     }
 
     #[async_trait::async_trait]
     impl FunctionInvoker for NoopInvoker {
-        async fn register(&self, _def: FunctionDefinition, _route_id: Option<&str>) -> Result<(), FunctionInvocationError> { Ok(()) }
-        async fn unregister(&self, _id: &FunctionId, _route_id: Option<&str>) -> Result<(), FunctionInvocationError> { Ok(()) }
-        async fn invoke(&self, _id: &FunctionId, _exchange: &Exchange) -> Result<ExchangePatch, FunctionInvocationError> { Ok(ExchangePatch::default()) }
-        async fn prepare_reload(&self, _diff: FunctionDiff, _generation: u64) -> Result<PrepareToken, FunctionInvocationError> { Ok(PrepareToken::default()) }
-        async fn finalize_reload(&self, _diff: &FunctionDiff, _generation: u64) -> Result<(), FunctionInvocationError> { Ok(()) }
-        async fn rollback_reload(&self, _token: PrepareToken, _generation: u64) -> Result<(), FunctionInvocationError> { Ok(()) }
-        async fn commit_staged(&self) -> Result<(), FunctionInvocationError> { Ok(()) }
+        async fn register(
+            &self,
+            _def: FunctionDefinition,
+            _route_id: Option<&str>,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn unregister(
+            &self,
+            _id: &FunctionId,
+            _route_id: Option<&str>,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn invoke(
+            &self,
+            _id: &FunctionId,
+            _exchange: &Exchange,
+        ) -> Result<ExchangePatch, FunctionInvocationError> {
+            Ok(ExchangePatch::default())
+        }
+        async fn prepare_reload(
+            &self,
+            _diff: FunctionDiff,
+            _generation: u64,
+        ) -> Result<PrepareToken, FunctionInvocationError> {
+            Ok(PrepareToken::default())
+        }
+        async fn finalize_reload(
+            &self,
+            _diff: &FunctionDiff,
+            _generation: u64,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn rollback_reload(
+            &self,
+            _token: PrepareToken,
+            _generation: u64,
+        ) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
+        async fn commit_staged(&self) -> Result<(), FunctionInvocationError> {
+            Ok(())
+        }
     }
 
     #[tokio::test]

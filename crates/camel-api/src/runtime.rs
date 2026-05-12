@@ -507,9 +507,11 @@ mod tests {
     impl RuntimeCommandBus for NoopRuntime {
         async fn execute(&self, cmd: RuntimeCommand) -> Result<RuntimeCommandResult, CamelError> {
             Ok(match cmd {
-                RuntimeCommand::RegisterRoute { spec, .. } => RuntimeCommandResult::RouteRegistered {
-                    route_id: spec.route_id,
-                },
+                RuntimeCommand::RegisterRoute { spec, .. } => {
+                    RuntimeCommandResult::RouteRegistered {
+                        route_id: spec.route_id,
+                    }
+                }
                 RuntimeCommand::StartRoute { route_id, .. }
                 | RuntimeCommand::StopRoute { route_id, .. }
                 | RuntimeCommand::SuspendRoute { route_id, .. }
@@ -823,15 +825,24 @@ mod tests {
     #[test]
     fn runtime_command_result_all_variants_are_distinct() {
         let accepted = RuntimeCommandResult::Accepted;
-        let dup = RuntimeCommandResult::Duplicate { command_id: "c1".into() };
-        let registered = RuntimeCommandResult::RouteRegistered { route_id: "r1".into() };
-        let changed = RuntimeCommandResult::RouteStateChanged { route_id: "r1".into(), status: "Started".into() };
+        let dup = RuntimeCommandResult::Duplicate {
+            command_id: "c1".into(),
+        };
+        let registered = RuntimeCommandResult::RouteRegistered {
+            route_id: "r1".into(),
+        };
+        let changed = RuntimeCommandResult::RouteStateChanged {
+            route_id: "r1".into(),
+            status: "Started".into(),
+        };
 
         assert_ne!(accepted, dup);
         assert_ne!(dup, registered);
         assert_ne!(registered, changed);
 
-        let dup2 = RuntimeCommandResult::Duplicate { command_id: "c1".into() };
+        let dup2 = RuntimeCommandResult::Duplicate {
+            command_id: "c1".into(),
+        };
         assert_eq!(dup, dup2);
     }
 

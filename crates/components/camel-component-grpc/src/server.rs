@@ -446,8 +446,8 @@ mod tests {
 
     use futures::{Stream, StreamExt};
     use tokio::sync::mpsc;
-    use tonic::server::{ServerStreamingService, UnaryService};
     use tonic::Status;
+    use tonic::server::{ServerStreamingService, UnaryService};
     use tower::Service;
 
     use super::*;

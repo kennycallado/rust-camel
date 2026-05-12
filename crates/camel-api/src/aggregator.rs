@@ -394,6 +394,8 @@ mod tests {
             .build();
 
         assert_eq!(config.header_name, "second");
-        assert!(matches!(config.correlation, CorrelationStrategy::HeaderName(ref h) if h == "second"));
+        assert!(
+            matches!(config.correlation, CorrelationStrategy::HeaderName(ref h) if h == "second")
+        );
     }
 }

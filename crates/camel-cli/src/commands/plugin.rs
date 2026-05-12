@@ -380,8 +380,7 @@ mod tests {
     #[test]
     fn find_camel_root_ignores_non_workspace_cargo_toml() {
         let root = tempdir().expect("tempdir");
-        std::fs::write(root.path().join("Cargo.toml"), "[package]\nname = \"x\"\n")
-            .expect("write");
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("write");
         let nested = root.path().join("a").join("b");
         std::fs::create_dir_all(&nested).expect("mkdir");
 

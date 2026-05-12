@@ -579,7 +579,10 @@ mod tests {
 
         let pool = CxfBridgePool::from_config(pool_config).expect("valid config");
         assert_eq!(pool.bridge_cache_dir, PathBuf::from("/tmp/cxf-cache"));
-        assert_eq!(pool.bind_address.as_deref(), Some("http://127.0.0.1:9000/cxf"));
+        assert_eq!(
+            pool.bind_address.as_deref(),
+            Some("http://127.0.0.1:9000/cxf")
+        );
     }
 
     #[test]
@@ -597,7 +600,10 @@ mod tests {
         let err = CxfBridgePool::from_config(pool_config)
             .err()
             .expect("expected invalid profile");
-        assert!(err.to_string().contains("must contain only lowercase letters"));
+        assert!(
+            err.to_string()
+                .contains("must contain only lowercase letters")
+        );
     }
 
     #[test]
@@ -663,15 +669,16 @@ mod tests {
     fn get_or_create_slot_returns_existing_without_starting_bridge() {
         let pool = Arc::new(CxfBridgePool::from_config(test_pool_config()).expect("valid config"));
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let slot = rt.block_on(async {
-            let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
-            pool.insert_slot_for_test(
-                "existing".to_string(),
-                BridgeSlot::new_ready_for_test(channel),
-            );
-            pool.get_or_create_slot("existing").await
-        })
-        .expect("existing slot");
+        let slot = rt
+            .block_on(async {
+                let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+                pool.insert_slot_for_test(
+                    "existing".to_string(),
+                    BridgeSlot::new_ready_for_test(channel),
+                );
+                pool.get_or_create_slot("existing").await
+            })
+            .expect("existing slot");
         assert_eq!(slot.key, "test-slot");
     }
 

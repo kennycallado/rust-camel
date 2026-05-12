@@ -977,7 +977,8 @@ async fn add_route_with_generation_and_prepare_insert_behaviors() {
 
     controller
         .add_route_with_generation(
-            RouteDefinition::new("timer:tick?period=15", vec![BuilderStep::Stop]).with_route_id("g1"),
+            RouteDefinition::new("timer:tick?period=15", vec![BuilderStep::Stop])
+                .with_route_id("g1"),
             7,
         )
         .await
@@ -985,7 +986,8 @@ async fn add_route_with_generation_and_prepare_insert_behaviors() {
 
     let dup = controller
         .add_route_with_generation(
-            RouteDefinition::new("timer:tick?period=15", vec![BuilderStep::Stop]).with_route_id("g1"),
+            RouteDefinition::new("timer:tick?period=15", vec![BuilderStep::Stop])
+                .with_route_id("g1"),
             8,
         )
         .await
@@ -994,7 +996,8 @@ async fn add_route_with_generation_and_prepare_insert_behaviors() {
 
     let prepared = controller
         .prepare_route_definition_with_generation(
-            RouteDefinition::new("timer:tick?period=20", vec![BuilderStep::Stop]).with_route_id("g2"),
+            RouteDefinition::new("timer:tick?period=20", vec![BuilderStep::Stop])
+                .with_route_id("g2"),
             9,
         )
         .expect("prepare route");
@@ -1005,7 +1008,8 @@ async fn add_route_with_generation_and_prepare_insert_behaviors() {
 
     let prepared_dup = controller
         .prepare_route_definition_with_generation(
-            RouteDefinition::new("timer:tick?period=21", vec![BuilderStep::Stop]).with_route_id("g2"),
+            RouteDefinition::new("timer:tick?period=21", vec![BuilderStep::Stop])
+                .with_route_id("g2"),
             10,
         )
         .expect("prepare duplicate route");
@@ -1025,7 +1029,8 @@ fn compile_route_definition_with_generation_and_global_error_handler_paths() {
 
     let _compiled = controller
         .compile_route_definition_with_generation(
-            RouteDefinition::new("timer:tick?period=10", vec![BuilderStep::Stop]).with_route_id("cg"),
+            RouteDefinition::new("timer:tick?period=10", vec![BuilderStep::Stop])
+                .with_route_id("cg"),
             11,
         )
         .expect("compile with generation should work");
@@ -1035,7 +1040,8 @@ fn compile_route_definition_with_generation_and_global_error_handler_paths() {
 
     let err = failing
         .compile_route_definition(
-            RouteDefinition::new("timer:tick?period=10", vec![BuilderStep::Stop]).with_route_id("fail-eh"),
+            RouteDefinition::new("timer:tick?period=10", vec![BuilderStep::Stop])
+                .with_route_id("fail-eh"),
         )
         .expect_err("missing dlc component should fail");
     assert!(err.to_string().contains("missing"));
@@ -1151,7 +1157,8 @@ fn constructors_and_reload_helpers_cover_accessors() {
     let langs: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let beans = Arc::new(std::sync::Mutex::new(camel_bean::BeanRegistry::new()));
 
-    let mut with_beans = DefaultRouteController::with_beans(Arc::clone(&registry), Arc::clone(&beans));
+    let mut with_beans =
+        DefaultRouteController::with_beans(Arc::clone(&registry), Arc::clone(&beans));
     with_beans.set_function_invoker(Arc::new(NoopInvoker));
 
     let with_langs = DefaultRouteController::with_languages(

@@ -707,10 +707,13 @@ mod tests {
         drop(journal);
 
         // Verify sequence numbers are monotonic.
-        let entries = RedbRuntimeEventJournal::inspect(dir.path().join("test.db"), JournalInspectFilter {
-            route_id: None,
-            limit: 10,
-        })
+        let entries = RedbRuntimeEventJournal::inspect(
+            dir.path().join("test.db"),
+            JournalInspectFilter {
+                route_id: None,
+                limit: 10,
+            },
+        )
         .await
         .unwrap();
         let seqs: Vec<u64> = entries.iter().map(|e| e.seq).collect();
@@ -808,8 +811,12 @@ mod tests {
 
         assert_eq!(entries.len(), 2);
         // Newest first: r4, r3
-        assert!(matches!(&entries[0].event, RuntimeEvent::RouteRegistered { route_id } if route_id == "r4"));
-        assert!(matches!(&entries[1].event, RuntimeEvent::RouteRegistered { route_id } if route_id == "r3"));
+        assert!(
+            matches!(&entries[0].event, RuntimeEvent::RouteRegistered { route_id } if route_id == "r4")
+        );
+        assert!(
+            matches!(&entries[1].event, RuntimeEvent::RouteRegistered { route_id } if route_id == "r3")
+        );
     }
 
     #[tokio::test]
@@ -842,7 +849,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(entries.len(), 1);
-        assert!(matches!(&entries[0].event, RuntimeEvent::RouteRegistered { route_id } if route_id == "alpha"));
+        assert!(
+            matches!(&entries[0].event, RuntimeEvent::RouteRegistered { route_id } if route_id == "alpha")
+        );
     }
 
     #[test]
@@ -878,15 +887,34 @@ mod tests {
     #[test]
     fn redb_journal_runtime_event_ext_all_variants() {
         let events = [
-            RuntimeEvent::RouteRegistered { route_id: "a".into() },
-            RuntimeEvent::RouteStartRequested { route_id: "b".into() },
-            RuntimeEvent::RouteStarted { route_id: "c".into() },
-            RuntimeEvent::RouteFailed { route_id: "d".into(), error: "err".into() },
-            RuntimeEvent::RouteStopped { route_id: "e".into() },
-            RuntimeEvent::RouteSuspended { route_id: "f".into() },
-            RuntimeEvent::RouteResumed { route_id: "g".into() },
-            RuntimeEvent::RouteReloaded { route_id: "h".into() },
-            RuntimeEvent::RouteRemoved { route_id: "i".into() },
+            RuntimeEvent::RouteRegistered {
+                route_id: "a".into(),
+            },
+            RuntimeEvent::RouteStartRequested {
+                route_id: "b".into(),
+            },
+            RuntimeEvent::RouteStarted {
+                route_id: "c".into(),
+            },
+            RuntimeEvent::RouteFailed {
+                route_id: "d".into(),
+                error: "err".into(),
+            },
+            RuntimeEvent::RouteStopped {
+                route_id: "e".into(),
+            },
+            RuntimeEvent::RouteSuspended {
+                route_id: "f".into(),
+            },
+            RuntimeEvent::RouteResumed {
+                route_id: "g".into(),
+            },
+            RuntimeEvent::RouteReloaded {
+                route_id: "h".into(),
+            },
+            RuntimeEvent::RouteRemoved {
+                route_id: "i".into(),
+            },
         ];
         let expected = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
         for (event, expected_id) in events.iter().zip(expected.iter()) {
@@ -995,7 +1023,9 @@ mod tests {
             "removed routes must be compacted"
         );
         assert!(
-            loaded.iter().any(|e| matches!(e, RuntimeEvent::RouteRegistered { route_id } if route_id == "kept")),
+            loaded.iter().any(
+                |e| matches!(e, RuntimeEvent::RouteRegistered { route_id } if route_id == "kept")
+            ),
             "kept route must survive"
         );
     }

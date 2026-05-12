@@ -419,7 +419,9 @@ mod tests {
         assert_eq!(config.dlc_uri.as_deref(), Some("log:dlc"));
         assert_eq!(config.policies.len(), 2);
         assert!((config.policies[0].matches)(&CamelError::Io("x".into())));
-        assert!((config.policies[1].matches)(&CamelError::RouteError("x".into())));
+        assert!((config.policies[1].matches)(&CamelError::RouteError(
+            "x".into()
+        )));
     }
 
     #[test]

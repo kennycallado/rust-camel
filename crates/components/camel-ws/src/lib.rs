@@ -1712,9 +1712,10 @@ mod tests {
             .unwrap();
         assert!(matches!(bin_msg, WsMessage::Binary(_)));
 
-        let client_text = body_to_client_ws_message(CamelBody::Json(serde_json::json!({"k":"v"})), "text")
-            .await
-            .unwrap();
+        let client_text =
+            body_to_client_ws_message(CamelBody::Json(serde_json::json!({"k":"v"})), "text")
+                .await
+                .unwrap();
         assert!(matches!(client_text, ClientWsMessage::Text(_)));
 
         let client_bin = body_to_client_ws_message(CamelBody::Bytes(vec![7, 8].into()), "binary")
@@ -1726,7 +1727,10 @@ mod tests {
     #[tokio::test]
     async fn body_to_text_handles_empty_text_json_and_bytes() {
         assert_eq!(body_to_text(CamelBody::Empty).await.unwrap(), "");
-        assert_eq!(body_to_text(CamelBody::Text("hello".into())).await.unwrap(), "hello");
+        assert_eq!(
+            body_to_text(CamelBody::Text("hello".into())).await.unwrap(),
+            "hello"
+        );
         assert_eq!(
             body_to_text(CamelBody::Json(serde_json::json!({"n":1})))
                 .await

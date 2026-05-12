@@ -322,7 +322,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::task::{Context, Poll};
 
-    use super::{GrpcProducer, json_to_protobuf, protobuf_to_json, proto_cache};
+    use super::{GrpcProducer, json_to_protobuf, proto_cache, protobuf_to_json};
     use crate::GrpcMode;
     use camel_api::{Body, CamelError, Exchange, Message};
     use tonic::Request;
@@ -519,7 +519,9 @@ mod tests {
     fn test_json_to_protobuf_roundtrip() {
         let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
         let cache = proto_cache();
-        let pool = cache.get_or_compile(&proto_path, std::iter::empty::<&Path>()).unwrap();
+        let pool = cache
+            .get_or_compile(&proto_path, std::iter::empty::<&Path>())
+            .unwrap();
         let svc = pool.get_service_by_name("helloworld.Greeter").unwrap();
         let method = svc.methods().find(|m| m.name() == "SayHello").unwrap();
         let desc = method.input();
@@ -536,7 +538,9 @@ mod tests {
     fn test_json_to_protobuf_invalid_field_type() {
         let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
         let cache = proto_cache();
-        let pool = cache.get_or_compile(&proto_path, std::iter::empty::<&Path>()).unwrap();
+        let pool = cache
+            .get_or_compile(&proto_path, std::iter::empty::<&Path>())
+            .unwrap();
         let svc = pool.get_service_by_name("helloworld.Greeter").unwrap();
         let method = svc.methods().find(|m| m.name() == "SayHello").unwrap();
         let desc = method.input();
@@ -544,21 +548,33 @@ mod tests {
         let json = serde_json::json!({"name": 123});
         let result = json_to_protobuf(json, desc);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("failed to parse JSON into protobuf"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to parse JSON into protobuf")
+        );
     }
 
     #[test]
     fn test_protobuf_to_json_invalid_bytes() {
         let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
         let cache = proto_cache();
-        let pool = cache.get_or_compile(&proto_path, std::iter::empty::<&Path>()).unwrap();
+        let pool = cache
+            .get_or_compile(&proto_path, std::iter::empty::<&Path>())
+            .unwrap();
         let svc = pool.get_service_by_name("helloworld.Greeter").unwrap();
         let method = svc.methods().find(|m| m.name() == "SayHello").unwrap();
         let desc = method.input();
 
         let result = protobuf_to_json(vec![0xFF, 0xFE, 0xFD], desc);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("failed to decode protobuf bytes"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to decode protobuf bytes")
+        );
     }
 
     #[tokio::test]
@@ -697,9 +713,8 @@ mod tests {
 
     #[test]
     fn test_inject_headers_skips_invalid_metadata_key() {
-        let exchange = exchange_with_headers(&[
-            ("x-good", serde_json::Value::String("ok".to_string())),
-        ]);
+        let exchange =
+            exchange_with_headers(&[("x-good", serde_json::Value::String("ok".to_string()))]);
         let mut request = Request::new(());
         GrpcProducer::inject_headers(&exchange, &mut request);
         assert!(request.metadata().get("x-good").is_some());

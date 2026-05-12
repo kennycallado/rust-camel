@@ -315,7 +315,7 @@ mod tests {
 
     use crate::CamelContext;
 
-    use super::{is_reload_event, resolve_watch_dirs, watch_and_reload, ReloadWatcher};
+    use super::{ReloadWatcher, is_reload_event, resolve_watch_dirs, watch_and_reload};
 
     fn make_event(paths: &[&str], kind: EventKind) -> Event {
         Event {
@@ -489,10 +489,7 @@ mod tests {
 
     #[test]
     fn is_reload_event_rejects_any_event_with_no_matching_kind() {
-        let ev = make_event(
-            &["routes/test.yaml"],
-            EventKind::Other,
-        );
+        let ev = make_event(&["routes/test.yaml"], EventKind::Other);
         assert!(!is_reload_event(&ev));
     }
 
@@ -541,8 +538,12 @@ mod tests {
         let nested = root.join("routes").join("sub");
         fs::create_dir_all(&nested).expect("create nested temp dir");
 
-        let pattern = root.join("routes").join("**").join("*.yaml")
-            .to_string_lossy().to_string();
+        let pattern = root
+            .join("routes")
+            .join("**")
+            .join("*.yaml")
+            .to_string_lossy()
+            .to_string();
 
         let dirs = resolve_watch_dirs(&[pattern]);
         assert!(dirs.iter().any(|d| d.starts_with(root.join("routes"))));

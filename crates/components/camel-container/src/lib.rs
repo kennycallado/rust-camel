@@ -2709,20 +2709,30 @@ mod tests {
 
     #[test]
     fn test_docker_socket_path_validation() {
-        let unix_cfg = ContainerConfig::from_uri("container:list?host=unix:///tmp/docker.sock").unwrap();
-        assert_eq!(unix_cfg.docker_socket_path().unwrap(), "unix:///tmp/docker.sock");
+        let unix_cfg =
+            ContainerConfig::from_uri("container:list?host=unix:///tmp/docker.sock").unwrap();
+        assert_eq!(
+            unix_cfg.docker_socket_path().unwrap(),
+            "unix:///tmp/docker.sock"
+        );
 
         let npipe_cfg =
-            ContainerConfig::from_uri("container:list?host=npipe:////./pipe/docker_engine").unwrap();
+            ContainerConfig::from_uri("container:list?host=npipe:////./pipe/docker_engine")
+                .unwrap();
         assert_eq!(
             npipe_cfg.docker_socket_path().unwrap(),
             "npipe:////./pipe/docker_engine"
         );
 
-        let plain_cfg = ContainerConfig::from_uri("container:list?host=/var/run/docker.sock").unwrap();
-        assert_eq!(plain_cfg.docker_socket_path().unwrap(), "/var/run/docker.sock");
+        let plain_cfg =
+            ContainerConfig::from_uri("container:list?host=/var/run/docker.sock").unwrap();
+        assert_eq!(
+            plain_cfg.docker_socket_path().unwrap(),
+            "/var/run/docker.sock"
+        );
 
-        let bad_cfg = ContainerConfig::from_uri("container:list?host=http://localhost:2375").unwrap();
+        let bad_cfg =
+            ContainerConfig::from_uri("container:list?host=http://localhost:2375").unwrap();
         assert!(bad_cfg.docker_socket_path().is_err());
     }
 
@@ -2731,7 +2741,8 @@ mod tests {
         let cfg = ContainerConfig::from_uri("container:run?ports= , ,8080").unwrap();
         assert!(cfg.parse_ports().is_none());
 
-        let cfg = ContainerConfig::from_uri("container:run?ports= 8080:80 ,  5353:53/udp ").unwrap();
+        let cfg =
+            ContainerConfig::from_uri("container:run?ports= 8080:80 ,  5353:53/udp ").unwrap();
         let (exposed, bindings) = cfg.parse_ports().unwrap();
         assert!(exposed.contains(&"80/tcp".to_string()));
         assert!(exposed.contains(&"53/udp".to_string()));
@@ -2810,7 +2821,9 @@ mod tests {
             |_id| async move { Ok(()) },
         )
         .await;
-        assert!(matches!(create_fail, Err(CamelError::ProcessorError(msg)) if msg == "create-fail"));
+        assert!(
+            matches!(create_fail, Err(CamelError::ProcessorError(msg)) if msg == "create-fail")
+        );
 
         let cleanup_fail = run_container_with_cleanup(
             || async { Ok("cid-1".to_string()) },

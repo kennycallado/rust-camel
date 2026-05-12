@@ -116,12 +116,7 @@ mod tests {
         let ctx = ProducerContext::new().with_runtime(runtime);
         let result = block_on(ctx.runtime().unwrap().ask(RuntimeQuery::ListRoutes)).unwrap();
 
-        assert_eq!(
-            result,
-            RuntimeQueryResult::Routes {
-                route_ids: vec![]
-            }
-        );
+        assert_eq!(result, RuntimeQueryResult::Routes { route_ids: vec![] });
     }
 
     #[test]
