@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use camel_ai::{OpenAiAdapter, OpenAiConfig};
+use camel_ai::uri::resolve_embedding_model;
 use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 
 use crate::endpoint::EmbeddingEndpoint;
@@ -31,28 +30,11 @@ impl Component for EmbeddingComponent {
         uri: &str,
         _ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
-        let (_, query) = uri.split_once('?').unwrap_or((uri, ""));
-        let params = parse_query(query);
-
-        let api_key = params.get("api_key").cloned();
-
-        let adapter = Arc::new(OpenAiAdapter::new(OpenAiConfig {
-            api_key: api_key.or_else(|| std::env::var("OPENAI_API_KEY").ok()),
-            base_url: Some(
-                params
-                    .get("base_url")
-                    .cloned()
-                    .unwrap_or_else(|| "http://localhost:11434".into()),
-            ),
-            model: params
-                .get("model")
-                .cloned()
-                .unwrap_or_else(|| "embeddinggemma".into()),
-        }));
+        let model = resolve_embedding_model(uri)?;
 
         Ok(Box::new(EmbeddingEndpoint {
             uri: uri.to_string(),
-            model: adapter,
+            model,
         }))
     }
 }

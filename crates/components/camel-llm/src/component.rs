@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use camel_ai::{ChatModel, OllamaAdapter, OllamaConfig, OpenAiAdapter, OpenAiConfig};
+use camel_ai::uri::resolve_chat_model;
 use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 
 use crate::endpoint::LlmEndpoint;
@@ -22,29 +21,8 @@ impl Component for LlmComponent {
         let (_, query) = uri.split_once('?').unwrap_or((uri, ""));
         let params = parse_query(query);
 
-        // Detect provider variant from URI: "llm:ollama?..." vs "llm:openai?..."
-        let variant = uri
-            .split(':')
-            .nth(1)
-            .unwrap_or("")
-            .split('?')
-            .next()
-            .unwrap_or("")
-            .trim_start_matches('/');
-        let is_ollama = variant == "ollama";
-
-        let base_url = params
-            .get("base_url")
-            .cloned()
-            .unwrap_or_else(|| "http://localhost:11434".into());
-        let model = params
-            .get("model")
-            .cloned()
-            .unwrap_or_else(|| "qwen3.5:4b".into());
-        let api_key = params.get("api_key").cloned();
-        let temperature = params
-            .get("temperature")
-            .and_then(|v| v.parse::<f32>().ok());
+        let model = resolve_chat_model(uri)?;
+        let temperature = params.get("temperature").and_then(|v| v.parse::<f32>().ok());
         let system_prompt = params.get("system_prompt").cloned();
         let think = params.get("think").and_then(|v| match v.as_str() {
             "true" => Some(true),
@@ -52,19 +30,9 @@ impl Component for LlmComponent {
             _ => None,
         });
 
-        let adapter: Arc<dyn ChatModel> = if is_ollama {
-            Arc::new(OllamaAdapter::new(OllamaConfig { base_url, model }))
-        } else {
-            Arc::new(OpenAiAdapter::new(OpenAiConfig {
-                api_key: api_key.or_else(|| std::env::var("OPENAI_API_KEY").ok()),
-                base_url: Some(base_url),
-                model,
-            }))
-        };
-
         Ok(Box::new(LlmEndpoint {
             uri: uri.to_string(),
-            model: adapter,
+            model,
             temperature,
             system_prompt,
             think,
