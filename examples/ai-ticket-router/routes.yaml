@@ -22,4 +22,6 @@ routes:
           model: "llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b"
           labels: ["billing", "technical", "legal", "spam"]
           output_header: "category"
+          on_unknown: "fallback"
+          fallback_label: "technical"
       - log: "Ticket classified"

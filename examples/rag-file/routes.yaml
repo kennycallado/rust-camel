@@ -6,7 +6,7 @@ routes:
       - log:
           message:
             simple: "Indexing file: ${header.CamelFileName}"
-      - to: "embedding:create?base_url=http://localhost:11434&model=embeddinggemma"
+      - to: "embedding:ollama?base_url=http://localhost:11434&model=embeddinggemma"
       - to: "vector:upsert?url=http://localhost:6334&collection=rag-file"
       - log:
           message:
@@ -19,8 +19,11 @@ routes:
       - set_header:
           key: question
           simple: "${body}"
-      - to: "embedding:create?base_url=http://localhost:11434&model=embeddinggemma"
+      - to: "embedding:ollama?base_url=http://localhost:11434&model=embeddinggemma"
       - to: "vector:search?url=http://localhost:6334&collection=rag-file&top_k=3"
-      - set_body:
-          simple: "Answer the question using only the context below. Be concise.\n\nQuestion: ${header.question}\n\nContext: ${body}"
+      - prompt_template:
+          template: |
+            Answer the question using only the context below. Be concise.
+            Question: ${header.question}
+            Context: ${body}
       - to: "llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b&think=false"

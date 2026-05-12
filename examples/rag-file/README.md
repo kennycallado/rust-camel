@@ -1,39 +1,21 @@
-# rag-file — Live Document Q&A
+# RAG File
 
-Drop `.txt` files into `./docs/` to index them, then ask questions via HTTP.
+File-based RAG: drop `.txt` files -> auto-index -> HTTP query endpoint.
 
 ## Prerequisites
 
-- **Ollama** running on `localhost:11434` with `embeddinggemma` and `qwen3.5:4b` models pulled
-- **Qdrant** running on `localhost:6334` (or use docker-compose below)
+- [Ollama](https://ollama.ai) running at `localhost:11434` with `embeddinggemma` model
+- [Qdrant](https://qdrant.tech) running at `localhost:6334`
 
-## Quick Start
+## Run
 
 ```bash
-# Start Qdrant
-docker compose up -d
-
-# Pull Ollama models (if not already)
-ollama pull embeddinggemma
-ollama pull qwen3.5:4b
-
-# Run the example
 cargo run -p rag-file
 ```
 
 ## Usage
 
-1. Drop `.txt` files into the `docs/` directory — they will be automatically indexed
-2. Ask questions via HTTP POST:
+1. Drop `.txt` files into the printed `docs/` directory
+2. Ask questions: `curl -d "your question" http://localhost:8080/ask`
 
-```bash
-curl -d "What is rust-camel?" http://localhost:8080/ask
-```
-
-Returns a JSON answer from the LLM based on your indexed documents.
-
-## How it works
-
-- **Route 1 (Ingest):** Polls `./docs/` every 2 seconds for new `.txt` files → embeds content → upserts into Qdrant collection `rag-file`. Files are NOT deleted (`noop=true`), but already-seen files are skipped by the idempotent consumer.
-- **Route 2 (Query):** HTTP POST `/ask` — the request body is the question text, which is embedded and searched against Qdrant (top 3 results), then the LLM synthesizes an answer from the retrieved context.
-- A `docs/sample.txt` is included for immediate testing on first run.
+Note: Re-running will re-index all files. For deduplication, clear the Qdrant collection first.

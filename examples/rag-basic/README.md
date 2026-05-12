@@ -1,33 +1,18 @@
-# rag-basic
+# RAG Basic
 
-Basic Retrieval-Augmented Generation (RAG) example using rust-camel.
-
-## Architecture
-
-```
-timer:tick (one-shot at 60s)
-  ↓ set_body (sample document)
-  ↓ embedding:create  (embeddinggemma)
-  ↓ vector:upsert     (Qdrant)
-
-timer:tick (one-shot at 65s)
-  ↓ set_body (query)
-  ↓ embedding:create  (embeddinggemma)
-  ↓ vector:search     (Qdrant top-3)
-  ↓ ai_extract        (qwen3.5:4b)
-  → JSON answer in header rag_result
-```
+Minimal RAG pipeline: embed -> store -> search -> answer.
 
 ## Prerequisites
 
-```bash
-docker compose up -d
-docker exec -it rag-basic-ollama-1 ollama pull embeddinggemma
-docker exec -it rag-basic-ollama-1 ollama pull qwen3.5:4b
-```
+- [Ollama](https://ollama.ai) running at `localhost:11434` with `embeddinggemma` model
+- [Qdrant](https://qdrant.tech) running at `localhost:6334`
 
 ## Run
 
 ```bash
 cargo run -p rag-basic
 ```
+
+## Expected Output
+
+Route 1 ingests a sample doc at t+60s. Route 2 queries at t+75s and prints the RAG answer.
