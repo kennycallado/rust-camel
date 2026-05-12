@@ -117,4 +117,32 @@ mod tests {
     fn header_constant_value() {
         assert_eq!(HEADER_CAMEL_AI_EMBEDDING, "CamelAiEmbedding");
     }
+
+    #[test]
+    fn set_ai_headers_without_usage() {
+        let mut headers = HashMap::new();
+        headers.insert("existing".into(), serde_json::json!("kept"));
+        set_ai_headers(&mut headers, "ollama", "qwen3.5:4b", "test_op", 42, None);
+        assert_eq!(headers["CamelAiProvider"], "ollama");
+        assert_eq!(headers["CamelAiModel"], "qwen3.5:4b");
+        assert_eq!(headers["CamelAiOperation"], "test_op");
+        assert_eq!(headers["CamelAiLatencyMs"], 42);
+        assert!(!headers.contains_key("CamelAiPromptTokens"));
+        assert!(!headers.contains_key("CamelAiTotalTokens"));
+        assert_eq!(headers["existing"], "kept");
+    }
+
+    #[test]
+    fn set_ai_headers_with_usage() {
+        let mut headers = HashMap::new();
+        let usage = TokenUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+        };
+        set_ai_headers(&mut headers, "openai", "gpt-4o", "extract", 100, Some(&usage));
+        assert_eq!(headers["CamelAiPromptTokens"], 10);
+        assert_eq!(headers["CamelAiCompletionTokens"], 5);
+        assert_eq!(headers["CamelAiTotalTokens"], 15);
+    }
 }
