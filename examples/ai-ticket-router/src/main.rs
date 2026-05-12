@@ -32,9 +32,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.start().await?;
 
     println!();
-    println!("ai-ticket-router started.");
-    println!("Route will fire once after 5 seconds, classifying a sample ticket.");
-    println!("(Requires Ollama running at localhost:11434 with qwen3.5:4b)");
+    println!("ai-ticket-router: Customer Support Pipeline Demo");
+    println!("================================================");
+    println!("Sends 5 realistic support tickets through:");
+    println!("  1. ai_extract  -> structured data extraction");
+    println!("  2. ai_classify -> category classification");
+    println!("  3. choice      -> route to appropriate team");
+    println!();
+    println!("Requires: Ollama at localhost:11434 with qwen3.5:4b");
     println!("Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;

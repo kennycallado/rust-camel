@@ -1,0 +1,18 @@
+Billing and Refund Policy
+
+Refund eligibility:
+- Subscription charges: Full refund within 14 days of charge
+- Duplicate charges: Immediate refund, no time limit
+- Service outages: Pro-rata credit for downtime exceeding 4 hours
+
+Processing refunds:
+1. Locate the charge in the billing dashboard under Account > Transactions
+2. Select the charge and click "Issue Refund"
+3. Choose refund reason: duplicate, cancellation, service-issue, or other
+4. Refunds appear on customer's statement within 5-10 business days
+5. For charges older than 90 days, escalate to finance team via ticket #FIN-REFUND
+
+Important notes:
+- Never process refunds via direct bank transfer
+- All refunds over $500 require manager approval
+- Document the refund reason in the customer's CRM notes

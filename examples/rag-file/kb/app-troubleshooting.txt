@@ -1,0 +1,23 @@
+Application Troubleshooting Guide
+
+Upload failures (Error UPLOAD_ERR_7742):
+- Cause: File exceeds the 10MB upload limit
+- Solution: Compress the file or split into smaller parts
+- Workaround: Use the bulk upload API endpoint which supports files up to 50MB
+
+App crashes on startup:
+- Clear browser cache and cookies
+- Disable browser extensions one by one to identify conflicts
+- Try incognito/private browsing mode
+- Check if the browser version is supported (Chrome 100+, Firefox 100+, Safari 16+)
+
+Slow performance:
+- Check network connection speed (minimum 5 Mbps recommended)
+- Clear application data in browser settings
+- Disable hardware acceleration in browser settings
+- Contact infrastructure team if latency exceeds 2 seconds for API calls
+
+WebSocket disconnections:
+- Check firewall settings for WebSocket support
+- VPN connections may interfere — try disconnecting VPN
+- Maximum 3 concurrent sessions per user

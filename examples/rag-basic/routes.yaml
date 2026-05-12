@@ -1,19 +1,19 @@
 routes:
   - id: "rag-ingest"
-    from: "timer:tick?period=60000&repeatCount=1"
+    from: "timer:tick?period=100&repeatCount=1&delay=100"
     steps:
       - set_body:
-          value: "rust-camel is a Rust integration framework with AI support"
+          value: "AcmeCorp provides cloud-based customer support software. The platform includes ticket management, live chat, knowledge base, and analytics. Support plans: Starter ($29/mo), Professional ($79/mo), Enterprise (custom pricing). All plans include email support. Professional and Enterprise include phone and chat support. Contact sales@acmecorp.com for enterprise pricing."
       - to: "embedding:ollama?base_url=http://localhost:11434&model=embeddinggemma"
       - to: "vector:upsert?url=http://localhost:6334&collection=docs"
       - log:
           message: "Ingested sample document"
 
   - id: "rag-query"
-    from: "timer:tick?period=75000&repeatCount=1"
+    from: "timer:tick?period=100&repeatCount=1&delay=2000"
     steps:
       - set_body:
-          value: "What is rust-camel?"
+          value: "What support plans does AcmeCorp offer?"
       - set_header:
           key: question
           simple: "${body}"

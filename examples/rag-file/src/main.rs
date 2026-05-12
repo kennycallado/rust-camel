@@ -11,12 +11,11 @@ use camel_core::CamelError;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let docs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
-    std::fs::create_dir_all(&docs_dir).ok();
-    let docs_path = docs_dir.to_str().unwrap();
+    let kb_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("kb");
+    std::fs::create_dir_all(&kb_dir).ok();
+    let kb_path = kb_dir.to_str().unwrap();
 
-    let yaml = include_str!("../routes.yaml")
-        .replace("file:docs", &format!("file:{}", docs_path));
+    let yaml = include_str!("../routes.yaml").replace("file:kb", &format!("file:{}", kb_path));
 
     let mut ctx = CamelContext::builder().build().await?;
     ctx.register_component(FileComponent::new());
@@ -33,10 +32,13 @@ async fn main() -> Result<(), CamelError> {
 
     ctx.start().await?;
 
-    println!("rag-file started.");
-    println!("Drop .txt files into {} to index them.", docs_path);
-    println!("Ask questions: curl -d \"your question\" http://localhost:8080/ask");
-    println!("(Requires Ollama + Qdrant — see docker-compose.yml)");
+    println!("RAG Knowledge Base: AcmeCorp Support Q&A");
+    println!("=========================================");
+    println!("Drop .txt files into the kb/ directory — they will be auto-indexed.");
+    println!("Ask questions via HTTP:");
+    println!("  curl -d \"How do I reset a password?\" http://localhost:8080/ask");
+    println!();
+    println!("Requires: Ollama (embeddinggemma + qwen3.5:4b) + Qdrant");
     println!("Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;

@@ -26,10 +26,12 @@ async fn main() -> Result<(), CamelError> {
 
     ctx.start().await?;
 
-    println!("rag-basic started.");
-    println!("Route 1 ingests a sample doc at t+60s.");
-    println!("Route 2 queries it at t+65s.");
-    println!("(Requires Ollama + Qdrant — see docker-compose.yml)");
+    println!("RAG Basic: Minimal RAG Demo");
+    println!("===========================");
+    println!("Indexes one document and queries it.");
+    println!("Demonstrates: embedding → vector store → prompt_template → LLM");
+    println!();
+    println!("Requires: Ollama (embeddinggemma + qwen3.5:4b) + Qdrant");
     println!("Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;

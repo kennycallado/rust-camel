@@ -1,11 +1,11 @@
 routes:
   - id: "rag-file-ingest"
-    from: "file:docs?delay=2000&initialDelay=2000"
+    from: "file:kb?delay=2000&initialDelay=2000"
     steps:
       - convert_body_to: text
       - log:
           message:
-            simple: "Indexing file: ${header.CamelFileName}"
+            simple: "Ingesting knowledge-base document: ${header.CamelFileName}"
       - to: "embedding:ollama?base_url=http://localhost:11434&model=embeddinggemma"
       - to: "vector:upsert?url=http://localhost:6334&collection=rag-file"
       - log:
@@ -23,7 +23,10 @@ routes:
       - to: "vector:search?url=http://localhost:6334&collection=rag-file&top_k=3"
       - prompt_template:
           template: |
-            Answer the question using only the context below. Be concise.
+            You are a customer support knowledge assistant. Answer the question using ONLY the context below. If the context doesn't contain the answer, say "I don't have that information in the knowledge base."
             Question: ${header.question}
             Context: ${body}
       - to: "llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b&think=false"
+      - log:
+          message:
+            simple: "Q&A answered: ${header.question}"

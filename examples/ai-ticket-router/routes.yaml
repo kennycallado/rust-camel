@@ -1,27 +1,83 @@
 routes:
-  - id: "ticket-classifier_1"
-    from: "timer:tick_1?period=100"
+  - id: "billing-ticket"
+    from: "timer:billing?period=100&delay=100&repeatCount=1"
     steps:
       - set_body:
-          value: "Can I talk to your manager?"
-      - to: "direct:ai-staffs"
-      - to: "log:info?showHeaders=true&showBody=false"
+          value: "I was charged twice for my subscription last month. My account number is ACC-90210 and I need a refund for the $49.99 duplicate charge."
+      - to: "direct:process-ticket"
 
-  - id: "ticket-classifier_2"
-    from: "timer:tick_2?period=100"
+  - id: "technical-ticket"
+    from: "timer:technical?period=100&delay=200&repeatCount=1"
     steps:
       - set_body:
-          value: "I can't log into my account, my billing is wrong"
-      - to: "direct:ai-staffs"
-      - to: "log:info?showHeaders=true&showBody=false"
+          value: "The app crashes every time I try to upload a file larger than 10MB. I'm using Chrome 120 on Windows 11. Error code: UPLOAD_ERR_7742"
+      - to: "direct:process-ticket"
 
-  - id: "ai-staffs"
-    from: "direct:ai-staffs"
+  - id: "account-ticket"
+    from: "timer:account?period=100&delay=300&repeatCount=1"
     steps:
+      - set_body:
+          value: "I can't log into my account. My email is maria.garcia@example.com and I'm not receiving the password reset email."
+      - to: "direct:process-ticket"
+
+  - id: "escalation-ticket"
+    from: "timer:escalation?period=100&delay=400&repeatCount=1"
+    steps:
+      - set_body:
+          value: "This is the third time I'm contacting support about this issue! I want to speak to a manager immediately. Ticket #TKT-44551"
+      - to: "direct:process-ticket"
+
+  - id: "spam-ticket"
+    from: "timer:spam?period=100&delay=500&repeatCount=1"
+    steps:
+      - set_body:
+          value: "Hey check out this amazing deal on crypto mining rigs!!! Click here for free money!!!"
+      - to: "direct:process-ticket"
+
+  - id: "process-ticket"
+    from: "direct:process-ticket"
+    steps:
+      - ai_extract:
+          model: "llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b"
+          schema: '{"type":"object","properties":{"customer_name":{"type":["string","null"]},"email":{"type":["string","null"]},"priority":{"type":"string","enum":["low","medium","high","critical"]},"summary":{"type":"string"}},"required":["customer_name","email","priority","summary"]}'
+          output_header: "extracted"
       - ai_classify:
           model: "llm:ollama?base_url=http://localhost:11434&model=qwen3.5:4b"
-          labels: ["billing", "technical", "legal", "spam"]
+          labels: ["billing", "technical", "account", "spam"]
           output_header: "category"
           on_unknown: "fallback"
-          fallback_label: "technical"
-      - log: "Ticket classified"
+          fallback_label: "uncategorized"
+      - log: "Category: ${header.category} | Priority: ${header.extracted}"
+      - choice:
+          when:
+            - simple: "${header.category} == 'billing'"
+              steps:
+                - to: "direct:billing-team"
+            - simple: "${header.category} == 'technical'"
+              steps:
+                - to: "direct:technical-team"
+            - simple: "${header.category} == 'account'"
+              steps:
+                - to: "direct:account-team"
+          otherwise:
+            - to: "direct:general-team"
+
+  - id: "billing-team"
+    from: "direct:billing-team"
+    steps:
+      - log: "Routed to billing: ${body}"
+
+  - id: "technical-team"
+    from: "direct:technical-team"
+    steps:
+      - log: "Routed to technical: ${body}"
+
+  - id: "account-team"
+    from: "direct:account-team"
+    steps:
+      - log: "Routed to account: ${body}"
+
+  - id: "general-team"
+    from: "direct:general-team"
+    steps:
+      - log: "Routed to general: ${body}"

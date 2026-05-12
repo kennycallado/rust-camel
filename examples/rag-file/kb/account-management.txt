@@ -1,0 +1,29 @@
+Account Management Procedures
+
+Account types:
+- Individual: Single user, personal email
+- Team: Up to 10 users, shared workspace
+- Enterprise: Unlimited users, SSO, dedicated support
+
+Upgrading accounts:
+1. Navigate to Settings > Subscription
+2. Select desired plan
+3. Changes take effect immediately
+4. Pro-rated credit applied for remaining days on current plan
+
+Downgrading accounts:
+- Downgrades take effect at the end of the current billing period
+- Features above the new tier limit are preserved but read-only
+- Data exceeding new tier limits must be archived before downgrade
+
+Closing accounts:
+- All data is retained for 30 days after closure
+- After 30 days, data is permanently deleted
+- Reactivation within 30 days restores all data
+- Contact support@acmecorp.com to initiate account closure
+
+SSO configuration (Enterprise only):
+- Supports SAML 2.0 and OpenID Connect
+- Configure under Settings > Security > SSO
+- Requires IdP metadata XML from your identity provider
+- Test with a single user before enabling for all users

@@ -1,0 +1,22 @@
+API Rate Limits and Quotas
+
+Rate limiting policy:
+- Free tier: 100 requests/minute, 10,000 requests/day
+- Pro tier: 1,000 requests/minute, 100,000 requests/day
+- Enterprise tier: 10,000 requests/minute, unlimited daily
+
+Rate limit headers (included in every response):
+- X-RateLimit-Limit: Maximum requests allowed in current window
+- X-RateLimit-Remaining: Requests remaining in current window
+- X-RateLimit-Reset: Seconds until the rate limit window resets
+
+When rate limit is exceeded:
+- HTTP 429 Too Many Requests is returned
+- Retry-After header indicates when to retry
+- Clients should implement exponential backoff: 1s, 2s, 4s, 8s, max 60s
+
+Best practices:
+- Cache responses when possible
+- Use batch endpoints for bulk operations
+- Implement client-side rate limiting to avoid hitting server limits
+- Monitor your usage dashboard at app.acmecorp.com/dashboard/usage
