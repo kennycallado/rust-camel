@@ -269,4 +269,22 @@ mod tests {
         let err = AiModelUri::parse("llm:?model=x").unwrap_err();
         assert!(format!("{err}").contains("unknown AI provider"));
     }
+
+    #[test]
+    fn resolve_chat_rejects_embedding_uri() {
+        let result = resolve_chat_model("embedding:ollama?model=x");
+        match result {
+            Err(err) => assert!(format!("{err}").contains("expected chat capability")),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn resolve_embedding_rejects_chat_uri() {
+        let result = resolve_embedding_model("llm:ollama?model=x");
+        match result {
+            Err(err) => assert!(format!("{err}").contains("expected embedding capability")),
+            Ok(_) => panic!("expected error"),
+        }
+    }
 }
