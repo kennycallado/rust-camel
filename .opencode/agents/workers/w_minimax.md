@@ -2,7 +2,7 @@
 description: Lightweight worker for simple, mechanical, and well-defined tasks.
 mode: subagent
 temperature: 0.1
-model: ollama/qwen3.6:27b
+model: opencode-go/minimax-m2.7
 tools:
   write: true
   edit: true
