@@ -33,6 +33,7 @@ impl WasmBean {
         module_path: impl AsRef<Path>,
         wasm_config: crate::config::WasmConfig,
         registry: Arc<std::sync::Mutex<Registry>>,
+        bean_config: HashMap<String, String>,
     ) -> Result<Self, WasmError> {
         let module_path = module_path.as_ref().to_path_buf();
 
@@ -77,8 +78,10 @@ impl WasmBean {
             .await
             .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
 
+        let mut config_pairs: Vec<(String, String)> = bean_config.into_iter().collect();
+        config_pairs.sort_by(|a, b| a.0.cmp(&b.0));
         let init_result: Result<(), String> = plugin
-            .call_init(&mut store)
+            .call_init(&mut store, &config_pairs)
             .await
             .map_err(|e| WasmError::GuestPanic(e.to_string()))?;
 
@@ -196,5 +199,22 @@ mod tests {
             crate::state_store::StateStore::new(),
         );
         assert!(host_state.properties.is_empty());
+    }
+
+    #[test]
+    fn test_config_vec_conversion() {
+        let config = HashMap::from([
+            ("key1".to_string(), "val1".to_string()),
+            ("key2".to_string(), "val2".to_string()),
+        ]);
+        let pairs: Vec<(String, String)> = config.into_iter().collect();
+        assert_eq!(pairs.len(), 2);
+    }
+
+    #[test]
+    fn test_empty_config_vec() {
+        let config: HashMap<String, String> = HashMap::new();
+        let pairs: Vec<(String, String)> = config.into_iter().collect();
+        assert!(pairs.is_empty());
     }
 }

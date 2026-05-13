@@ -215,14 +215,34 @@ async fn run(
     #[cfg(feature = "wasm")]
     if let Some(ref bean_reg) = beans_registry {
         let component_registry = ctx.registry_arc();
-        let plugins_dir = camel_config
+        let plugins_dir_raw = camel_config
             .components
             .raw
             .get("wasm")
             .and_then(|v| v.get("plugins_dir"))
             .and_then(|v| v.as_str())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
+            .unwrap_or("plugins");
+        let config_dir = std::path::Path::new(&config_path)
+            .parent()
+            .map(|p| {
+                if p.as_os_str().is_empty() {
+                    std::path::Path::new(".")
+                } else {
+                    p
+                }
+            })
+            .unwrap_or(std::path::Path::new("."));
+        let camel_root = config_dir.canonicalize().unwrap_or_else(|e| {
+            eprintln!("Error: cannot resolve project root: {e}");
+            std::process::exit(1);
+        });
+        crate::commands::plugin::validate_plugins_dir(&camel_root, plugins_dir_raw).unwrap_or_else(
+            |e| {
+                eprintln!("Error: invalid plugins_dir: {e}");
+                std::process::exit(1);
+            },
+        );
+        let plugins_dir = camel_root.join(plugins_dir_raw);
         for (bean_name, bean_cfg) in &camel_config.beans {
             tracing::info!(bean = %bean_name, plugin = %bean_cfg.plugin, "registering WASM bean");
 
@@ -259,6 +279,7 @@ async fn run(
                 &wasm_path,
                 wasm_config,
                 component_registry.clone(),
+                bean_cfg.config.clone(),
             )
             .await
             .unwrap_or_else(|e| {

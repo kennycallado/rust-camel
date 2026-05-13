@@ -12,7 +12,13 @@ mod bindings {
 struct TextUtils;
 
 impl Guest for TextUtils {
-    fn init() -> Result<(), String> {
+    fn init(config: Vec<(String, String)>) -> Result<(), String> {
+        for (key, value) in &config {
+            let _ = bindings::camel::plugin::host::host_store(
+                &format!("cfg:{key}"),
+                value,
+            );
+        }
         Ok(())
     }
 

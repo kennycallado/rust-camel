@@ -35,6 +35,7 @@ pub struct PluginNewArgs {
 
 #[derive(Args, Debug)]
 pub struct PluginBuildArgs {
+    pub path: Option<String>,
     #[arg(long)]
     pub debug: bool,
 }
@@ -110,12 +111,42 @@ fn run_plugin_new(args: PluginNewArgs) {
 }
 
 fn run_plugin_build(args: PluginBuildArgs) {
-    let cwd = std::env::current_dir().unwrap_or_else(|e| {
-        eprintln!("Error: failed to get current directory: {e}");
-        std::process::exit(1);
-    });
+    let plugin_dir = match args.path {
+        Some(ref p) => {
+            let canonical = std::path::Path::new(p).canonicalize().unwrap_or_else(|e| {
+                eprintln!("Error: cannot resolve path '{}': {e}", p);
+                std::process::exit(1);
+            });
+            if !canonical.join("Cargo.toml").exists() {
+                eprintln!(
+                    "Error: '{}' does not contain a Cargo.toml",
+                    canonical.display()
+                );
+                std::process::exit(1);
+            }
+            canonical
+        }
+        None => {
+            let cwd = std::env::current_dir().unwrap_or_else(|e| {
+                eprintln!("Error: failed to get current directory: {e}");
+                std::process::exit(1);
+            });
+            let canonical = cwd.canonicalize().unwrap_or_else(|e| {
+                eprintln!("Error: cannot resolve current directory: {e}");
+                std::process::exit(1);
+            });
+            if !canonical.join("Cargo.toml").exists() {
+                eprintln!(
+                    "Error: current directory '{}' does not contain a Cargo.toml",
+                    canonical.display()
+                );
+                std::process::exit(1);
+            }
+            canonical
+        }
+    };
 
-    let cargo_toml_path = cwd.join("Cargo.toml");
+    let cargo_toml_path = plugin_dir.join("Cargo.toml");
     let cargo_toml = std::fs::read_to_string(&cargo_toml_path).unwrap_or_else(|e| {
         eprintln!(
             "Error: failed to read '{}': {}",
@@ -148,7 +179,10 @@ fn run_plugin_build(args: PluginBuildArgs) {
         });
 
     let mut cmd = Command::new("cargo");
-    cmd.arg("build").arg("--target").arg("wasm32-wasip2");
+    cmd.arg("build")
+        .arg("--target")
+        .arg("wasm32-wasip2")
+        .current_dir(&plugin_dir);
 
     if !args.debug {
         cmd.arg("--release");
@@ -164,18 +198,23 @@ fn run_plugin_build(args: PluginBuildArgs) {
         std::process::exit(1);
     }
 
-    let built_wasm = build_output_path(&cwd, &plugin_name, args.debug);
+    let built_wasm = build_output_path(&plugin_dir, &plugin_name, args.debug);
     if !built_wasm.exists() {
         eprintln!("Error: built wasm not found at '{}'", built_wasm.display());
         std::process::exit(1);
     }
 
-    let camel_root = find_camel_root(&cwd).unwrap_or_else(|e| {
+    let camel_root = find_camel_root(&plugin_dir).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
         std::process::exit(1);
     });
 
-    let plugins_dir = camel_root.join(".camel").join("plugins");
+    let plugins_dir_relative = resolve_plugins_dir(&camel_root).unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    });
+    let plugins_dir = camel_root.join(&plugins_dir_relative);
+
     std::fs::create_dir_all(&plugins_dir).unwrap_or_else(|e| {
         eprintln!(
             "Error: failed to create plugins directory '{}': {}",
@@ -231,6 +270,113 @@ pub fn build_output_path(dir: &Path, plugin_name: &str, debug: bool) -> PathBuf 
         .join("wasm32-wasip2")
         .join(profile)
         .join(format!("{wasm_name}.wasm"))
+}
+
+/// Validates a `plugins_dir` config value relative to `camel_root`.
+///
+/// Rejects empty strings, absolute paths, and any path containing `ParentDir` (`..`) components.
+/// Also verifies that the resolved path stays within `camel_root` (catches symlink escapes).
+pub fn validate_plugins_dir(camel_root: &Path, dir: &str) -> Result<(), String> {
+    let trimmed = dir.trim();
+    if trimmed.is_empty() {
+        return Err("plugins_dir must not be empty".to_string());
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return Err(format!(
+            "plugins_dir must be a relative path, got '{}'",
+            dir
+        ));
+    }
+
+    // Reject any ParentDir (..) component using Path::components()
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(format!("plugins_dir must not contain '..', got '{}'", dir));
+        }
+    }
+
+    // Containment check via canonicalization
+    let canonical_root = camel_root
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize project root: {e}"))?;
+
+    let candidate = camel_root.join(trimmed);
+
+    // Try to canonicalize the candidate directly
+    if let Ok(canonical_candidate) = candidate.canonicalize() {
+        if !canonical_candidate.starts_with(&canonical_root) {
+            return Err("plugins_dir resolves outside project root".to_string());
+        }
+        return Ok(());
+    }
+
+    // Candidate doesn't exist yet — walk up ancestors until we find one that does
+    let mut ancestor = candidate.as_path();
+    let mut suffix = PathBuf::new();
+    loop {
+        if ancestor.exists() {
+            match ancestor.canonicalize() {
+                Ok(canonical_ancestor) => {
+                    let resolved = canonical_ancestor.join(&suffix);
+                    if !resolved.starts_with(&canonical_root) {
+                        return Err("plugins_dir resolves outside project root".to_string());
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "failed to canonicalize ancestor '{}': {e}",
+                        ancestor.display()
+                    ));
+                }
+            }
+        }
+        if let Some(parent) = ancestor.parent() {
+            if let Some(file_name) = ancestor.file_name() {
+                // Prepend this component to the suffix
+                let mut new_suffix = PathBuf::from(file_name);
+                if !suffix.as_os_str().is_empty() {
+                    new_suffix.push(&suffix);
+                }
+                suffix = new_suffix;
+                ancestor = parent;
+            } else {
+                return Err("no existing ancestor found for plugins_dir".to_string());
+            }
+        } else {
+            return Err("no existing ancestor found for plugins_dir".to_string());
+        }
+    }
+}
+
+/// Resolves the plugins directory from Camel.toml `[default.components.wasm].plugins_dir`.
+///
+/// Falls back to `"plugins"` when no Camel.toml or no `plugins_dir` key is present.
+pub fn resolve_plugins_dir(camel_root: &Path) -> Result<PathBuf, String> {
+    let toml_path = camel_root.join("Camel.toml");
+    if toml_path.exists() {
+        let contents = std::fs::read_to_string(&toml_path)
+            .map_err(|e| format!("failed to read '{}': {e}", toml_path.display()))?;
+        let parsed: toml::Value = toml::from_str(&contents)
+            .map_err(|e| format!("failed to parse '{}': {e}", toml_path.display()))?;
+
+        if let Some(plugins_dir) = parsed
+            .get("default")
+            .and_then(|d| d.get("components"))
+            .and_then(|c| c.get("wasm"))
+            .and_then(|w| w.get("plugins_dir"))
+            .and_then(toml::Value::as_str)
+        {
+            validate_plugins_dir(camel_root, plugins_dir)?;
+            return Ok(PathBuf::from(plugins_dir));
+        }
+    }
+
+    // Default: "plugins"
+    validate_plugins_dir(camel_root, "plugins")?;
+    Ok(PathBuf::from("plugins"))
 }
 
 #[cfg(test)]
@@ -292,6 +438,29 @@ mod tests {
         match cli.action {
             PluginAction::Build(args) => {
                 assert!(args.debug);
+            }
+            _ => panic!("expected PluginAction::Build"),
+        }
+    }
+
+    #[test]
+    fn plugin_build_accepts_optional_path() {
+        let cli = TestCli::try_parse_from(["test", "build", "my-plugin/"])
+            .expect("expected parse success");
+        match cli.action {
+            PluginAction::Build(args) => {
+                assert_eq!(args.path.as_deref(), Some("my-plugin/"));
+            }
+            _ => panic!("expected PluginAction::Build"),
+        }
+    }
+
+    #[test]
+    fn plugin_build_defaults_path_to_none() {
+        let cli = TestCli::try_parse_from(["test", "build"]).expect("expected parse success");
+        match cli.action {
+            PluginAction::Build(args) => {
+                assert!(args.path.is_none());
             }
             _ => panic!("expected PluginAction::Build"),
         }
@@ -443,5 +612,108 @@ mod tests {
             "got: {}",
             path.display()
         );
+    }
+
+    // validate_plugins_dir tests
+    #[test]
+    fn validate_plugins_dir_rejects_absolute_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let err = super::validate_plugins_dir(root.path(), "/tmp/plugins").unwrap_err();
+        assert!(err.contains("relative path"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_plugins_dir_rejects_parentdir_component() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let err = super::validate_plugins_dir(root.path(), "../other").unwrap_err();
+        assert!(err.contains("'..'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_plugins_dir_rejects_parentdir_mid_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let err = super::validate_plugins_dir(root.path(), "foo/../bar").unwrap_err();
+        assert!(err.contains("'..'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_plugins_dir_rejects_empty_string() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let err = super::validate_plugins_dir(root.path(), "").unwrap_err();
+        assert!(err.contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_plugins_dir_accepts_simple_relative() {
+        let root = tempfile::tempdir().expect("tempdir");
+        super::validate_plugins_dir(root.path(), "plugins").expect("should accept");
+    }
+
+    #[test]
+    fn validate_plugins_dir_accepts_nested_relative() {
+        let root = tempfile::tempdir().expect("tempdir");
+        super::validate_plugins_dir(root.path(), ".camel/plugins").expect("should accept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_plugins_dir_rejects_symlink_escape() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir outside");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
+        let err = super::validate_plugins_dir(root.path(), "link/escape").unwrap_err();
+        assert!(err.contains("outside project root"), "got: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_plugins_dir_rejects_symlink_escape_missing_target() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir outside");
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
+        let err = super::validate_plugins_dir(root.path(), "link/sub/deep").unwrap_err();
+        assert!(err.contains("outside project root"), "got: {err}");
+    }
+
+    // resolve_plugins_dir tests
+    #[test]
+    fn resolve_plugins_dir_defaults_to_plugins_when_no_camel_toml() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = super::resolve_plugins_dir(root.path()).expect("should resolve");
+        assert_eq!(dir, std::path::PathBuf::from("plugins"));
+    }
+
+    #[test]
+    fn resolve_plugins_dir_reads_default_components_wasm_plugins_dir() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("Camel.toml"),
+            "[default.components.wasm]\nplugins_dir = \".camel/plugins\"\n",
+        )
+        .expect("write config");
+        let dir = super::resolve_plugins_dir(root.path()).expect("should resolve");
+        assert_eq!(dir, std::path::PathBuf::from(".camel/plugins"));
+    }
+
+    #[test]
+    fn resolve_plugins_dir_returns_error_on_invalid_toml() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("Camel.toml"), "[invalid\n").expect("write config");
+        let err = super::resolve_plugins_dir(root.path()).unwrap_err();
+        assert!(err.contains("failed to parse"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_plugins_dir_rejects_invalid_plugins_dir_from_config() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("Camel.toml"),
+            "[default.components.wasm]\nplugins_dir = \"/absolute/path\"\n",
+        )
+        .expect("write config");
+        let err = super::resolve_plugins_dir(root.path()).unwrap_err();
+        assert!(err.contains("relative path"), "got: {err}");
     }
 }

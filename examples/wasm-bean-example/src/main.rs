@@ -17,10 +17,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let wasm_path = fixtures_dir.join("text_utils.wasm");
     let registry_arc = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
+    let bean_config: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let wasm_bean = WasmBean::new(
         &wasm_path,
         camel_component_wasm::WasmConfig::default(),
         registry_arc,
+        bean_config,
     )
     .await?;
 

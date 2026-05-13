@@ -52,7 +52,7 @@ fn readme_md(plugin_name: &str) -> String {
 }
 
 fn gitignore() -> &'static str {
-    "target\n"
+    "target\nplugins/\n"
 }
 
 #[cfg(test)]
@@ -103,5 +103,16 @@ mod tests {
 
         assert!(plugin.contains("type = \"processor\""));
         assert!(plugin.contains("entry = \"acme-processor.wasm\""));
+    }
+
+    #[test]
+    fn gitignore_contains_target_and_plugins() {
+        let files = processor_files("acme-processor");
+        let gitignore = files
+            .iter()
+            .find(|f| f.path == ".gitignore")
+            .expect("gitignore");
+        assert!(gitignore.content.contains("target"));
+        assert!(gitignore.content.contains("plugins/"));
     }
 }
