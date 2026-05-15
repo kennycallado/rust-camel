@@ -959,7 +959,6 @@ dependencies = [
  "camel-api",
  "camel-endpoint",
  "camel-language-api",
- "camel-util",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -1377,8 +1376,6 @@ dependencies = [
  "camel-language-simple",
  "camel-language-xpath",
  "camel-processor",
- "camel-support",
- "camel-util",
  "chrono",
  "criterion",
  "futures",
@@ -1438,7 +1435,6 @@ dependencies = [
  "async-trait",
  "camel-api",
  "camel-endpoint-macros",
- "camel-util",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1624,8 +1620,6 @@ dependencies = [
  "bytes",
  "camel-api",
  "camel-language-api",
- "camel-support",
- "camel-util",
  "criterion",
  "futures",
  "rand 0.10.1",
@@ -1667,15 +1661,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
-]
-
-[[package]]
-name = "camel-support"
-version = "0.9.0"
-dependencies = [
- "async-trait",
- "camel-api",
- "camel-util",
 ]
 
 [[package]]
@@ -1734,14 +1719,6 @@ dependencies = [
  "tower",
  "tracing-subscriber",
  "wiremock",
-]
-
-[[package]]
-name = "camel-util"
-version = "0.9.0"
-dependencies = [
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]

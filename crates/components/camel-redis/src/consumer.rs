@@ -197,7 +197,7 @@ async fn run_pubsub_consumer(
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
 ) -> Result<(), CamelError> {
-    info!("PubSub consumer connecting to {}", config.redis_url());
+    info!("PubSub consumer connecting to {}", config.redis_url_safe());
 
     // Create dedicated PubSub connection
     let client = redis::Client::open(config.redis_url())
@@ -266,7 +266,7 @@ async fn run_queue_consumer(
 ) -> Result<(), CamelError> {
     info!(
         "Queue consumer connecting to {} for key '{}' with {} timeout {}s",
-        config.redis_url(),
+        config.redis_url_safe(),
         key,
         queue_command_name(pop_command),
         timeout

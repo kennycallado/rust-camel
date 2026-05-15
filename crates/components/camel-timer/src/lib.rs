@@ -17,7 +17,7 @@ use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, Produc
 /// Format: `timer:name?period=1000&delay=0&repeatCount=0`
 #[derive(Debug, Clone, UriConfig)]
 #[uri_scheme = "timer"]
-#[uri_config(crate = "camel_component_api")]
+#[uri_config(skip_impl, crate = "camel_component_api")]
 pub struct TimerConfig {
     /// Timer name (the path portion of the URI).
     pub name: String,
@@ -41,6 +41,31 @@ pub struct TimerConfig {
     /// Maximum number of ticks. `None` means infinite.
     #[uri_param(name = "repeatCount")]
     pub repeat_count: Option<u32>,
+}
+
+impl UriConfig for TimerConfig {
+    fn scheme() -> &'static str {
+        "timer"
+    }
+
+    fn from_uri(uri: &str) -> Result<Self, CamelError> {
+        let parts = camel_component_api::parse_uri(uri)?;
+        Self::from_components(parts)
+    }
+
+    fn from_components(parts: camel_component_api::UriComponents) -> Result<Self, CamelError> {
+        let config = Self::parse_uri_components(parts)?;
+        config.validate()
+    }
+
+    fn validate(self) -> Result<Self, CamelError> {
+        if self.period.is_zero() {
+            return Err(CamelError::InvalidUri(
+                "timer period must be greater than 0".to_string(),
+            ));
+        }
+        Ok(self)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +212,17 @@ impl Consumer for TimerConsumer {
 mod tests {
     use super::*;
     use camel_component_api::NoOpComponentContext;
+
+    #[test]
+    fn test_zero_period_rejected() {
+        let result = TimerConfig::from_uri("timer:tick?period=0");
+        assert!(result.is_err(), "period=0 should be rejected");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("period"),
+            "error should mention 'period'"
+        );
+    }
 
     #[test]
     fn test_timer_config_defaults() {

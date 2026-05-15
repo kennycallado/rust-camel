@@ -14,7 +14,6 @@ categories.workspace = true
 [dependencies]
 camel-api.workspace = true
 camel-language-api.workspace = true
-camel-util.workspace = true
 camel-endpoint.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true

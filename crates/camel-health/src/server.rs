@@ -107,6 +107,10 @@ impl Lifecycle for HealthServer {
     async fn start(&mut self) -> Result<(), CamelError> {
         use tokio::net::TcpListener;
 
+        if self.server_handle.is_some() {
+            return Ok(());
+        }
+
         let listener = TcpListener::bind(self.addr).await.map_err(|e| {
             self.status.store(STATUS_FAILED, Ordering::SeqCst);
             CamelError::Io(e.to_string())
@@ -115,9 +119,9 @@ impl Lifecycle for HealthServer {
         let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
         self.bound_port.store(actual_port, Ordering::SeqCst);
 
-        let checker = self.health_checker.take();
-        let liveness = self.liveness_checker.take();
-        let startup = self.startup_checker.take();
+        let checker = self.health_checker.clone();
+        let liveness = self.liveness_checker.clone();
+        let startup = self.startup_checker.clone();
         let port = actual_port;
 
         let handle = tokio::spawn(async move {
@@ -145,6 +149,7 @@ impl Lifecycle for HealthServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     async fn wait_for_server(port: u16, timeout_ms: u64) -> Result<(), String> {
@@ -223,6 +228,59 @@ mod tests {
         assert_eq!(status_arc.load(Ordering::SeqCst), STATUS_STARTED);
         server.stop().await.unwrap();
         assert_eq!(status_arc.load(Ordering::SeqCst), STATUS_STOPPED);
+    }
+
+    #[tokio::test]
+    async fn test_health_source_reflects_checker_after_start() {
+        use camel_api::health::{HealthChecker, HealthReport, HealthSource};
+        use camel_api::lifecycle::HealthStatus;
+
+        let unhealthy = Arc::new(AtomicBool::new(true));
+        let checker: HealthChecker = {
+            let unhealthy = unhealthy.clone();
+            Arc::new(move || {
+                let status = if unhealthy.load(Ordering::SeqCst) {
+                    HealthStatus::Unhealthy
+                } else {
+                    HealthStatus::Healthy
+                };
+                HealthReport {
+                    status,
+                    ..HealthReport::default()
+                }
+            })
+        };
+
+        let mut server = HealthServer::new("127.0.0.1:0".parse().unwrap());
+        server.set_health_checker(checker);
+        server.start().await.unwrap();
+
+        let health = server.readiness();
+        assert_eq!(
+            health,
+            HealthStatus::Unhealthy,
+            "HealthSource must reflect checker state after start()"
+        );
+
+        server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_double_start_is_idempotent() {
+        let mut server = HealthServer::new("127.0.0.1:0".parse().unwrap());
+        server.start().await.unwrap();
+        let first_port = server.port();
+
+        let result = server.start().await;
+        assert!(result.is_ok(), "second start() should be idempotent");
+
+        let second_port = server.port();
+        assert_eq!(
+            first_port, second_port,
+            "second start should not bind a new port"
+        );
+
+        server.stop().await.unwrap();
     }
 }
 

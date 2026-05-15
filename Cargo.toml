@@ -7,8 +7,6 @@ members = [
     "crates/camel-bean-macros",
     "crates/camel-core",
     "crates/camel-cli",
-    "crates/camel-util",
-    "crates/camel-support",
     "crates/camel-processor",
     "crates/camel-health",
     "crates/services/camel-bridge",
@@ -153,8 +151,6 @@ camel-bean = { path = "crates/camel-bean", version = "=0.9.0" }
 camel-bean-macros = { path = "crates/camel-bean-macros", version = "=0.9.0" }
 camel-cli = { path = "crates/camel-cli", version = "=0.9.0" }
 camel-core = { path = "crates/camel-core", version = "=0.9.0" }
-camel-util = { path = "crates/camel-util", version = "=0.9.0" }
-camel-support = { path = "crates/camel-support", version = "=0.9.0" }
 camel-processor = { path = "crates/camel-processor", version = "=0.9.0" }
 camel-health = { path = "crates/camel-health", version = "=0.9.0" }
 camel-bridge = { path = "crates/services/camel-bridge", version = "=0.9.0" }

@@ -438,6 +438,21 @@ impl RedisEndpointConfig {
             format!("redis://{}:{}/{}", host, port, self.db)
         }
     }
+
+    /// Build a safe version of the Redis URL with password redacted.
+    ///
+    /// Returns the full URL from `redis_url()` if no password is set,
+    /// otherwise replaces the password with `***`.
+    pub fn redis_url_safe(&self) -> String {
+        match &self.password {
+            Some(_) => {
+                let host = self.host.as_deref().unwrap_or("localhost");
+                let port = self.port.unwrap_or(6379);
+                format!("redis://:***@{}:{}/{}", host, port, self.db)
+            }
+            None => self.redis_url(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -640,6 +655,27 @@ mod tests {
 
     // --- Critical test: catches the original defect where from_uri filled absent
     //     params with hardcoded defaults, preventing apply_defaults from working.
+    #[test]
+    fn test_redis_url_safe_redacts_password() {
+        let config = RedisEndpointConfig::from_uri(
+            "redis://localhost:6379?password=mysecret&db=2",
+        )
+        .unwrap();
+        let safe = config.redis_url_safe();
+        assert!(!safe.contains("mysecret"), "safe URL must not contain password");
+        assert!(safe.contains("***"), "safe URL should contain redaction marker");
+        assert!(safe.contains("localhost"), "safe URL should contain host");
+        assert!(safe.contains("6379"), "safe URL should contain port");
+    }
+
+    #[test]
+    fn test_redis_url_safe_no_password() {
+        let config =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?db=0").unwrap();
+        let safe = config.redis_url_safe();
+        assert_eq!(safe, config.redis_url());
+    }
+
     #[test]
     fn test_apply_defaults_with_from_uri_no_host_param() {
         // Parse URI without host/port

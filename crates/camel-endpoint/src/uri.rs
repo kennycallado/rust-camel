@@ -5,7 +5,7 @@ use camel_api::CamelError;
 /// Parsed components of a Camel URI.
 ///
 /// Format: `scheme:path?key1=value1&key2=value2`
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct UriComponents {
     /// The scheme (component name), e.g. "timer", "log".
     pub scheme: String,
@@ -13,6 +13,34 @@ pub struct UriComponents {
     pub path: String,
     /// Query parameters as key-value pairs.
     pub params: HashMap<String, String>,
+}
+
+const SENSITIVE_KEYS: &[&str] = &[
+    "password",
+    "secret",
+    "token",
+    "credential",
+    "apikey",
+    "accesskey",
+    "privatekey",
+];
+
+impl std::fmt::Debug for UriComponents {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut redacted_params = std::collections::HashMap::new();
+        for (k, v) in &self.params {
+            if SENSITIVE_KEYS.contains(&k.to_lowercase().as_str()) {
+                redacted_params.insert(k.clone(), "***".to_string());
+            } else {
+                redacted_params.insert(k.clone(), v.clone());
+            }
+        }
+        f.debug_struct("UriComponents")
+            .field("scheme", &self.scheme)
+            .field("path", &self.path)
+            .field("params", &redacted_params)
+            .finish()
+    }
 }
 
 /// Parse a Camel-style URI into its components.
@@ -146,5 +174,23 @@ mod tests {
             result.params.get("connectTimeout"),
             Some(&"5000".to_string())
         );
+    }
+
+    #[test]
+    fn test_uri_components_debug_redacts_sensitive_params() {
+        let uri = parse_uri("timer:tick?password=secret&token=abc123&name=hello").unwrap();
+        let debug_output = format!("{:?}", uri);
+        assert!(!debug_output.contains("secret"), "Debug must not contain password value");
+        assert!(!debug_output.contains("abc123"), "Debug must not contain token value");
+        assert!(debug_output.contains("hello"), "Debug should contain non-sensitive param values");
+        assert!(debug_output.contains("password"), "Debug should show param key 'password'");
+    }
+
+    #[test]
+    fn test_uri_components_debug_redacts_case_insensitive() {
+        let uri = parse_uri("timer:tick?Password=secret&TOKEN=abc123").unwrap();
+        let debug_output = format!("{:?}", uri);
+        assert!(!debug_output.contains("secret"), "Debug must redact 'Password' (capitalized)");
+        assert!(!debug_output.contains("abc123"), "Debug must redact 'TOKEN' (uppercase)");
     }
 }
