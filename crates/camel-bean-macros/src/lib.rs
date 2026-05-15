@@ -3,35 +3,14 @@ mod handler;
 use handler::find_handler_methods;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, ItemImpl, parse_macro_input};
+use syn::{ItemImpl, parse_macro_input};
 
-/// Derive macro for BeanProcessor trait implementation
-/// This is a placeholder - Task 2.2 will complete the implementation
 #[proc_macro_derive(Bean)]
-pub fn derive_bean(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-
-    // TODO: Implementation in next task
-    let name = &input.ident;
-
-    let expanded = quote! {
-        // Placeholder implementation
-        impl camel_bean::BeanProcessor for #name {
-            async fn call(
-                &self,
-                method: &str,
-                exchange: &mut camel_api::Exchange,
-            ) -> Result<(), camel_api::CamelError> {
-                unimplemented!("Bean derive macro requires impl block with #[handler] methods")
-            }
-
-            fn methods(&self) -> Vec<String> {
-                vec![]
-            }
-        }
-    };
-
-    TokenStream::from(expanded)
+pub fn derive_bean(_input: TokenStream) -> TokenStream {
+    quote! {
+        compile_error!("Bean derive macro is not yet implemented. Use #[bean_impl] on an impl block instead.");
+    }
+    .into()
 }
 
 /// Marker attribute for handler methods
