@@ -1,7 +1,35 @@
+//! Redis component for rust-camel.
+//!
+//! Provides producer and consumer implementations for Redis, supporting:
+//! - String, Hash, List, Set, Sorted Set operations
+//! - Pub/Sub (SUBSCRIBE, PSUBSCRIBE, PUBLISH)
+//! - Queue operations (BLPOP, BRPOP)
+//! - Key management (EXPIRE, TTL, DEL, etc.)
+//!
+//! # Breaking Changes in v0.10.0
+//!
+//! - **`RedisConsumer::new()`** now takes `RedisEndpointConfig` directly instead of
+//!   separate `(config, mode)` parameters. The mode is inferred from the command type
+//!   in the config (SUBSCRIBE/PSUBSCRIBE → PubSub, BLPOP/BRPOP → Queue).
+//! - **`resolve_zstore_keys()`** signature changed to accept `&[String]` instead of
+//!   a single `&str` for ZUNIONSTORE/ZINTERSTORE key resolution.
+//! - Invalid consumer commands (e.g. SET, GET) now return an error instead of silently
+//!   falling back to BLPOP (REDIS-003).
+//!
+//! # Example
+//!
+//! ```no_run
+//! use camel_component_redis::{RedisComponent, RedisEndpointConfig};
+//!
+//! let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
+//! let component = RedisComponent::new();
+//! ```
+
 pub mod bundle;
 pub mod commands;
 pub mod config;
 pub mod consumer;
+pub mod executor;
 pub mod producer;
 
 use camel_component_api::{BoxProcessor, CamelError};
@@ -83,7 +111,7 @@ impl Endpoint for RedisEndpoint {
     }
 
     fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
-        Ok(Box::new(RedisConsumer::new(self.config.clone())))
+        Ok(Box::new(RedisConsumer::new(self.config.clone())?))
     }
 }
 
@@ -133,7 +161,11 @@ mod tests {
         let _producer = endpoint
             .create_producer(&ProducerContext::default())
             .expect("producer should be created");
-        let _consumer = endpoint
+        // GET is not a valid consumer command (REDIS-003), so use BLPOP for consumer test
+        let endpoint2 = component
+            .create_endpoint("redis://?command=BLPOP&key=test", &ctx)
+            .expect("endpoint should be created");
+        let _consumer = endpoint2
             .create_consumer()
             .expect("consumer should be created");
     }

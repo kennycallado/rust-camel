@@ -1,13 +1,18 @@
 use crate::commands;
-use crate::config::{RedisCommand, RedisEndpointConfig};
+use crate::config::{
+    RedisCommand, RedisEndpointConfig, backoff_delay, is_idempotent_command,
+    is_transient_redis_error,
+};
 use camel_component_api::{CamelError, Exchange};
 use redis::aio::MultiplexedConnection;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tower::Service;
+use tracing::{debug, info, warn};
 
 /// Redis producer that implements Tower `Service<Exchange>` for integration
 /// with rust-camel pipelines.
@@ -188,6 +193,51 @@ impl RedisProducer {
     }
 }
 
+/// Get an existing cached connection or create a new one.
+/// Clears and recreates the connection if the cached one is stale.
+async fn get_or_create_connection(
+    config: &RedisEndpointConfig,
+    conn: &Arc<Mutex<Option<MultiplexedConnection>>>,
+    endpoint: &str,
+) -> Result<MultiplexedConnection, CamelError> {
+    // Fast path: try to use cached connection
+    {
+        let guard = conn.lock().await;
+        if let Some(c) = guard.as_ref() {
+            return Ok(c.clone());
+        }
+    }
+
+    // Need to create connection — double-check under exclusive lock
+    let mut guard = conn.lock().await;
+    if let Some(c) = guard.as_ref() {
+        return Ok(c.clone());
+    }
+
+    debug!(endpoint = %endpoint, "Creating new Redis connection");
+    let redis_url_safe = config.redis_url_safe();
+    let client = redis::Client::open(config.redis_url().as_str()).map_err(|e| {
+        CamelError::ProcessorError(format!(
+            "Failed to create Redis client for endpoint '{}': {}",
+            redis_url_safe, e
+        ))
+    })?;
+
+    let new_conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| {
+            CamelError::ProcessorError(format!(
+                "Failed to connect to Redis at '{}': {}",
+                redis_url_safe, e
+            ))
+        })?;
+
+    *guard = Some(new_conn.clone());
+    info!(endpoint = %endpoint, "Redis connection established");
+    Ok(new_conn)
+}
+
 impl Service<Exchange> for RedisProducer {
     type Response = Exchange;
     type Error = CamelError;
@@ -203,44 +253,10 @@ impl Service<Exchange> for RedisProducer {
         let conn = self.conn.clone();
 
         Box::pin(async move {
-            // 1. Get or create connection
-            let mut connection = {
-                let guard = conn.lock().await;
-                if let Some(c) = guard.as_ref() {
-                    c.clone()
-                } else {
-                    // Need to create connection - drop guard first
-                    drop(guard);
+            let endpoint = config.safe_endpoint();
 
-                    let mut guard = conn.lock().await;
-                    if let Some(c) = guard.as_ref() {
-                        c.clone()
-                    } else {
-                        let redis_url_safe = config.redis_url_safe();
-                        tracing::debug!("Creating Redis client with URL: {}", redis_url_safe);
-                        let client = redis::Client::open(config.redis_url().as_str()).map_err(|e| {
-                            CamelError::ProcessorError(format!(
-                                "Failed to create Redis client for URL '{}': {}",
-                                redis_url_safe, e
-                            ))
-                        })?;
-
-                        let new_conn =
-                            client
-                                .get_multiplexed_async_connection()
-                                .await
-                                .map_err(|e| {
-                                    CamelError::ProcessorError(format!(
-                                        "Failed to connect to Redis: {}",
-                                        e
-                                    ))
-                                })?;
-
-                        *guard = Some(new_conn.clone());
-                        new_conn
-                    }
-                }
-            };
+            // 1. Get or create connection (with reconnect on stale connection)
+            let mut connection = get_or_create_connection(&config, &conn, &endpoint).await?;
 
             // 2. Resolve command from header or config
             let cmd = Self::resolve_command(&exchange, &config);
@@ -249,9 +265,90 @@ impl Service<Exchange> for RedisProducer {
             Self::apply_default_key(&mut exchange, &config);
             Self::apply_default_channels(&mut exchange, &config);
 
-            // 5. Dispatch to appropriate command handler
-            Self::dispatch_command(&cmd, &mut connection, &mut exchange).await?;
+            // 4. Dispatch to appropriate command handler with retry for transient errors
+            let result = Self::dispatch_command(&cmd, &mut connection, &mut exchange).await;
 
+            // 5. On transient error, clear stale connection and retry with bounded exponential backoff
+            if let Err(ref e) = result
+                && is_transient_redis_error(e)
+                && is_idempotent_command(&cmd)
+            {
+                warn!(
+                    endpoint = %endpoint,
+                    command = ?cmd,
+                    error = %e,
+                    "Transient error on idempotent command, reconnecting with bounded retry"
+                );
+                const MAX_RETRIES: u32 = 10;
+                const MAX_BACKOFF: Duration = Duration::from_secs(30);
+                let mut last_err = e.clone();
+
+                for attempt in 0..MAX_RETRIES {
+                    // Clear stale connection
+                    {
+                        let mut guard = conn.lock().await;
+                        *guard = None;
+                    }
+
+                    let delay = backoff_delay(attempt, 100, MAX_BACKOFF);
+                    debug!(
+                        endpoint = %endpoint,
+                        command = ?cmd,
+                        attempt = attempt + 1,
+                        delay_ms = delay.as_millis(),
+                        "Waiting before reconnect attempt"
+                    );
+                    tokio::time::sleep(delay).await;
+
+                    // Reconnect
+                    match get_or_create_connection(&config, &conn, &endpoint).await {
+                        Ok(mut reconnected) => {
+                            // Retry the command
+                            match Self::dispatch_command(&cmd, &mut reconnected, &mut exchange).await {
+                                Ok(()) => return Ok(exchange),
+                            Err(retry_err) => {
+                                if is_transient_redis_error(&retry_err) {
+                                    warn!(
+                                        endpoint = %endpoint,
+                                        command = ?cmd,
+                                        attempt = attempt + 1,
+                                        error = %retry_err,
+                                        "Retry failed with transient error"
+                                    );
+                                    last_err = retry_err;
+                                    continue;
+                                    } else {
+                                        // Non-transient error on retry — propagate immediately
+                                        return Err(retry_err);
+                                    }
+                                }
+                            }
+                        }
+                        Err(conn_err) => {
+                            if is_transient_redis_error(&conn_err) {
+                                warn!(
+                                    endpoint = %endpoint,
+                                    attempt = attempt + 1,
+                                    error = %conn_err,
+                                    "Reconnect failed with transient error"
+                                );
+                                last_err = conn_err;
+                                continue;
+                            } else {
+                                return Err(conn_err);
+                            }
+                        }
+                    }
+                }
+
+                // Exhausted all retries
+                return Err(CamelError::ProcessorError(format!(
+                    "Command {:?} failed after {} retries: {}",
+                    cmd, MAX_RETRIES, last_err
+                )));
+            }
+
+            result?;
             Ok(exchange)
         })
     }

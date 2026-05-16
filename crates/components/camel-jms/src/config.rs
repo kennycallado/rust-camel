@@ -180,16 +180,36 @@ impl JmsPoolConfig {
         }
     }
 
-    /// Validates the config: all brokers must have non-empty URLs.
+    /// Validates the config: all brokers must have non-empty URLs, and all
+    /// timing fields must be strictly positive to prevent busy-loops.
     pub fn validate(&self) -> Result<(), camel_component_api::CamelError> {
+        use camel_component_api::CamelError;
+
         for (name, bc) in &self.brokers {
             if bc.broker_url.is_empty() {
-                return Err(camel_component_api::CamelError::ProcessorError(format!(
+                return Err(CamelError::ProcessorError(format!(
                     "broker '{}' has an empty broker_url",
                     name
                 )));
             }
         }
+
+        if self.bridge_start_timeout_ms == 0 {
+            return Err(CamelError::Config(
+                "bridge_start_timeout_ms must be > 0".to_string(),
+            ));
+        }
+        if self.health_check_interval_ms == 0 {
+            return Err(CamelError::Config(
+                "health_check_interval_ms must be > 0".to_string(),
+            ));
+        }
+        if self.broker_reconnect_interval_ms == 0 {
+            return Err(CamelError::Config(
+                "broker_reconnect_interval_ms must be > 0".to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -316,5 +336,41 @@ mod tests {
     fn validate_ok() {
         let cfg = JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq);
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_zero_bridge_start_timeout() {
+        let mut cfg = JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq);
+        cfg.bridge_start_timeout_ms = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("bridge_start_timeout_ms"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_health_check_interval() {
+        let mut cfg = JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq);
+        cfg.health_check_interval_ms = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("health_check_interval_ms"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_reconnect_interval() {
+        let mut cfg = JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq);
+        cfg.broker_reconnect_interval_ms = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("broker_reconnect_interval_ms"),
+            "got: {}",
+            err
+        );
     }
 }

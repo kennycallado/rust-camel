@@ -35,9 +35,16 @@ pub(crate) fn resolve_destination(exchange: &Exchange) -> Result<String, CamelEr
         .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Destination".into()))
 }
 
-pub(crate) fn resolve_zstore_keys(exchange: &Exchange) -> Vec<String> {
-    get_str_vec_header(exchange, "CamelRedis.Keys")
-        .unwrap_or_else(|| vec![require_key(exchange).unwrap_or_default()])
+pub(crate) fn resolve_zstore_keys(exchange: &Exchange) -> Result<Vec<String>, CamelError> {
+    if let Some(keys) = get_str_vec_header(exchange, "CamelRedis.Keys") {
+        Ok(keys)
+    } else if let Ok(key) = require_key(exchange) {
+        Ok(vec![key])
+    } else {
+        Err(CamelError::ProcessorError(
+            "ZUNIONSTORE/ZINTERSTORE requires either CamelRedis.Keys (array) or CamelRedis.Key header".into(),
+        ))
+    }
 }
 
 pub(crate) fn resolve_range_bounds(exchange: &Exchange) -> (isize, isize) {
@@ -80,7 +87,7 @@ pub(crate) fn resolve_zstore_operands(
 ) -> Result<(String, Vec<String>), CamelError> {
     Ok((
         resolve_destination(exchange)?,
-        resolve_zstore_keys(exchange),
+        resolve_zstore_keys(exchange)?,
     ))
 }
 
@@ -541,7 +548,7 @@ mod tests {
             ("CamelRedis.Keys", serde_json::json!(["zset1", "zset2"])),
         ]);
         assert_eq!(resolve_destination(&ex).unwrap(), "dest");
-        assert_eq!(resolve_zstore_keys(&ex), vec!["zset1", "zset2"]);
+        assert_eq!(resolve_zstore_keys(&ex).unwrap(), vec!["zset1", "zset2"]);
     }
 
     #[test]
@@ -558,13 +565,28 @@ mod tests {
         assert!(err.to_string().contains("CamelRedis.Destination"));
     }
 
+    // REDIS-005: resolve_zstore_keys returns error when neither keys nor key header exists
     #[test]
-    fn test_resolve_zstore_keys_falls_back_to_single_key_or_empty() {
-        let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("k1"))]);
-        assert_eq!(resolve_zstore_keys(&ex), vec!["k1"]);
+    fn test_resolve_zstore_keys_falls_back_to_single_key_or_error() {
+        // With Keys header
+        let ex = ex_with(&[
+            ("CamelRedis.Destination", serde_json::json!("dest")),
+            ("CamelRedis.Keys", serde_json::json!(["zset1", "zset2"])),
+        ]);
+        assert_eq!(resolve_zstore_keys(&ex).unwrap(), vec!["zset1", "zset2"]);
 
-        let ex_missing = Exchange::new(Message::default());
-        assert_eq!(resolve_zstore_keys(&ex_missing), vec![""]);
+        // With Key header (fallback)
+        let ex_with_key = ex_with(&[
+            ("CamelRedis.Destination", serde_json::json!("dest")),
+            ("CamelRedis.Key", serde_json::json!("k1")),
+        ]);
+        assert_eq!(resolve_zstore_keys(&ex_with_key).unwrap(), vec!["k1"]);
+
+        // REDIS-005: Missing both keys and key returns error
+        let ex_missing = ex_with(&[("CamelRedis.Destination", serde_json::json!("dest"))]);
+        let err = resolve_zstore_keys(&ex_missing).expect_err("missing keys should return error");
+        assert!(err.to_string().contains("CamelRedis.Keys"));
+        assert!(err.to_string().contains("CamelRedis.Key"));
     }
 
     #[test]

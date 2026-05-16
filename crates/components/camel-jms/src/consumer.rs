@@ -11,7 +11,9 @@ use tonic::transport::Channel;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::component::{BridgeState, JmsBridgePool, is_bridge_transport_error};
+use crate::component::{
+    BRIDGE_TRANSPORT_ERROR_PREFIX, BridgeState, JmsBridgePool, is_bridge_transport_error,
+};
 use crate::config::{DestinationType, JmsEndpointConfig};
 use crate::headers::apply_jms_headers;
 use crate::proto::{JmsMessage, SubscribeRequest, bridge_service_client::BridgeServiceClient};
@@ -108,6 +110,13 @@ async fn await_ready_channel(
 #[async_trait]
 impl Consumer for JmsConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        // Reject double-start (JMS-006)
+        if self.cancel_token.is_some() {
+            return Err(CamelError::EndpointCreationFailed(
+                "JMS consumer already started".into(),
+            ));
+        }
+
         let pool = Arc::clone(&self.pool);
         let broker_name = self.broker_name.clone();
         let endpoint_config = self.endpoint_config.clone();
@@ -157,7 +166,9 @@ impl Consumer for JmsConsumer {
                     })
                     .await
                     .map_err(|e| {
-                        CamelError::ProcessorError(format!("JMS gRPC subscribe error: {e}"))
+                        CamelError::ProcessorError(format!(
+                            "{BRIDGE_TRANSPORT_ERROR_PREFIX}subscribe error: {e}"
+                        ))
                     }) {
                     Ok(resp) => {
                         consecutive_transport_failures = 0;
@@ -229,7 +240,7 @@ impl Consumer for JmsConsumer {
                                 }
                                 Err(e) => {
                                     let subscribe_err = CamelError::ProcessorError(format!(
-                                        "JMS gRPC subscribe error: {e}"
+                                        "{BRIDGE_TRANSPORT_ERROR_PREFIX}subscribe error: {e}"
                                     ));
                                     if is_bridge_transport_error(&subscribe_err) {
                                         consecutive_transport_failures += 1;
@@ -288,7 +299,9 @@ impl Consumer for JmsConsumer {
         if let Some(handle) = self.task_handle.take()
             && let Err(join_err) = handle.await
         {
-            warn!("JMS consumer task panicked on stop: {join_err}");
+            return Err(CamelError::ProcessorError(format!(
+                "JMS consumer task panicked: {join_err}"
+            )));
         }
         Ok(())
     }
@@ -303,6 +316,7 @@ mod tests {
     use super::*;
     use crate::BrokerType;
     use crate::config::JmsPoolConfig;
+    use tokio::sync::mpsc;
 
     #[test]
     fn build_exchange_text_body() {
@@ -364,5 +378,71 @@ mod tests {
         let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
         let mut consumer = JmsConsumer::new(pool, "default".to_string(), endpoint_cfg, 50);
         assert!(consumer.stop().await.is_ok());
+    }
+
+    // ── JMS-006: Consumer double-start guard ──────────────────────────────────
+
+    #[tokio::test]
+    async fn consumer_double_start_returns_error() {
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::Generic,
+            ))
+            .unwrap(),
+        );
+        let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        let mut consumer = JmsConsumer::new(pool, "default".to_string(), endpoint_cfg, 50);
+
+        // Simulate an already-started state by setting a cancel token directly.
+        consumer.cancel_token = Some(CancellationToken::new());
+
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let result = consumer.start(ctx).await;
+        assert!(
+            result.is_err(),
+            "second start must return an error"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("already started"),
+            "error must mention already started: {}",
+            msg
+        );
+    }
+
+    // ── JMS-002: Consumer panic propagation ──────────────────────────────────
+
+    #[tokio::test]
+    async fn stop_returns_error_when_consumer_task_panics() {
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::Generic,
+            ))
+            .unwrap(),
+        );
+        let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        let mut consumer = JmsConsumer::new(pool, "default".to_string(), endpoint_cfg, 50);
+
+        // Manually set a task handle that will panic.
+        consumer.task_handle = Some(tokio::spawn(async {
+            panic!("simulated consumer panic");
+        }));
+        // Give the panic time to materialize.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let result = consumer.stop().await;
+        assert!(
+            result.is_err(),
+            "stop must return Err when consumer task panics"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("panicked"),
+            "error must mention panic: {}",
+            err_msg
+        );
     }
 }

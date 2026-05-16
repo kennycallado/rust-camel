@@ -104,16 +104,28 @@ impl WsEndpointConfig {
         };
 
         let params = parsed.params;
+        // Validate maxConnections >= 1 (WS-015)
         if let Some(v) = params
             .get("maxConnections")
             .and_then(|v| v.parse::<u32>().ok())
         {
+            if v == 0 {
+                return Err(CamelError::InvalidUri(
+                    "maxConnections must be >= 1".into(),
+                ));
+            }
             cfg.max_connections = v;
         }
+        // Validate maxMessageSize > 0 (WS-019)
         if let Some(v) = params
             .get("maxMessageSize")
             .and_then(|v| v.parse::<u32>().ok())
         {
+            if v == 0 {
+                return Err(CamelError::InvalidUri(
+                    "maxMessageSize must be > 0".into(),
+                ));
+            }
             cfg.max_message_size = v;
         }
         if let Some(v) = params.get("sendToAll").and_then(|v| v.parse::<bool>().ok()) {
@@ -144,6 +156,11 @@ impl WsEndpointConfig {
             cfg.response_timeout = Duration::from_millis(v);
         }
         if let Some(v) = params.get("allowOrigin") {
+            if v.is_empty() {
+                return Err(CamelError::InvalidUri(
+                    "allowOrigin must not be empty when specified".into(),
+                ));
+            }
             cfg.allow_origin = v.to_string();
         }
         if let Some(v) = params.get("tlsCert") {

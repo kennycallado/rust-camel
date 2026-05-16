@@ -415,15 +415,19 @@ fn resolve_expression_param(
 
 /// Returns true if the SQL is a read-only query (SELECT, TABLE, SHOW, EXPLAIN).
 ///
-/// Note: `WITH` (CTEs) is intentionally excluded because writeable CTEs
-/// (`WITH ... UPDATE/INSERT/DELETE`) also start with `WITH`. Users should
-/// write read-only CTEs starting with `SELECT` or use explicit subqueries.
+/// **SQL-012:** `WITH` (CTEs) is treated as SELECT-like because the most common
+/// use case is read-only CTEs (`WITH cte AS (SELECT ...) SELECT * FROM cte`).
+/// **Limitation:** Writeable CTEs (`WITH ... UPDATE/INSERT/DELETE`) are also
+/// classified as SELECT and will route to `execute_select`. If you need to
+/// execute a writeable CTE, prefix it with a comment or use `execute_modify`
+/// directly. This trade-off favors the common read-only case.
 pub fn is_select_query(sql: &str) -> bool {
     let upper = sql.trim().to_uppercase();
     upper.starts_with("SELECT")
         || upper.starts_with("TABLE")
         || upper.starts_with("SHOW")
         || upper.starts_with("EXPLAIN")
+        || upper.starts_with("WITH")
 }
 
 const DEFAULT_IN_SEPARATOR: &str = ", ";
@@ -577,9 +581,10 @@ mod tests {
     fn is_select() {
         assert!(is_select_query("SELECT * FROM t"));
         assert!(is_select_query("  select * from t"));
-        // WITH is NOT treated as SELECT because writeable CTEs (WITH ... UPDATE/DELETE) exist
-        assert!(!is_select_query("WITH cte AS (SELECT 1) SELECT * FROM cte"));
-        assert!(!is_select_query(
+        // SQL-012: WITH CTEs are now treated as SELECT-like (read-only is the common case)
+        assert!(is_select_query("WITH cte AS (SELECT 1) SELECT * FROM cte"));
+        // Note: writeable CTEs are also classified as SELECT — documented limitation
+        assert!(is_select_query(
             "WITH cte AS (UPDATE t SET x = 1 RETURNING *) SELECT * FROM cte"
         ));
         assert!(is_select_query("TABLE users"));

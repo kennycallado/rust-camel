@@ -39,10 +39,14 @@ pub(crate) fn extract_publish_message(exchange: &mut Exchange) -> Result<String,
                 e
             ))
         })?;
-    Ok(body
-        .as_text()
-        .expect("try_into_text guarantees Text")
-        .to_string())
+    // REDIS-014: No expect() — try_into_text guarantees Text variant on success
+    match body {
+        Body::Text(t) => Ok(t.to_string()),
+        other => Err(CamelError::ProcessorError(format!(
+            "Unexpected body type after try_into_text: {:?}",
+            other
+        ))),
+    }
 }
 
 #[allow(dead_code)]

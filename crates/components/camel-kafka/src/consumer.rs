@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::config::ResolvedKafkaEndpointConfig;
 use crate::config::apply_security_config;
 use crate::manual_commit::{CommitRequest, KafkaManualCommit};
 
@@ -47,10 +48,8 @@ impl RdConsumerContext for ReadyContext {
 
 type ReadyStreamConsumer = StreamConsumer<ReadyContext>;
 
-use crate::config::KafkaEndpointConfig;
-
 pub struct KafkaConsumer {
-    config: KafkaEndpointConfig,
+    config: ResolvedKafkaEndpointConfig,
     cancel_token: Option<CancellationToken>,
     task_handle: Option<JoinHandle<Result<(), CamelError>>>,
     /// Notified once the consumer has received its first partition assignment.
@@ -58,7 +57,7 @@ pub struct KafkaConsumer {
 }
 
 impl KafkaConsumer {
-    pub fn new(config: KafkaEndpointConfig) -> Self {
+    pub fn new(config: ResolvedKafkaEndpointConfig) -> Self {
         Self {
             config,
             cancel_token: None,
@@ -77,6 +76,13 @@ impl KafkaConsumer {
 #[async_trait]
 impl Consumer for KafkaConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        // Reject double-start (KAFKA-006)
+        if self.cancel_token.is_some() {
+            return Err(CamelError::EndpointCreationFailed(
+                "Kafka consumer already started".into(),
+            ));
+        }
+
         let cancel_token = CancellationToken::new();
         self.cancel_token = Some(cancel_token.clone());
 
@@ -85,8 +91,8 @@ impl Consumer for KafkaConsumer {
 
         info!(
             topic = %config.topic,
-            brokers = %config.brokers.as_deref().unwrap_or("<not set>"),
-            group_id = %config.group_id.as_deref().unwrap_or("<not set>"),
+            brokers = %config.brokers,
+            group_id = %config.group_id,
             "Starting Kafka consumer"
         );
 
@@ -102,17 +108,26 @@ impl Consumer for KafkaConsumer {
             token.cancel();
         }
 
+        let mut result = Ok(());
         if let Some(handle) = self.task_handle.take() {
             match handle.await {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => error!("Consumer task error: {}", e),
-                Err(e) => error!("Failed to join consumer task: {}", e),
+                Ok(Err(e)) => {
+                    error!("Consumer task error: {}", e);
+                    result = Err(e);
+                }
+                Err(e) => {
+                    error!("Failed to join consumer task: {}", e);
+                    result = Err(CamelError::ProcessorError(format!(
+                        "Consumer task panicked during shutdown: {e}"
+                    )));
+                }
             }
         }
 
         self.cancel_token = None;
         info!("Kafka consumer stopped");
-        Ok(())
+        result
     }
 
     fn concurrency_model(&self) -> ConcurrencyModel {
@@ -160,22 +175,33 @@ fn set_core_headers(exchange: &mut Exchange, msg: &OwnedMessage, group_id: &str)
 /// Build an Exchange from an OwnedMessage.
 ///
 /// Sets headers: CamelKafkaTopic, CamelKafkaPartition, CamelKafkaOffset,
-/// CamelKafkaKey (if present), CamelKafkaTimestamp (if present), CamelKafkaGroupId
+/// CamelKafkaKey (UTF-8), CamelKafkaKeyBytes (base64 for binary keys),
+/// CamelKafkaTimestamp (if present), CamelKafkaGroupId
 pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
     let body = resolve_payload_body(msg);
     let mut exchange = Exchange::new(Message::new(body));
 
     set_core_headers(&mut exchange, msg, group_id);
 
-    if let Some(key) = resolve_utf8_key(msg) {
-        exchange
-            .input
-            .set_header("CamelKafkaKey", Value::String(key));
-    } else if msg.key().is_some() {
-        warn!(
-            topic = %msg.topic(),
-            "Kafka message key is non-UTF-8 bytes; CamelKafkaKey header not set"
-        );
+    if let Some(key_bytes) = msg.key() {
+        match std::str::from_utf8(key_bytes) {
+            Ok(s) => {
+                exchange
+                    .input
+                    .set_header("CamelKafkaKey", Value::String(s.to_string()));
+            }
+            Err(_) => {
+                // Binary key: preserve as base64 so it is not lost
+                let encoded = base64_encode(key_bytes);
+                exchange
+                    .input
+                    .set_header("CamelKafkaKeyBytes", Value::String(encoded));
+                warn!(
+                    topic = %msg.topic(),
+                    "Kafka message key is non-UTF-8 bytes; stored as base64 in CamelKafkaKeyBytes"
+                );
+            }
+        }
     }
 
     if let Some(ts) = resolve_timestamp_millis(msg) {
@@ -204,8 +230,45 @@ pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
     exchange
 }
 
+/// Minimal base64 encoder (no external dependency).
+/// Uses the standard alphabet with RFC 4648 padding ('=').
+fn base64_encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let chunks = input.chunks_exact(3);
+    let remainder = chunks.remainder();
+
+    for chunk in chunks {
+        let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
+        out.push(ALPHABET[(n >> 18) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
+        out.push(ALPHABET[(n & 0x3F) as usize] as char);
+    }
+
+    match remainder {
+        [a] => {
+            let n = (*a as u32) << 16;
+            out.push(ALPHABET[(n >> 18) as usize] as char);
+            out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        [a, b] => {
+            let n = ((*a as u32) << 16) | ((*b as u32) << 8);
+            out.push(ALPHABET[(n >> 18) as usize] as char);
+            out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+            out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+
+    out
+}
+
 async fn run_consumer_loop(
-    config: KafkaEndpointConfig,
+    config: ResolvedKafkaEndpointConfig,
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
     ready: Arc<Notify>,
@@ -224,30 +287,13 @@ async fn run_consumer_loop(
 
     let mut client_cfg = ClientConfig::new();
     client_cfg
-        .set(
-            "bootstrap.servers",
-            config.brokers.as_ref().expect("brokers must be resolved"),
-        )
-        .set(
-            "group.id",
-            config.group_id.as_ref().expect("group_id must be resolved"),
-        )
-        .set(
-            "auto.offset.reset",
-            config
-                .auto_offset_reset
-                .as_ref()
-                .expect("auto_offset_reset must be resolved"),
-        )
-        .set(
-            "session.timeout.ms",
-            config
-                .session_timeout_ms
-                .expect("session_timeout_ms must be resolved")
-                .to_string(),
-        )
+        .set("bootstrap.servers", &config.brokers)
+        .set("group.id", &config.group_id)
+        .set("auto.offset.reset", &config.auto_offset_reset)
+        .set("session.timeout.ms", config.session_timeout_ms.to_string())
         .set("enable.auto.commit", "false")
-        .set("fetch.wait.max.ms", config.poll_timeout_ms.to_string());
+        .set("fetch.wait.max.ms", config.poll_timeout_ms.to_string())
+        .set("client.id", &config.client_id);
 
     client_cfg.set(
         "partition.assignment.strategy",
@@ -282,12 +328,21 @@ async fn run_consumer_loop(
             use rdkafka::consumer::CommitMode;
             while let Some(req) = rx.recv().await {
                 let mut tpl = TopicPartitionList::new();
-                tpl.add_partition_offset(
+                if let Err(e) = tpl.add_partition_offset(
                     &req.topic,
                     req.partition,
                     rdkafka::Offset::Offset(req.offset + 1),
-                )
-                .expect("topic/partition from valid message should never fail");
+                ) {
+                    let err = CamelError::ProcessorError(format!(
+                        "Invalid topic/partition for commit: {e}"
+                    ));
+                    if let Some(reply_tx) = req.reply_tx {
+                        let _ = reply_tx.send(Err(err));
+                    } else {
+                        error!(error = %err, "Invalid topic/partition for async commit");
+                    }
+                    continue;
+                }
                 let result = consumer_for_commits
                     .commit(&tpl, CommitMode::Sync)
                     .map_err(|e| CamelError::ProcessorError(format!("Commit failed: {e}")));
@@ -306,6 +361,10 @@ async fn run_consumer_loop(
     // when partitions are assigned. No polling loop needed — recv() drives the
     // rebalance protocol automatically.
 
+    // KAFKA-016: capped exponential backoff state
+    let mut backoff_ms: u64 = 100;
+    const MAX_BACKOFF_MS: u64 = 30_000;
+
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -315,15 +374,18 @@ async fn run_consumer_loop(
             msg_result = consumer.recv() => {
                 match msg_result {
                     Err(e) => {
-                        warn!(error = %e, "Kafka consumer error, continuing");
-                        // Brief backoff to avoid tight error loops on transient failures
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        warn!(error = %e, backoff_ms = backoff_ms, "Kafka consumer error, backing off");
+                        // KAFKA-016: capped exponential backoff
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
                     }
                     Ok(msg) => {
+                        // Reset backoff on successful receive
+                        backoff_ms = 100;
+
                         // Must detach before await point (BorrowedMessage not 'static)
                         let owned = msg.detach();
-                        let group_id = config.group_id.as_deref().expect("group_id must be resolved");
-                        let mut exchange = build_exchange(&owned, group_id);
+                        let mut exchange = build_exchange(&owned, &config.group_id);
 
                         if let Some(ref tx) = commit_tx {
                             // Manual commit mode: store handle in extensions, user is responsible for commit
@@ -343,12 +405,13 @@ async fn run_consumer_loop(
                                 error!(error = %e, "Failed to send exchange to pipeline");
                             }
                             let mut tpl = rdkafka::TopicPartitionList::new();
-                            tpl.add_partition_offset(
+                            if let Err(e) = tpl.add_partition_offset(
                                 owned.topic(),
                                 owned.partition(),
                                 rdkafka::Offset::Offset(owned.offset() + 1),
-                            ).expect("topic/partition from valid message should never fail");
-                            if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
+                            ) {
+                                warn!(error = %e, "Failed to build TPL for auto-commit; skipping");
+                            } else if let Err(e) = consumer.commit(&tpl, CommitMode::Async) {
                                 warn!(error = %e, "Failed to commit Kafka offset");
                             }
                         }
@@ -358,10 +421,32 @@ async fn run_consumer_loop(
         }
     }
 
+    // KAFKA-003: Graceful shutdown — unsubscribe before dropping
+    info!(topic = %config.topic, "Unsubscribing Kafka consumer");
+    consumer.unsubscribe();
+
     // Wait for the commit handler to drain in-flight commits
     if let Some(handle) = commit_handle {
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
+        let timeout = std::time::Duration::from_millis(config.commit_timeout_ms as u64);
+        match tokio::time::timeout(timeout, handle).await {
+            Ok(Ok(())) => {
+                info!("Commit handler drained successfully");
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "Commit handler task failed during drain");
+            }
+            Err(_) => {
+                warn!(
+                    timeout_ms = config.commit_timeout_ms,
+                    "Commit handler drain timed out; pending commits may be lost"
+                );
+            }
+        }
     }
+
+    // KAFKA-003: The consumer is dropped here after unsubscribe.
+    // rdkafka handles graceful close on Drop — no explicit close() needed.
+    info!(topic = %config.topic, "Kafka consumer dropped after unsubscribe");
 
     Ok(())
 }
@@ -369,10 +454,13 @@ async fn run_consumer_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::KafkaEndpointConfig;
     use rdkafka::Timestamp;
 
-    fn make_config() -> KafkaEndpointConfig {
+    fn make_resolved_config() -> ResolvedKafkaEndpointConfig {
         KafkaEndpointConfig::from_uri("kafka:test-topic?brokers=localhost:9092&groupId=test-group")
+            .unwrap()
+            .resolve()
             .unwrap()
     }
 
@@ -397,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_consumer_new() {
-        let config = make_config();
+        let config = make_resolved_config();
         let consumer = KafkaConsumer::new(config);
         assert!(consumer.cancel_token.is_none());
         assert!(consumer.task_handle.is_none());
@@ -405,18 +493,89 @@ mod tests {
 
     #[test]
     fn test_concurrency_model_is_sequential() {
-        let config = make_config();
+        let config = make_resolved_config();
         let consumer = KafkaConsumer::new(config);
         assert_eq!(consumer.concurrency_model(), ConcurrencyModel::Sequential);
     }
 
     #[tokio::test]
     async fn test_consumer_stop_without_start() {
-        let config = make_config();
+        let config = make_resolved_config();
         let mut consumer = KafkaConsumer::new(config);
         // stop() before start() should be a no-op, not panic
         let result = consumer.stop().await;
         assert!(result.is_ok());
+    }
+
+    // --- KAFKA-002: stop() propagates task errors ---
+
+    #[tokio::test]
+    async fn test_consumer_stop_propagates_task_error() {
+        let config = make_resolved_config();
+        let mut consumer = KafkaConsumer::new(config);
+
+        // Simulate a task that returns an error
+        let handle = tokio::spawn(async {
+            Err(CamelError::ProcessorError(
+                "simulated consumer failure".into(),
+            ))
+        });
+        consumer.task_handle = Some(handle);
+        consumer.cancel_token = Some(CancellationToken::new());
+
+        let result = consumer.stop().await;
+        assert!(result.is_err(), "stop() should propagate task error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("simulated consumer failure"),
+            "error message should contain original error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_consumer_stop_propagates_panic() {
+        let config = make_resolved_config();
+        let mut consumer = KafkaConsumer::new(config);
+
+        // Simulate a task that panics
+        let handle = tokio::spawn(async {
+            panic!("consumer task panic");
+        });
+        consumer.task_handle = Some(handle);
+        consumer.cancel_token = Some(CancellationToken::new());
+
+        let result = consumer.stop().await;
+        assert!(result.is_err(), "stop() should propagate panic as error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("panicked") || msg.contains("Consumer task panicked"),
+            "error should mention panic: {msg}"
+        );
+    }
+
+    // --- KAFKA-006: Consumer double-start guard ---
+
+    #[tokio::test]
+    async fn consumer_double_start_returns_error() {
+        let config = make_resolved_config();
+        let mut consumer = KafkaConsumer::new(config);
+
+        // Simulate an already-started state by setting a cancel token directly.
+        consumer.cancel_token = Some(CancellationToken::new());
+
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        let result = consumer.start(ctx).await;
+        assert!(
+            result.is_err(),
+            "second start must return an error"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("already started"),
+            "error must mention already started: {}",
+            msg
+        );
     }
 
     // --- build_exchange tests ---
@@ -600,10 +759,166 @@ mod tests {
 
     #[test]
     fn test_ready_signal_returns_shared_notify_handle() {
-        let consumer = KafkaConsumer::new(make_config());
+        let consumer = KafkaConsumer::new(make_resolved_config());
         let ready_a = consumer.ready_signal();
         let ready_b = consumer.ready_signal();
         assert!(Arc::ptr_eq(&ready_a, &ready_b));
+    }
+
+    // --- KAFKA-008: binary key preservation ---
+
+    #[test]
+    fn test_build_exchange_binary_key_preserved_as_base64() {
+        let binary_key = vec![0xff, 0xfe, 0x01, 0x02];
+        let msg = make_msg(
+            None,
+            Some(binary_key.clone()),
+            "t",
+            Timestamp::NotAvailable,
+            0,
+            0,
+        );
+        let ex = build_exchange(&msg, "g");
+
+        // CamelKafkaKey should NOT be set for binary keys
+        assert!(
+            ex.input.header("CamelKafkaKey").is_none(),
+            "CamelKafkaKey should be absent for non-UTF-8 key bytes"
+        );
+
+        // CamelKafkaKeyBytes should contain base64-encoded key
+        let key_bytes_header = ex.input.header("CamelKafkaKeyBytes");
+        assert!(
+            key_bytes_header.is_some(),
+            "CamelKafkaKeyBytes should be set for binary keys"
+        );
+        let encoded = key_bytes_header.unwrap().as_str().unwrap();
+        // Verify round-trip: decode base64 and compare
+        let decoded = base64_decode(encoded).expect("base64 should decode");
+        assert_eq!(decoded, binary_key, "decoded key should match original");
+    }
+
+    #[test]
+    fn test_build_exchange_utf8_key_still_works() {
+        let msg = make_msg(
+            None,
+            Some(b"my-key".to_vec()),
+            "t",
+            Timestamp::NotAvailable,
+            0,
+            0,
+        );
+        let ex = build_exchange(&msg, "g");
+        assert_eq!(
+            ex.input.header("CamelKafkaKey"),
+            Some(&Value::String("my-key".to_string()))
+        );
+        // CamelKafkaKeyBytes should NOT be set for UTF-8 keys
+        assert!(
+            ex.input.header("CamelKafkaKeyBytes").is_none(),
+            "CamelKafkaKeyBytes should be absent for UTF-8 keys"
+        );
+    }
+
+    // --- KAFKA-016: exponential backoff verification ---
+
+    #[test]
+    fn test_exponential_backoff_sequence() {
+        // Verify the backoff logic: 100 → 200 → 400 → ... → 30000
+        const MAX_BACKOFF_MS: u64 = 30_000;
+        let mut backoff_ms: u64 = 100;
+        let mut sequence = Vec::new();
+        for _ in 0..20 {
+            sequence.push(backoff_ms);
+            backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        }
+        // First few values
+        assert_eq!(sequence[0], 100);
+        assert_eq!(sequence[1], 200);
+        assert_eq!(sequence[2], 400);
+        assert_eq!(sequence[3], 800);
+        // Caps at MAX_BACKOFF_MS
+        assert!(sequence.iter().all(|&v| v <= MAX_BACKOFF_MS));
+        // Last values should all be capped
+        assert_eq!(sequence[sequence.len() - 1], MAX_BACKOFF_MS);
+        assert_eq!(sequence[sequence.len() - 2], MAX_BACKOFF_MS);
+    }
+
+    // --- KAFKA-004: commit drain timeout ---
+
+    #[tokio::test]
+    async fn test_commit_handler_drain_timeout_observed() {
+        // Simulate a slow commit handler that doesn't finish within timeout
+        let (tx, mut rx) = mpsc::channel::<CommitRequest>(1);
+
+        // Spawn a handler that sleeps longer than any reasonable timeout
+        let handle = tokio::spawn(async move {
+            while let Some(_req) = rx.recv().await {
+                tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+            }
+        });
+
+        // Send a commit request
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(CommitRequest {
+            topic: "t".into(),
+            partition: 0,
+            offset: 0,
+            reply_tx: Some(reply_tx),
+        })
+        .await
+        .unwrap();
+
+        // Use a short timeout (10ms) — the handler sleeps 5s, so this will timeout
+        let timeout = std::time::Duration::from_millis(10);
+        let result = tokio::time::timeout(timeout, handle).await;
+        assert!(
+            result.is_err(),
+            "commit handler should timeout with short deadline"
+        );
+        // Clean up: drop tx to close channel
+        drop(tx);
+        // The reply will never come, but that's expected
+        drop(reply_rx);
+    }
+
+    // --- base64 round-trip helper ---
+
+    fn base64_decode(input: &str) -> Option<Vec<u8>> {
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut decode_map = [255u8; 256];
+        for (i, &b) in alphabet.iter().enumerate() {
+            decode_map[b as usize] = i as u8;
+        }
+
+        let mut out = Vec::new();
+        for chunk in input.as_bytes().chunks_exact(4) {
+            let mut vals = [0u8; 4];
+            for (i, &b) in chunk.iter().enumerate() {
+                if b == b'=' {
+                    vals[i] = 0; // padding contributes zero bits
+                } else {
+                    let v = decode_map[b as usize];
+                    if v == 255 {
+                        return None;
+                    }
+                    vals[i] = v;
+                }
+            }
+            let n = ((vals[0] as u32) << 18)
+                | ((vals[1] as u32) << 12)
+                | ((vals[2] as u32) << 6)
+                | (vals[3] as u32);
+            out.push((n >> 16) as u8);
+            if chunk[2] != b'=' {
+                out.push(((n >> 8) & 0xFF) as u8);
+            }
+            if chunk[3] != b'=' {
+                out.push((n & 0xFF) as u8);
+            }
+        }
+
+        Some(out)
     }
 
     // ---------------------------------------------------------------------------

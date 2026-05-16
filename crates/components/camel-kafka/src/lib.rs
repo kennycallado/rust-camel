@@ -1,3 +1,30 @@
+//! Kafka component for rust-camel — Apache Camel–inspired integration with Apache Kafka.
+//!
+//! Provides producer and consumer endpoints backed by `rdkafka`, with Tower-native
+//! async pipelines, EIP patterns, and full security (SASL, SSL) support.
+//!
+//! # Migration from v0.x (Breaking API Change)
+//!
+//! `KafkaProducer::new`, `KafkaConsumer::new`, and `apply_security_config` now require
+//! a `ResolvedKafkaEndpointConfig` instead of `KafkaEndpointConfig`. This eliminates
+//! production panics from missing config fields by enforcing resolution at compile time.
+//!
+//! **Before:**
+//! ```ignore
+//! let config = KafkaEndpointConfig::from_uri("kafka:topic?brokers=localhost:9092&groupId=g")?;
+//! let producer = KafkaProducer::new(config)?;  // could panic on missing fields
+//! ```
+//!
+//! **After:**
+//! ```ignore
+//! let config = KafkaEndpointConfig::from_uri("kafka:topic?brokers=localhost:9092&groupId=g")?;
+//! let resolved = config.resolve()?;  // applies defaults, validates, returns ResolvedKafkaEndpointConfig
+//! let producer = KafkaProducer::new(resolved)?;  // guaranteed safe
+//! ```
+//!
+//! When using the `KafkaComponent` trait implementation, resolution happens automatically
+//! in `create_endpoint`, so no changes are needed for component-based usage.
+
 pub mod bundle;
 pub mod config;
 pub mod consumer;
@@ -5,7 +32,7 @@ pub mod manual_commit;
 pub mod producer;
 
 pub use bundle::KafkaBundle;
-pub use config::{KafkaConfig, KafkaEndpointConfig};
+pub use config::{KafkaConfig, KafkaEndpointConfig, ResolvedKafkaEndpointConfig};
 pub use consumer::KafkaConsumer;
 pub use manual_commit::KafkaManualCommit;
 pub use producer::KafkaProducer;
@@ -60,18 +87,18 @@ impl Component for KafkaComponent {
         if let Some(ref global_cfg) = self.config {
             config.apply_defaults(global_cfg);
         }
-        // Resolve any remaining None fields to hardcoded defaults
-        config.resolve_defaults();
+        // Resolve all fields and validate — returns ResolvedKafkaEndpointConfig
+        let resolved = config.resolve()?;
         Ok(Box::new(KafkaEndpoint {
             uri: uri.to_string(),
-            config,
+            config: resolved,
         }))
     }
 }
 
 struct KafkaEndpoint {
     uri: String,
-    config: KafkaEndpointConfig,
+    config: ResolvedKafkaEndpointConfig,
 }
 
 impl Endpoint for KafkaEndpoint {
@@ -124,6 +151,38 @@ mod tests {
         assert!(result.is_err(), "wrong scheme should fail");
         let err = result.err().expect("error must exist");
         assert!(err.to_string().contains("expected scheme 'kafka'"));
+    }
+
+    #[test]
+    fn test_component_rejects_empty_brokers() {
+        let component = KafkaComponent::new();
+        let ctx = NoOpComponentContext;
+        // Empty brokers string should be rejected at resolve time
+        let result = component.create_endpoint("kafka:orders?brokers=", &ctx);
+        assert!(result.is_err(), "empty brokers should fail");
+        if let Err(e) = result {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("brokers"),
+                "error should mention brokers: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_component_rejects_empty_group_id() {
+        let component = KafkaComponent::new();
+        let ctx = NoOpComponentContext;
+        let result =
+            component.create_endpoint("kafka:orders?brokers=localhost:9092&groupId=", &ctx);
+        assert!(result.is_err(), "empty group_id should fail");
+        if let Err(e) = result {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("group_id"),
+                "error should mention group_id: {msg}"
+            );
+        }
     }
 
     #[test]

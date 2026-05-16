@@ -9,6 +9,7 @@ use tonic::transport::Channel;
 use tower::Service;
 use tracing::debug;
 
+use crate::component::BRIDGE_TRANSPORT_ERROR_PREFIX;
 use crate::config::{DestinationType, JmsEndpointConfig};
 use crate::headers::extract_send_headers;
 use crate::proto::{SendRequest, bridge_service_client::BridgeServiceClient};
@@ -100,7 +101,11 @@ impl Service<Exchange> for JmsProducer {
             let response = client
                 .send(request)
                 .await
-                .map_err(|s| CamelError::ProcessorError(format!("JMS gRPC send error: {s}")))?
+                .map_err(|s| {
+                    CamelError::ProcessorError(format!(
+                        "{BRIDGE_TRANSPORT_ERROR_PREFIX}send error: {s}"
+                    ))
+                })?
                 .into_inner();
 
             debug!(message_id = %response.message_id, "JMS message sent");

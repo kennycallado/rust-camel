@@ -1,5 +1,6 @@
 use camel_component_api::CamelError;
 use camel_component_api::parse_uri;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -289,6 +290,7 @@ impl RedisConfig {
 /// - `timeout` - Timeout in seconds for blocking operations (default: 1)
 /// - `password` - Redis password for authentication (default: None)
 /// - `db` - Redis database number (default: 0)
+/// - `ssl` - Use TLS connection (default: false)
 #[derive(Debug, Clone)]
 pub struct RedisEndpointConfig {
     /// Redis server hostname. `None` if not set in URI.
@@ -316,18 +318,26 @@ pub struct RedisEndpointConfig {
 
     /// Redis database number. Default: 0.
     pub db: u8,
+
+    /// Use TLS connection. Default: false.
+    pub ssl: bool,
 }
 
 impl RedisEndpointConfig {
     pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
         let parts = parse_uri(uri)?;
 
-        if parts.scheme != "redis" {
+        // Support both `redis://` and `rediss://` (TLS) schemes
+        let ssl_from_scheme = if parts.scheme == "rediss" {
+            true
+        } else if parts.scheme == "redis" {
+            false
+        } else {
             return Err(CamelError::InvalidUri(format!(
-                "expected scheme 'redis', got '{}'",
+                "expected scheme 'redis' or 'rediss', got '{}'",
                 parts.scheme
             )));
-        }
+        };
 
         // Parse host and port from path (format: //host:port or //host or empty)
         // Use Option to distinguish "not set in URI" from "set in URI"
@@ -385,6 +395,14 @@ impl RedisEndpointConfig {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
+        // Parse ssl: explicit `ssl=true` param or `rediss://` scheme
+        let ssl = ssl_from_scheme
+            || parts
+                .params
+                .get("ssl")
+                .map(|s| s.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
         Ok(Self {
             host,
             port,
@@ -394,6 +412,7 @@ impl RedisEndpointConfig {
             timeout,
             password,
             db,
+            ssl,
         })
     }
 
@@ -428,14 +447,18 @@ impl RedisEndpointConfig {
     /// Build the Redis connection URL.
     ///
     /// After `resolve_defaults()`, host and port are guaranteed `Some`.
+    /// Passwords are URL-encoded to handle special characters (`@`, `:`, `/`).
+    /// Uses `rediss://` scheme when `ssl` is true.
     pub fn redis_url(&self) -> String {
         let host = self.host.as_deref().unwrap_or("localhost");
         let port = self.port.unwrap_or(6379);
+        let scheme = if self.ssl { "rediss" } else { "redis" };
 
         if let Some(password) = &self.password {
-            format!("redis://:{}@{}:{}/{}", password, host, port, self.db)
+            let encoded = utf8_percent_encode(password, NON_ALPHANUMERIC).to_string();
+            format!("{}://:{}@{}:{}/{}", scheme, encoded, host, port, self.db)
         } else {
-            format!("redis://{}:{}/{}", host, port, self.db)
+            format!("{}://{}:{}/{}", scheme, host, port, self.db)
         }
     }
 
@@ -444,15 +467,114 @@ impl RedisEndpointConfig {
     /// Returns the full URL from `redis_url()` if no password is set,
     /// otherwise replaces the password with `***`.
     pub fn redis_url_safe(&self) -> String {
+        let host = self.host.as_deref().unwrap_or("localhost");
+        let port = self.port.unwrap_or(6379);
+        let scheme = if self.ssl { "rediss" } else { "redis" };
+
         match &self.password {
-            Some(_) => {
-                let host = self.host.as_deref().unwrap_or("localhost");
-                let port = self.port.unwrap_or(6379);
-                format!("redis://:***@{}:{}/{}", host, port, self.db)
-            }
+            Some(_) => format!("{}://:***@{}:{}/{}", scheme, host, port, self.db),
             None => self.redis_url(),
         }
     }
+
+    /// Return a concise, secret-safe endpoint identifier for tracing.
+    ///
+    /// Format: `rediss://host:port/db` or `redis://host:port/db` — never contains credentials.
+    pub fn safe_endpoint(&self) -> String {
+        let host = self.host.as_deref().unwrap_or("localhost");
+        let port = self.port.unwrap_or(6379);
+        let scheme = if self.ssl { "rediss" } else { "redis" };
+        format!("{}://{}:{}/{}", scheme, host, port, self.db)
+    }
+}
+
+// ── Transient error detection ────────────────────────────────────────────────
+
+/// Returns true if the error is a transient transport failure that may be
+/// resolved by reconnecting (e.g. connection reset, timeout, I/O error).
+///
+/// Business errors (WRONGTYPE, NOSCRIPT, etc.) and config errors are NOT transient.
+pub fn is_transient_redis_error(err: &CamelError) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("connection")
+        || msg.contains("io error")
+        || msg.contains("timed out")
+        || msg.contains("broken pipe")
+        || msg.contains("connection reset")
+        || msg.contains("eof")
+        || msg.contains("refused")
+}
+
+// ── Capped exponential backoff ──────────────────────────────────────────────
+
+/// Computes the backoff delay for a given attempt number using capped exponential
+/// backoff: `min(2^attempt * 100ms, max_delay)`.
+///
+/// - `attempt`: zero-based retry attempt number
+/// - `base_ms`: base delay in milliseconds (default 100)
+/// - `max_delay`: maximum delay cap
+pub fn backoff_delay(
+    attempt: u32,
+    base_ms: u64,
+    max_delay: std::time::Duration,
+) -> std::time::Duration {
+    let exponent = attempt.min(10);
+    let delay_ms = base_ms.saturating_mul(1u64 << exponent);
+    std::time::Duration::from_millis(delay_ms).min(max_delay)
+}
+
+// ── Command idempotency classification ──────────────────────────────────────
+
+/// Returns true if the command is idempotent (safe to retry without risk of
+/// duplicate side effects). Read commands and some writes (SET, DEL) are idempotent.
+pub fn is_idempotent_command(cmd: &RedisCommand) -> bool {
+    matches!(
+        cmd,
+        // Read-only commands
+        RedisCommand::Get
+            | RedisCommand::Mget
+            | RedisCommand::Exists
+            | RedisCommand::Ttl
+            | RedisCommand::Keys
+            | RedisCommand::Type
+            | RedisCommand::Llen
+            | RedisCommand::Lrange
+            | RedisCommand::Lindex
+            | RedisCommand::Scard
+            | RedisCommand::Smembers
+            | RedisCommand::Sismember
+            | RedisCommand::Srandmember
+            | RedisCommand::Zrange
+            | RedisCommand::Zrevrange
+            | RedisCommand::Zrank
+            | RedisCommand::Zrevrank
+            | RedisCommand::Zscore
+            | RedisCommand::Zcard
+            | RedisCommand::Zcount
+            | RedisCommand::Zrangebyscore
+            | RedisCommand::Zrevrangebyscore
+            | RedisCommand::Hget
+            | RedisCommand::Hmget
+            | RedisCommand::Hexists
+            | RedisCommand::Hlen
+            | RedisCommand::Hkeys
+            | RedisCommand::Hvals
+            | RedisCommand::Hgetall
+            | RedisCommand::Strlen
+            | RedisCommand::Ping
+            | RedisCommand::Echo
+            // Idempotent writes (same result if retried)
+            | RedisCommand::Set
+            | RedisCommand::Del
+            | RedisCommand::Expire
+            | RedisCommand::Expireat
+            | RedisCommand::Pexpire
+            | RedisCommand::Pexpireat
+            | RedisCommand::Persist
+            | RedisCommand::Rename
+            | RedisCommand::Renamenx
+            | RedisCommand::Move
+    )
 }
 
 #[cfg(test)]
@@ -542,6 +664,7 @@ mod tests {
         let mut c =
             RedisEndpointConfig::from_uri("redis://localhost:6379?password=secret&db=2").unwrap();
         c.resolve_defaults();
+        // Password without special chars is unchanged
         assert_eq!(c.redis_url(), "redis://:secret@localhost:6379/2");
     }
 
@@ -550,6 +673,240 @@ mod tests {
         let mut c = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
         c.resolve_defaults();
         assert_eq!(c.redis_url(), "redis://localhost:6379/0");
+    }
+
+    // REDIS-015: Password with special characters is URL-encoded
+    #[test]
+    fn test_redis_url_encodes_password_with_at_sign() {
+        // Use a config with raw password containing @
+        let c = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            password: Some("pass@word".to_string()),
+            db: 0,
+            ssl: false,
+        };
+        let url = c.redis_url();
+        assert!(
+            url.contains("%40"),
+            "password with @ should be encoded: {}",
+            url
+        );
+        assert!(
+            !url.contains("pass@word"),
+            "raw @ should not appear in URL: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_redis_url_encodes_password_with_colon() {
+        let c = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            password: Some("pass:word".to_string()),
+            db: 0,
+            ssl: false,
+        };
+        let url = c.redis_url();
+        assert!(
+            url.contains("%3A"),
+            "password with : should be encoded: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_redis_url_encodes_password_with_slash() {
+        let c = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            password: Some("pass/word".to_string()),
+            db: 0,
+            ssl: false,
+        };
+        let url = c.redis_url();
+        assert!(
+            url.contains("%2F"),
+            "password with / should be encoded: {}",
+            url
+        );
+    }
+
+    // REDIS-006: TLS support via rediss:// scheme and ssl=true param
+    #[test]
+    fn test_rediss_scheme_enables_ssl() {
+        let c = RedisEndpointConfig::from_uri("rediss://localhost:6379?command=GET").unwrap();
+        assert!(c.ssl, "rediss:// scheme should enable SSL");
+    }
+
+    #[test]
+    fn test_ssl_true_param_enables_ssl() {
+        let c =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&ssl=true").unwrap();
+        assert!(c.ssl, "ssl=true should enable SSL");
+    }
+
+    #[test]
+    fn test_ssl_false_param_does_not_enable_ssl() {
+        let c =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET&ssl=false").unwrap();
+        assert!(!c.ssl, "ssl=false should not enable SSL");
+    }
+
+    #[test]
+    fn test_redis_url_uses_rediss_scheme_when_ssl_enabled() {
+        let c = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            password: None,
+            db: 0,
+            ssl: true,
+        };
+        let url = c.redis_url();
+        assert!(
+            url.starts_with("rediss://"),
+            "SSL config should use rediss:// scheme: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_redis_url_uses_redis_scheme_when_ssl_disabled() {
+        let c = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            password: None,
+            db: 0,
+            ssl: false,
+        };
+        let url = c.redis_url();
+        assert!(
+            url.starts_with("redis://"),
+            "non-SSL config should use redis:// scheme: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_redis_url_safe_uses_correct_scheme_for_ssl() {
+        let c_ssl = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            password: Some("secret".to_string()),
+            db: 0,
+            ssl: true,
+        };
+        let safe = c_ssl.redis_url_safe();
+        assert!(
+            safe.starts_with("rediss://"),
+            "safe URL should use rediss:// for SSL: {}",
+            safe
+        );
+        assert!(
+            !safe.contains("secret"),
+            "safe URL must not contain password"
+        );
+
+        let c_no_ssl = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            password: Some("secret".to_string()),
+            db: 0,
+            ssl: false,
+        };
+        let safe = c_no_ssl.redis_url_safe();
+        assert!(
+            safe.starts_with("redis://"),
+            "safe URL should use redis:// for non-SSL: {}",
+            safe
+        );
+    }
+
+    // P3/P4: safe_endpoint helper
+    #[test]
+    fn test_safe_endpoint_no_credentials() {
+        let c = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            password: Some("supersecret".to_string()),
+            db: 2,
+            ssl: false,
+        };
+        let endpoint = c.safe_endpoint();
+        assert!(
+            !endpoint.contains("supersecret"),
+            "safe endpoint must not contain password"
+        );
+        assert!(
+            endpoint.contains("localhost"),
+            "safe endpoint should contain host"
+        );
+        assert!(
+            endpoint.contains("6379"),
+            "safe endpoint should contain port"
+        );
+    }
+
+    #[test]
+    fn test_safe_endpoint_uses_correct_scheme() {
+        let c_ssl = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6380),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            password: None,
+            db: 0,
+            ssl: true,
+        };
+        assert!(c_ssl.safe_endpoint().starts_with("rediss://"));
+
+        let c_plain = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6380),
+            command: RedisCommand::Set,
+            channels: vec![],
+            key: None,
+            timeout: 1,
+            password: None,
+            db: 0,
+            ssl: false,
+        };
+        assert!(c_plain.safe_endpoint().starts_with("redis://"));
     }
 
     #[test]
@@ -657,21 +1014,24 @@ mod tests {
     //     params with hardcoded defaults, preventing apply_defaults from working.
     #[test]
     fn test_redis_url_safe_redacts_password() {
-        let config = RedisEndpointConfig::from_uri(
-            "redis://localhost:6379?password=mysecret&db=2",
-        )
-        .unwrap();
+        let config =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?password=mysecret&db=2").unwrap();
         let safe = config.redis_url_safe();
-        assert!(!safe.contains("mysecret"), "safe URL must not contain password");
-        assert!(safe.contains("***"), "safe URL should contain redaction marker");
+        assert!(
+            !safe.contains("mysecret"),
+            "safe URL must not contain password"
+        );
+        assert!(
+            safe.contains("***"),
+            "safe URL should contain redaction marker"
+        );
         assert!(safe.contains("localhost"), "safe URL should contain host");
         assert!(safe.contains("6379"), "safe URL should contain port");
     }
 
     #[test]
     fn test_redis_url_safe_no_password() {
-        let config =
-            RedisEndpointConfig::from_uri("redis://localhost:6379?db=0").unwrap();
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?db=0").unwrap();
         let safe = config.redis_url_safe();
         assert_eq!(safe, config.redis_url());
     }
@@ -692,5 +1052,86 @@ mod tests {
             Some("redis-prod".to_string()),
             "custom default host should be applied"
         );
+    }
+
+    // REDIS-002: Transient error detection
+    #[test]
+    fn test_is_transient_redis_error_detects_connection_errors() {
+        assert!(is_transient_redis_error(&CamelError::ProcessorError(
+            "Connection refused".into()
+        )));
+        assert!(is_transient_redis_error(&CamelError::ProcessorError(
+            "connection reset by peer".into()
+        )));
+        assert!(is_transient_redis_error(&CamelError::ProcessorError(
+            "IO error: broken pipe".into()
+        )));
+        assert!(is_transient_redis_error(&CamelError::ProcessorError(
+            "timed out".into()
+        )));
+        assert!(is_transient_redis_error(&CamelError::ProcessorError(
+            "EOF".into()
+        )));
+    }
+
+    #[test]
+    fn test_is_transient_redis_error_rejects_business_errors() {
+        assert!(!is_transient_redis_error(&CamelError::ProcessorError(
+            "WRONGTYPE".into()
+        )));
+        assert!(!is_transient_redis_error(&CamelError::ProcessorError(
+            "NOSCRIPT".into()
+        )));
+        assert!(!is_transient_redis_error(&CamelError::InvalidUri(
+            "bad uri".into()
+        )));
+        assert!(!is_transient_redis_error(&CamelError::Config(
+            "bad config".into()
+        )));
+    }
+
+    // REDIS-002: Capped exponential backoff
+    #[test]
+    fn test_backoff_delay_grows_exponentially() {
+        let max = std::time::Duration::from_secs(5);
+        let d0 = backoff_delay(0, 100, max);
+        let d1 = backoff_delay(1, 100, max);
+        let d2 = backoff_delay(2, 100, max);
+        assert_eq!(d0, std::time::Duration::from_millis(100));
+        assert_eq!(d1, std::time::Duration::from_millis(200));
+        assert_eq!(d2, std::time::Duration::from_millis(400));
+    }
+
+    #[test]
+    fn test_backoff_delay_is_capped() {
+        let max = std::time::Duration::from_secs(2);
+        let d10 = backoff_delay(10, 100, max);
+        assert_eq!(d10, max);
+    }
+
+    // REDIS-002: Idempotency classification
+    #[test]
+    fn test_is_idempotent_command_read_commands() {
+        assert!(is_idempotent_command(&RedisCommand::Get));
+        assert!(is_idempotent_command(&RedisCommand::Exists));
+        assert!(is_idempotent_command(&RedisCommand::Ttl));
+        assert!(is_idempotent_command(&RedisCommand::Ping));
+    }
+
+    #[test]
+    fn test_is_idempotent_command_idempotent_writes() {
+        assert!(is_idempotent_command(&RedisCommand::Set));
+        assert!(is_idempotent_command(&RedisCommand::Del));
+        assert!(is_idempotent_command(&RedisCommand::Expire));
+    }
+
+    #[test]
+    fn test_is_idempotent_command_non_idempotent() {
+        assert!(!is_idempotent_command(&RedisCommand::Incr));
+        assert!(!is_idempotent_command(&RedisCommand::Decr));
+        assert!(!is_idempotent_command(&RedisCommand::Lpush));
+        assert!(!is_idempotent_command(&RedisCommand::Sadd));
+        assert!(!is_idempotent_command(&RedisCommand::Zadd));
+        assert!(!is_idempotent_command(&RedisCommand::Publish));
     }
 }

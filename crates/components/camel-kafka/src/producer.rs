@@ -6,31 +6,31 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tower::Service;
 use tracing::{debug, error};
 
-use crate::config::{KafkaEndpointConfig, apply_security_config};
+use crate::config::{ResolvedKafkaEndpointConfig, apply_security_config};
 
 #[derive(Clone)]
 pub struct KafkaProducer {
-    config: KafkaEndpointConfig,
+    config: ResolvedKafkaEndpointConfig,
     producer: Arc<FutureProducer>,
+    /// Set to true when the producer is stopped or in a failed state.
+    /// Used by `poll_ready` to reject calls when the producer is unusable.
+    stopped: Arc<AtomicBool>,
 }
 
 impl KafkaProducer {
-    pub fn new(config: KafkaEndpointConfig) -> Result<Self, CamelError> {
-        let brokers = config.brokers.as_ref().expect("brokers must be resolved");
-        let request_timeout_ms = config
-            .request_timeout_ms
-            .expect("request_timeout_ms must be resolved");
-
+    pub fn new(config: ResolvedKafkaEndpointConfig) -> Result<Self, CamelError> {
         let mut cc = ClientConfig::new();
-        cc.set("bootstrap.servers", brokers)
-            .set("message.timeout.ms", request_timeout_ms.to_string())
-            .set("acks", &config.acks);
+        cc.set("bootstrap.servers", &config.brokers)
+            .set("message.timeout.ms", config.request_timeout_ms.to_string())
+            .set("acks", &config.acks)
+            .set("client.id", &config.client_id);
 
         apply_security_config(&config, &mut cc);
 
@@ -41,6 +41,7 @@ impl KafkaProducer {
         Ok(Self {
             config,
             producer: Arc::new(producer),
+            stopped: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -63,7 +64,7 @@ impl KafkaProducer {
 
     pub fn resolve_topic<'a>(
         exchange: &'a Exchange,
-        config: &'a KafkaEndpointConfig,
+        config: &'a ResolvedKafkaEndpointConfig,
     ) -> Result<&'a str, CamelError> {
         // Check for header override first
         if let Some(v) = exchange.input.header("CamelKafkaTopic")
@@ -95,12 +96,15 @@ impl KafkaProducer {
             .and_then(|v| v.as_i64().map(|n| n as i32))
     }
 
-    pub fn resolve_request_timeout(config: &KafkaEndpointConfig) -> Duration {
-        Duration::from_millis(
-            config
-                .request_timeout_ms
-                .expect("request_timeout_ms must be resolved") as u64,
-        )
+    pub fn resolve_request_timeout(config: &ResolvedKafkaEndpointConfig) -> Duration {
+        Duration::from_millis(config.request_timeout_ms as u64)
+    }
+
+    /// Mark this producer as stopped. Subsequent `poll_ready` calls will
+    /// return an error, preventing new messages from being sent.
+    /// Clones share the same stopped state (Arc-backed).
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
     }
 }
 
@@ -110,6 +114,16 @@ impl Service<Exchange> for KafkaProducer {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // KAFKA-007: rdkafka's FutureProducer handles internal buffer
+        // backpressure (queue-full) internally via its librdkafka queue.
+        // We cannot observe that queue depth from Rust, so we rely on
+        // rdkafka's internal backpressure. We DO check for a stopped/failed
+        // state to reject calls when the producer is known unusable.
+        if self.stopped.load(Ordering::SeqCst) {
+            return Poll::Ready(Err(CamelError::ProcessorError(
+                "Kafka producer is stopped".into(),
+            )));
+        }
         Poll::Ready(Ok(()))
     }
 
@@ -188,6 +202,7 @@ impl Service<Exchange> for KafkaProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::KafkaEndpointConfig;
     use bytes::Bytes;
     use camel_component_api::Message;
     use camel_component_api::StreamBody;
@@ -196,8 +211,11 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    fn make_config() -> KafkaEndpointConfig {
-        KafkaEndpointConfig::from_uri("kafka:test-topic?brokers=localhost:9092").unwrap()
+    fn make_resolved_config() -> ResolvedKafkaEndpointConfig {
+        KafkaEndpointConfig::from_uri("kafka:test-topic?brokers=localhost:9092")
+            .unwrap()
+            .resolve()
+            .unwrap()
     }
 
     #[test]
@@ -245,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_resolve_topic_from_config() {
-        let config = make_config();
+        let config = make_resolved_config();
         let exchange = Exchange::new(Message::default());
         let topic = KafkaProducer::resolve_topic(&exchange, &config).unwrap();
         assert_eq!(topic, "test-topic");
@@ -253,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_resolve_topic_from_header_overrides_config() {
-        let config = make_config();
+        let config = make_resolved_config();
         let mut msg = Message::default();
         msg.set_header(
             "CamelKafkaTopic",
@@ -266,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_resolve_topic_empty_header_falls_back_to_config() {
-        let config = make_config();
+        let config = make_resolved_config();
         let mut msg = Message::default();
         msg.set_header("CamelKafkaTopic", serde_json::Value::String("".to_string()));
         let exchange = Exchange::new(msg);
@@ -276,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_resolve_topic_non_string_header_falls_back_to_config() {
-        let config = make_config();
+        let config = make_resolved_config();
         let mut msg = Message::default();
         msg.set_header("CamelKafkaTopic", serde_json::Value::Number(42.into()));
         let exchange = Exchange::new(msg);
@@ -286,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_resolve_topic_errors_when_config_topic_empty() {
-        let mut config = make_config();
+        let mut config = make_resolved_config();
         config.topic.clear();
         let exchange = Exchange::new(Message::default());
 
@@ -304,8 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_fails_fast_when_topic_missing() {
-        let mut config = make_config();
-        config.resolve_defaults();
+        let mut config = make_resolved_config();
         config.topic.clear();
 
         let mut producer = KafkaProducer::new(config).expect("producer should build");
@@ -320,8 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_fails_fast_for_stream_body() {
-        let mut config = make_config();
-        config.resolve_defaults();
+        let config = make_resolved_config();
         let mut producer = KafkaProducer::new(config).expect("producer should build");
 
         let stream = stream::iter(vec![Ok(Bytes::from("chunk"))]);
@@ -378,12 +394,59 @@ mod tests {
 
     #[test]
     fn test_resolve_request_timeout_from_config() {
-        let mut config = make_config();
-        config.resolve_defaults();
-        config.request_timeout_ms = Some(4321);
+        let config = make_resolved_config();
         assert_eq!(
             KafkaProducer::resolve_request_timeout(&config),
-            Duration::from_millis(4321)
+            Duration::from_millis(30_000)
         );
+    }
+
+    // --- KAFKA-007: poll_ready returns error when producer is stopped ---
+
+    #[test]
+    fn test_poll_ready_returns_error_when_stopped() {
+        let config = make_resolved_config();
+        let producer = KafkaProducer::new(config).expect("producer should build");
+
+        // Before stop, poll_ready should be ready
+        let mut producer = producer.clone();
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(matches!(
+            producer.poll_ready(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+
+        // After stop, poll_ready should return error
+        producer.stop();
+        let result = producer.poll_ready(&mut cx);
+        assert!(
+            matches!(result, Poll::Ready(Err(_))),
+            "poll_ready must return error when stopped"
+        );
+        if let Poll::Ready(Err(err)) = result {
+            assert!(
+                err.to_string().contains("stopped"),
+                "error must mention stopped: {}",
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_stop_state_shared_across_clones() {
+        let config = make_resolved_config();
+        let producer = KafkaProducer::new(config).expect("producer should build");
+        let clone = producer.clone();
+
+        // Stop the original
+        producer.stop();
+
+        // Clone should also see stopped state
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let mut clone = clone;
+        assert!(matches!(
+            clone.poll_ready(&mut cx),
+            Poll::Ready(Err(_))
+        ));
     }
 }

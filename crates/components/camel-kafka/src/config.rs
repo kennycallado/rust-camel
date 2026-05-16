@@ -3,6 +3,22 @@ use camel_component_api::UriConfig;
 use rdkafka::config::ClientConfig;
 use tracing::warn;
 
+// ---------------------------------------------------------------------------
+// Minimum / maximum bounds for numeric URI parameters
+// ---------------------------------------------------------------------------
+
+const MIN_SESSION_TIMEOUT_MS: u32 = 1_000;
+const MAX_SESSION_TIMEOUT_MS: u32 = 3_600_000; // 1 hour
+const MIN_POLL_TIMEOUT_MS: u32 = 1;
+const MAX_POLL_TIMEOUT_MS: u32 = 300_000; // 5 min
+const MIN_MAX_POLL_RECORDS: u32 = 1;
+const MAX_MAX_POLL_RECORDS: u32 = 100_000;
+const MIN_REQUEST_TIMEOUT_MS: u32 = 1_000;
+const MAX_REQUEST_TIMEOUT_MS: u32 = 3_600_000; // 1 hour
+const MIN_COMMIT_TIMEOUT_MS: u32 = 100;
+const MAX_COMMIT_TIMEOUT_MS: u32 = 60_000; // 60 s
+const DEFAULT_COMMIT_TIMEOUT_MS: u32 = 500;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SecurityProtocol {
     #[default]
@@ -241,6 +257,12 @@ pub struct KafkaEndpointConfig {
 
     /// Partition assignment strategy. Default: Range.
     pub partition_assignment_strategy: PartitionAssignmentStrategy,
+
+    /// Client identifier sent to the broker. Default: "camel-kafka".
+    pub client_id: Option<String>,
+
+    /// Commit drain timeout in milliseconds (shutdown grace period). Default: 500.
+    pub commit_timeout_ms: u32,
 }
 
 impl KafkaEndpointConfig {
@@ -347,6 +369,14 @@ impl KafkaEndpointConfig {
             .map_err(CamelError::InvalidUri)?
             .unwrap_or_default();
 
+        let client_id = parts.params.get("clientId").cloned();
+
+        let commit_timeout_ms = parts
+            .params
+            .get("commitTimeoutMs")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_COMMIT_TIMEOUT_MS);
+
         let config = Self {
             topic,
             brokers,
@@ -367,6 +397,8 @@ impl KafkaEndpointConfig {
             ssl_truststore_password,
             allow_manual_commit,
             partition_assignment_strategy,
+            client_id,
+            commit_timeout_ms,
         };
 
         config.validate()
@@ -404,6 +436,40 @@ impl KafkaEndpointConfig {
                     "saslAuthType requires saslPassword parameter".to_string(),
                 ));
             }
+        }
+
+        // Validate numeric bounds for values provided in URI
+        if let Some(v) = self.session_timeout_ms
+            && !(MIN_SESSION_TIMEOUT_MS..=MAX_SESSION_TIMEOUT_MS).contains(&v)
+        {
+            return Err(CamelError::InvalidUri(format!(
+                "sessionTimeoutMs must be between {MIN_SESSION_TIMEOUT_MS} and {MAX_SESSION_TIMEOUT_MS}, got {v}"
+            )));
+        }
+        if !(MIN_POLL_TIMEOUT_MS..=MAX_POLL_TIMEOUT_MS).contains(&self.poll_timeout_ms) {
+            return Err(CamelError::InvalidUri(format!(
+                "pollTimeoutMs must be between {MIN_POLL_TIMEOUT_MS} and {MAX_POLL_TIMEOUT_MS}, got {}",
+                self.poll_timeout_ms
+            )));
+        }
+        if !(MIN_MAX_POLL_RECORDS..=MAX_MAX_POLL_RECORDS).contains(&self.max_poll_records) {
+            return Err(CamelError::InvalidUri(format!(
+                "maxPollRecords must be between {MIN_MAX_POLL_RECORDS} and {MAX_MAX_POLL_RECORDS}, got {}",
+                self.max_poll_records
+            )));
+        }
+        if let Some(v) = self.request_timeout_ms
+            && !(MIN_REQUEST_TIMEOUT_MS..=MAX_REQUEST_TIMEOUT_MS).contains(&v)
+        {
+            return Err(CamelError::InvalidUri(format!(
+                "requestTimeoutMs must be between {MIN_REQUEST_TIMEOUT_MS} and {MAX_REQUEST_TIMEOUT_MS}, got {v}"
+            )));
+        }
+        if !(MIN_COMMIT_TIMEOUT_MS..=MAX_COMMIT_TIMEOUT_MS).contains(&self.commit_timeout_ms) {
+            return Err(CamelError::InvalidUri(format!(
+                "commitTimeoutMs must be between {MIN_COMMIT_TIMEOUT_MS} and {MAX_COMMIT_TIMEOUT_MS}, got {}",
+                self.commit_timeout_ms
+            )));
         }
 
         Ok(self)
@@ -482,6 +548,193 @@ impl KafkaEndpointConfig {
             );
         }
     }
+
+    /// Resolve all `None` fields to defaults and validate, returning a
+    /// `ResolvedKafkaEndpointConfig` that guarantees every field is populated.
+    ///
+    /// This is the **only** safe way to construct a producer or consumer.
+    /// It rejects empty brokers, empty group_id, and out-of-range numeric values.
+    pub fn resolve(self) -> Result<ResolvedKafkaEndpointConfig, CamelError> {
+        let mut cfg = self;
+        cfg.resolve_defaults();
+
+        let brokers = cfg
+            .brokers
+            .clone()
+            .ok_or_else(|| CamelError::Config("brokers must be set".into()))?;
+        if brokers.trim().is_empty() {
+            return Err(CamelError::InvalidUri(
+                "brokers must not be empty".to_string(),
+            ));
+        }
+
+        let group_id = cfg
+            .group_id
+            .clone()
+            .ok_or_else(|| CamelError::Config("group_id must be set".into()))?;
+        if group_id.trim().is_empty() {
+            return Err(CamelError::InvalidUri(
+                "group_id must not be empty".to_string(),
+            ));
+        }
+
+        let auto_offset_reset = cfg
+            .auto_offset_reset
+            .clone()
+            .ok_or_else(|| CamelError::Config("auto_offset_reset must be set".into()))?;
+        // Re-validate after resolution (defaults are safe, but be defensive)
+        if !matches!(auto_offset_reset.as_str(), "earliest" | "latest" | "none") {
+            return Err(CamelError::Config(format!(
+                "auto_offset_reset must be 'earliest', 'latest', or 'none', got '{auto_offset_reset}'"
+            )));
+        }
+
+        let session_timeout_ms = cfg
+            .session_timeout_ms
+            .ok_or_else(|| CamelError::Config("session_timeout_ms must be set".into()))?;
+        if !(MIN_SESSION_TIMEOUT_MS..=MAX_SESSION_TIMEOUT_MS).contains(&session_timeout_ms) {
+            return Err(CamelError::Config(format!(
+                "sessionTimeoutMs must be between {MIN_SESSION_TIMEOUT_MS} and {MAX_SESSION_TIMEOUT_MS}, got {session_timeout_ms}"
+            )));
+        }
+
+        let request_timeout_ms = cfg
+            .request_timeout_ms
+            .ok_or_else(|| CamelError::Config("request_timeout_ms must be set".into()))?;
+        if !(MIN_REQUEST_TIMEOUT_MS..=MAX_REQUEST_TIMEOUT_MS).contains(&request_timeout_ms) {
+            return Err(CamelError::Config(format!(
+                "requestTimeoutMs must be between {MIN_REQUEST_TIMEOUT_MS} and {MAX_REQUEST_TIMEOUT_MS}, got {request_timeout_ms}"
+            )));
+        }
+
+        // Re-validate per-endpoint numeric bounds
+        if !(MIN_POLL_TIMEOUT_MS..=MAX_POLL_TIMEOUT_MS).contains(&cfg.poll_timeout_ms) {
+            return Err(CamelError::Config(format!(
+                "pollTimeoutMs must be between {MIN_POLL_TIMEOUT_MS} and {MAX_POLL_TIMEOUT_MS}, got {}",
+                cfg.poll_timeout_ms
+            )));
+        }
+        if !(MIN_MAX_POLL_RECORDS..=MAX_MAX_POLL_RECORDS).contains(&cfg.max_poll_records) {
+            return Err(CamelError::Config(format!(
+                "maxPollRecords must be between {MIN_MAX_POLL_RECORDS} and {MAX_MAX_POLL_RECORDS}, got {}",
+                cfg.max_poll_records
+            )));
+        }
+        if !(MIN_COMMIT_TIMEOUT_MS..=MAX_COMMIT_TIMEOUT_MS).contains(&cfg.commit_timeout_ms) {
+            return Err(CamelError::Config(format!(
+                "commitTimeoutMs must be between {MIN_COMMIT_TIMEOUT_MS} and {MAX_COMMIT_TIMEOUT_MS}, got {}",
+                cfg.commit_timeout_ms
+            )));
+        }
+
+        Ok(ResolvedKafkaEndpointConfig {
+            topic: cfg.topic,
+            brokers,
+            group_id,
+            auto_offset_reset,
+            session_timeout_ms,
+            poll_timeout_ms: cfg.poll_timeout_ms,
+            max_poll_records: cfg.max_poll_records,
+            acks: cfg.acks,
+            request_timeout_ms,
+            security_protocol: cfg.security_protocol.unwrap_or(SecurityProtocol::Plaintext),
+            sasl_auth_type: cfg.sasl_auth_type,
+            sasl_username: cfg.sasl_username,
+            sasl_password: cfg.sasl_password,
+            ssl_keystore_location: cfg.ssl_keystore_location,
+            ssl_keystore_password: cfg.ssl_keystore_password,
+            ssl_truststore_location: cfg.ssl_truststore_location,
+            ssl_truststore_password: cfg.ssl_truststore_password,
+            allow_manual_commit: cfg.allow_manual_commit,
+            partition_assignment_strategy: cfg.partition_assignment_strategy,
+            client_id: cfg.client_id.unwrap_or_else(|| "camel-kafka".to_string()),
+            commit_timeout_ms: cfg.commit_timeout_ms,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ResolvedKafkaEndpointConfig — all fields guaranteed populated
+// ---------------------------------------------------------------------------
+
+/// A fully-resolved Kafka endpoint configuration.
+///
+/// Constructed via [`KafkaEndpointConfig::resolve`], which applies defaults,
+/// validates bounds, and rejects empty required fields.  Producer and consumer
+/// constructors accept **only** this type, eliminating production `expect()` panics.
+#[derive(Clone)]
+pub struct ResolvedKafkaEndpointConfig {
+    pub topic: String,
+    pub brokers: String,
+    pub group_id: String,
+    pub auto_offset_reset: String,
+    pub session_timeout_ms: u32,
+    pub poll_timeout_ms: u32,
+    pub max_poll_records: u32,
+    pub acks: String,
+    pub request_timeout_ms: u32,
+    pub security_protocol: SecurityProtocol,
+    pub sasl_auth_type: SaslAuthType,
+    pub sasl_username: Option<String>,
+    pub sasl_password: Option<String>,
+    pub ssl_keystore_location: Option<String>,
+    pub ssl_keystore_password: Option<String>,
+    pub ssl_truststore_location: Option<String>,
+    pub ssl_truststore_password: Option<String>,
+    pub allow_manual_commit: bool,
+    pub partition_assignment_strategy: PartitionAssignmentStrategy,
+    pub client_id: String,
+    pub commit_timeout_ms: u32,
+}
+
+impl ResolvedKafkaEndpointConfig {
+    /// Build from an unresolved config (applies defaults + validates).
+    pub fn from_unresolved(cfg: KafkaEndpointConfig) -> Result<Self, CamelError> {
+        cfg.resolve()
+    }
+}
+
+impl std::fmt::Debug for ResolvedKafkaEndpointConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedKafkaEndpointConfig")
+            .field("topic", &self.topic)
+            .field("brokers", &self.brokers)
+            .field("group_id", &self.group_id)
+            .field("auto_offset_reset", &self.auto_offset_reset)
+            .field("session_timeout_ms", &self.session_timeout_ms)
+            .field("poll_timeout_ms", &self.poll_timeout_ms)
+            .field("max_poll_records", &self.max_poll_records)
+            .field("acks", &self.acks)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("security_protocol", &self.security_protocol)
+            .field("sasl_auth_type", &self.sasl_auth_type)
+            .field("sasl_username", &self.sasl_username)
+            .field(
+                "sasl_password",
+                &self.sasl_password.as_deref().map(|_| "[REDACTED]"),
+            )
+            .field("ssl_keystore_location", &self.ssl_keystore_location)
+            .field(
+                "ssl_keystore_password",
+                &self.ssl_keystore_password.as_deref().map(|_| "[REDACTED]"),
+            )
+            .field("ssl_truststore_location", &self.ssl_truststore_location)
+            .field(
+                "ssl_truststore_password",
+                &self
+                    .ssl_truststore_password
+                    .as_deref()
+                    .map(|_| "[REDACTED]"),
+            )
+            .field("allow_manual_commit", &self.allow_manual_commit)
+            .field(
+                "partition_assignment_strategy",
+                &self.partition_assignment_strategy,
+            )
+            .field("client_id", &self.client_id)
+            .field("commit_timeout_ms", &self.commit_timeout_ms)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for KafkaEndpointConfig {
@@ -521,6 +774,8 @@ impl std::fmt::Debug for KafkaEndpointConfig {
                 "partition_assignment_strategy",
                 &self.partition_assignment_strategy,
             )
+            .field("client_id", &self.client_id)
+            .field("commit_timeout_ms", &self.commit_timeout_ms)
             .finish()
     }
 }
@@ -547,16 +802,12 @@ impl UriConfig for KafkaEndpointConfig {
     }
 }
 
-/// Apply security-related settings from `KafkaEndpointConfig` to an rdkafka `ClientConfig`.
+/// Apply security-related settings from a resolved config to an rdkafka `ClientConfig`.
 /// Call this after setting the basic fields (brokers, group.id, etc.) and before `.create()`.
-pub fn apply_security_config(config: &KafkaEndpointConfig, cc: &mut ClientConfig) {
-    // security_protocol is guaranteed Some after resolve_defaults()
-    let security_protocol = config
-        .security_protocol
-        .expect("security_protocol must be Some after resolve_defaults()");
+pub fn apply_security_config(config: &ResolvedKafkaEndpointConfig, cc: &mut ClientConfig) {
     cc.set(
         "security.protocol",
-        match security_protocol {
+        match config.security_protocol {
             SecurityProtocol::Plaintext => "PLAINTEXT",
             SecurityProtocol::Ssl => "SSL",
             SecurityProtocol::SaslPlaintext => "SASL_PLAINTEXT",
@@ -844,12 +1095,14 @@ mod security_config_tests {
 
     #[test]
     fn test_apply_sasl_ssl_sets_required_keys() {
-        let mut config = KafkaEndpointConfig::from_uri(
-            "kafka:t?securityProtocol=SASL_SSL&saslAuthType=SCRAM_SHA_512\
+        let config = KafkaEndpointConfig::from_uri(
+            "kafka:t?brokers=localhost:9092&groupId=g\
+             &securityProtocol=SASL_SSL&saslAuthType=SCRAM_SHA_512\
              &saslUsername=user&saslPassword=pass",
         )
+        .unwrap()
+        .resolve()
         .unwrap();
-        config.resolve_defaults();
         let mut cc = ClientConfig::new();
         apply_security_config(&config, &mut cc);
         // Does not panic — rdkafka stores values internally; just verify no crash
@@ -857,20 +1110,24 @@ mod security_config_tests {
 
     #[test]
     fn test_apply_ssl_only_does_not_set_sasl_mechanism() {
-        let mut config = KafkaEndpointConfig::from_uri(
-            "kafka:t?securityProtocol=SSL\
+        let config = KafkaEndpointConfig::from_uri(
+            "kafka:t?brokers=localhost:9092&groupId=g\
+             &securityProtocol=SSL\
              &sslKeystoreLocation=/k&sslKeystorePassword=ks",
         )
+        .unwrap()
+        .resolve()
         .unwrap();
-        config.resolve_defaults();
         let mut cc = ClientConfig::new();
         apply_security_config(&config, &mut cc); // must not panic
     }
 
     #[test]
     fn test_apply_plaintext_is_noop() {
-        let mut config = KafkaEndpointConfig::from_uri("kafka:t").unwrap();
-        config.resolve_defaults();
+        let config = KafkaEndpointConfig::from_uri("kafka:t?brokers=localhost:9092&groupId=g")
+            .unwrap()
+            .resolve()
+            .unwrap();
         let mut cc = ClientConfig::new();
         apply_security_config(&config, &mut cc); // must not panic
     }
@@ -1015,6 +1272,8 @@ mod kafka_config_tests {
             ssl_truststore_password: None,
             allow_manual_commit: false,
             partition_assignment_strategy: PartitionAssignmentStrategy::Range,
+            client_id: None,
+            commit_timeout_ms: DEFAULT_COMMIT_TIMEOUT_MS,
         };
 
         let defaults = KafkaConfig::default()
@@ -1115,5 +1374,165 @@ mod kafka_config_tests {
         assert_eq!(ep.request_timeout_ms, Some(30_000));
         assert_eq!(ep.auto_offset_reset.as_deref(), Some("latest"));
         assert_eq!(ep.security_protocol, Some(SecurityProtocol::Plaintext));
+    }
+
+    // --- KAFKA-005: new URI options ---
+
+    #[test]
+    fn test_client_id_from_uri() {
+        let c = KafkaEndpointConfig::from_uri("kafka:orders?clientId=my-app").unwrap();
+        assert_eq!(c.client_id, Some("my-app".to_string()));
+    }
+
+    #[test]
+    fn test_client_id_default_none() {
+        let c = KafkaEndpointConfig::from_uri("kafka:orders").unwrap();
+        assert!(c.client_id.is_none());
+    }
+
+    #[test]
+    fn test_commit_timeout_ms_from_uri() {
+        let c = KafkaEndpointConfig::from_uri("kafka:orders?commitTimeoutMs=2000").unwrap();
+        assert_eq!(c.commit_timeout_ms, 2000);
+    }
+
+    #[test]
+    fn test_commit_timeout_ms_default() {
+        let c = KafkaEndpointConfig::from_uri("kafka:orders").unwrap();
+        assert_eq!(c.commit_timeout_ms, DEFAULT_COMMIT_TIMEOUT_MS);
+    }
+
+    // --- KAFKA-011: numeric bounds validation ---
+
+    #[test]
+    fn test_zero_session_timeout_ms_rejected() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?sessionTimeoutMs=0");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("sessionTimeoutMs"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_max_session_timeout_ms_rejected() {
+        let result =
+            KafkaEndpointConfig::from_uri(&format!("kafka:orders?sessionTimeoutMs={}", u32::MAX));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("sessionTimeoutMs"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_zero_poll_timeout_ms_rejected() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?pollTimeoutMs=0");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("pollTimeoutMs"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_zero_max_poll_records_rejected() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?maxPollRecords=0");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("maxPollRecords"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_zero_request_timeout_ms_rejected() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?requestTimeoutMs=0");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("requestTimeoutMs"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_zero_commit_timeout_ms_rejected() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?commitTimeoutMs=0");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("commitTimeoutMs"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_valid_numeric_bounds_accepted() {
+        let c = KafkaEndpointConfig::from_uri(
+            "kafka:orders?sessionTimeoutMs=10000&pollTimeoutMs=1000&maxPollRecords=100\
+             &requestTimeoutMs=5000&commitTimeoutMs=1000",
+        )
+        .unwrap();
+        assert_eq!(c.session_timeout_ms, Some(10_000));
+        assert_eq!(c.poll_timeout_ms, 1000);
+        assert_eq!(c.max_poll_records, 100);
+        assert_eq!(c.request_timeout_ms, Some(5000));
+        assert_eq!(c.commit_timeout_ms, 1000);
+    }
+
+    // --- KAFKA-017: empty brokers rejection ---
+
+    #[test]
+    fn test_empty_brokers_in_uri_rejected() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?brokers=");
+        // Empty string is accepted at parse time (it's a valid string),
+        // but resolve() must reject it.
+        let cfg = result.unwrap();
+        let resolved = cfg.resolve();
+        assert!(resolved.is_err());
+        let msg = resolved.unwrap_err().to_string();
+        assert!(msg.contains("brokers"), "got: {msg}");
+    }
+
+    // --- KAFKA-001: resolved config invariant ---
+
+    #[test]
+    fn test_resolve_produces_resolved_config() {
+        let cfg =
+            KafkaEndpointConfig::from_uri("kafka:orders?brokers=localhost:9092&groupId=test-group")
+                .unwrap();
+        let resolved = cfg.resolve().expect("resolve should succeed");
+        assert_eq!(resolved.topic, "orders");
+        assert_eq!(resolved.brokers, "localhost:9092");
+        assert_eq!(resolved.group_id, "test-group");
+        assert_eq!(resolved.client_id, "camel-kafka"); // default
+        assert_eq!(resolved.commit_timeout_ms, DEFAULT_COMMIT_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn test_resolve_with_custom_client_id() {
+        let cfg = KafkaEndpointConfig::from_uri(
+            "kafka:orders?brokers=localhost:9092&groupId=test-group&clientId=my-app",
+        )
+        .unwrap();
+        let resolved = cfg.resolve().expect("resolve should succeed");
+        assert_eq!(resolved.client_id, "my-app");
+    }
+
+    #[test]
+    fn test_resolve_empty_group_id_rejected() {
+        let cfg =
+            KafkaEndpointConfig::from_uri("kafka:orders?brokers=localhost:9092&groupId=").unwrap();
+        let resolved = cfg.resolve();
+        assert!(resolved.is_err());
+        let msg = resolved.unwrap_err().to_string();
+        assert!(msg.contains("group_id"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_resolved_config_debug_masks_passwords() {
+        let cfg = KafkaEndpointConfig::from_uri(
+            "kafka:orders?brokers=localhost:9092&groupId=test-group\
+             &securityProtocol=SASL_SSL&saslAuthType=PLAIN\
+             &saslUsername=user&saslPassword=secret123",
+        )
+        .unwrap();
+        let resolved = cfg.resolve().unwrap();
+        let debug_str = format!("{resolved:?}");
+        assert!(
+            !debug_str.contains("secret123"),
+            "password leaked: {debug_str}"
+        );
+        assert!(
+            debug_str.contains("[REDACTED]"),
+            "no redaction: {debug_str}"
+        );
     }
 }

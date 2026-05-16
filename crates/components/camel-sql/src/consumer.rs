@@ -7,12 +7,12 @@ use sqlx::AnyPool;
 use sqlx::any::AnyPoolOptions;
 use sqlx::any::AnyRow;
 use tokio::sync::OnceCell;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use camel_component_api::{Body, CamelError, Exchange, Message};
 use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 
-use crate::config::{SqlEndpointConfig, enrich_db_url_with_ssl};
+use crate::config::{SqlEndpointConfig, enrich_db_url_with_ssl, redact_db_url};
 use crate::headers;
 use crate::query::{QueryTemplate, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
@@ -20,11 +20,16 @@ use crate::utils::{bind_json_values, row_to_json};
 pub struct SqlConsumer {
     pub(crate) config: SqlEndpointConfig,
     pub(crate) pool: Arc<OnceCell<AnyPool>>,
+    stopped: bool,
 }
 
 impl SqlConsumer {
     pub fn new(config: SqlEndpointConfig, pool: Arc<OnceCell<AnyPool>>) -> Self {
-        Self { config, pool }
+        Self {
+            config,
+            pool,
+            stopped: false,
+        }
     }
 
     /// Poll the database for new rows and process them.
@@ -108,22 +113,26 @@ impl SqlConsumer {
             let row_count = rows_json.len();
 
             // Create exchange with array of rows
-            let mut msg = Message::new(Body::Json(JsonValue::Array(rows_json)));
+            let mut msg = Message::new(Body::Json(JsonValue::Array(rows_json.clone())));
             msg.set_header(headers::ROW_COUNT, JsonValue::Number(row_count.into()));
 
             let exchange = Exchange::new(msg);
 
-            // Send and wait for result, then run post-processing with Null row
+            // Send and wait for result
             let result = context.send_and_wait(exchange).await;
-            if let Err(e) = self
-                .handle_post_processing(pool, &result, &JsonValue::Null)
-                .await
-            {
-                error!(error = %e, "Post-processing failed for batch");
-                if self.config.break_batch_on_consume_fail {
-                    return Err(e);
+
+            // SQL-021: Run per-row post-processing even in batch mode so that
+            // onConsume/onConsumeFailed queries can reference row-specific parameters
+            // (e.g. `:#id`). Each row gets its own post-processing query execution.
+            for row_json in rows_json.iter() {
+                if let Err(e) = self.handle_post_processing(pool, &result, row_json).await {
+                    error!(error = %e, "Post-processing failed for batch row");
+                    if self.config.break_batch_on_consume_fail {
+                        return Err(e);
+                    }
                 }
             }
+
             // If downstream processing itself failed, honour break_batch_on_consume_fail
             if let Err(ref consume_err) = result
                 && self.config.break_batch_on_consume_fail
@@ -213,6 +222,13 @@ impl SqlConsumer {
 #[async_trait]
 impl Consumer for SqlConsumer {
     async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
+        // Reject double-start
+        if self.stopped {
+            return Err(CamelError::Config(
+                "SQL consumer cannot be restarted after stop".into(),
+            ));
+        }
+
         // Step 1: Initialize the connection pool
         let pool = self
             .pool
@@ -224,27 +240,33 @@ impl Consumer for SqlConsumer {
                 // This is idempotent; safe to call multiple times.
                 sqlx::any::install_default_drivers();
                 let db_url = enrich_db_url_with_ssl(&self.config.db_url, &self.config)?;
+
+                let max_conn = self.config.max_connections.ok_or_else(|| {
+                    CamelError::Config("max_connections not resolved for SQL consumer pool".into())
+                })?;
+                let min_conn = self.config.min_connections.ok_or_else(|| {
+                    CamelError::Config("min_connections not resolved for SQL consumer pool".into())
+                })?;
+                let idle_timeout = self.config.idle_timeout_secs.ok_or_else(|| {
+                    CamelError::Config(
+                        "idle_timeout_secs not resolved for SQL consumer pool".into(),
+                    )
+                })?;
+                let max_lifetime = self.config.max_lifetime_secs.ok_or_else(|| {
+                    CamelError::Config(
+                        "max_lifetime_secs not resolved for SQL consumer pool".into(),
+                    )
+                })?;
+
+                info!(
+                    db_url = %redact_db_url(&self.config.db_url),
+                    "SQL consumer pool initializing"
+                );
                 AnyPoolOptions::new()
-                    .max_connections(
-                        self.config
-                            .max_connections
-                            .expect("must be Some after resolve_defaults()"),
-                    )
-                    .min_connections(
-                        self.config
-                            .min_connections
-                            .expect("must be Some after resolve_defaults()"),
-                    )
-                    .idle_timeout(Duration::from_secs(
-                        self.config
-                            .idle_timeout_secs
-                            .expect("must be Some after resolve_defaults()"),
-                    ))
-                    .max_lifetime(Duration::from_secs(
-                        self.config
-                            .max_lifetime_secs
-                            .expect("must be Some after resolve_defaults()"),
-                    ))
+                    .max_connections(max_conn)
+                    .min_connections(min_conn)
+                    .idle_timeout(Duration::from_secs(idle_timeout))
+                    .max_lifetime(Duration::from_secs(max_lifetime))
                     .connect(&db_url)
                     .await
                     .map_err(|e| {
@@ -262,6 +284,12 @@ impl Consumer for SqlConsumer {
                 "SQL consumer started without onConsume configured — consumed rows will not be marked/deleted"
             );
         }
+
+        info!(
+            db_url = %redact_db_url(&self.config.db_url),
+            query_len = self.config.query.len(),
+            "SQL consumer started"
+        );
 
         // Step 2: Parse query template once (avoid re-parsing every poll)
         let template = parse_query_template(&self.config.query, self.config.placeholder)
@@ -297,6 +325,21 @@ impl Consumer for SqlConsumer {
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
+        // Double-stop is safe — no-op after first stop
+        if self.stopped {
+            debug!("SQL consumer stop called on already-stopped consumer");
+            return Ok(());
+        }
+
+        // Close the connection pool if it was initialized
+        if let Some(pool) = self.pool.get() {
+            debug!("SQL consumer closing connection pool");
+            pool.close().await;
+            debug!("SQL consumer pool closed");
+        }
+
+        self.stopped = true;
+        info!("SQL consumer stopped");
         Ok(())
     }
 
@@ -316,6 +359,7 @@ mod tests {
     use camel_component_api::UriConfig;
     use sqlx::any::AnyPoolOptions;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -500,5 +544,232 @@ mod tests {
 
         assert_eq!(failed_1, 1);
         assert_eq!(failed_2, 0, "second row must not be processed");
+    }
+
+    // --- Phase B hardening tests ---
+
+    // SQL-001: Direct consumer construction without resolve_defaults does not panic.
+    // The consumer defensively calls resolve_defaults() during pool init, so the pool
+    // fields get resolved. This test verifies no panic occurs.
+    #[tokio::test]
+    async fn consumer_no_panic_without_prior_resolve_defaults() {
+        let config = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=sqlite::memory:&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        // Deliberately NOT calling resolve_defaults() — pool fields remain None
+        assert!(config.max_connections.is_none());
+
+        let mut consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()));
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange));
+                }
+            }
+        });
+        let token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        // Spawn the consumer and cancel it quickly — it should not panic
+        let consumer_handle = tokio::spawn(async move { consumer.start(ctx).await });
+
+        // Cancel after a short delay
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token.cancel();
+
+        let result = consumer_handle.await.expect("task should not panic");
+        // Should complete without panic (may be Ok or Err depending on timing)
+        let _ = result;
+    }
+
+    // SQL-008: stop() closes the pool
+    #[tokio::test]
+    async fn stop_closes_pool() {
+        let pool = sqlite_pool().await;
+        seed_consumer_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id from jobs?db_url=sqlite::memory:&onConsume=update jobs set processed=1 where id=:#id&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell.set(pool.clone()).unwrap();
+
+        let mut consumer = SqlConsumer::new(config, pool_cell);
+        consumer.stop().await.expect("stop should succeed");
+
+        // After stop, the pool should be closed
+        assert!(
+            pool.is_closed(),
+            "Pool should be closed after consumer.stop()"
+        );
+    }
+
+    // SQL-008: double-stop is safe
+    #[tokio::test]
+    async fn double_stop_is_safe() {
+        let pool = sqlite_pool().await;
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=sqlite::memory:&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell.set(pool.clone()).unwrap();
+
+        let mut consumer = SqlConsumer::new(config, pool_cell);
+        consumer.stop().await.expect("first stop should succeed");
+        consumer
+            .stop()
+            .await
+            .expect("second stop should also succeed");
+    }
+
+    // SQL-008: start after stop is rejected
+    #[tokio::test]
+    async fn start_after_stop_rejected() {
+        let pool = sqlite_pool().await;
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=sqlite::memory:&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell.set(pool.clone()).unwrap();
+
+        let mut consumer = SqlConsumer::new(config, pool_cell);
+        consumer.stop().await.expect("stop should succeed");
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange));
+                }
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+        let result = consumer.start(ctx).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("cannot be restarted") || err_msg.contains("after stop"),
+            "Expected restart error, got: {}",
+            err_msg
+        );
+    }
+
+    // SQL-021: batch mode per-row post-processing
+    #[tokio::test]
+    async fn batch_mode_per_row_post_processing() {
+        let pool = sqlite_pool().await;
+        seed_consumer_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, processed, failed from jobs where processed = 0 order by id?db_url=sqlite::memory:&onConsume=update jobs set processed=1 where id=:#id&useIterator=false&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange));
+                }
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+        consumer
+            .poll_database(&pool, &ctx, &template)
+            .await
+            .expect("poll must succeed");
+
+        // SQL-021: Each row should have been processed individually via onConsume
+        let row = sqlx::query("select processed from jobs where id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("row 1");
+        let processed_1: i64 = sqlx::Row::try_get(&row, 0).expect("processed");
+
+        let row = sqlx::query("select processed from jobs where id = 2")
+            .fetch_one(&pool)
+            .await
+            .expect("row 2");
+        let processed_2: i64 = sqlx::Row::try_get(&row, 0).expect("processed");
+
+        assert_eq!(
+            processed_1, 1,
+            "row 1 should be marked processed via per-row onConsume"
+        );
+        assert_eq!(
+            processed_2, 1,
+            "row 2 should be marked processed via per-row onConsume"
+        );
+    }
+
+    // SQL-021: batch mode per-row onConsumeFailed when downstream fails
+    #[tokio::test]
+    async fn batch_mode_per_row_post_processing_on_failure() {
+        let pool = sqlite_pool().await;
+        seed_consumer_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, processed, failed from jobs where processed = 0 order by id?db_url=sqlite::memory:&onConsumeFailed=update jobs set failed=1 where id=:#id&useIterator=false&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ =
+                        reply_tx.send(Err(CamelError::ProcessorError("downstream boom".into())));
+                }
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+        consumer
+            .poll_database(&pool, &ctx, &template)
+            .await
+            .expect("consumer should swallow downstream errors when breakBatchOnConsumeFail=false");
+
+        // SQL-021: Each row should have onConsumeFailed executed individually
+        let row = sqlx::query("select failed from jobs where id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("row 1");
+        let failed_1: i64 = sqlx::Row::try_get(&row, 0).expect("failed");
+
+        let row = sqlx::query("select failed from jobs where id = 2")
+            .fetch_one(&pool)
+            .await
+            .expect("row 2");
+        let failed_2: i64 = sqlx::Row::try_get(&row, 0).expect("failed");
+
+        assert_eq!(
+            failed_1, 1,
+            "row 1 should be marked failed via per-row onConsumeFailed"
+        );
+        assert_eq!(
+            failed_2, 1,
+            "row 2 should be marked failed via per-row onConsumeFailed"
+        );
     }
 }

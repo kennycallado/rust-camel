@@ -6,9 +6,9 @@ use redis::Msg;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::config::{RedisCommand, RedisEndpointConfig};
+use crate::config::{RedisCommand, RedisEndpointConfig, backoff_delay, is_transient_redis_error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueuePopCommand {
@@ -61,7 +61,10 @@ impl RedisConsumer {
     /// - SUBSCRIBE → PubSub with channels
     /// - PSUBSCRIBE → PubSub with patterns
     /// - BLPOP/BRPOP → Queue mode
-    pub fn new(config: RedisEndpointConfig) -> Self {
+    ///
+    /// Returns an error for commands that are not valid consumer commands
+    /// (REDIS-003: no silent fallback to BLPOP).
+    pub fn new(config: RedisEndpointConfig) -> Result<Self, CamelError> {
         let mode = match &config.command {
             RedisCommand::Subscribe => RedisConsumerMode::PubSub {
                 channels: config.channels.clone(),
@@ -84,31 +87,49 @@ impl RedisConsumer {
                     pop_command,
                 }
             }
-            _ => {
-                warn!(
-                    "Invalid consumer command: {:?}, defaulting to BLPOP",
-                    config.command
-                );
-                RedisConsumerMode::Queue {
-                    key: config.key.clone().unwrap_or_else(|| "queue".to_string()),
-                    timeout: config.timeout,
-                    pop_command: QueuePopCommand::Blpop,
-                }
+            other => {
+                // REDIS-003: Return error instead of silent fallback
+                return Err(CamelError::InvalidUri(format!(
+                    "Invalid consumer command: {:?}. Only SUBSCRIBE, PSUBSCRIBE, BLPOP, and BRPOP are valid consumer commands.",
+                    other
+                )));
             }
         };
 
-        Self {
+        Ok(Self {
             config,
             mode,
             cancel_token: None,
             task_handle: None,
-        }
+        })
     }
 }
 
 #[async_trait]
 impl Consumer for RedisConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        // REDIS-016: Clean up any stale state from a previous stop before restarting
+        if self.task_handle.is_some() {
+            warn!("Consumer start called while task handle is still present; cleaning up first");
+            // Cancel any existing token
+            if let Some(token) = &self.cancel_token {
+                token.cancel();
+            }
+            if let Some(handle) = self.task_handle.take() {
+                match handle.await {
+                    Ok(result) => {
+                        if let Err(e) = result {
+                            warn!("Previous consumer task exited with error during cleanup: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to join previous consumer task during cleanup: {}", e);
+                    }
+                }
+            }
+            self.cancel_token = None;
+        }
+
         // Create cancellation token for this consumer
         let cancel_token = CancellationToken::new();
         self.cancel_token = Some(cancel_token.clone());
@@ -117,7 +138,11 @@ impl Consumer for RedisConsumer {
         let config = self.config.clone();
         let mode = self.mode.clone();
 
-        info!("Starting Redis consumer in {:?} mode", mode);
+        info!(
+            endpoint = %config.safe_endpoint(),
+            mode = ?mode,
+            "Starting Redis consumer"
+        );
 
         // Spawn the appropriate consumer loop based on mode
         let handle =
@@ -151,7 +176,7 @@ impl Consumer for RedisConsumer {
             token.cancel();
         }
 
-        // Wait for the task to complete
+        // Wait for the task to complete (safe to call multiple times — take() returns None on second call)
         if let Some(handle) = self.task_handle.take() {
             match handle.await {
                 Ok(result) => {
@@ -197,7 +222,7 @@ async fn run_pubsub_consumer(
     ctx: ConsumerContext,
     cancel_token: CancellationToken,
 ) -> Result<(), CamelError> {
-    info!("PubSub consumer connecting to {}", config.redis_url_safe());
+    info!(endpoint = %config.safe_endpoint(), "PubSub consumer connecting");
 
     // Create dedicated PubSub connection
     let client = redis::Client::open(config.redis_url())
@@ -209,7 +234,7 @@ async fn run_pubsub_consumer(
 
     // Subscribe to channels
     for channel in &channels {
-        info!("Subscribing to channel: {}", channel);
+        debug!(channel = %channel, "Subscribing to channel");
         pubsub.subscribe(channel).await.map_err(|e| {
             CamelError::ProcessorError(format!("Failed to subscribe to channel {}: {}", channel, e))
         })?;
@@ -217,7 +242,7 @@ async fn run_pubsub_consumer(
 
     // Subscribe to patterns
     for pattern in &patterns {
-        info!("Subscribing to pattern: {}", pattern);
+        debug!(pattern = %pattern, "Subscribing to pattern");
         pubsub.psubscribe(pattern).await.map_err(|e| {
             CamelError::ProcessorError(format!("Failed to subscribe to pattern {}: {}", pattern, e))
         })?;
@@ -265,11 +290,11 @@ async fn run_queue_consumer(
     cancel_token: CancellationToken,
 ) -> Result<(), CamelError> {
     info!(
-        "Queue consumer connecting to {} for key '{}' with {} timeout {}s",
-        config.redis_url_safe(),
-        key,
-        queue_command_name(pop_command),
-        timeout
+        endpoint = %config.safe_endpoint(),
+        key = %key,
+        command = %queue_command_name(pop_command),
+        timeout_s = timeout,
+        "Queue consumer connecting"
     );
 
     // Create dedicated multiplexed connection
@@ -283,8 +308,12 @@ async fn run_queue_consumer(
 
     info!("Queue consumer started, waiting for items");
 
-    // Blocking pop loop (BLPOP/BRPOP)
+    // Blocking pop loop (BLPOP/BRPOP) with capped exponential backoff on errors (REDIS-004)
     let queue_cmd = queue_command_name(pop_command);
+    let mut error_count: u32 = 0;
+    const MAX_RETRIES: u32 = 10;
+    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -301,6 +330,8 @@ async fn run_queue_consumer(
             {
                 match result {
                     Ok(Some((key, value))) => {
+                        // Reset error counter on success
+                        error_count = 0;
                         let exchange = build_exchange_from_blpop(key, value);
                         if let Err(e) = ctx.send(exchange).await {
                             error!("Failed to send exchange to pipeline: {}", e);
@@ -314,8 +345,32 @@ async fn run_queue_consumer(
                     Err(e) => {
                         if e.is_timeout() {
                             // Timeout - continue loop silently
+                            error_count = 0;
+                        } else if is_transient_redis_error(&CamelError::ProcessorError(e.to_string())) {
+                            error_count += 1;
+                            if error_count > MAX_RETRIES {
+                                error!(
+                                    command = %queue_cmd,
+                                    retries = error_count,
+                                    "Max retries exceeded for transient error, terminating"
+                                );
+                                return Err(CamelError::ProcessorError(format!(
+                                    "{} failed after {} retries: {}",
+                                    queue_cmd, MAX_RETRIES, e
+                                )));
+                            }
+                            let delay = backoff_delay(error_count - 1, 100, MAX_BACKOFF);
+                            warn!(
+                                command = %queue_cmd,
+                                error = %e,
+                                retry = error_count,
+                                delay_ms = delay.as_millis(),
+                                "Transient error, retrying with backoff"
+                            );
+                            tokio::time::sleep(delay).await;
                         } else {
-                            error!("{} error: {}", queue_cmd, e);
+                            // Non-transient error — log and continue with small delay
+                            error!(command = %queue_cmd, error = %e, "Non-transient error");
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
@@ -391,13 +446,14 @@ mod tests {
             timeout: 1,
             password: None,
             db: 0,
+            ssl: false,
         }
     }
 
     #[test]
     fn test_consumer_new_subscribe() {
         let config = create_test_config(RedisCommand::Subscribe);
-        let consumer = RedisConsumer::new(config);
+        let consumer = RedisConsumer::new(config).expect("Subscribe should be valid");
 
         match consumer.mode {
             RedisConsumerMode::PubSub { channels, patterns } => {
@@ -411,7 +467,7 @@ mod tests {
     #[test]
     fn test_consumer_new_psubscribe() {
         let config = create_test_config(RedisCommand::Psubscribe);
-        let consumer = RedisConsumer::new(config);
+        let consumer = RedisConsumer::new(config).expect("Psubscribe should be valid");
 
         match consumer.mode {
             RedisConsumerMode::PubSub { channels, patterns } => {
@@ -425,7 +481,7 @@ mod tests {
     #[test]
     fn test_consumer_new_blpop() {
         let config = create_test_config(RedisCommand::Blpop);
-        let consumer = RedisConsumer::new(config);
+        let consumer = RedisConsumer::new(config).expect("Blpop should be valid");
 
         match consumer.mode {
             RedisConsumerMode::Queue {
@@ -444,7 +500,7 @@ mod tests {
     #[test]
     fn test_consumer_new_brpop_uses_right_pop_command() {
         let config = create_test_config(RedisCommand::Brpop);
-        let consumer = RedisConsumer::new(config);
+        let consumer = RedisConsumer::new(config).expect("Brpop should be valid");
 
         match consumer.mode {
             RedisConsumerMode::Queue { pop_command, .. } => {
@@ -458,7 +514,7 @@ mod tests {
     fn test_consumer_new_blpop_default_key() {
         let mut config = create_test_config(RedisCommand::Blpop);
         config.key = None;
-        let consumer = RedisConsumer::new(config);
+        let consumer = RedisConsumer::new(config).expect("Blpop should be valid");
 
         match consumer.mode {
             RedisConsumerMode::Queue {
@@ -471,23 +527,30 @@ mod tests {
         }
     }
 
+    // REDIS-003: Invalid consumer command now returns error instead of silent fallback
     #[test]
-    fn test_consumer_new_non_consumer_command_defaults_to_queue_mode() {
+    fn test_consumer_new_invalid_command_returns_error() {
         let config = create_test_config(RedisCommand::Set);
-        let consumer = RedisConsumer::new(config);
+        let result = RedisConsumer::new(config);
+        assert!(
+            result.is_err(),
+            "SET should not be a valid consumer command"
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for invalid consumer command"),
+        };
+        assert!(err.to_string().contains("Invalid consumer command"));
+    }
 
-        match consumer.mode {
-            RedisConsumerMode::Queue {
-                key,
-                timeout,
-                pop_command,
-            } => {
-                assert_eq!(key, "test-queue");
-                assert_eq!(timeout, 1);
-                assert_eq!(pop_command, QueuePopCommand::Blpop);
-            }
-            _ => panic!("Expected Queue mode"),
-        }
+    #[test]
+    fn test_consumer_new_get_command_returns_error() {
+        let config = create_test_config(RedisCommand::Get);
+        let result = RedisConsumer::new(config);
+        assert!(
+            result.is_err(),
+            "GET should not be a valid consumer command"
+        );
     }
 
     #[test]
@@ -499,7 +562,7 @@ mod tests {
     #[test]
     fn test_consumer_concurrency_model_is_sequential() {
         let config = create_test_config(RedisCommand::Subscribe);
-        let consumer = RedisConsumer::new(config);
+        let consumer = RedisConsumer::new(config).expect("Subscribe should be valid");
         assert_eq!(consumer.concurrency_model(), ConcurrencyModel::Sequential);
     }
 
@@ -576,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_stop_without_start() {
         let config = create_test_config(RedisCommand::Subscribe);
-        let mut consumer = RedisConsumer::new(config);
+        let mut consumer = RedisConsumer::new(config).expect("Subscribe should be valid");
 
         // Stop without start should succeed gracefully
         let result = consumer.stop().await;
@@ -586,7 +649,7 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_start_sets_task_handle() {
         let config = create_test_config(RedisCommand::Blpop);
-        let mut consumer = RedisConsumer::new(config);
+        let mut consumer = RedisConsumer::new(config).expect("Blpop should be valid");
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
@@ -604,7 +667,7 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_start_pubsub_mode() {
         let config = create_test_config(RedisCommand::Subscribe);
-        let mut consumer = RedisConsumer::new(config);
+        let mut consumer = RedisConsumer::new(config).expect("Subscribe should be valid");
 
         let (tx, _rx) = mpsc::channel(16);
         let cancel_token = CancellationToken::new();
@@ -622,7 +685,7 @@ mod tests {
     fn test_consumer_new_blpop_with_default_key_when_none() {
         let mut config = create_test_config(RedisCommand::Blpop);
         config.key = None;
-        let consumer = RedisConsumer::new(config);
+        let consumer = RedisConsumer::new(config).expect("Blpop should be valid");
 
         match &consumer.mode {
             RedisConsumerMode::Queue { key, .. } => {
@@ -636,7 +699,7 @@ mod tests {
     fn test_consumer_new_brpop_with_default_key_when_none() {
         let mut config = create_test_config(RedisCommand::Brpop);
         config.key = None;
-        let consumer = RedisConsumer::new(config);
+        let consumer = RedisConsumer::new(config).expect("Brpop should be valid");
 
         match &consumer.mode {
             RedisConsumerMode::Queue {
@@ -646,26 +709,6 @@ mod tests {
                 assert_eq!(*pop_command, QueuePopCommand::Brpop);
             }
             _ => panic!("Expected Queue mode"),
-        }
-    }
-
-    #[test]
-    fn test_consumer_new_invalid_command_defaults_to_blpop() {
-        let mut config = create_test_config(RedisCommand::Get);
-        config.key = None;
-        let consumer = RedisConsumer::new(config);
-
-        match consumer.mode {
-            RedisConsumerMode::Queue {
-                key,
-                pop_command,
-                timeout,
-            } => {
-                assert_eq!(key, "queue");
-                assert_eq!(pop_command, QueuePopCommand::Blpop);
-                assert_eq!(timeout, 1);
-            }
-            _ => panic!("Expected Queue mode for invalid consumer command"),
         }
     }
 
@@ -690,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn test_consumer_stops_gracefully() {
         let config = create_test_config(RedisCommand::Blpop);
-        let mut consumer = RedisConsumer::new(config);
+        let mut consumer = RedisConsumer::new(config).expect("Blpop should be valid");
 
         // Create a mock context (won't actually be used in this test)
         let (tx, _rx) = mpsc::channel(16);
@@ -707,5 +750,52 @@ mod tests {
         // Stop should succeed
         let stop_result = consumer.stop().await;
         assert!(stop_result.is_ok());
+    }
+
+    // REDIS-016: start/stop/start lifecycle test
+    #[tokio::test]
+    async fn test_consumer_start_stop_start_lifecycle() {
+        let config = create_test_config(RedisCommand::Blpop);
+        let mut consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+
+        let (tx, _rx) = mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+
+        // First start
+        assert!(consumer.start(ctx).await.is_ok());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Stop
+        assert!(consumer.stop().await.is_ok());
+
+        // Start again after stop — should succeed (clean restart)
+        let (tx2, _rx2) = mpsc::channel(16);
+        let cancel_token2 = CancellationToken::new();
+        let ctx2 = ConsumerContext::new(tx2, cancel_token2.clone());
+        assert!(consumer.start(ctx2).await.is_ok());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Final cleanup
+        assert!(consumer.stop().await.is_ok());
+    }
+
+    // REDIS-016: double-stop is safe
+    #[tokio::test]
+    async fn test_consumer_double_stop_is_safe() {
+        let config = create_test_config(RedisCommand::Blpop);
+        let mut consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+
+        let (tx, _rx) = mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+
+        assert!(consumer.start(ctx).await.is_ok());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // First stop
+        assert!(consumer.stop().await.is_ok());
+        // Second stop — should be safe (no panic, no error)
+        assert!(consumer.stop().await.is_ok());
     }
 }

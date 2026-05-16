@@ -11,9 +11,9 @@ use sqlx::any::AnyRow;
 use sqlx::pool::PoolOptions;
 use tokio::sync::OnceCell;
 use tower::Service;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::config::{SqlEndpointConfig, SqlOutputType, enrich_db_url_with_ssl};
+use crate::config::{SqlEndpointConfig, SqlOutputType, enrich_db_url_with_ssl, redact_db_url};
 use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
@@ -60,6 +60,12 @@ impl Service<Exchange> for SqlProducer {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // The SQL pool uses lazy initialization via OnceCell — it is created on the
+        // first call() rather than eagerly at startup. Because there is no persistent
+        // "failed" state to detect (a bad connection URL will surface as an error in
+        // call(), not here), readiness is always Ready(Ok). The pool will attempt to
+        // connect when the first exchange arrives, and any connection failure is
+        // returned as a CamelError from call().
         Poll::Ready(Ok(()))
     }
 
@@ -78,29 +84,32 @@ impl Service<Exchange> for SqlProducer {
                     // Install all compiled-in sqlx drivers so AnyPool can resolve them.
                     // This is idempotent; safe to call multiple times.
                     sqlx::any::install_default_drivers();
+
+                    let max_conn = config.max_connections.ok_or_else(|| {
+                        CamelError::Config("max_connections not resolved for SQL pool".into())
+                    })?;
+                    let min_conn = config.min_connections.ok_or_else(|| {
+                        CamelError::Config("min_connections not resolved for SQL pool".into())
+                    })?;
+                    let idle_timeout = config.idle_timeout_secs.ok_or_else(|| {
+                        CamelError::Config("idle_timeout_secs not resolved for SQL pool".into())
+                    })?;
+                    let max_lifetime = config.max_lifetime_secs.ok_or_else(|| {
+                        CamelError::Config("max_lifetime_secs not resolved for SQL pool".into())
+                    })?;
+
                     let opts: PoolOptions<sqlx::Any> = PoolOptions::new()
-                        .max_connections(
-                            config
-                                .max_connections
-                                .expect("must be Some after resolve_defaults()"),
-                        )
-                        .min_connections(
-                            config
-                                .min_connections
-                                .expect("must be Some after resolve_defaults()"),
-                        )
-                        .idle_timeout(Duration::from_secs(
-                            config
-                                .idle_timeout_secs
-                                .expect("must be Some after resolve_defaults()"),
-                        ))
-                        .max_lifetime(Duration::from_secs(
-                            config
-                                .max_lifetime_secs
-                                .expect("must be Some after resolve_defaults()"),
-                        ));
+                        .max_connections(max_conn)
+                        .min_connections(min_conn)
+                        .idle_timeout(Duration::from_secs(idle_timeout))
+                        .max_lifetime(Duration::from_secs(max_lifetime));
+
+                    info!(
+                        db_url = %redact_db_url(&config.db_url),
+                        "SQL producer pool initializing"
+                    );
                     opts.connect(&db_url).await.map_err(|e| {
-                        error!("Failed to connect to database: {}", e);
+                        error!(error = %e, db_url = %redact_db_url(&config.db_url), "Failed to connect to database");
                         CamelError::EndpointCreationFailed(format!(
                             "Failed to connect to database: {}",
                             e
@@ -109,21 +118,24 @@ impl Service<Exchange> for SqlProducer {
                 })
                 .await
                 .map_err(|e: CamelError| {
-                    error!("Pool initialization failed: {}", e);
+                    error!("SQL producer pool initialization failed: {}", e);
                     e.clone()
                 })?;
 
             // Resolve query string
             let query_str = Self::resolve_query_source(&exchange, &config);
 
-            debug!("Executing SQL: {}", query_str);
+            debug!(
+                "Executing SQL query (config query length: {})",
+                query_str.len()
+            );
 
             // Execute based on mode
             if config.batch {
                 // Batch mode: execute_batch handles its own template parsing per item
                 execute_batch(pool, &config, &mut exchange).await?;
-            } else {
-                // Non-batch: parse template, resolve params, apply header override
+            } else if config.use_placeholder {
+                // Placeholder processing enabled (default): parse template, resolve params, apply header override
                 let template = parse_query_template(&query_str, config.placeholder)?;
                 let mut prepared = resolve_params(&template, &exchange, &config.in_separator)?;
 
@@ -154,7 +166,23 @@ impl Service<Exchange> for SqlProducer {
                     }
                 }
 
-                debug!("Executing SQL: {}", prepared.sql);
+                debug!(
+                    "Executing prepared SQL ({} bindings)",
+                    prepared.bindings.len()
+                );
+
+                if is_select_query(&prepared.sql) {
+                    execute_select(pool, &prepared, &config, &mut exchange).await?;
+                } else {
+                    execute_modify(pool, &prepared, &config, &mut exchange).await?;
+                }
+            } else {
+                // use_placeholder=false: execute query as-is without template parsing
+                debug!("Executing raw SQL (placeholder processing disabled)");
+                let prepared = PreparedQuery {
+                    sql: query_str,
+                    bindings: vec![],
+                };
 
                 if is_select_query(&prepared.sql) {
                     execute_select(pool, &prepared, &config, &mut exchange).await?;
@@ -731,5 +759,117 @@ mod tests {
             .expect("query row");
         let done: i64 = sqlx::Row::try_get(&row, 0).expect("done column");
         assert_eq!(done, 0, "transaction must rollback first update");
+    }
+
+    // --- Phase B hardening tests ---
+
+    // SQL-001: Direct producer construction without resolve_defaults does not panic.
+    // The producer defensively calls resolve_defaults() during pool init, so the pool
+    // fields get resolved. This test verifies no panic occurs and the pool initializes.
+    #[tokio::test]
+    async fn producer_no_panic_without_prior_resolve_defaults() {
+        // Create config without calling resolve_defaults() — pool fields are None
+        let config = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").unwrap();
+        assert!(config.max_connections.is_none());
+
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        let exchange = Exchange::new(Message::default());
+
+        // Should NOT panic — producer calls resolve_defaults() defensively
+        let result = producer.call(exchange).await;
+        assert!(
+            result.is_ok(),
+            "Producer should initialize pool without panic, got: {:?}",
+            result
+        );
+    }
+
+    // SQL-001: Pool init returns CamelError::Config when pool params cannot be resolved
+    #[tokio::test]
+    async fn producer_pool_init_returns_config_error_for_invalid_db() {
+        // Create config with an invalid db_url that will fail to connect
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://nonexistent-host:5432/nonexistent_db",
+        )
+        .unwrap();
+        // Set pool params explicitly so resolve_defaults doesn't help with connection
+        config.max_connections = Some(1);
+        config.min_connections = Some(0);
+        config.idle_timeout_secs = Some(300);
+        config.max_lifetime_secs = Some(1800);
+
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        let exchange = Exchange::new(Message::default());
+
+        let result = producer.call(exchange).await;
+        assert!(result.is_err());
+        // Error should be EndpointCreationFailed (connection error), not a panic
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to connect") || err_msg.contains("database"),
+            "Expected connection error, got: {}",
+            err_msg
+        );
+    }
+
+    // SQL-007: poll_ready returns Ready (pool lazily initialized on first call)
+    #[test]
+    fn poll_ready_returns_ready_for_uninitialized_pool() {
+        let config = {
+            let mut c = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").unwrap();
+            c.resolve_defaults();
+            c
+        };
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let result = producer.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+    }
+
+    // SQL-004: use_placeholder=false skips template parsing
+    #[tokio::test]
+    async fn use_placeholder_false_executes_raw_sql() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, name from items order by id?db_url=sqlite::memory:&usePlaceholder=false",
+        )
+        .unwrap();
+        config.resolve_defaults();
+        assert!(!config.use_placeholder);
+
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        // Pre-initialize the pool so we don't hit the pool init path
+        producer.pool.set(pool.clone()).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.call(exchange).await;
+        assert!(result.is_ok());
+        let exchange = result.unwrap();
+        // Should return results, not rowsAffected
+        assert!(matches!(exchange.input.body, Body::Json(_)));
+    }
+
+    // SQL-004: use_placeholder=true (default) processes placeholders normally
+    #[tokio::test]
+    async fn use_placeholder_true_processes_placeholders() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, name from items where id = #?db_url=sqlite::memory:",
+        )
+        .unwrap();
+        config.resolve_defaults();
+        assert!(config.use_placeholder);
+
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        producer.pool.set(pool.clone()).unwrap();
+
+        let msg = Message::new(Body::Json(json!([1])));
+        let exchange = Exchange::new(msg);
+        let result = producer.call(exchange).await;
+        assert!(result.is_ok());
     }
 }

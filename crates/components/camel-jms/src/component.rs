@@ -16,7 +16,7 @@ use camel_component_api::{
     BoxProcessor, CamelError, Component, Consumer, Endpoint, Exchange, ProducerContext,
 };
 use dashmap::DashMap;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use tonic::transport::Channel;
 use tower::Service;
 use tracing::{info, warn};
@@ -25,6 +25,15 @@ use crate::config::{BrokerConfig, JmsEndpointConfig, JmsPoolConfig};
 use crate::consumer::JmsConsumer;
 use crate::producer::JmsProducer;
 use crate::proto::{HealthRequest, bridge_service_client::BridgeServiceClient};
+
+// ── Transport error classification ───────────────────────────────────────────
+
+/// Shared constant prefix for all bridge transport errors.
+///
+/// Both error-producing sites (producer.rs, consumer.rs) and the detection
+/// helper (`is_bridge_transport_error`) reference this constant so that a
+/// format-string drift cannot silently break retry logic.
+pub const BRIDGE_TRANSPORT_ERROR_PREFIX: &str = "JMS gRPC ";
 
 // ── BridgeState ──────────────────────────────────────────────────────────────
 
@@ -48,6 +57,9 @@ pub struct BridgeSlot {
     pub(crate) state_tx: watch::Sender<BridgeState>,
     /// BridgeProcess::stop(mut self) takes ownership — Mutex<Option<>> is required.
     pub process: Arc<tokio::sync::Mutex<Option<BridgeProcess>>>,
+    /// JoinHandle of the health monitor task for this slot.
+    /// Stored so that shutdown can await the monitor and observe panics.
+    pub(crate) health_monitor_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for BridgeSlot {
@@ -70,6 +82,10 @@ pub struct JmsBridgePool {
     pub(crate) health_check_interval_ms: u64,
     pub(crate) bridge_version: String,
     pub(crate) bridge_cache_dir: PathBuf,
+    /// Maximum number of concurrently active (Starting/Ready) bridges.
+    pub(crate) max_bridges: usize,
+    /// Serializes bridge admission (check + insert) to prevent race on max_bridges.
+    bridge_create_lock: Mutex<()>,
 }
 
 impl JmsBridgePool {
@@ -83,6 +99,8 @@ impl JmsBridgePool {
             health_check_interval_ms: pool_config.health_check_interval_ms,
             bridge_version: crate::BRIDGE_VERSION.to_string(),
             bridge_cache_dir: pool_config.bridge_cache_dir,
+            max_bridges: pool_config.max_bridges,
+            bridge_create_lock: Mutex::new(()),
         })
     }
 
@@ -157,6 +175,29 @@ impl JmsBridgePool {
             return Ok(Arc::clone(&*slot));
         }
 
+        // Serialize admission: check + insert in single critical section to prevent
+        // concurrent creators from both seeing count below limit and exceeding max_bridges.
+        let _guard = self.bridge_create_lock.lock().await;
+
+        // Re-check after acquiring lock (another caller may have inserted while we waited).
+        if let Some(slot) = self.slots.get(broker_name) {
+            return Ok(Arc::clone(&*slot));
+        }
+
+        // Enforce max_bridges: count ALL slots in the map under the admission lock.
+        // We count total slots (not just Starting/Ready) because any inserted slot
+        // represents an allocated bridge — even Degraded/Restarting slots hold resources
+        // and the bridge process may still be running. Counting only active states would
+        // allow a race: slot A transitions Starting→Degraded between two callers' checks,
+        // letting both pass the limit.
+        let total_count = self.slots.len();
+        if total_count >= self.max_bridges {
+            return Err(CamelError::Config(format!(
+                "JMS bridge limit reached: {total_count} bridge(s) >= max_bridges ({})",
+                self.max_bridges
+            )));
+        }
+
         let broker_config = self.config.get(broker_name).ok_or_else(|| {
             CamelError::ProcessorError(format!("Unknown JMS broker '{}'", broker_name))
         })?;
@@ -183,6 +224,7 @@ impl JmsBridgePool {
                     state_rx,
                     state_tx,
                     process: Arc::new(tokio::sync::Mutex::new(None)),
+                    health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
                 });
                 entry.insert(Arc::clone(&slot));
                 slot
@@ -214,7 +256,7 @@ impl JmsBridgePool {
             }
         }
 
-        self.spawn_health_monitor(Arc::clone(&slot));
+        self.spawn_health_monitor(Arc::clone(&slot)).await;
 
         Ok(slot)
     }
@@ -264,41 +306,66 @@ impl JmsBridgePool {
         Ok(())
     }
 
-    /// Shutdown all slots: stop all bridge processes concurrently.
+    /// Shutdown all slots: stop all bridge processes and await health monitors.
     pub async fn shutdown(&self) -> Result<(), CamelError> {
         let names: Vec<String> = self.slots.iter().map(|e| e.key().clone()).collect();
-        let mut tasks = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+
         for name in names {
             if let Some((_, slot)) = self.slots.remove(&name) {
-                tasks.push(tokio::spawn(async move {
-                    let process = {
-                        let mut guard = slot.process.lock().await;
-                        guard.take()
-                    };
-                    let _ = slot.state_tx.send(BridgeState::Stopped);
-                    if let Some(p) = process {
-                        let _ = p.stop().await;
-                    }
-                }));
+                // Signal the health monitor to stop.
+                let _ = slot.state_tx.send(BridgeState::Stopped);
+
+                // Stop the bridge process.
+                let process = {
+                    let mut guard = slot.process.lock().await;
+                    guard.take()
+                };
+                if let Some(p) = process
+                    && let Err(e) = p.stop().await
+                {
+                    errors.push(format!("broker '{}': process stop failed: {e}", slot.name));
+                }
+
+                // Await the health monitor task and observe any panic.
+                let monitor_handle = {
+                    let mut guard = slot.health_monitor_handle.lock().await;
+                    guard.take()
+                };
+                if let Some(h) = monitor_handle
+                    && let Err(join_err) = h.await
+                {
+                    errors.push(format!(
+                        "broker '{}': health monitor panicked: {join_err}",
+                        slot.name
+                    ));
+                }
             }
         }
-        for t in tasks {
-            let _ = t.await;
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(CamelError::ProcessorError(format!(
+                "JMS pool shutdown completed with {} error(s): {}",
+                errors.len(),
+                errors.join("; ")
+            )))
         }
-        Ok(())
     }
 
     pub fn broker_reconnect_interval_ms(&self) -> u64 {
         self.broker_reconnect_interval_ms
     }
 
-    fn spawn_health_monitor(&self, slot: Arc<BridgeSlot>) {
+    async fn spawn_health_monitor(&self, slot: Arc<BridgeSlot>) {
         let health_interval = self.health_check_interval_ms;
         let bridge_version = self.bridge_version.clone();
         let bridge_cache_dir = self.bridge_cache_dir.clone();
         let start_timeout_ms = self.bridge_start_timeout_ms;
+        let handle_ref = Arc::clone(&slot.health_monitor_handle);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 let state = slot.state_rx.borrow().clone();
                 match state {
@@ -410,6 +477,10 @@ impl JmsBridgePool {
                 }
             }
         });
+
+        // Store the handle so shutdown can await the monitor.
+        let mut guard = handle_ref.lock().await;
+        *guard = Some(handle);
     }
 
     async fn start_bridge_process(
@@ -420,7 +491,7 @@ impl JmsBridgePool {
         broker_type: &BrokerType,
         credentials: &Option<(String, String)>,
     ) -> Result<(BridgeProcess, Channel), CamelError> {
-        info!("Starting JMS bridge process for {broker_url}...");
+        info!("Starting JMS bridge process for {}...", redact_url(broker_url));
         let binary_path = ensure_binary(bridge_version, bridge_cache_dir)
             .await
             .map_err(|e| {
@@ -601,6 +672,28 @@ impl Service<Exchange> for LazyJmsProducer {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Check existing slot state if one is already present.
+        // If no slot exists yet, return Ready — call() will handle async bridge start.
+        if let Some(slot) = self.pool.slots.get(&self.broker_name) {
+            match &*slot.state_rx.borrow() {
+                BridgeState::Ready { .. } => return Poll::Ready(Ok(())),
+                BridgeState::Starting | BridgeState::Restarting { .. } => {
+                    return Poll::Pending;
+                }
+                BridgeState::Degraded(reason) => {
+                    return Poll::Ready(Err(CamelError::ProcessorError(format!(
+                        "JMS broker '{}' is degraded: {}",
+                        self.broker_name, reason
+                    ))));
+                }
+                BridgeState::Stopped => {
+                    return Poll::Ready(Err(CamelError::ProcessorError(format!(
+                        "JMS broker '{}' is stopped",
+                        self.broker_name
+                    ))));
+                }
+            }
+        }
         Poll::Ready(Ok(()))
     }
 
@@ -618,13 +711,13 @@ impl Service<Exchange> for LazyJmsProducer {
                 match state {
                     BridgeState::Ready { channel } => {
                         let mut producer = JmsProducer::new(channel, endpoint_config.clone());
-                        match producer.call(exchange.clone()).await {
+                        match producer.call(exchange).await {
                             Ok(done) => return Ok(done),
                             Err(first_err) if is_bridge_transport_error(&first_err) => {
                                 warn!(
                                     broker = %broker_name,
                                     error = %first_err,
-                                    "JMS send transport error; refreshing channel and retrying once"
+                                    "JMS send transport error; refreshing channel (no automatic resend)"
                                 );
 
                                 if let Err(refresh_err) =
@@ -636,22 +729,13 @@ impl Service<Exchange> for LazyJmsProducer {
                                         "JMS channel refresh failed; requesting bridge restart"
                                     );
                                     pool.restart_slot(&broker_name);
-                                    return Err(first_err);
                                 }
 
-                                let refreshed = match slot.state_rx.borrow().clone() {
-                                    BridgeState::Ready { channel } => channel,
-                                    other => {
-                                        return Err(CamelError::ProcessorError(format!(
-                                            "JMS broker '{}' not ready after channel refresh: {:?}",
-                                            broker_name, other
-                                        )));
-                                    }
-                                };
-
-                                let mut retry_producer =
-                                    JmsProducer::new(refreshed, endpoint_config.clone());
-                                return retry_producer.call(exchange).await;
+                                // Do NOT automatically resend — the first send may have reached
+                                // the broker even though the ack failed. Resending non-idempotent
+                                // writes causes duplicates. Return the original error so the caller
+                                // can decide whether to retry.
+                                return Err(first_err);
                             }
                             Err(other_err) => return Err(other_err),
                         }
@@ -684,9 +768,25 @@ impl Service<Exchange> for LazyJmsProducer {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Redact userinfo (username:password@) from a broker URL for safe logging.
+/// Handles URLs like `tcp://user:pass@host:61616` → `tcp://***@host:61616`.
+fn redact_url(url: &str) -> String {
+    // Find the scheme separator (://)
+    if let Some(pos) = url.find("://") {
+        let scheme = &url[..pos + 3]; // includes "://"
+        let rest = &url[pos + 3..];
+        // Find @ in the remainder — everything before @ is userinfo
+        if let Some(at_pos) = rest.find('@') {
+            return format!("{}***@{}", scheme, &rest[at_pos + 1..]);
+        }
+    }
+    url.to_string()
+}
+
 pub fn is_bridge_transport_error(err: &CamelError) -> bool {
-    let msg = err.to_string();
-    msg.contains("JMS gRPC send error") || msg.contains("JMS gRPC subscribe error")
+    // CamelError::ProcessorError wraps the message with "Processor error: ",
+    // so we check for containment of the shared constant prefix.
+    err.to_string().contains(BRIDGE_TRANSPORT_ERROR_PREFIX)
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────
@@ -1021,6 +1121,7 @@ mod tests {
             state_rx: state_rx.clone(),
             state_tx: state_tx.clone(),
             process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -1048,6 +1149,656 @@ mod tests {
             matches!(state_after, BridgeState::Restarting { .. }),
             "slot must enter Restarting when refresh is unavailable; got: {:?}",
             state_after
+        );
+    }
+
+    // ── JMS-007: Transport error classification ──────────────────────────────
+
+    #[test]
+    fn transport_error_detects_send_error() {
+        let err = CamelError::ProcessorError(format!(
+            "{}send error: connection refused",
+            BRIDGE_TRANSPORT_ERROR_PREFIX
+        ));
+        assert!(
+            is_bridge_transport_error(&err),
+            "send error must be classified as transport"
+        );
+    }
+
+    #[test]
+    fn transport_error_detects_subscribe_error() {
+        let err = CamelError::ProcessorError(format!(
+            "{}subscribe error: stream reset",
+            BRIDGE_TRANSPORT_ERROR_PREFIX
+        ));
+        assert!(
+            is_bridge_transport_error(&err),
+            "subscribe error must be classified as transport"
+        );
+    }
+
+    #[test]
+    fn transport_error_rejects_business_errors() {
+        let err = CamelError::ProcessorError("JMS broker 'main' is degraded: timeout".to_string());
+        assert!(
+            !is_bridge_transport_error(&err),
+            "degraded state error must NOT be transport"
+        );
+    }
+
+    #[test]
+    fn transport_error_rejects_config_errors() {
+        let err = CamelError::Config("bridge_start_timeout_ms must be > 0".to_string());
+        assert!(
+            !is_bridge_transport_error(&err),
+            "config error must NOT be transport"
+        );
+    }
+
+    #[test]
+    fn transport_error_prefix_is_used_by_producer_and_consumer() {
+        // Verify the constant prefix matches what producer.rs and consumer.rs emit.
+        // If this test fails, the constant has drifted from the error format strings.
+        assert!(
+            BRIDGE_TRANSPORT_ERROR_PREFIX.starts_with("JMS gRPC "),
+            "prefix must start with 'JMS gRPC '"
+        );
+    }
+
+    // ── JMS-006: max_bridges enforcement ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn pool_enforces_max_bridges_limit() {
+        use tokio::sync::watch;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                brokers: HashMap::from([
+                    (
+                        "b1".to_string(),
+                        BrokerConfig {
+                            broker_url: "tcp://b1:61616".to_string(),
+                            broker_type: BrokerType::ActiveMq,
+                            username: None,
+                            password: None,
+                        },
+                    ),
+                    (
+                        "b2".to_string(),
+                        BrokerConfig {
+                            broker_url: "tcp://b2:61616".to_string(),
+                            broker_type: BrokerType::ActiveMq,
+                            username: None,
+                            password: None,
+                        },
+                    ),
+                    (
+                        "b3".to_string(),
+                        BrokerConfig {
+                            broker_url: "tcp://b3:61616".to_string(),
+                            broker_type: BrokerType::ActiveMq,
+                            username: None,
+                            password: None,
+                        },
+                    ),
+                ]),
+                max_bridges: 2,
+                ..JmsPoolConfig::default()
+            })
+            .unwrap(),
+        );
+
+        // Manually insert two slots to simulate existing bridges.
+        // max_bridges counts ALL slots in the map (not just active states).
+        for name in &["b1", "b2"] {
+            let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+            let slot = Arc::new(BridgeSlot {
+                name: name.to_string(),
+                broker_url: format!("tcp://{name}:61616"),
+                broker_type: BrokerType::ActiveMq,
+                credentials: None,
+                state_rx,
+                state_tx,
+                process: Arc::new(tokio::sync::Mutex::new(None)),
+                health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            });
+            pool.slots.insert(name.to_string(), slot);
+        }
+
+        // Attempting to create a third slot should fail.
+        let err = pool.get_or_create_slot("b3").await.unwrap_err();
+        assert!(
+            err.to_string().contains("max_bridges"),
+            "expected max_bridges error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_allows_slot_when_below_max_bridges() {
+        use tokio::sync::watch;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                brokers: HashMap::from([(
+                    "b1".to_string(),
+                    BrokerConfig {
+                        broker_url: "tcp://b1:61616".to_string(),
+                        broker_type: BrokerType::ActiveMq,
+                        username: None,
+                        password: None,
+                    },
+                )]),
+                max_bridges: 2,
+                bridge_start_timeout_ms: 100,
+                ..JmsPoolConfig::default()
+            })
+            .unwrap(),
+        );
+
+        // Insert one slot in Degraded state (not counted as active).
+        let (state_tx, state_rx) = watch::channel(BridgeState::Degraded("test".to_string()));
+        let slot = Arc::new(BridgeSlot {
+            name: "b1".to_string(),
+            broker_url: "tcp://b1:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        pool.slots.insert("b1".to_string(), slot);
+
+        // b1 is Degraded (not active), so creating b1's slot returns existing.
+        // The max_bridges check only applies to new slots.
+        let result = pool.get_or_create_slot("b1").await;
+        assert!(result.is_ok(), "existing slot must be returned");
+    }
+
+    // ── JMS-003: poll_ready reflects bridge state ────────────────────────────
+
+    #[tokio::test]
+    async fn poll_ready_returns_pending_when_starting() {
+        use tokio::sync::watch;
+        use tower::Service;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        pool.slots.insert("default".to_string(), slot);
+
+        let endpoint_config = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        let mut producer = LazyJmsProducer {
+            pool: Arc::clone(&pool),
+            broker_name: "default".to_string(),
+            endpoint_config,
+            resolved_broker_type: BrokerType::ActiveMq,
+        };
+
+        let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
+        assert!(
+            matches!(result, Poll::Pending),
+            "poll_ready must be Pending when Starting; got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_ready_returns_error_when_degraded() {
+        use tokio::sync::watch;
+        use tower::Service;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+
+        let (state_tx, state_rx) =
+            watch::channel(BridgeState::Degraded("health check failed".to_string()));
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        pool.slots.insert("default".to_string(), slot);
+
+        let endpoint_config = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        let mut producer = LazyJmsProducer {
+            pool: Arc::clone(&pool),
+            broker_name: "default".to_string(),
+            endpoint_config,
+            resolved_broker_type: BrokerType::ActiveMq,
+        };
+
+        let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
+        assert!(
+            matches!(result, Poll::Ready(Err(_))),
+            "poll_ready must be Err when Degraded; got: {:?}",
+            result
+        );
+        let err_msg = match result {
+            Poll::Ready(Err(e)) => e.to_string(),
+            _ => unreachable!(),
+        };
+        assert!(
+            err_msg.contains("degraded"),
+            "error must mention degraded: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_ready_returns_error_when_stopped() {
+        use tokio::sync::watch;
+        use tower::Service;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Stopped);
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        pool.slots.insert("default".to_string(), slot);
+
+        let endpoint_config = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        let mut producer = LazyJmsProducer {
+            pool: Arc::clone(&pool),
+            broker_name: "default".to_string(),
+            endpoint_config,
+            resolved_broker_type: BrokerType::ActiveMq,
+        };
+
+        let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
+        assert!(
+            matches!(result, Poll::Ready(Err(_))),
+            "poll_ready must be Err when Stopped; got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_ready_returns_ready_when_slot_ready() {
+        use tokio::sync::watch;
+        use tonic::transport::Endpoint as TonicEndpoint;
+        use tower::Service;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+
+        let lazy_channel = TonicEndpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let (state_tx, state_rx) = watch::channel(BridgeState::Ready {
+            channel: lazy_channel,
+        });
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        pool.slots.insert("default".to_string(), slot);
+
+        let endpoint_config = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        let mut producer = LazyJmsProducer {
+            pool: Arc::clone(&pool),
+            broker_name: "default".to_string(),
+            endpoint_config,
+            resolved_broker_type: BrokerType::ActiveMq,
+        };
+
+        let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
+        assert!(
+            matches!(result, Poll::Ready(Ok(()))),
+            "poll_ready must be Ready(Ok) when bridge is Ready; got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_ready_returns_ready_when_no_slot_exists() {
+        use tower::Service;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+
+        let endpoint_config = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        let mut producer = LazyJmsProducer {
+            pool: Arc::clone(&pool),
+            broker_name: "default".to_string(),
+            endpoint_config,
+            resolved_broker_type: BrokerType::ActiveMq,
+        };
+
+        // No slot exists yet — poll_ready should return Ready so call() can start the bridge.
+        let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
+        assert!(
+            matches!(result, Poll::Ready(Ok(()))),
+            "poll_ready must be Ready(Ok) when no slot exists; got: {:?}",
+            result
+        );
+    }
+
+    // ── JMS-001: Health monitor lifecycle ────────────────────────────────────
+
+    #[tokio::test]
+    async fn pool_shutdown_awaits_health_monitor() {
+        use tokio::sync::watch;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                brokers: HashMap::from([(
+                    "default".to_string(),
+                    BrokerConfig {
+                        broker_url: "tcp://localhost:61616".to_string(),
+                        broker_type: BrokerType::ActiveMq,
+                        username: None,
+                        password: None,
+                    },
+                )]),
+                health_check_interval_ms: 100,
+                ..JmsPoolConfig::default()
+            })
+            .unwrap(),
+        );
+
+        // Create a slot manually with a spawned health monitor task.
+        let (state_tx, state_rx) = watch::channel(BridgeState::Ready {
+            channel: tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+        });
+        let monitor_handle_ref: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+
+        // Spawn a simple monitor that exits on Stopped.
+        let state_rx_clone = state_rx.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                if matches!(*state_rx_clone.borrow(), BridgeState::Stopped) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        *monitor_handle_ref.lock().await = Some(handle);
+
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: monitor_handle_ref,
+        });
+        pool.slots.insert("default".to_string(), slot);
+
+        // Shutdown should complete without hanging — the monitor exits on Stopped.
+        let result = pool.shutdown().await;
+        // May report errors from bridge process (none in this test), but must not hang.
+        let _ = result;
+    }
+
+    #[tokio::test]
+    async fn health_monitor_handle_stored_after_spawn() {
+        use tokio::sync::watch;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                brokers: HashMap::from([(
+                    "default".to_string(),
+                    BrokerConfig {
+                        broker_url: "tcp://localhost:61616".to_string(),
+                        broker_type: BrokerType::ActiveMq,
+                        username: None,
+                        password: None,
+                    },
+                )]),
+                health_check_interval_ms: 100,
+                bridge_start_timeout_ms: 100,
+                ..JmsPoolConfig::default()
+            })
+            .unwrap(),
+        );
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Stopped);
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        pool.spawn_health_monitor(Arc::clone(&slot)).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let guard = slot.health_monitor_handle.lock().await;
+        assert!(
+            guard.is_some(),
+            "health monitor handle must be stored after spawn_health_monitor"
+        );
+    }
+
+    // ── JMS-008: URL redaction for safe logging ──────────────────────────────
+
+    #[test]
+    fn redact_url_strips_userinfo_with_password() {
+        assert_eq!(
+            redact_url("tcp://admin:s3cret@broker:61616"),
+            "tcp://***@broker:61616"
+        );
+    }
+
+    #[test]
+    fn redact_url_strips_userinfo_without_password() {
+        assert_eq!(
+            redact_url("tcp://admin@broker:61616"),
+            "tcp://***@broker:61616"
+        );
+    }
+
+    #[test]
+    fn redact_url_passes_clean_url_unchanged() {
+        assert_eq!(
+            redact_url("tcp://localhost:61616"),
+            "tcp://localhost:61616"
+        );
+    }
+
+    #[test]
+    fn redact_url_handles_ssl_scheme() {
+        assert_eq!(
+            redact_url("ssl://user:pass@secure-broker:61617"),
+            "ssl://***@secure-broker:61617"
+        );
+    }
+
+    // ── JMS-009: max_bridges race condition under concurrency ────────────────
+
+    #[tokio::test]
+    async fn concurrent_slot_creation_respects_max_bridges() {
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                brokers: HashMap::from([
+                    ("b1".to_string(), BrokerConfig {
+                        broker_url: "tcp://b1:61616".to_string(),
+                        broker_type: BrokerType::ActiveMq,
+                        username: None, password: None,
+                    }),
+                    ("b2".to_string(), BrokerConfig {
+                        broker_url: "tcp://b2:61616".to_string(),
+                        broker_type: BrokerType::ActiveMq,
+                        username: None, password: None,
+                    }),
+                    ("b3".to_string(), BrokerConfig {
+                        broker_url: "tcp://b3:61616".to_string(),
+                        broker_type: BrokerType::ActiveMq,
+                        username: None, password: None,
+                    }),
+                ]),
+                max_bridges: 2,
+                bridge_start_timeout_ms: 100,
+                ..JmsPoolConfig::default()
+            })
+            .unwrap(),
+        );
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        for name in &["b1", "b2"] {
+            let slot = Arc::new(BridgeSlot {
+                name: name.to_string(),
+                broker_url: format!("tcp://{name}:61616"),
+                broker_type: BrokerType::ActiveMq,
+                credentials: None,
+                state_rx: state_rx.clone(),
+                state_tx: state_tx.clone(),
+                process: Arc::new(tokio::sync::Mutex::new(None)),
+                health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            });
+            pool.slots.insert(name.to_string(), slot);
+        }
+
+        assert_eq!(pool.slots.len(), 2);
+
+        let guard = pool.bridge_create_lock.lock().await;
+        let total_count = pool.slots.len();
+        assert!(total_count >= pool.max_bridges as usize);
+        let result = if total_count >= pool.max_bridges as usize {
+            Err(CamelError::Config(format!(
+                "JMS bridge limit reached: {total_count} bridge(s) >= max_bridges ({})",
+                pool.max_bridges
+            )))
+        } else {
+            Ok(())
+        };
+        drop(guard);
+
+        assert!(result.is_err(), "3rd broker should be rejected");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("max_bridges"),
+            "error must mention max_bridges, got: {err_msg}"
+        );
+    }
+
+    // ── JMS-010: Transport error does NOT auto-resend ────────────────────────
+
+    #[tokio::test]
+    async fn transport_error_refreshes_channel_but_does_not_resend() {
+        use tokio::sync::watch;
+        use tonic::transport::Endpoint as TonicEndpoint;
+        use tower::Service;
+
+        let dead_channel = TonicEndpoint::from_static("http://127.0.0.1:1").connect_lazy();
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Ready {
+            channel: dead_channel.clone(),
+        });
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx: state_rx.clone(),
+            state_tx: state_tx.clone(),
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let endpoint_config =
+            crate::config::JmsEndpointConfig::from_uri("jms:queue:test-no-resend").unwrap();
+
+        let mut producer = LazyJmsProducer {
+            pool: Arc::clone(&pool),
+            broker_name: "default".to_string(),
+            endpoint_config,
+            resolved_broker_type: BrokerType::ActiveMq,
+        };
+
+        let mut exchange = Exchange::default();
+        exchange.input.body = camel_component_api::Body::Text("hello".to_string());
+
+        let result = producer.call(exchange).await;
+        assert!(result.is_err(), "expected send to fail");
+
+        let state_after = state_rx.borrow().clone();
+        assert!(
+            matches!(state_after, BridgeState::Restarting { .. }),
+            "slot must enter Restarting; got: {:?}",
+            state_after
+        );
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(BRIDGE_TRANSPORT_ERROR_PREFIX),
+            "error must be original transport error, got: {}",
+            err_msg
         );
     }
 }

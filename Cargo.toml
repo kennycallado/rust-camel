@@ -255,6 +255,7 @@ sxd-document = "0.3"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }
 serde_yml = "0.0.12"
 toml = "1"
+percent-encoding = "2.3"
 schemars = "1"
 ts-rs = "12"
 

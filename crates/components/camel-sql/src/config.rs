@@ -3,6 +3,27 @@ use std::str::FromStr;
 use camel_component_api::CamelError;
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
 
+/// Redaction helper: returns `Some("***")` if the option is `Some`, otherwise `None`.
+fn redacted_opt(opt: &Option<String>) -> Option<&'static str> {
+    if opt.is_some() { Some("***") } else { None }
+}
+
+/// Redacts the user:password portion of a database URL for safe display.
+/// Returns `"scheme://***@host/db"` for URLs with userinfo, or the original URL otherwise.
+pub fn redact_db_url(db_url: &str) -> String {
+    match url::Url::parse(db_url) {
+        Ok(mut parsed) => {
+            if parsed.username().is_empty() && parsed.password().is_none() {
+                return db_url.to_string();
+            }
+            let _ = parsed.set_username("***");
+            let _ = parsed.set_password(Some("***"));
+            parsed.to_string()
+        }
+        Err(_) => db_url.to_string(),
+    }
+}
+
 /// Output type for SQL query results.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum SqlOutputType {
@@ -35,7 +56,9 @@ impl FromStr for SqlOutputType {
 ///
 /// This struct supports serde deserialization with defaults and builder methods.
 /// It holds pool configuration that can be applied as defaults to endpoints.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+///
+/// **Security note:** `Debug` implementation redacts sensitive fields (SSL key paths).
+#[derive(Clone, PartialEq, serde::Deserialize)]
 #[serde(default)]
 pub struct SqlGlobalConfig {
     pub max_connections: u32,
@@ -47,6 +70,21 @@ pub struct SqlGlobalConfig {
     pub ssl_root_cert: Option<String>,
     pub ssl_cert: Option<String>,
     pub ssl_key: Option<String>,
+}
+
+impl std::fmt::Debug for SqlGlobalConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlGlobalConfig")
+            .field("max_connections", &self.max_connections)
+            .field("min_connections", &self.min_connections)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("max_lifetime_secs", &self.max_lifetime_secs)
+            .field("ssl_mode", &self.ssl_mode)
+            .field("ssl_root_cert", &self.ssl_root_cert)
+            .field("ssl_cert", &self.ssl_cert)
+            .field("ssl_key", &redacted_opt(&self.ssl_key))
+            .finish()
+    }
 }
 
 impl Default for SqlGlobalConfig {
@@ -117,7 +155,16 @@ impl SqlGlobalConfig {
 /// The query can be inline SQL or a file reference with `file:` prefix:
 /// - `sql:SELECT * FROM users?db_url=...` - inline SQL
 /// - `sql:file:/path/to/query.sql?db_url=...` - read SQL from file
-#[derive(Debug, Clone)]
+///
+/// **Note on file-based queries (SQL-014):** When the query path starts with `file:`,
+/// the SQL is read synchronously via `std::fs::read_to_string` during endpoint creation.
+/// This is a blocking I/O call, but it occurs in the synchronous `from_uri` / `create_endpoint`
+/// path — not in the async hot path (producer `call()` or consumer `poll_database()`).
+/// The file content is cached in `config.query` after parsing, so no runtime file reads occur.
+///
+/// **Security note:** `Debug` implementation redacts the `db_url` (which may contain credentials)
+/// and `ssl_key` path. Use `redact_db_url()` for safe logging of database URLs.
+#[derive(Clone)]
 pub struct SqlEndpointConfig {
     // Connection
     /// Database connection URL (required).
@@ -140,6 +187,9 @@ pub struct SqlEndpointConfig {
     pub output_type: SqlOutputType,
     /// Placeholder character for parameters. Default: '#'.
     pub placeholder: char,
+    /// If true, process parameter placeholders in queries. Default: true.
+    /// When false, queries are executed as-is without template parsing.
+    pub use_placeholder: bool,
     /// If true, don't execute the query (dry run). Default: false.
     pub noop: bool,
     /// Separator for IN clause expansion. Default: ", ".
@@ -182,6 +232,44 @@ pub struct SqlEndpointConfig {
     pub ssl_cert: Option<String>,
     /// Path to SSL client key. None = use global default.
     pub ssl_key: Option<String>,
+}
+
+impl std::fmt::Debug for SqlEndpointConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlEndpointConfig")
+            .field("db_url", &redact_db_url(&self.db_url))
+            .field("max_connections", &self.max_connections)
+            .field("min_connections", &self.min_connections)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("max_lifetime_secs", &self.max_lifetime_secs)
+            .field("query", &self.query)
+            .field("source_path", &self.source_path)
+            .field("output_type", &self.output_type)
+            .field("placeholder", &self.placeholder)
+            .field("use_placeholder", &self.use_placeholder)
+            .field("noop", &self.noop)
+            .field("in_separator", &self.in_separator)
+            .field("delay_ms", &self.delay_ms)
+            .field("initial_delay_ms", &self.initial_delay_ms)
+            .field("max_messages_per_poll", &self.max_messages_per_poll)
+            .field("on_consume", &self.on_consume)
+            .field("on_consume_failed", &self.on_consume_failed)
+            .field("on_consume_batch_complete", &self.on_consume_batch_complete)
+            .field("route_empty_result_set", &self.route_empty_result_set)
+            .field("use_iterator", &self.use_iterator)
+            .field("expected_update_count", &self.expected_update_count)
+            .field(
+                "break_batch_on_consume_fail",
+                &self.break_batch_on_consume_fail,
+            )
+            .field("batch", &self.batch)
+            .field("use_message_body_for_sql", &self.use_message_body_for_sql)
+            .field("ssl_mode", &self.ssl_mode)
+            .field("ssl_root_cert", &self.ssl_root_cert)
+            .field("ssl_cert", &self.ssl_cert)
+            .field("ssl_key", &redacted_opt(&self.ssl_key))
+            .finish()
+    }
 }
 
 impl SqlEndpointConfig {
@@ -369,11 +457,43 @@ impl UriConfig for SqlEndpointConfig {
         let placeholder = params
             .get("placeholder")
             .filter(|v| !v.is_empty())
-            .map(|v| v.chars().next().unwrap())
+            .map(|v| {
+                if v.chars().count() != 1 {
+                    return Err(CamelError::InvalidUri(format!(
+                        "placeholder must be exactly one character, got '{}'",
+                        v
+                    )));
+                }
+                Ok(v.chars().next().unwrap())
+            })
+            .transpose()?
             .unwrap_or('#');
+/// Parse a boolean URI parameter strictly.
+///
+/// Accepts only `"true"` or `"false"` (case-insensitive). Any other value
+/// returns `CamelError::InvalidUri` to prevent silent misconfiguration.
+fn parse_bool_param(name: &str, value: &str) -> Result<bool, CamelError> {
+    if value.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        Err(CamelError::InvalidUri(format!(
+            "{} must be 'true' or 'false', got '{}'",
+            name, value
+        )))
+    }
+}
+
+        let use_placeholder = params
+            .get("usePlaceholder")
+            .map(|v| parse_bool_param("usePlaceholder", v))
+            .transpose()?
+            .unwrap_or(true);
         let noop = params
             .get("noop")
-            .map(|v| v.eq_ignore_ascii_case("true"))
+            .map(|v| parse_bool_param("noop", v))
+            .transpose()?
             .unwrap_or(false);
         let in_separator = params
             .get("inSeparator")
@@ -402,28 +522,33 @@ impl UriConfig for SqlEndpointConfig {
         let on_consume_batch_complete = params.get("onConsumeBatchComplete").cloned();
         let route_empty_result_set = params
             .get("routeEmptyResultSet")
-            .map(|v| v.eq_ignore_ascii_case("true"))
+            .map(|v| parse_bool_param("routeEmptyResultSet", v))
+            .transpose()?
             .unwrap_or(false);
         let use_iterator = params
             .get("useIterator")
-            .map(|v| v.eq_ignore_ascii_case("true"))
+            .map(|v| parse_bool_param("useIterator", v))
+            .transpose()?
             .unwrap_or(true);
         let expected_update_count = params
             .get("expectedUpdateCount")
             .and_then(|v| v.parse().ok());
         let break_batch_on_consume_fail = params
             .get("breakBatchOnConsumeFail")
-            .map(|v| v.eq_ignore_ascii_case("true"))
+            .map(|v| parse_bool_param("breakBatchOnConsumeFail", v))
+            .transpose()?
             .unwrap_or(false);
 
         // Producer parameters
         let batch = params
             .get("batch")
-            .map(|v| v.eq_ignore_ascii_case("true"))
+            .map(|v| parse_bool_param("batch", v))
+            .transpose()?
             .unwrap_or(false);
         let use_message_body_for_sql = params
             .get("useMessageBodyForSql")
-            .map(|v| v.eq_ignore_ascii_case("true"))
+            .map(|v| parse_bool_param("useMessageBodyForSql", v))
+            .transpose()?
             .unwrap_or(false);
         let ssl_mode = params.get("sslMode").cloned();
         let ssl_root_cert = params.get("sslRootCert").cloned();
@@ -440,6 +565,7 @@ impl UriConfig for SqlEndpointConfig {
             source_path,
             output_type,
             placeholder,
+            use_placeholder,
             noop,
             in_separator,
             delay_ms,
@@ -918,5 +1044,253 @@ mod tests {
         c.resolve_defaults();
         let result = enrich_db_url_with_ssl("://not-a-valid-url", &c);
         assert!(result.is_err());
+    }
+
+    // --- Phase B hardening tests ---
+
+    // SQL-010: Debug output redacts credentials
+    #[test]
+    fn debug_redacts_db_url_with_password() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://user:secret123@localhost/test",
+        )
+        .unwrap();
+        let debug_output = format!("{:?}", c);
+        assert!(
+            !debug_output.contains("secret123"),
+            "Debug output must not contain password: {}",
+            debug_output
+        );
+        assert!(
+            debug_output.contains("***"),
+            "Debug output must contain redacted marker: {}",
+            debug_output
+        );
+    }
+
+    #[test]
+    fn debug_redacts_ssl_key() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&sslKey=/secret/key.pem",
+        )
+        .unwrap();
+        let debug_output = format!("{:?}", c);
+        assert!(
+            !debug_output.contains("/secret/key.pem"),
+            "Debug output must not contain ssl_key path: {}",
+            debug_output
+        );
+    }
+
+    #[test]
+    fn debug_global_config_redacts_ssl_key() {
+        let c = SqlGlobalConfig::default().with_ssl_key("/secret/key.pem");
+        let debug_output = format!("{:?}", c);
+        assert!(
+            !debug_output.contains("/secret/key.pem"),
+            "Debug output must not contain ssl_key path: {}",
+            debug_output
+        );
+        assert!(
+            debug_output.contains("***"),
+            "Debug output must contain redacted marker: {}",
+            debug_output
+        );
+    }
+
+    #[test]
+    fn redact_db_url_with_credentials() {
+        assert_eq!(
+            redact_db_url("postgres://user:pass@host/db"),
+            "postgres://***:***@host/db"
+        );
+    }
+
+    #[test]
+    fn redact_db_url_without_credentials() {
+        assert_eq!(redact_db_url("sqlite::memory:"), "sqlite::memory:");
+    }
+
+    #[test]
+    fn redact_db_url_invalid_returns_original() {
+        assert_eq!(redact_db_url("not-a-url"), "not-a-url");
+    }
+
+    // SQL-004: usePlaceholder parsing
+    #[test]
+    fn use_placeholder_defaults_to_true() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert!(c.use_placeholder);
+    }
+
+    #[test]
+    fn use_placeholder_false_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&usePlaceholder=false",
+        )
+        .unwrap();
+        assert!(!c.use_placeholder);
+    }
+
+    #[test]
+    fn use_placeholder_true_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&usePlaceholder=true",
+        )
+        .unwrap();
+        assert!(c.use_placeholder);
+    }
+
+    // SQL-004: strict boolean parsing — invalid values rejected
+    #[test]
+    fn use_placeholder_rejects_invalid_value() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&usePlaceholder=1",
+        );
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("usePlaceholder") && msg.contains("true") && msg.contains("false"));
+    }
+
+    #[test]
+    fn use_placeholder_rejects_typo_tru() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&usePlaceholder=tru",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn use_placeholder_rejects_yes() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&usePlaceholder=yes",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn noop_rejects_invalid_value() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&noop=1",
+        );
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("noop"));
+    }
+
+    #[test]
+    fn batch_rejects_invalid_value() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&batch=yes",
+        );
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("batch"));
+    }
+
+    #[test]
+    fn route_empty_result_set_rejects_invalid_value() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&routeEmptyResultSet=on",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn use_iterator_rejects_invalid_value() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&useIterator=1",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn break_batch_on_consume_fail_rejects_invalid_value() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&breakBatchOnConsumeFail=yes",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn use_message_body_for_sql_rejects_invalid_value() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&useMessageBodyForSql=1",
+        );
+        assert!(result.is_err());
+    }
+
+    // Case-insensitive true/false still works
+    #[test]
+    fn boolean_params_case_insensitive() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&usePlaceholder=TRUE&noop=FALSE&batch=True&useIterator=False",
+        )
+        .unwrap();
+        assert!(c.use_placeholder);
+        assert!(!c.noop);
+        assert!(c.batch);
+        assert!(!c.use_iterator);
+    }
+
+    // SQL-022: multi-char placeholder rejected
+    #[test]
+    fn multi_char_placeholder_rejected() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&placeholder=##",
+        );
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(msg.contains("placeholder") && msg.contains("one character"));
+    }
+
+    #[test]
+    fn single_char_placeholder_accepted() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&placeholder=$",
+        )
+        .unwrap();
+        assert_eq!(c.placeholder, '$');
+    }
+
+    #[test]
+    fn empty_placeholder_falls_back_to_default() {
+        // Empty string is filtered out by the original logic — falls back to '#'
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&placeholder=",
+        )
+        .unwrap();
+        assert_eq!(c.placeholder, '#');
+    }
+
+    // SQL-014: file-based SQL config test (verifies file content is cached, no async read)
+    #[test]
+    fn file_query_cached_in_config() {
+        use std::io::Write;
+        let unique_name = format!(
+            "test_sql_cached_{}.sql",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let mut tmp = std::env::temp_dir();
+        tmp.push(unique_name);
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            writeln!(f, "SELECT * FROM cached_test").unwrap();
+        }
+        let uri = format!(
+            "sql:file:{}?db_url=postgres://localhost/test",
+            tmp.display()
+        );
+        let c = SqlEndpointConfig::from_uri(&uri).unwrap();
+        // Query content is cached in config — no runtime file read needed
+        assert_eq!(c.query, "SELECT * FROM cached_test");
+        assert_eq!(c.source_path, Some(tmp.to_string_lossy().into_owned()));
+        // Delete the file — config still has the query
+        std::fs::remove_file(&tmp).ok();
+        assert_eq!(c.query, "SELECT * FROM cached_test");
     }
 }
