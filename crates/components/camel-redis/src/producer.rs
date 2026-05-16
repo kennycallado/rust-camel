@@ -304,19 +304,21 @@ impl Service<Exchange> for RedisProducer {
                     match get_or_create_connection(&config, &conn, &endpoint).await {
                         Ok(mut reconnected) => {
                             // Retry the command
-                            match Self::dispatch_command(&cmd, &mut reconnected, &mut exchange).await {
+                            match Self::dispatch_command(&cmd, &mut reconnected, &mut exchange)
+                                .await
+                            {
                                 Ok(()) => return Ok(exchange),
-                            Err(retry_err) => {
-                                if is_transient_redis_error(&retry_err) {
-                                    warn!(
-                                        endpoint = %endpoint,
-                                        command = ?cmd,
-                                        attempt = attempt + 1,
-                                        error = %retry_err,
-                                        "Retry failed with transient error"
-                                    );
-                                    last_err = retry_err;
-                                    continue;
+                                Err(retry_err) => {
+                                    if is_transient_redis_error(&retry_err) {
+                                        warn!(
+                                            endpoint = %endpoint,
+                                            command = ?cmd,
+                                            attempt = attempt + 1,
+                                            error = %retry_err,
+                                            "Retry failed with transient error"
+                                        );
+                                        last_err = retry_err;
+                                        continue;
                                     } else {
                                         // Non-transient error on retry — propagate immediately
                                         return Err(retry_err);

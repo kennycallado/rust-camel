@@ -55,7 +55,7 @@ impl PropertiesResolver {
                     (None, None) => {
                         return Err(ResolveError::MissingKey {
                             key: key.to_string(),
-                        })
+                        });
                     }
                 };
 

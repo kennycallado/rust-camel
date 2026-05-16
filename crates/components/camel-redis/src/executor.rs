@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use camel_component_api::{CamelError, Exchange};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
 use crate::config::{RedisCommand, is_transient_redis_error};
@@ -129,7 +129,10 @@ pub async fn execute_with_retry<E: RedisCommandExecutor>(
 
     let result = executor.execute_command(cmd, exchange).await;
 
-    if let Err(ref e) = result && is_transient_redis_error(e) && is_idempotent {
+    if let Err(ref e) = result
+        && is_transient_redis_error(e)
+        && is_idempotent
+    {
         warn!(
             command = ?cmd,
             error = %e,

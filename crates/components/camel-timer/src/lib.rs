@@ -218,10 +218,7 @@ mod tests {
         let result = TimerConfig::from_uri("timer:tick?period=0");
         assert!(result.is_err(), "period=0 should be rejected");
         let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("period"),
-            "error should mention 'period'"
-        );
+        assert!(err_msg.contains("period"), "error should mention 'period'");
     }
 
     #[test]

@@ -400,10 +400,7 @@ mod tests {
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
         let result = consumer.start(ctx).await;
-        assert!(
-            result.is_err(),
-            "second start must return an error"
-        );
+        assert!(result.is_err(), "second start must return an error");
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("already started"),

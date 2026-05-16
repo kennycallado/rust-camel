@@ -160,9 +160,11 @@ async fn spawn_server(
     let addr = format!("{host}:{port}");
     let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
     let path_configs = Arc::new(DashMap::new());
+    let server_error = new_atomic_false();
     let state = WsAppState {
         dispatch: Arc::clone(&dispatch),
         path_configs: Arc::clone(&path_configs),
+        server_error: Arc::clone(&server_error),
     };
     let app = Router::new()
         .fallback(dispatch_handler)
@@ -174,6 +176,7 @@ async fn spawn_server(
             CamelError::EndpointCreationFailed(format!("Invalid listen address {addr}: {e}"))
         })?;
         let tls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(rustls));
+        let error_flag = Arc::clone(&server_error);
         let task = tokio::spawn(async move {
             if let Err(e) = axum_server::bind_rustls(parsed_addr, tls_cfg)
                 .serve(app.into_make_service())
@@ -185,6 +188,7 @@ async fn spawn_server(
                     error = %e,
                     "WebSocket server terminated with error"
                 );
+                error_flag.store(true, Ordering::Relaxed);
             }
         });
         (task, true)
@@ -192,6 +196,7 @@ async fn spawn_server(
         let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
             CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
         })?;
+        let error_flag = Arc::clone(&server_error);
         let task = tokio::spawn(async move {
             if let Err(e) = serve(listener, app).await {
                 tracing::error!(
@@ -200,6 +205,7 @@ async fn spawn_server(
                     error = %e,
                     "WebSocket server terminated with error"
                 );
+                error_flag.store(true, Ordering::Relaxed);
             }
         });
         (task, false)
@@ -218,6 +224,7 @@ async fn spawn_server(
 struct WsAppState {
     dispatch: DispatchTable,
     path_configs: Arc<DashMap<String, WsPathConfig>>,
+    server_error: Arc<AtomicBool>,
 }
 
 pub struct WsConnectionRegistry {
@@ -555,7 +562,10 @@ async fn ws_handler(
                 }
             }
             Ok(WsMessage::Close(cf)) => {
-                let reason = cf.as_ref().map(|f| f.reason.to_string()).unwrap_or_default();
+                let reason = cf
+                    .as_ref()
+                    .map(|f| f.reason.to_string())
+                    .unwrap_or_default();
                 tracing::info!(
                     connection_key = connection_key,
                     path = path,
@@ -842,7 +852,10 @@ impl Consumer for WsConsumer {
             let _ = try_send_with_backpressure(&tx, close_msg.clone(), "consumer-stop-close");
         }
 
+        let mut had_server_error = false;
+
         if let Some(state) = self.server_state.take() {
+            had_server_error = state.server_error.load(Ordering::Relaxed);
             let mut table = state.dispatch.write().await;
             table.remove(&self.cfg.inner.path);
             state.path_configs.remove(&self.cfg.inner.path);
@@ -850,7 +863,6 @@ impl Consumer for WsConsumer {
 
         if let Some(key) = self.registry_key.take() {
             global_registries().remove(&key);
-            // Release server registry reference — abort server when last consumer stops (WS-005)
             ServerRegistry::global().release(key.1);
         }
 
@@ -865,6 +877,18 @@ impl Consumer for WsConsumer {
             "WebSocket consumer stopped"
         );
 
+        if had_server_error {
+            tracing::warn!(
+                host = self.cfg.inner.host,
+                port = self.cfg.inner.port,
+                path = self.cfg.inner.path,
+                "WebSocket server had errors during its lifetime"
+            );
+            return Err(CamelError::ProcessorError(
+                "WebSocket server terminated with errors during its lifetime".into(),
+            ));
+        }
+
         Ok(())
     }
 
@@ -876,6 +900,10 @@ impl Consumer for WsConsumer {
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};
+
+fn new_atomic_false() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
 
 #[derive(Clone)]
 pub struct WsProducer {
@@ -2107,13 +2135,19 @@ mod tests {
         // Verify registry entry exists
         let registries = global_registries();
         let key = ("127.0.0.1".to_string(), port, "/cleanup".to_string());
-        assert!(registries.contains_key(&key), "registry should have entry after start");
+        assert!(
+            registries.contains_key(&key),
+            "registry should have entry after start"
+        );
 
         // Stop consumer
         consumer.stop().await.unwrap();
 
         // Verify registry entry is removed
-        assert!(!registries.contains_key(&key), "registry should be cleaned up after stop");
+        assert!(
+            !registries.contains_key(&key),
+            "registry should be cleaned up after stop"
+        );
 
         // Verify server registry reference is released (port can be reused)
         // The ServerRegistry should have removed the entry
@@ -2206,7 +2240,10 @@ mod tests {
         };
 
         // Send a ping
-        client.send(ClientMessage::Ping(vec![1, 2, 3].into())).await.unwrap();
+        client
+            .send(ClientMessage::Ping(vec![1, 2, 3].into()))
+            .await
+            .unwrap();
 
         // Expect a pong with the same payload
         let pong = tokio::time::timeout(Duration::from_secs(2), async {
@@ -2283,5 +2320,73 @@ mod tests {
         let _ = start_result;
 
         consumer.stop().await.unwrap();
+    }
+
+    #[test]
+    fn ws_app_state_server_error_starts_false() {
+        let state = WsAppState {
+            dispatch: Arc::new(RwLock::new(HashMap::new())),
+            path_configs: Arc::new(DashMap::new()),
+            server_error: new_atomic_false(),
+        };
+        assert!(
+            !state.server_error.load(Ordering::Relaxed),
+            "server_error should start as false"
+        );
+    }
+
+    #[test]
+    fn ws_app_state_server_error_can_be_set() {
+        let state = WsAppState {
+            dispatch: Arc::new(RwLock::new(HashMap::new())),
+            path_configs: Arc::new(DashMap::new()),
+            server_error: new_atomic_false(),
+        };
+        assert!(!state.server_error.load(Ordering::Relaxed));
+        state.server_error.store(true, Ordering::Relaxed);
+        assert!(state.server_error.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn consumer_stop_returns_error_when_server_had_errors() {
+        let port = free_port();
+        let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/errorflag")).unwrap();
+        let mut consumer = WsConsumer::new(cfg.server_config());
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        consumer.start(ctx).await.unwrap();
+
+        // Simulate server error by setting the flag directly
+        if let Some(ref state) = consumer.server_state {
+            state.server_error.store(true, Ordering::Relaxed);
+        }
+
+        let result = consumer.stop().await;
+        assert!(
+            result.is_err(),
+            "stop should return error when server had errors"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("terminated with errors"),
+            "expected server error message, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn consumer_stop_succeeds_when_server_healthy() {
+        let port = free_port();
+        let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/healthy")).unwrap();
+        let mut consumer = WsConsumer::new(cfg.server_config());
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
+        consumer.start(ctx).await.unwrap();
+
+        let result = consumer.stop().await;
+        assert!(
+            result.is_ok(),
+            "stop should succeed when server is healthy: {:?}",
+            result
+        );
     }
 }

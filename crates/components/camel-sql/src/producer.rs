@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -23,11 +24,20 @@ use camel_component_api::{Body, CamelError, Exchange, Message, StreamBody, Strea
 pub struct SqlProducer {
     pub(crate) config: SqlEndpointConfig,
     pub(crate) pool: Arc<OnceCell<AnyPool>>,
+    pub(crate) stopped: Arc<AtomicBool>,
 }
 
 impl SqlProducer {
     pub fn new(config: SqlEndpointConfig, pool: Arc<OnceCell<AnyPool>>) -> Self {
-        Self { config, pool }
+        Self {
+            config,
+            pool,
+            stopped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
     }
 
     /// Resolves the query source based on priority:
@@ -60,12 +70,18 @@ impl Service<Exchange> for SqlProducer {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // The SQL pool uses lazy initialization via OnceCell — it is created on the
-        // first call() rather than eagerly at startup. Because there is no persistent
-        // "failed" state to detect (a bad connection URL will surface as an error in
-        // call(), not here), readiness is always Ready(Ok). The pool will attempt to
-        // connect when the first exchange arrives, and any connection failure is
-        // returned as a CamelError from call().
+        if self.stopped.load(Ordering::Relaxed) {
+            return Poll::Ready(Err(CamelError::ProcessorError(
+                "SQL producer stopped".into(),
+            )));
+        }
+        if let Some(pool) = self.pool.get()
+            && pool.is_closed()
+        {
+            return Poll::Ready(Err(CamelError::ProcessorError(
+                "SQL connection pool is closed".into(),
+            )));
+        }
         Poll::Ready(Ok(()))
     }
 
@@ -479,6 +495,7 @@ mod tests {
         let p1 = SqlProducer::new(config(), Arc::new(OnceCell::new()));
         let p2 = p1.clone();
         assert!(Arc::ptr_eq(&p1.pool, &p2.pool));
+        assert!(Arc::ptr_eq(&p1.stopped, &p2.stopped));
     }
 
     #[test]
@@ -821,6 +838,70 @@ mod tests {
             c
         };
         let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let result = producer.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+    }
+
+    // SQL-007: poll_ready returns error when stopped flag is set
+    #[test]
+    fn poll_ready_returns_error_when_stopped() {
+        let config = {
+            let mut c = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").unwrap();
+            c.resolve_defaults();
+            c
+        };
+        let mut producer = SqlProducer::new(config, Arc::new(OnceCell::new()));
+        producer.stop();
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let result = producer.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(_))));
+        let err_msg = match result {
+            Poll::Ready(Err(e)) => e.to_string(),
+            _ => unreachable!(),
+        };
+        assert!(err_msg.contains("SQL producer stopped"));
+    }
+
+    // SQL-007: poll_ready returns error when pool is closed
+    #[tokio::test]
+    async fn poll_ready_returns_error_when_pool_closed() {
+        let pool = sqlite_pool().await;
+        pool.close().await;
+
+        let config = {
+            let mut c = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").unwrap();
+            c.resolve_defaults();
+            c
+        };
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell.set(pool).unwrap();
+
+        let mut producer = SqlProducer::new(config, pool_cell);
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let result = producer.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(_))));
+        let err_msg = match result {
+            Poll::Ready(Err(e)) => e.to_string(),
+            _ => unreachable!(),
+        };
+        assert!(err_msg.contains("SQL connection pool is closed"));
+    }
+
+    // SQL-007: poll_ready returns Ok for healthy initialized pool
+    #[tokio::test]
+    async fn poll_ready_returns_ok_for_healthy_pool() {
+        let pool = sqlite_pool().await;
+
+        let config = {
+            let mut c = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").unwrap();
+            c.resolve_defaults();
+            c
+        };
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell.set(pool).unwrap();
+
+        let mut producer = SqlProducer::new(config, pool_cell);
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));

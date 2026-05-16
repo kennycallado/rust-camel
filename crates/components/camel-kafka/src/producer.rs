@@ -6,8 +6,8 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tower::Service;
@@ -411,10 +411,7 @@ mod tests {
         // Before stop, poll_ready should be ready
         let mut producer = producer.clone();
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        assert!(matches!(
-            producer.poll_ready(&mut cx),
-            Poll::Ready(Ok(()))
-        ));
+        assert!(matches!(producer.poll_ready(&mut cx), Poll::Ready(Ok(()))));
 
         // After stop, poll_ready should return error
         producer.stop();
@@ -444,9 +441,6 @@ mod tests {
         // Clone should also see stopped state
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let mut clone = clone;
-        assert!(matches!(
-            clone.poll_ready(&mut cx),
-            Poll::Ready(Err(_))
-        ));
+        assert!(matches!(clone.poll_ready(&mut cx), Poll::Ready(Err(_))));
     }
 }

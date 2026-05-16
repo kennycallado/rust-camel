@@ -119,11 +119,17 @@ impl Consumer for RedisConsumer {
                 match handle.await {
                     Ok(result) => {
                         if let Err(e) = result {
-                            warn!("Previous consumer task exited with error during cleanup: {}", e);
+                            warn!(
+                                "Previous consumer task exited with error during cleanup: {}",
+                                e
+                            );
                         }
                     }
                     Err(e) => {
-                        warn!("Failed to join previous consumer task during cleanup: {}", e);
+                        warn!(
+                            "Failed to join previous consumer task during cleanup: {}",
+                            e
+                        );
                     }
                 }
             }

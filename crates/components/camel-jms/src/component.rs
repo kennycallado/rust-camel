@@ -491,7 +491,10 @@ impl JmsBridgePool {
         broker_type: &BrokerType,
         credentials: &Option<(String, String)>,
     ) -> Result<(BridgeProcess, Channel), CamelError> {
-        info!("Starting JMS bridge process for {}...", redact_url(broker_url));
+        info!(
+            "Starting JMS bridge process for {}...",
+            redact_url(broker_url)
+        );
         let binary_path = ensure_binary(bridge_version, bridge_cache_dir)
             .await
             .map_err(|e| {
@@ -1655,10 +1658,7 @@ mod tests {
 
     #[test]
     fn redact_url_passes_clean_url_unchanged() {
-        assert_eq!(
-            redact_url("tcp://localhost:61616"),
-            "tcp://localhost:61616"
-        );
+        assert_eq!(redact_url("tcp://localhost:61616"), "tcp://localhost:61616");
     }
 
     #[test]
@@ -1676,21 +1676,33 @@ mod tests {
         let pool = Arc::new(
             JmsBridgePool::from_config(JmsPoolConfig {
                 brokers: HashMap::from([
-                    ("b1".to_string(), BrokerConfig {
-                        broker_url: "tcp://b1:61616".to_string(),
-                        broker_type: BrokerType::ActiveMq,
-                        username: None, password: None,
-                    }),
-                    ("b2".to_string(), BrokerConfig {
-                        broker_url: "tcp://b2:61616".to_string(),
-                        broker_type: BrokerType::ActiveMq,
-                        username: None, password: None,
-                    }),
-                    ("b3".to_string(), BrokerConfig {
-                        broker_url: "tcp://b3:61616".to_string(),
-                        broker_type: BrokerType::ActiveMq,
-                        username: None, password: None,
-                    }),
+                    (
+                        "b1".to_string(),
+                        BrokerConfig {
+                            broker_url: "tcp://b1:61616".to_string(),
+                            broker_type: BrokerType::ActiveMq,
+                            username: None,
+                            password: None,
+                        },
+                    ),
+                    (
+                        "b2".to_string(),
+                        BrokerConfig {
+                            broker_url: "tcp://b2:61616".to_string(),
+                            broker_type: BrokerType::ActiveMq,
+                            username: None,
+                            password: None,
+                        },
+                    ),
+                    (
+                        "b3".to_string(),
+                        BrokerConfig {
+                            broker_url: "tcp://b3:61616".to_string(),
+                            broker_type: BrokerType::ActiveMq,
+                            username: None,
+                            password: None,
+                        },
+                    ),
                 ]),
                 max_bridges: 2,
                 bridge_start_timeout_ms: 100,

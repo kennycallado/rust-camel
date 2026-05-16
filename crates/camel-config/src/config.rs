@@ -1055,7 +1055,10 @@ base_url = "https://api.example.com"
         let auth = config.beans.get("auth").unwrap();
         assert_eq!(auth.plugin, "my-auth");
         assert_eq!(auth.config.get("api_key").unwrap(), "${API_KEY}");
-        assert_eq!(auth.config.get("base_url").unwrap(), "https://api.example.com");
+        assert_eq!(
+            auth.config.get("base_url").unwrap(),
+            "https://api.example.com"
+        );
     }
 
     #[test]
@@ -1086,6 +1089,9 @@ base_url = "https://prod.example.com"
         super::merge_toml_values(&mut merged, &prod_overlay);
         let config: CamelConfig = merged.try_into().unwrap();
         let auth = config.beans.get("auth").unwrap();
-        assert_eq!(auth.config.get("base_url").unwrap(), "https://prod.example.com");
+        assert_eq!(
+            auth.config.get("base_url").unwrap(),
+            "https://prod.example.com"
+        );
     }
 }

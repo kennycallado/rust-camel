@@ -468,22 +468,22 @@ impl UriConfig for SqlEndpointConfig {
             })
             .transpose()?
             .unwrap_or('#');
-/// Parse a boolean URI parameter strictly.
-///
-/// Accepts only `"true"` or `"false"` (case-insensitive). Any other value
-/// returns `CamelError::InvalidUri` to prevent silent misconfiguration.
-fn parse_bool_param(name: &str, value: &str) -> Result<bool, CamelError> {
-    if value.eq_ignore_ascii_case("true") {
-        Ok(true)
-    } else if value.eq_ignore_ascii_case("false") {
-        Ok(false)
-    } else {
-        Err(CamelError::InvalidUri(format!(
-            "{} must be 'true' or 'false', got '{}'",
-            name, value
-        )))
-    }
-}
+        /// Parse a boolean URI parameter strictly.
+        ///
+        /// Accepts only `"true"` or `"false"` (case-insensitive). Any other value
+        /// returns `CamelError::InvalidUri` to prevent silent misconfiguration.
+        fn parse_bool_param(name: &str, value: &str) -> Result<bool, CamelError> {
+            if value.eq_ignore_ascii_case("true") {
+                Ok(true)
+            } else if value.eq_ignore_ascii_case("false") {
+                Ok(false)
+            } else {
+                Err(CamelError::InvalidUri(format!(
+                    "{} must be 'true' or 'false', got '{}'",
+                    name, value
+                )))
+            }
+        }
 
         let use_placeholder = params
             .get("usePlaceholder")
@@ -1171,9 +1171,8 @@ mod tests {
 
     #[test]
     fn noop_rejects_invalid_value() {
-        let result = SqlEndpointConfig::from_uri(
-            "sql:select 1?db_url=postgres://localhost/test&noop=1",
-        );
+        let result =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test&noop=1");
         assert!(result.is_err());
         let msg = format!("{:?}", result.unwrap_err());
         assert!(msg.contains("noop"));
@@ -1181,9 +1180,8 @@ mod tests {
 
     #[test]
     fn batch_rejects_invalid_value() {
-        let result = SqlEndpointConfig::from_uri(
-            "sql:select 1?db_url=postgres://localhost/test&batch=yes",
-        );
+        let result =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test&batch=yes");
         assert!(result.is_err());
         let msg = format!("{:?}", result.unwrap_err());
         assert!(msg.contains("batch"));

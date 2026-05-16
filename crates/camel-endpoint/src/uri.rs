@@ -180,17 +180,35 @@ mod tests {
     fn test_uri_components_debug_redacts_sensitive_params() {
         let uri = parse_uri("timer:tick?password=secret&token=abc123&name=hello").unwrap();
         let debug_output = format!("{:?}", uri);
-        assert!(!debug_output.contains("secret"), "Debug must not contain password value");
-        assert!(!debug_output.contains("abc123"), "Debug must not contain token value");
-        assert!(debug_output.contains("hello"), "Debug should contain non-sensitive param values");
-        assert!(debug_output.contains("password"), "Debug should show param key 'password'");
+        assert!(
+            !debug_output.contains("secret"),
+            "Debug must not contain password value"
+        );
+        assert!(
+            !debug_output.contains("abc123"),
+            "Debug must not contain token value"
+        );
+        assert!(
+            debug_output.contains("hello"),
+            "Debug should contain non-sensitive param values"
+        );
+        assert!(
+            debug_output.contains("password"),
+            "Debug should show param key 'password'"
+        );
     }
 
     #[test]
     fn test_uri_components_debug_redacts_case_insensitive() {
         let uri = parse_uri("timer:tick?Password=secret&TOKEN=abc123").unwrap();
         let debug_output = format!("{:?}", uri);
-        assert!(!debug_output.contains("secret"), "Debug must redact 'Password' (capitalized)");
-        assert!(!debug_output.contains("abc123"), "Debug must redact 'TOKEN' (uppercase)");
+        assert!(
+            !debug_output.contains("secret"),
+            "Debug must redact 'Password' (capitalized)"
+        );
+        assert!(
+            !debug_output.contains("abc123"),
+            "Debug must redact 'TOKEN' (uppercase)"
+        );
     }
 }

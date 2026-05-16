@@ -110,9 +110,7 @@ impl WsEndpointConfig {
             .and_then(|v| v.parse::<u32>().ok())
         {
             if v == 0 {
-                return Err(CamelError::InvalidUri(
-                    "maxConnections must be >= 1".into(),
-                ));
+                return Err(CamelError::InvalidUri("maxConnections must be >= 1".into()));
             }
             cfg.max_connections = v;
         }
@@ -122,9 +120,7 @@ impl WsEndpointConfig {
             .and_then(|v| v.parse::<u32>().ok())
         {
             if v == 0 {
-                return Err(CamelError::InvalidUri(
-                    "maxMessageSize must be > 0".into(),
-                ));
+                return Err(CamelError::InvalidUri("maxMessageSize must be > 0".into()));
             }
             cfg.max_message_size = v;
         }
