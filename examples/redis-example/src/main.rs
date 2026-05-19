@@ -33,17 +33,17 @@ async fn main() -> Result<(), CamelError> {
     let container = Redis::default()
         .start()
         .await
-        .expect("Failed to start Redis container — is Docker running?");
+        .expect("Failed to start Redis container — is Docker running?"); // allow-unwrap
     let port = container
         .get_host_port_ipv4(6379)
         .await
-        .expect("Failed to get Redis port");
+        .expect("Failed to get Redis port"); // allow-unwrap
     let conn_str = format!("127.0.0.1:{port}");
     println!("Redis available at {conn_str}");
 
     // Seed demo-queue with items for the BRPOP consumer
-    let client = redis::Client::open(format!("redis://{conn_str}")).unwrap();
-    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let client = redis::Client::open(format!("redis://{conn_str}")).unwrap(); // allow-unwrap
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap(); // allow-unwrap
     let () = redis::cmd("RPUSH")
         .arg("demo-queue")
         .arg("item-0")
@@ -51,10 +51,10 @@ async fn main() -> Result<(), CamelError> {
         .arg("item-2")
         .exec_async(&mut conn)
         .await
-        .unwrap();
+        .unwrap(); // allow-unwrap
     println!("Seeded 3 items into demo-queue\n");
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(RedisComponent::new());
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());

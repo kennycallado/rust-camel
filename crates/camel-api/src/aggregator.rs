@@ -238,7 +238,7 @@ impl AggregatorConfigBuilder {
 
     /// Build the config. Panics if no completion condition was set.
     pub fn build(self) -> AggregatorConfig {
-        self.try_build().expect("completion condition required")
+        self.try_build().expect("completion condition required") // allow-unwrap
     }
 }
 

@@ -53,7 +53,7 @@ impl EndpointPipelineService {
 
     pub fn resolve(&self, uri: &str) -> Result<Option<BoxProcessor>, CamelError> {
         {
-            let cache_guard = self.cache.lock().unwrap();
+            let cache_guard = self.cache.lock().unwrap(); // allow-unwrap
             if let Some(endpoint) = cache_guard.get(uri) {
                 return Ok(Some(endpoint));
             }
@@ -62,7 +62,7 @@ impl EndpointPipelineService {
         match (self.resolver)(uri) {
             Some(endpoint) => {
                 if self.config.cache_size > 0 {
-                    let mut cache_guard = self.cache.lock().unwrap();
+                    let mut cache_guard = self.cache.lock().unwrap(); // allow-unwrap
                     cache_guard.insert(uri.to_string(), endpoint.clone(), self.config.cache_size);
                 }
                 Ok(Some(endpoint))

@@ -10,7 +10,7 @@ async fn main() -> Result<(), CamelError> {
         .with_target(false) // Cleaner output
         .init();
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 

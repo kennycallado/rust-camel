@@ -660,7 +660,7 @@ fn compile_declarative_step_with_threshold(
             let df = if format.strip_prefix("protobuf:").is_some() {
                 #[cfg(feature = "protobuf")]
                 {
-                    let rest = format.strip_prefix("protobuf:").expect("checked prefix");
+                    let rest = format.strip_prefix("protobuf:").expect("checked prefix"); // allow-unwrap
                     resolve_protobuf_dataformat(rest)?
                 }
                 #[cfg(not(feature = "protobuf"))]
@@ -685,7 +685,7 @@ fn compile_declarative_step_with_threshold(
             let df = if format.strip_prefix("protobuf:").is_some() {
                 #[cfg(feature = "protobuf")]
                 {
-                    let rest = format.strip_prefix("protobuf:").expect("checked prefix");
+                    let rest = format.strip_prefix("protobuf:").expect("checked prefix"); // allow-unwrap
                     resolve_protobuf_dataformat(rest)?
                 }
                 #[cfg(not(feature = "protobuf"))]

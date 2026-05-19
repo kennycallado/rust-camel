@@ -33,3 +33,6 @@ harness = false
 [[bench]]
 name = "body_coercion"
 harness = false
+
+[lints]
+workspace = true

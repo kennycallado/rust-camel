@@ -56,3 +56,6 @@ harness = false
 [[bench]]
 name = "load_balancer"
 harness = false
+
+[lints]
+workspace = true

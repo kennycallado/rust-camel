@@ -25,7 +25,7 @@ use camel_core::context::CamelContext;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
@@ -39,8 +39,8 @@ async fn main() -> Result<(), CamelError> {
         .process(move |mut exchange: camel_api::Exchange| {
             let dests = dest_clone.clone();
             Box::pin(async move {
-                let mut d = dests.lock().unwrap();
-                let dest = d.next().unwrap();
+                let mut d = dests.lock().unwrap(); // allow-unwrap
+                let dest = d.next().unwrap(); // allow-unwrap
                 exchange
                     .input
                     .set_header("destination", Value::String(dest.to_string()));

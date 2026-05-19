@@ -73,7 +73,9 @@ fn run_query(query: &str, xml: &str) -> Result<JsonValue, LanguageError> {
         // type mismatch). No document-derived values are embedded, but we follow the
         // same conservative pattern: generic message, no raw external error strings.
         warn!("xpath: expression evaluation failed");
-        LanguageError::EvalError("xpath query failed: expression could not be evaluated".to_string())
+        LanguageError::EvalError(
+            "xpath query failed: expression could not be evaluated".to_string(),
+        )
     })?;
 
     Ok(match result {

@@ -20,3 +20,6 @@ toml = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 tower = { workspace = true }
+
+[lints]
+workspace = true

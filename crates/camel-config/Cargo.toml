@@ -42,3 +42,6 @@ camel-component-log.workspace = true
 [features]
 otel = ["dep:tracing-opentelemetry", "dep:opentelemetry-appender-tracing"]
 kubernetes = ["dep:camel-platform-kubernetes"]
+
+[lints]
+workspace = true

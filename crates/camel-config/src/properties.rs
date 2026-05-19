@@ -27,12 +27,12 @@ impl PropertiesResolver {
     pub fn set(&self, key: &str, value: &str) {
         self.properties
             .write()
-            .unwrap()
+            .unwrap() // allow-unwrap
             .insert(key.to_string(), value.to_string());
     }
 
     pub fn resolve(&self, input: &str) -> Result<String, ResolveError> {
-        let props = self.properties.read().unwrap();
+        let props = self.properties.read().unwrap(); // allow-unwrap
         let mut result = input.to_string();
         let mut start = 0;
 

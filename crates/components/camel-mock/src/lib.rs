@@ -50,7 +50,7 @@ impl MockComponent {
         let registry = self
             .registry
             .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
+            .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
         registry.get(name).cloned()
     }
 }

@@ -11,7 +11,7 @@ use camel_core::context::CamelContext;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
 
     let direct = DirectComponent::new();
     ctx.register_component(TimerComponent::new());

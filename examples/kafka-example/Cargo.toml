@@ -16,3 +16,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing-subscriber.workspace = true
 testcontainers.workspace = true
 testcontainers-modules = { workspace = true, features = ["kafka"] }
+
+[lints]
+workspace = true

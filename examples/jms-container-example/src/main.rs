@@ -137,7 +137,7 @@ async fn main() -> Result<(), CamelError> {
          &env=ARTEMIS_PASSWORD={BROKER_PASS}"
     );
 
-    let mut init_ctx = CamelContext::builder().build().await.unwrap();
+    let mut init_ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     init_ctx.register_component(TimerComponent::new());
     init_ctx.register_component(ContainerComponent::new());
 
@@ -184,7 +184,7 @@ async fn main() -> Result<(), CamelError> {
     };
     let pool = Arc::new(JmsBridgePool::from_config(pool_config)?);
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(JmsComponent::with_scheme("jms", Arc::clone(&pool)));
@@ -366,7 +366,7 @@ fn print_banner() {
     println!();
     println!("Patterns demonstrated:");
     println!("  - Pinned Docker image (apache/activemq-artemis:2.36.0-alpine)");
-    println!("  - Mandatory broker auth (ARTEMIS_USER/PASSWORD, no ANONYMOUS_LOGIN)");
+    println!("  - Mandatory broker auth (ARTEMIS_USER/PASSWORD, no ANONYMOUS_LOGIN)"); // allow-secret
     println!("  - Custom JMS headers (x-order-id, x-priority)");
     println!("  - Competing consumers (consumer-a and consumer-b share orders queue)");
     println!("  - Dead Letter Channel on consumer-b failure");

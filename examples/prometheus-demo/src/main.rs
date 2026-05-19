@@ -24,7 +24,7 @@ async fn main() -> Result<(), CamelError> {
     let mut ctx = CamelContext::builder()
         .build()
         .await
-        .unwrap()
+        .unwrap() // allow-unwrap
         .with_lifecycle(prometheus)
         .with_tracing()
         .await;

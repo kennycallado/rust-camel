@@ -36,7 +36,7 @@ pub(crate) fn resolve_language(
 ) -> Result<Arc<dyn Language>, CamelError> {
     let guard = languages
         .lock()
-        .expect("mutex poisoned: another thread panicked while holding this lock");
+        .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
     guard.get(language).cloned().ok_or_else(|| {
         CamelError::RouteError(format!(
             "language `{language}` is not registered in CamelContext"
@@ -574,7 +574,7 @@ pub(crate) fn resolve_steps(
             }
             BuilderStep::Bean { name, method } => {
                 // Lock beans registry to lookup bean
-                let beans = beans.lock().expect(
+                let beans = beans.lock().expect( // allow-unwrap
                     "beans mutex poisoned: another thread panicked while holding this lock",
                 );
 

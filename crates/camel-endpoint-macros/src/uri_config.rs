@@ -398,8 +398,8 @@ fn generate_param_parsing(
             if let Some(default_val) = default {
                 quote! {
                     let #field_name = params.get(#param_name)
-                        .map(|v| v.parse::<#ty>().unwrap_or_else(|_| #default_val.parse().unwrap()))
-                        .unwrap_or_else(|| #default_val.parse().unwrap())
+                        .map(|v| v.parse::<#ty>().unwrap_or_else(|_| #default_val.parse().unwrap())) // allow-unwrap
+                        .unwrap_or_else(|| #default_val.parse().unwrap()) // allow-unwrap
                 }
             } else {
                 quote! {
@@ -474,11 +474,11 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
     // Collect all field names for Duration companion lookup
     let all_field_names: Vec<String> = fields
         .iter()
-        .map(|f| f.ident.as_ref().unwrap().to_string())
+        .map(|f| f.ident.as_ref().unwrap().to_string()) // allow-unwrap
         .collect();
 
     for field in fields {
-        let field_name = field.ident.as_ref().unwrap().clone();
+        let field_name = field.ident.as_ref().unwrap().clone(); // allow-unwrap
         let field_type = field.ty.clone();
 
         // Check if this is a Duration type that should derive from a companion field

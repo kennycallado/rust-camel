@@ -14,22 +14,22 @@ use camel_language_xpath::XPathLanguage;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
     ctx.register_language("xpath", Box::new(XPathLanguage))
-        .expect("xpath not yet registered");
+        .expect("xpath not yet registered"); // allow-unwrap
 
     let lang = XPathLanguage;
 
     let title_expr = lang
         .create_expression("/catalog/book[1]/title")
-        .expect("valid expression");
+        .expect("valid expression"); // allow-unwrap
 
     let in_stock_pred = lang
         .create_predicate("/catalog/book[@in-stock='true']")
-        .expect("valid predicate");
+        .expect("valid predicate"); // allow-unwrap
 
     let title_expr = Arc::new(title_expr);
     let in_stock_pred = Arc::new(in_stock_pred);

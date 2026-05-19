@@ -23,3 +23,6 @@ serde_json.workspace = true
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+[lints]
+workspace = true

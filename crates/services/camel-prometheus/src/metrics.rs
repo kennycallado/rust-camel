@@ -37,20 +37,20 @@ impl PrometheusMetrics {
             Opts::new("exchanges_total", "Total number of exchanges processed").namespace("camel"),
             &["route"],
         )
-        .expect("Failed to create exchanges_total counter");
+        .expect("Failed to create exchanges_total counter"); // allow-unwrap
         registry
             .register(Box::new(exchanges_total.clone()))
-            .expect("Failed to register exchanges_total counter");
+            .expect("Failed to register exchanges_total counter"); // allow-unwrap
 
         // Create and register errors_total counter
         let errors_total = CounterVec::new(
             Opts::new("errors_total", "Total number of errors").namespace("camel"),
             &["route", "error_type"],
         )
-        .expect("Failed to create errors_total counter");
+        .expect("Failed to create errors_total counter"); // allow-unwrap
         registry
             .register(Box::new(errors_total.clone()))
-            .expect("Failed to register errors_total counter");
+            .expect("Failed to register errors_total counter"); // allow-unwrap
 
         // Create and register exchange_duration_seconds histogram
         // Using buckets suitable for typical exchange durations (ms to seconds range)
@@ -67,20 +67,20 @@ impl PrometheusMetrics {
             },
             &["route"],
         )
-        .expect("Failed to create exchange_duration_seconds histogram");
+        .expect("Failed to create exchange_duration_seconds histogram"); // allow-unwrap
         registry
             .register(Box::new(exchange_duration_seconds.clone()))
-            .expect("Failed to register exchange_duration_seconds histogram");
+            .expect("Failed to register exchange_duration_seconds histogram"); // allow-unwrap
 
         // Create and register queue_depth gauge
         let queue_depth = GaugeVec::new(
             Opts::new("queue_depth", "Current queue depth").namespace("camel"),
             &["route"],
         )
-        .expect("Failed to create queue_depth gauge");
+        .expect("Failed to create queue_depth gauge"); // allow-unwrap
         registry
             .register(Box::new(queue_depth.clone()))
-            .expect("Failed to register queue_depth gauge");
+            .expect("Failed to register queue_depth gauge"); // allow-unwrap
 
         // Create and register circuit_breaker_state gauge
         let circuit_breaker_state = GaugeVec::new(
@@ -91,10 +91,10 @@ impl PrometheusMetrics {
             .namespace("camel"),
             &["route"],
         )
-        .expect("Failed to create circuit_breaker_state gauge");
+        .expect("Failed to create circuit_breaker_state gauge"); // allow-unwrap
         registry
             .register(Box::new(circuit_breaker_state.clone()))
-            .expect("Failed to register circuit_breaker_state gauge");
+            .expect("Failed to register circuit_breaker_state gauge"); // allow-unwrap
 
         Self {
             registry,

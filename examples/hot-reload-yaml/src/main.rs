@@ -85,7 +85,7 @@ async fn main() -> Result<(), CamelError> {
     }
 
     // ── 2. Build context and register components ──────────────────────────────
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(MockComponent::new()); // available for YAML routes
@@ -156,7 +156,7 @@ async fn main() -> Result<(), CamelError> {
     // ── 6. Wait for Ctrl+C ────────────────────────────────────────────────────
     tokio::signal::ctrl_c()
         .await
-        .expect("Failed to listen for Ctrl+C");
+        .expect("Failed to listen for Ctrl+C"); // allow-unwrap
 
     println!();
     println!("Shutting down...");

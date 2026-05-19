@@ -22,3 +22,6 @@ tracing.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

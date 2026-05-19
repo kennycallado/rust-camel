@@ -37,3 +37,6 @@ tempfile = "3"
 [[bench]]
 name = "route_parsing"
 harness = false
+
+[lints]
+workspace = true

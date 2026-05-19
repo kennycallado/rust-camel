@@ -125,7 +125,7 @@ impl JmsBridgePool {
                 0 => Err(CamelError::ProcessorError(
                     "No JMS brokers configured — declare at least one in [components.jms.brokers] in Camel.toml".to_string(),
                 )),
-                1 => Ok(self.config.keys().next().unwrap().clone()),
+                1 => Ok(self.config.keys().next().unwrap().clone()), // allow-unwrap
                 _ => Err(CamelError::ProcessorError(format!(
                     "Multiple JMS brokers configured ({}); specify one with ?broker=<name> in the URI",
                     self.config.keys().cloned().collect::<Vec<_>>().join(", ")

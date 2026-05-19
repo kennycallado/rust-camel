@@ -33,7 +33,7 @@ async fn main() -> Result<(), CamelError> {
     // regardless of the working directory.
     let fixtures_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
 
     let registry = Arc::new(Mutex::new(Registry::new()));
     ctx.register_component(TimerComponent::new());

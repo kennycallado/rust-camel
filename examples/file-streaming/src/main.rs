@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let out_dir = tempfile::tempdir()?;
-    let out_path = out_dir.path().to_str().unwrap().to_string();
+    let out_path = out_dir.path().to_str().unwrap().to_string(); // allow-unwrap
 
     info!("Output directory: {out_path}");
 

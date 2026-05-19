@@ -37,7 +37,7 @@ async fn main() -> Result<(), CamelError> {
         .max_connections(1)
         .connect(DB_URL)
         .await
-        .expect("Failed to connect to SQLite");
+        .expect("Failed to connect to SQLite"); // allow-unwrap
 
     sqlx::query(
         r#"
@@ -51,7 +51,7 @@ async fn main() -> Result<(), CamelError> {
     )
     .execute(&pool)
     .await
-    .expect("Failed to create table");
+    .expect("Failed to create table"); // allow-unwrap
 
     // Insert seed data
     sqlx::query(
@@ -59,19 +59,19 @@ async fn main() -> Result<(), CamelError> {
     )
     .execute(&pool)
     .await
-    .expect("Failed to insert seed data 1");
+    .expect("Failed to insert seed data 1"); // allow-unwrap
 
     sqlx::query("INSERT INTO users (name, email, processed) VALUES ('Bob', 'bob@example.com', 0)")
         .execute(&pool)
         .await
-        .expect("Failed to insert seed data 2");
+        .expect("Failed to insert seed data 2"); // allow-unwrap
 
     println!("Created 'users' table with 2 seed rows.\n");
 
     // -------------------------------------------------------------------------
     // Step 2: Create CamelContext and register components
     // -------------------------------------------------------------------------
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(SqlComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(TimerComponent::new());
@@ -153,7 +153,7 @@ async fn main() -> Result<(), CamelError> {
         sqlx::query_as("SELECT id, name, email, processed FROM users ORDER BY id")
             .fetch_all(&pool)
             .await
-            .expect("Failed to fetch final state");
+            .expect("Failed to fetch final state"); // allow-unwrap
 
     for (id, name, email, processed) in rows {
         println!(

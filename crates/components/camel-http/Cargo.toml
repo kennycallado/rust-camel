@@ -32,3 +32,6 @@ toml = { workspace = true }
 
 [features]
 otel = ["dep:camel-otel"]
+
+[lints]
+workspace = true

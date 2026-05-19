@@ -36,7 +36,7 @@ async fn main() -> Result<(), CamelError> {
         .max_connections(1)
         .connect(DB_URL)
         .await
-        .expect("Failed to connect to SQLite");
+        .expect("Failed to connect to SQLite"); // allow-unwrap
 
     sqlx::query(
         r#"
@@ -50,7 +50,7 @@ async fn main() -> Result<(), CamelError> {
     )
     .execute(&pool)
     .await
-    .expect("Failed to create table");
+    .expect("Failed to create table"); // allow-unwrap
 
     // Insert rows in batches
     for batch in 0..10 {
@@ -64,7 +64,7 @@ async fn main() -> Result<(), CamelError> {
                 .bind(value)
                 .execute(&pool)
                 .await
-                .expect("Failed to insert");
+                .expect("Failed to insert"); // allow-unwrap
         }
         print!(".");
         std::io::Write::flush(&mut std::io::stdout()).ok();
@@ -74,7 +74,7 @@ async fn main() -> Result<(), CamelError> {
     // -------------------------------------------------------------------------
     // Step 2: Create CamelContext
     // -------------------------------------------------------------------------
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(SqlComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(TimerComponent::new());
@@ -101,7 +101,7 @@ async fn main() -> Result<(), CamelError> {
                 println!("  Result: JSON array with {} rows", arr.len());
                 println!("  First 3 rows:");
                 for (i, row) in arr.iter().take(3).enumerate() {
-                    println!("    [{}] {}", i, serde_json::to_string(row).unwrap());
+                    println!("    [{}] {}", i, serde_json::to_string(row).unwrap()); // allow-unwrap
                 }
                 println!("  ... (all {} rows loaded in memory)\n", arr.len());
             }

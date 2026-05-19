@@ -131,7 +131,7 @@ impl_builder_methods!(WithTimeControl);
 // ---------------------------------------------------------------------------
 
 async fn build_context(registrations: Vec<Registration>, mock: MockComponent) -> CamelTestContext {
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
 
     // MockComponent is always registered.
     ctx.register_component(mock.clone());
@@ -245,7 +245,7 @@ impl CamelTestContext {
     /// Start all routes.
     pub async fn start(&self) {
         let mut ctx = self.ctx.lock().await;
-        ctx.start().await.expect("CamelTestContext: start failed");
+        ctx.start().await.expect("CamelTestContext: start failed"); // allow-unwrap
     }
 
     /// Stop all routes explicitly. Safe to call before the harness is dropped —
@@ -255,7 +255,7 @@ impl CamelTestContext {
             return; // already stopped
         }
         let mut ctx = self.ctx.lock().await;
-        ctx.stop().await.expect("CamelTestContext: stop failed");
+        ctx.stop().await.expect("CamelTestContext: stop failed"); // allow-unwrap
     }
 
     /// Consume the harness and stop routes deterministically.

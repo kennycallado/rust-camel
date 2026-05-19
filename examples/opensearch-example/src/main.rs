@@ -91,11 +91,11 @@ async fn main() -> Result<(), CamelError> {
     let container = OpenSearchImage
         .start()
         .await
-        .expect("Failed to start OpenSearch container — is Docker running?");
+        .expect("Failed to start OpenSearch container — is Docker running?"); // allow-unwrap
     let port = container
         .get_host_port_ipv4(OPENSEARCH_HTTP_PORT)
         .await
-        .expect("Failed to get OpenSearch port");
+        .expect("Failed to get OpenSearch port"); // allow-unwrap
     let host_port = format!("127.0.0.1:{}", port);
 
     wait_for_opensearch("127.0.0.1", port).await;

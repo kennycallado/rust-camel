@@ -91,7 +91,7 @@ impl Service<Exchange> for ThrottlerService {
 
         Box::pin(async move {
             let acquired = {
-                let mut limiter = limiter.lock().unwrap();
+                let mut limiter = limiter.lock().unwrap(); // allow-unwrap
                 limiter.try_acquire()
             };
 
@@ -102,14 +102,14 @@ impl Service<Exchange> for ThrottlerService {
                     ThrottleStrategy::Delay => {
                         loop {
                             let wait_time = {
-                                let limiter = limiter.lock().unwrap();
+                                let limiter = limiter.lock().unwrap(); // allow-unwrap
                                 limiter.time_until_next_token()
                             };
                             if wait_time > Duration::ZERO {
                                 tokio::time::sleep(wait_time).await;
                             }
                             let acquired = {
-                                let mut limiter = limiter.lock().unwrap();
+                                let mut limiter = limiter.lock().unwrap(); // allow-unwrap
                                 limiter.try_acquire()
                             };
                             if acquired {

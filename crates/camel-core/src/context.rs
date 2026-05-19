@@ -359,7 +359,7 @@ impl CamelContext {
         info!(scheme = component.scheme(), "Registering component");
         self.registry
             .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock")
+            .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
             .register(Arc::new(component));
     }
 
@@ -378,7 +378,7 @@ impl CamelContext {
         let mut languages = self
             .languages
             .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
+            .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
         if languages.contains_key(&name) {
             return Err(LanguageRegistryError::AlreadyRegistered { name });
         }
@@ -391,7 +391,7 @@ impl CamelContext {
         let languages = self
             .languages
             .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
+            .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
         languages.get(name).cloned()
     }
 
@@ -423,7 +423,7 @@ impl CamelContext {
     pub fn registry(&self) -> std::sync::MutexGuard<'_, Registry> {
         self.registry
             .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock")
+            .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
     }
 
     /// Access the shared component registry Arc.
@@ -681,7 +681,7 @@ impl ComponentRegistrar for CamelContext {
     fn register_component_dyn(&mut self, component: Arc<dyn Component>) {
         self.registry
             .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock")
+            .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
             .register(component);
     }
 }
@@ -810,7 +810,7 @@ impl CamelContextBuilder {
         );
         languages
             .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock")
+            .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
             .insert("simple".to_string(), simple_with_resolver);
         let metrics = self.metrics.unwrap_or_else(|| Arc::new(NoOpMetrics));
         let platform_service = self
@@ -874,7 +874,7 @@ impl CamelContextBuilder {
         let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
         controller
             .try_set_runtime_handle(runtime_handle)
-            .expect("controller actor mailbox should accept initial runtime handle");
+            .expect("controller actor mailbox should accept initial runtime handle"); // allow-unwrap
 
         Ok(CamelContext {
             registry,

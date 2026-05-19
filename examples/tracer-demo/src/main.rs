@@ -75,7 +75,7 @@ async fn run_section_1() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Route: timer → log  (3 exchanges)\n");
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.set_tracer_config(tracer_config(DetailLevel::Minimal))
         .await;
     ctx.register_component(TimerComponent::new());
@@ -104,7 +104,7 @@ async fn run_section_2() -> Result<(), Box<dyn std::error::Error>> {
     println!("Fields: + headers_count, body_type, has_error, output_body_type");
     println!("Route: timer → set_header → transform → log  (2 exchanges)\n");
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.set_tracer_config(tracer_config(DetailLevel::Medium))
         .await;
     ctx.register_component(TimerComponent::new());
@@ -135,7 +135,7 @@ async fn run_section_3() -> Result<(), Box<dyn std::error::Error>> {
     println!("Fields: + header_0, header_1, header_2 (up to 3 headers captured)");
     println!("Route: timer → set_header×3 → log  (2 exchanges)\n");
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.set_tracer_config(tracer_config(DetailLevel::Full))
         .await;
     ctx.register_component(TimerComponent::new());
@@ -167,7 +167,7 @@ async fn run_section_4() -> Result<(), Box<dyn std::error::Error>> {
     println!("Fields: status=\"error\", error=<message>, error_type=<type>");
     println!("Route: timer → processor(returns Err)  (2 exchanges)\n");
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.set_tracer_config(tracer_config(DetailLevel::Minimal))
         .await;
     ctx.register_component(TimerComponent::new());

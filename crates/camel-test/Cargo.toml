@@ -89,3 +89,6 @@ integration-tests = [
     "dep:kube",
     "dep:k8s-openapi",
 ]
+
+[lints]
+workspace = true

@@ -169,7 +169,7 @@ async fn main() -> Result<(), CamelError> {
         config::Config::builder()
             .build()
             .and_then(|c: config::Config| c.try_deserialize())
-            .expect("failed to build default CamelConfig")
+            .expect("failed to build default CamelConfig") // allow-unwrap
     });
 
     // Build context (applies logging, OTel, etc. from config)

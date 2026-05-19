@@ -33,3 +33,6 @@ opentelemetry = { workspace = true }
 otel = ["dep:camel-otel"]
 cmake-build = ["rdkafka/cmake-build"]
 dynamic-linking = ["rdkafka/dynamic-linking"]
+
+[lints]
+workspace = true

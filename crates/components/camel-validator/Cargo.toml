@@ -37,3 +37,6 @@ tempfile = "3"
 camel-core.workspace = true
 camel-dsl.workspace = true
 camel-component-direct.workspace = true
+
+[lints]
+workspace = true

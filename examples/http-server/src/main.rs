@@ -19,7 +19,7 @@ use storage::UserStorage;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(HttpComponent::new());
 
     let storage = Arc::new(UserStorage::new());
@@ -113,7 +113,7 @@ fn create_list_users_route(
                 let (page, per_page) = parse_pagination(query);
 
                 let result = storage.list(page, per_page);
-                exchange.input.body = Body::Json(serde_json::to_value(result).unwrap());
+                exchange.input.body = Body::Json(serde_json::to_value(result).unwrap()); // allow-unwrap
                 Ok(exchange)
             }
         })
@@ -139,7 +139,7 @@ fn create_user_route(
                     Ok(r) => r,
                     Err(e) => {
                         let error = ApiError::bad_request(format!("Invalid JSON: {}", e));
-                        exchange.input.body = Body::Json(serde_json::to_value(error).unwrap());
+                        exchange.input.body = Body::Json(serde_json::to_value(error).unwrap()); // allow-unwrap
                         exchange
                             .input
                             .set_header("CamelHttpResponseCode", Value::from(400u16));
@@ -149,7 +149,7 @@ fn create_user_route(
 
                 if let Err(e) = req.validate() {
                     let error = ApiError::bad_request(e);
-                    exchange.input.body = Body::Json(serde_json::to_value(error).unwrap());
+                    exchange.input.body = Body::Json(serde_json::to_value(error).unwrap()); // allow-unwrap
                     exchange
                         .input
                         .set_header("CamelHttpResponseCode", Value::from(400u16));
@@ -158,7 +158,7 @@ fn create_user_route(
 
                 if storage.email_exists(&req.email) {
                     let error = ApiError::conflict("Email already exists");
-                    exchange.input.body = Body::Json(serde_json::to_value(error).unwrap());
+                    exchange.input.body = Body::Json(serde_json::to_value(error).unwrap()); // allow-unwrap
                     exchange
                         .input
                         .set_header("CamelHttpResponseCode", Value::from(409u16));
@@ -166,7 +166,7 @@ fn create_user_route(
                 }
 
                 let user = storage.create(req);
-                exchange.input.body = Body::Json(serde_json::to_value(user).unwrap());
+                exchange.input.body = Body::Json(serde_json::to_value(user).unwrap()); // allow-unwrap
                 exchange
                     .input
                     .set_header("CamelHttpResponseCode", Value::from(201u16));
@@ -200,11 +200,11 @@ fn get_user_route(
 
                 match storage.get(user_id) {
                     Some(user) => {
-                        exchange.input.body = Body::Json(serde_json::to_value(user).unwrap());
+                        exchange.input.body = Body::Json(serde_json::to_value(user).unwrap()); // allow-unwrap
                     }
                     None => {
                         let error = ApiError::not_found(format!("User {} not found", user_id));
-                        exchange.input.body = Body::Json(serde_json::to_value(error).unwrap());
+                        exchange.input.body = Body::Json(serde_json::to_value(error).unwrap()); // allow-unwrap
                         exchange
                             .input
                             .set_header("CamelHttpResponseCode", Value::from(404u16));
@@ -239,7 +239,7 @@ fn update_user_route(
 
                 if storage.get(user_id).is_none() {
                     let error = ApiError::not_found(format!("User {} not found", user_id));
-                    exchange.input.body = Body::Json(serde_json::to_value(error).unwrap());
+                    exchange.input.body = Body::Json(serde_json::to_value(error).unwrap()); // allow-unwrap
                     exchange
                         .input
                         .set_header("CamelHttpResponseCode", Value::from(404u16));
@@ -252,7 +252,7 @@ fn update_user_route(
                     Ok(r) => r,
                     Err(e) => {
                         let error = ApiError::bad_request(format!("Invalid JSON: {}", e));
-                        exchange.input.body = Body::Json(serde_json::to_value(error).unwrap());
+                        exchange.input.body = Body::Json(serde_json::to_value(error).unwrap()); // allow-unwrap
                         exchange
                             .input
                             .set_header("CamelHttpResponseCode", Value::from(400u16));
@@ -262,7 +262,7 @@ fn update_user_route(
 
                 if let Err(e) = req.validate() {
                     let error = ApiError::bad_request(e);
-                    exchange.input.body = Body::Json(serde_json::to_value(error).unwrap());
+                    exchange.input.body = Body::Json(serde_json::to_value(error).unwrap()); // allow-unwrap
                     exchange
                         .input
                         .set_header("CamelHttpResponseCode", Value::from(400u16));
@@ -271,7 +271,7 @@ fn update_user_route(
 
                 if !req.has_updates() {
                     let error = ApiError::bad_request("No fields to update");
-                    exchange.input.body = Body::Json(serde_json::to_value(error).unwrap());
+                    exchange.input.body = Body::Json(serde_json::to_value(error).unwrap()); // allow-unwrap
                     exchange
                         .input
                         .set_header("CamelHttpResponseCode", Value::from(400u16));
@@ -280,11 +280,11 @@ fn update_user_route(
 
                 match storage.update(user_id, req) {
                     Some(user) => {
-                        exchange.input.body = Body::Json(serde_json::to_value(user).unwrap());
+                        exchange.input.body = Body::Json(serde_json::to_value(user).unwrap()); // allow-unwrap
                     }
                     None => {
                         let error = ApiError::internal("Failed to update user");
-                        exchange.input.body = Body::Json(serde_json::to_value(error).unwrap());
+                        exchange.input.body = Body::Json(serde_json::to_value(error).unwrap()); // allow-unwrap
                         exchange
                             .input
                             .set_header("CamelHttpResponseCode", Value::from(500u16));
@@ -327,7 +327,7 @@ fn delete_user_route(
                     }
                     None => {
                         let error = ApiError::not_found(format!("User {} not found", user_id));
-                        exchange.input.body = Body::Json(serde_json::to_value(error).unwrap());
+                        exchange.input.body = Body::Json(serde_json::to_value(error).unwrap()); // allow-unwrap
                         exchange
                             .input
                             .set_header("CamelHttpResponseCode", Value::from(404u16));

@@ -113,10 +113,10 @@ pub mod fake {
             self.spawn_count.fetch_add(1, Ordering::SeqCst);
             self.calls
                 .lock()
-                .expect("calls")
+                .expect("calls") // allow-unwrap
                 .push(FakeCall::Spawn(key.clone()));
-            self.spawned.lock().expect("spawned").push(key.clone());
-            if self.config.lock().expect("config").fail_on_spawn {
+            self.spawned.lock().expect("spawned").push(key.clone()); // allow-unwrap
+            if self.config.lock().expect("config").fail_on_spawn { // allow-unwrap
                 return Err(ProviderError::SpawnFailed("configured".into()));
             }
             Ok(RunnerHandle {
@@ -129,13 +129,13 @@ pub mod fake {
         async fn shutdown(&self, handle: RunnerHandle) -> Result<(), ProviderError> {
             self.calls
                 .lock()
-                .expect("calls")
+                .expect("calls") // allow-unwrap
                 .push(FakeCall::Shutdown(RunnerPoolKey {
                     runtime: handle.id.replace("fake-", ""),
                 }));
             self.shutdowns
                 .lock()
-                .expect("shutdowns")
+                .expect("shutdowns") // allow-unwrap
                 .push(RunnerPoolKey {
                     runtime: handle.id.replace("fake-", ""),
                 });
@@ -145,9 +145,9 @@ pub mod fake {
         async fn health(&self, handle: &RunnerHandle) -> Result<HealthReport, ProviderError> {
             self.calls
                 .lock()
-                .expect("calls")
+                .expect("calls") // allow-unwrap
                 .push(FakeCall::Health(handle.id.clone()));
-            if self.config.lock().expect("config").fail_on_health {
+            if self.config.lock().expect("config").fail_on_health { // allow-unwrap
                 return Ok(HealthReport::Unhealthy("configured".into()));
             }
             Ok(HealthReport::Healthy)
@@ -160,17 +160,17 @@ pub mod fake {
         ) -> Result<(), ProviderError> {
             self.calls
                 .lock()
-                .expect("calls")
+                .expect("calls") // allow-unwrap
                 .push(FakeCall::Register(handle.id.clone(), def.id.clone()));
-            let mut count = self.register_ok_count.lock().expect("count");
-            let cfg = self.config.lock().expect("config").clone();
+            let mut count = self.register_ok_count.lock().expect("count"); // allow-unwrap
+            let cfg = self.config.lock().expect("config").clone(); // allow-unwrap
             if cfg.fail_on_register > 0 && *count >= cfg.fail_on_register {
                 return Err(ProviderError::RegisterFailed("configured".into()));
             }
             *count += 1;
             self.registered
                 .lock()
-                .expect("registered")
+                .expect("registered") // allow-unwrap
                 .entry(handle.id.clone())
                 .or_default()
                 .insert(def.id.clone());
@@ -184,12 +184,12 @@ pub mod fake {
         ) -> Result<(), ProviderError> {
             self.calls
                 .lock()
-                .expect("calls")
+                .expect("calls") // allow-unwrap
                 .push(FakeCall::Unregister(handle.id.clone(), id.clone()));
             if let Some(set) = self
                 .registered
                 .lock()
-                .expect("registered")
+                .expect("registered") // allow-unwrap
                 .get_mut(&handle.id)
             {
                 set.remove(id);
@@ -206,19 +206,19 @@ pub mod fake {
         ) -> Result<ExchangePatch, ProviderError> {
             self.calls
                 .lock()
-                .expect("calls")
+                .expect("calls") // allow-unwrap
                 .push(FakeCall::Invoke(handle.id.clone(), id.clone()));
             let exists = self
                 .registered
                 .lock()
-                .expect("registered")
+                .expect("registered") // allow-unwrap
                 .get(&handle.id)
                 .map(|s| s.contains(id))
                 .unwrap_or(false);
             if !exists {
                 return Err(ProviderError::InvokeFailed("not registered".into()));
             }
-            let cfg = self.config.lock().expect("config").clone();
+            let cfg = self.config.lock().expect("config").clone(); // allow-unwrap
             Ok(cfg.invoke_response.unwrap_or_default())
         }
     }

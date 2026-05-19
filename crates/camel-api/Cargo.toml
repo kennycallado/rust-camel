@@ -45,3 +45,6 @@ harness = false
 [[bench]]
 name = "from_body"
 harness = false
+
+[lints]
+workspace = true

@@ -456,9 +456,9 @@ impl RedisEndpointConfig {
 
         if let Some(password) = &self.password {
             let encoded = utf8_percent_encode(password, NON_ALPHANUMERIC).to_string();
-            format!("{}://:{}@{}:{}/{}", scheme, encoded, host, port, self.db)
+            format!("{}://:{}@{}:{}/{}", scheme, encoded, host, port, self.db) // allow-secret
         } else {
-            format!("{}://{}:{}/{}", scheme, host, port, self.db)
+            format!("{}://{}:{}/{}", scheme, host, port, self.db) // allow-secret
         }
     }
 
@@ -472,7 +472,7 @@ impl RedisEndpointConfig {
         let scheme = if self.ssl { "rediss" } else { "redis" };
 
         match &self.password {
-            Some(_) => format!("{}://:***@{}:{}/{}", scheme, host, port, self.db),
+            Some(_) => format!("{}://:***@{}:{}/{}", scheme, host, port, self.db), // allow-secret
             None => self.redis_url(),
         }
     }

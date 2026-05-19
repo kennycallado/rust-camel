@@ -229,7 +229,7 @@ async fn main() -> Result<(), CamelError> {
         .create(true)
         .append(true)
         .open("showcase-trace.log")
-        .expect("failed to open showcase-trace.log");
+        .expect("failed to open showcase-trace.log"); // allow-unwrap
     let tracer_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_span_events(FmtSpan::CLOSE)
@@ -285,7 +285,7 @@ async fn main() -> Result<(), CamelError> {
     // Setup temp directory for file routes
     let output_dir = std::env::temp_dir().join("rust-camel-showcase");
     std::fs::create_dir_all(&output_dir).ok();
-    let file_path = output_dir.to_str().unwrap();
+    let file_path = output_dir.to_str().unwrap(); // allow-unwrap
 
     // =========================================================================
     // CATEGORY 1: EIP BASICS
@@ -743,7 +743,7 @@ async fn main() -> Result<(), CamelError> {
         .process(move |mut exchange| {
             let counter = Arc::clone(&seq_counter_clone);
             async move {
-                let mut n = counter.lock().unwrap();
+                let mut n = counter.lock().unwrap(); // allow-unwrap
                 *n += 1;
                 exchange.input.body = Body::Json(serde_json::json!({
                     "count": *n,

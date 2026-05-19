@@ -157,7 +157,7 @@ async fn main() -> Result<(), CamelError> {
     println!("This example demonstrates bean registration and invocation in rust-camel\n");
 
     // Create Camel context
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(LogComponent::new());
 
     // Create and configure bean registry
@@ -166,7 +166,7 @@ async fn main() -> Result<(), CamelError> {
     // Register our OrderService bean
     bean_registry
         .register("orderService", OrderService)
-        .expect("register bean");
+        .expect("register bean"); // allow-unwrap
 
     println!("Registered {} beans:", bean_registry.len());
     println!("   - orderService (with handlers: process, validate, get_stats)\n");
@@ -197,7 +197,7 @@ async fn main() -> Result<(), CamelError> {
 
     let mut exchange = Exchange::new(Message::default());
     exchange.input.body =
-        Body::Json(serde_json::to_value(&valid_order).expect("Failed to serialize order"));
+        Body::Json(serde_json::to_value(&valid_order).expect("Failed to serialize order")); // allow-unwrap
 
     match bean_registry
         .invoke("orderService", "validate", &mut exchange)
@@ -205,7 +205,7 @@ async fn main() -> Result<(), CamelError> {
     {
         Ok(_) => {
             let result: Order =
-                extract_json(&exchange.input.body).expect("Failed to deserialize result");
+                extract_json(&exchange.input.body).expect("Failed to deserialize result"); // allow-unwrap
             println!("   [OK] Validation passed for order {}", result.id);
         }
         Err(e) => {
@@ -228,7 +228,7 @@ async fn main() -> Result<(), CamelError> {
 
     let mut exchange = Exchange::new(Message::default());
     exchange.input.body =
-        Body::Json(serde_json::to_value(&invalid_order).expect("Failed to serialize order"));
+        Body::Json(serde_json::to_value(&invalid_order).expect("Failed to serialize order")); // allow-unwrap
 
     match bean_registry
         .invoke("orderService", "validate", &mut exchange)
@@ -262,7 +262,7 @@ async fn main() -> Result<(), CamelError> {
 
     let mut exchange = Exchange::new(Message::default());
     exchange.input.body =
-        Body::Json(serde_json::to_value(&high_value_order).expect("Failed to serialize order"));
+        Body::Json(serde_json::to_value(&high_value_order).expect("Failed to serialize order")); // allow-unwrap
 
     match bean_registry
         .invoke("orderService", "process", &mut exchange)
@@ -270,7 +270,7 @@ async fn main() -> Result<(), CamelError> {
     {
         Ok(_) => {
             let result: ProcessedOrder =
-                extract_json(&exchange.input.body).expect("Failed to deserialize result");
+                extract_json(&exchange.input.body).expect("Failed to deserialize result"); // allow-unwrap
             println!("   [OK] Order {} processed", result.order.id);
             println!("   Customer: {}", result.order.customer);
             println!("   Total: ${:.2}", result.order.total);
@@ -298,7 +298,7 @@ async fn main() -> Result<(), CamelError> {
     {
         Ok(_) => {
             let stats: String =
-                extract_json(&exchange.input.body).expect("Failed to deserialize stats");
+                extract_json(&exchange.input.body).expect("Failed to deserialize stats"); // allow-unwrap
             println!("   [OK] {}", stats);
         }
         Err(e) => {
@@ -326,7 +326,7 @@ async fn main() -> Result<(), CamelError> {
 
     let mut exchange = Exchange::new(Message::default());
     exchange.input.body =
-        Body::Json(serde_json::to_value(&regular_order).expect("Failed to serialize order"));
+        Body::Json(serde_json::to_value(&regular_order).expect("Failed to serialize order")); // allow-unwrap
 
     match bean_registry
         .invoke("orderService", "process", &mut exchange)
@@ -334,7 +334,7 @@ async fn main() -> Result<(), CamelError> {
     {
         Ok(_) => {
             let result: ProcessedOrder =
-                extract_json(&exchange.input.body).expect("Failed to deserialize result");
+                extract_json(&exchange.input.body).expect("Failed to deserialize result"); // allow-unwrap
             println!("   [OK] Order {} processed", result.order.id);
             println!("   Customer: {}", result.order.customer);
             println!("   Total: ${:.2}", result.order.total);

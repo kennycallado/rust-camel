@@ -13,3 +13,6 @@ readme = "README.md"
 include = ["src/**/*", "wit/**/*", "README.md", "Cargo.toml"]
 
 [dependencies]
+
+[lints]
+workspace = true

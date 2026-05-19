@@ -21,3 +21,6 @@ criterion.workspace = true
 [[bench]]
 name = "expression_eval"
 harness = false
+
+[lints]
+workspace = true

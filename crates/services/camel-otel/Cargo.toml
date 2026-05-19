@@ -31,3 +31,6 @@ tokio = { workspace = true }
 opentelemetry_sdk = { version = "0.31", features = ["testing"] }
 tower = { workspace = true }
 serial_test = "3"
+
+[lints]
+workspace = true

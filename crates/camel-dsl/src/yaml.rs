@@ -1056,9 +1056,7 @@ pub fn load_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
         error!(path = %path.display(), error = %e, "failed to load routes from file");
         CamelError::Io(format!("Failed to read {}: {e}", path.display()))
     })?;
-    parse_yaml(&content).map_err(|e| {
-        CamelError::RouteError(format!("{e} (in {})", path.display()))
-    })
+    parse_yaml(&content).map_err(|e| CamelError::RouteError(format!("{e} (in {})", path.display())))
 }
 
 #[cfg(test)]

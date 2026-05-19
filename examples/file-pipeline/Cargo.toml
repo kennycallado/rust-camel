@@ -13,3 +13,6 @@ camel-component-file.workspace = true
 camel-component-log.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

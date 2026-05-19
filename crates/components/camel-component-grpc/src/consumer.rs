@@ -356,7 +356,7 @@ impl GrpcConsumer {
                     let Some(envelope) = envelope else { break };
 
                     let sem = semaphore.clone();
-                    let permit = sem.acquire_owned().await.expect("semaphore closed");
+                    let permit = sem.acquire_owned().await.expect("semaphore closed"); // allow-unwrap
                     let req_desc = req_desc.clone();
                     let resp_desc = resp_desc.clone();
                     let sender = sender.clone();

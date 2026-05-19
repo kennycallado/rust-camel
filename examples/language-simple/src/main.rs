@@ -30,7 +30,7 @@ use camel_language_simple::SimpleLanguage;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
@@ -41,27 +41,27 @@ async fn main() -> Result<(), CamelError> {
     // Predicate: only let 'order' messages through the filter
     let order_pred = lang
         .create_predicate("${header.type} == 'order'")
-        .expect("valid predicate");
+        .expect("valid predicate"); // allow-unwrap
 
     // Predicate: compound condition using &&
     let high_priority_order_pred = lang
         .create_predicate("${header.type} == 'order' && ${header.priority} == 'high'")
-        .expect("valid compound predicate");
+        .expect("valid compound predicate"); // allow-unwrap
 
     // Predicate: null-safe body existence check
     let body_present_pred = lang
         .create_predicate("${body} != null")
-        .expect("valid body presence predicate");
+        .expect("valid body presence predicate"); // allow-unwrap
 
     // Predicate: boolean literal comparison
     let approved_pred = lang
         .create_predicate("${header.approved} == true")
-        .expect("valid boolean predicate");
+        .expect("valid boolean predicate"); // allow-unwrap
 
     // Expression: evaluate ${header.type} to enrich the body
     let type_expr = lang
         .create_expression("${header.type}")
-        .expect("valid expression");
+        .expect("valid expression"); // allow-unwrap
 
     // Wrap in Arc so they can be moved into multiple route closures
     let order_pred = Arc::new(order_pred);

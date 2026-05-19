@@ -79,3 +79,6 @@ wasm = ["dep:camel-component-wasm"]
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]
 kafka-static = ["dep:camel-component-kafka", "cmake-build"]
+
+[lints]
+workspace = true

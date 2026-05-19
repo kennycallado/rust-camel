@@ -21,9 +21,9 @@ async fn main() -> Result<(), CamelError> {
     let input_dir = std::env::temp_dir().join("rust-camel-input");
     std::fs::create_dir_all(&input_dir).ok();
 
-    let input_path = input_dir.to_str().unwrap();
+    let input_path = input_dir.to_str().unwrap(); // allow-unwrap
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(FileComponent::new());
     ctx.register_component(LogComponent::new());
 

@@ -38,14 +38,14 @@ use camel_language_rhai::RhaiLanguage;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
     // Register RhaiLanguage manually — it is not included by default
     // to keep the Rhai dependency optional.
     ctx.register_language("rhai", Box::new(RhaiLanguage::new()))
-        .expect("rhai not yet registered");
+        .expect("rhai not yet registered"); // allow-unwrap
 
     // --- Build language predicates / expressions up-front ---
 
@@ -62,7 +62,7 @@ async fn main() -> Result<(), CamelError> {
             }
             "#,
         )
-        .expect("valid expression");
+        .expect("valid expression"); // allow-unwrap
 
     // Expression 2: in-script mutation — compute a tax string using
     // set_header to store an intermediate value, then read it back.
@@ -74,12 +74,12 @@ async fn main() -> Result<(), CamelError> {
             "tax=" + header("tax")
             "#,
         )
-        .expect("valid expression");
+        .expect("valid expression"); // allow-unwrap
 
     // Predicate: only let through messages where amount > 100
     let high_value_pred = lang
         .create_predicate(r#"header("amount") > 100"#)
-        .expect("valid predicate");
+        .expect("valid predicate"); // allow-unwrap
 
     let enrich_expr = Arc::new(enrich_expr);
     let tax_expr = Arc::new(tax_expr);

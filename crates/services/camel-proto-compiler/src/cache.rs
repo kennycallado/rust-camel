@@ -42,7 +42,7 @@ impl ProtoCache {
         if let Some(pool) = self
             .pools
             .lock()
-            .expect("mutex poisoned")
+            .expect("mutex poisoned") // allow-unwrap
             .get(&key)
             .cloned()
         {
@@ -51,16 +51,16 @@ impl ProtoCache {
 
         let pool = compile_proto(proto_path, &include_paths)?;
 
-        let mut guard = self.pools.lock().expect("mutex poisoned");
+        let mut guard = self.pools.lock().expect("mutex poisoned"); // allow-unwrap
         guard.insert(key, pool.clone());
         Ok(pool)
     }
 
     pub fn len(&self) -> usize {
-        self.pools.lock().expect("mutex poisoned").len()
+        self.pools.lock().expect("mutex poisoned").len() // allow-unwrap
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pools.lock().expect("mutex poisoned").is_empty()
+        self.pools.lock().expect("mutex poisoned").is_empty() // allow-unwrap
     }
 }

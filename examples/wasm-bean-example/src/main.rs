@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     bean_registry.register("text-utils", wasm_bean)?;
     let beans = Arc::new(std::sync::Mutex::new(bean_registry));
 
-    let mut ctx = CamelContext::builder().beans(beans).build().await.unwrap();
+    let mut ctx = CamelContext::builder().beans(beans).build().await.unwrap(); // allow-unwrap
 
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());

@@ -35,15 +35,15 @@ async fn main() -> Result<(), CamelError> {
     let _container = apache::Kafka::default()
         .start()
         .await
-        .expect("Failed to start Kafka container — is Docker running?");
+        .expect("Failed to start Kafka container — is Docker running?"); // allow-unwrap
     let port = _container
         .get_host_port_ipv4(apache::KAFKA_PORT)
         .await
-        .expect("Failed to get Kafka port");
+        .expect("Failed to get Kafka port"); // allow-unwrap
     let brokers = format!("127.0.0.1:{port}");
     println!("Kafka broker available at {brokers}");
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(KafkaComponent::new());

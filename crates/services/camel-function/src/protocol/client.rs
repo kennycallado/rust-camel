@@ -19,7 +19,7 @@ impl ProtocolClient {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
-                .expect("reqwest client"),
+                .expect("reqwest client"), // allow-unwrap
         }
     }
 

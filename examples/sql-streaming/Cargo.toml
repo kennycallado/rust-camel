@@ -19,3 +19,6 @@ tracing-subscriber.workspace = true
 serde_json.workspace = true
 sqlx = { version = "0.8", features = ["runtime-tokio", "any", "sqlite"] }
 futures.workspace = true
+
+[lints]
+workspace = true

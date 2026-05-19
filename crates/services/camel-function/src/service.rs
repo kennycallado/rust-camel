@@ -67,7 +67,7 @@ impl FunctionRuntimeService {
     pub fn provider(&self) -> &crate::provider::container::ContainerProvider {
         self.container_provider
             .as_ref()
-            .expect("not a container provider")
+            .expect("not a container provider") // allow-unwrap
     }
 
     pub fn runner_state(&self, runtime: &str) -> Option<RunnerState> {
@@ -78,7 +78,7 @@ impl FunctionRuntimeService {
             .pool
             .handles
             .get(&key)
-            .map(|h| h.state.lock().expect("state").clone())
+            .map(|h| h.state.lock().expect("state").clone()) // allow-unwrap
     }
 
     pub fn force_runner_failed(&self, runtime: &str, reason: &str) {
@@ -86,7 +86,7 @@ impl FunctionRuntimeService {
             runtime: runtime.to_string(),
         };
         if let Some(handle) = self.invoker.pool.handles.get(&key) {
-            *handle.state.lock().expect("state") = RunnerState::Failed {
+            *handle.state.lock().expect("state") = RunnerState::Failed { // allow-unwrap
                 reason: reason.to_string(),
             };
         }
@@ -103,11 +103,11 @@ impl FunctionRuntimeService {
             }
             match self.provider.health(handle).await {
                 Ok(HealthReport::Healthy) => {
-                    *handle.state.lock().expect("state") = RunnerState::Healthy;
+                    *handle.state.lock().expect("state") = RunnerState::Healthy; // allow-unwrap
                     return Ok(());
                 }
                 Ok(HealthReport::Unhealthy(reason)) => {
-                    *handle.state.lock().expect("state") = RunnerState::Unhealthy {
+                    *handle.state.lock().expect("state") = RunnerState::Unhealthy { // allow-unwrap
                         since: std::time::Instant::now(),
                         reason,
                     };
@@ -133,16 +133,16 @@ impl FunctionRuntimeService {
                         match provider.health(&handle).await {
                             Ok(HealthReport::Healthy) => {
                                 unhealthy_count = 0;
-                                *handle.state.lock().expect("state") = RunnerState::Healthy;
+                                *handle.state.lock().expect("state") = RunnerState::Healthy; // allow-unwrap
                             }
                             Ok(HealthReport::Unhealthy(reason)) => {
                                 unhealthy_count = unhealthy_count.saturating_add(1);
                                 if unhealthy_count >= 2 {
-                                    *handle.state.lock().expect("state") = RunnerState::Unhealthy { since: std::time::Instant::now(), reason };
+                                    *handle.state.lock().expect("state") = RunnerState::Unhealthy { since: std::time::Instant::now(), reason }; // allow-unwrap
                                 }
                             }
                             Err(err) => {
-                                *handle.state.lock().expect("state") = RunnerState::Failed { reason: err.to_string() };
+                                *handle.state.lock().expect("state") = RunnerState::Failed { reason: err.to_string() }; // allow-unwrap
                             }
                         }
                     }
@@ -170,7 +170,7 @@ impl FunctionRuntimeService {
                 self.invoker
                     .function_timeouts
                     .lock()
-                    .expect("function_timeouts")
+                    .expect("function_timeouts") // allow-unwrap
                     .remove(&ref_key.0);
             }
         }
@@ -182,7 +182,7 @@ impl FunctionRuntimeService {
         self.invoker
             .pending
             .lock()
-            .expect("pending")
+            .expect("pending") // allow-unwrap
             .extend(pending.iter().cloned());
     }
 }
@@ -206,7 +206,7 @@ impl Lifecycle for FunctionRuntimeService {
             return Ok(());
         }
         let pending = {
-            let mut lock = self.invoker.pending.lock().expect("pending");
+            let mut lock = self.invoker.pending.lock().expect("pending"); // allow-unwrap
             std::mem::take(&mut *lock)
         };
         let mut grouped: std::collections::HashMap<
@@ -287,7 +287,7 @@ impl Lifecycle for FunctionRuntimeService {
         self.invoker
             .function_timeouts
             .lock()
-            .expect("function_timeouts")
+            .expect("function_timeouts") // allow-unwrap
             .clear();
         for handle in handles {
             handle.cancel.cancel();

@@ -43,7 +43,7 @@ async fn main() {
     println!("3. Converting Body::Xml → Body::Text");
     println!("   ───────────────────────────────────");
     let xml_body = Body::Xml("<order><id>42</id></order>".to_string());
-    let text_body = xml_body.try_into_text().unwrap();
+    let text_body = xml_body.try_into_text().unwrap(); // allow-unwrap
     if let Some(text) = text_body.as_text() {
         println!("   Converted to Text: {:?}", text);
     }
@@ -55,7 +55,7 @@ async fn main() {
     println!("4. Converting Body::Text (valid XML) → Body::Xml");
     println!("   ──────────────────────────────────────────────");
     let text_with_xml = Body::Text("<product><name>Widget</name></product>".to_string());
-    let xml_body = text_with_xml.try_into_xml().unwrap();
+    let xml_body = text_with_xml.try_into_xml().unwrap(); // allow-unwrap
     if let Some(xml) = xml_body.as_xml() {
         println!("   Converted Text to Xml: {:?}", xml);
     }

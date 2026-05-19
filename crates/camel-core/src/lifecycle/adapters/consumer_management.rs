@@ -25,7 +25,7 @@ pub(crate) fn create_route_consumer(
     let component = {
         let guard = registry
             .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
+            .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
         guard.get_or_err(&parsed.scheme)?.clone()
     };
     let endpoint = component.create_endpoint(from_uri, component_ctx)?;
@@ -82,33 +82,33 @@ pub(super) async fn stop_route_internal(
 
     let managed = routes
         .get_mut(route_id)
-        .expect("invariant: route must exist after prior existence check");
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     managed.consumer_cancel_token.cancel();
 
     let managed = routes
         .get_mut(route_id)
-        .expect("invariant: route must exist after prior existence check");
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     if let Some(agg_svc) = &managed.agg_service {
         let guard = agg_svc
             .lock()
-            .expect("mutex poisoned: another thread panicked while holding this lock");
+            .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
         guard.force_complete_all();
     }
 
     let managed = routes
         .get_mut(route_id)
-        .expect("invariant: route must exist after prior existence check");
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     managed.pipeline_cancel_token.cancel();
 
     let managed = routes
         .get_mut(route_id)
-        .expect("invariant: route must exist after prior existence check");
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     let consumer_handle = managed.consumer_handle.take();
     let pipeline_handle = managed.pipeline_handle.take();
 
     let managed = routes
         .get_mut(route_id)
-        .expect("invariant: route must exist after prior existence check");
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     managed.channel_sender = None;
 
     let timeout_result = tokio::time::timeout(Duration::from_secs(30), async {
@@ -133,7 +133,7 @@ pub(super) async fn stop_route_internal(
 
     let managed = routes
         .get_mut(route_id)
-        .expect("invariant: route must exist after prior existence check");
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     managed.consumer_cancel_token = CancellationToken::new();
     managed.pipeline_cancel_token = CancellationToken::new();
 

@@ -25,3 +25,6 @@ url = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 futures-util = "0.3"
+
+[lints]
+workspace = true

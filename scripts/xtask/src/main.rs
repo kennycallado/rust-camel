@@ -47,6 +47,15 @@ enum Commands {
     },
     /// Generate canonical route spec artifacts (JSON Schema, TypeScript types)
     Schema,
+    /// Scan production source files for .unwrap() and .expect( calls.
+    /// Exits non-zero if any violations are found.
+    /// Escape hatch: append `// allow-unwrap` to the line.
+    LintUnwrap,
+    /// Scan source files for potential credential leakage in format macros
+    /// and tracing macro structured fields.
+    /// Exits non-zero if any violations are found.
+    /// Escape hatch: append `// allow-secret` to the line.
+    LintSecrets,
 }
 
 fn main() {
@@ -76,11 +85,64 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::LintUnwrap => {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let workspace_root = find_workspace_root_from(&manifest_dir)
+                .ok_or_else(|| "Cannot locate workspace root".to_string())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            match lint_unwrap(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-unwrap: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!("UNWRAP VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-unwrap: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-unwrap error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintSecrets => {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let workspace_root = find_workspace_root_from(&manifest_dir)
+                .ok_or_else(|| "Cannot locate workspace root".to_string())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            match lint_secrets(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-secrets: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!("SECRET LEAKAGE VIOLATIONS ({} found):", violations.len()); // allow-secret
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                        println!("    rule: {}", v.rule);
+                    }
+                    eprintln!("\nlint-secrets: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-secrets error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 
 fn validate_version(v: &str) -> Result<(), String> {
-    let re = regex::Regex::new(r"^(dev|[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)$").unwrap();
+    let re = regex::Regex::new(r"^(dev|[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)$").unwrap(); // allow-unwrap
     if !re.is_match(v) {
         return Err(format!(
             "Invalid version '{v}' — must be 'dev' or semver pattern MAJOR.MINOR.PATCH[-PRERELEASE]"
@@ -322,7 +384,7 @@ fn patchelf_for_nixos(binary: &Path) -> Result<(), String> {
     let is_writable = std::fs::OpenOptions::new().write(true).open(binary).is_ok();
     if !is_writable {
         let status = Command::new("sudo")
-            .args(["chmod", "a+w", binary.to_str().unwrap()])
+            .args(["chmod", "a+w", binary.to_str().unwrap()]) // allow-unwrap
             .status()
             .map_err(|e| format!("sudo chmod failed: {e}"))?;
         if !status.success() {
@@ -334,7 +396,7 @@ fn patchelf_for_nixos(binary: &Path) -> Result<(), String> {
 
     // patchelf --set-interpreter
     let status = Command::new("patchelf")
-        .args(["--set-interpreter", &interpreter, binary.to_str().unwrap()])
+        .args(["--set-interpreter", &interpreter, binary.to_str().unwrap()]) // allow-unwrap
         .status()
         .map_err(|e| format!("patchelf --set-interpreter failed: {e}"))?;
     if !status.success() {
@@ -346,7 +408,7 @@ fn patchelf_for_nixos(binary: &Path) -> Result<(), String> {
 
     // patchelf --set-rpath (so libz.so.1 and libc.so.6 are found)
     let status = Command::new("patchelf")
-        .args(["--set-rpath", &rpath, binary.to_str().unwrap()])
+        .args(["--set-rpath", &rpath, binary.to_str().unwrap()]) // allow-unwrap
         .status()
         .map_err(|e| format!("patchelf --set-rpath failed: {e}"))?;
     if !status.success() {
@@ -465,6 +527,307 @@ fn host_uid_gid() -> Result<(String, String), String> {
     Ok((uid, gid))
 }
 
+/// A single lint violation: file path, 1-based line number, line content.
+#[derive(Debug, PartialEq)]
+pub struct Violation {
+    pub file: String,
+    pub line: usize,
+    pub snippet: String,
+}
+
+/// Returns true if the file path looks like a test file that should be excluded
+/// from the unwrap scan.
+fn is_test_file(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    // Exclude files under a `tests/` directory (portable, no string slicing)
+    path.components().any(|c| c == Component::Normal("tests".as_ref()))
+        // Exclude test_*.rs, *_test.rs, *_tests.rs
+        || name.starts_with("test_")
+        || name.ends_with("_test.rs")
+        || name.ends_with("_tests.rs")
+        // Exclude build scripts
+        || name == "build.rs"
+}
+
+/// Scan all workspace `src/**/*.rs` files (excluding test files and build.rs)
+/// for `.unwrap()` and `.expect(` calls not marked with `// allow-unwrap`.
+///
+/// NOTE: This is a lexical scanner. UFCS forms like `Option::unwrap(x)` are
+/// not caught. They are rare in this codebase; add `// allow-unwrap` if needed.
+pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
+    use regex::Regex;
+    use std::path::Component;
+    use walkdir::WalkDir;
+
+    let unwrap_re = Regex::new(r"\.(unwrap\(\)|expect\()").expect("valid regex"); // allow-unwrap
+    let mut violations = Vec::new();
+
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if is_test_file(path) {
+            continue;
+        }
+        // Only process files under a `src` component (portable, no string slicing)
+        if !path
+            .components()
+            .any(|c| c == Component::Normal("src".as_ref()))
+        {
+            continue;
+        }
+        // Skip target directory
+        if path
+            .components()
+            .any(|c| c == Component::Normal("target".as_ref()))
+        {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+
+        // Collect into a Vec so we can do one-line look-ahead for `// allow-unwrap`
+        // placed on the next line by rustfmt (e.g. after opening `{` on an expect call).
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Use a pending-attribute approach to correctly handle both:
+        //   #[cfg(test)] mod tests { ... }  — a module block
+        //   #[test] fn test_foo() { ... }   — an individual test function
+        // Both open a braced scope, but they must not interfere with each other.
+        let mut pending_test_attr = false;
+        let mut test_scope_entry_depth: Option<i32> = None;
+        let mut brace_depth: i32 = 0;
+
+        for (line_idx, raw_line) in lines.iter().enumerate() {
+            let trimmed = raw_line.trim();
+
+            // Detect test attributes only when not already inside a test scope.
+            // Updating test_mod_depth while already in a scope would cause premature
+            // exit when the inner function closes (the nested-#[test] bug).
+            if test_scope_entry_depth.is_none()
+                && (trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]"))
+            {
+                pending_test_attr = true;
+            }
+
+            // Capture whether this line opens a test scope BEFORE counting braces.
+            // This handles the case where #[test] and fn body are on separate lines
+            // and the body's braces open+close on the same line.
+            let entering_test_scope = pending_test_attr && test_scope_entry_depth.is_none();
+
+            // Count braces on this line.
+            // NOTE: This is a lexical approximation — braces inside string literals
+            // or comments will affect the count. This is acceptable for a build-time
+            // scanner as long as unusual cases can be suppressed with // allow-unwrap.
+            for ch in trimmed.chars() {
+                match ch {
+                    '{' => {
+                        brace_depth += 1;
+                        // The first '{' after a test attribute opens the test scope.
+                        if pending_test_attr && test_scope_entry_depth.is_none() {
+                            test_scope_entry_depth = Some(brace_depth - 1);
+                            pending_test_attr = false;
+                        }
+                    }
+                    '}' => {
+                        brace_depth -= 1;
+                        if let Some(entry) = test_scope_entry_depth
+                            && brace_depth <= entry
+                        {
+                            test_scope_entry_depth = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // If we set pending_test_attr on this line but no brace was opened,
+            // the attribute applies to a non-block item (e.g. `type Foo = ...;`
+            // or `use super::*;`).  Clear the flag so it does not bleed into the
+            // next line's production code.
+            if pending_test_attr && test_scope_entry_depth.is_none() && trimmed.contains(';') {
+                pending_test_attr = false;
+            }
+
+            // Skip: the attribute line itself, the line that opens a test scope,
+            // and all lines inside a test scope.
+            if pending_test_attr || entering_test_scope || test_scope_entry_depth.is_some() {
+                continue;
+            }
+            // Skip comment-only lines.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            // Skip lines with the escape hatch — also check the next line because
+            // rustfmt sometimes moves `// allow-unwrap` onto the line after `expect(`
+            // when the call opens a block (`= RunnerState::Failed { // allow-unwrap`
+            // becomes the body's first line after fmt).
+            let next_line_allow = lines
+                .get(line_idx + 1)
+                .map(|l| l.trim() == "// allow-unwrap")
+                .unwrap_or(false);
+            if raw_line.contains("// allow-unwrap") || next_line_allow {
+                continue;
+            }
+
+            if unwrap_re.is_match(raw_line) {
+                violations.push(Violation {
+                    file: path.to_string_lossy().to_string(),
+                    line: line_idx + 1,
+                    snippet: raw_line.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(violations)
+}
+
+/// A secret leakage violation.
+#[derive(Debug, PartialEq)]
+pub struct SecretViolation {
+    pub file: String,
+    pub line: usize,
+    pub snippet: String,
+    pub rule: String,
+}
+
+/// Patterns that indicate potential secret leakage.
+/// Each entry: (regex pattern, human-readable rule name).
+///
+/// Key design choices:
+/// - `(?i)` case-insensitive matching.
+/// - `[^;]{0,300}?` instead of `.*` to (a) match across newlines (`;` terminates
+///   a macro call in practice), and (b) limit backtracking.
+/// - Three categories: format macros, tracing structured fields (name = value),
+///   and tracing shorthand fields (%field, ?field).
+const SECRET_PATTERNS: &[(&str, &str)] = &[
+    // format!/write!/println!/eprintln! with a sensitive field name — multiline-aware
+    (
+        r"(?i)(format|println|eprintln|print|writeln|write)!\s*\([^;]{0,300}?\b(password|secret|token|credential|api_key|auth_token|access_token|refresh_token|client_secret|private_key|bearer_token)\b",
+        "sensitive field name in format macro",
+    ),
+    // tracing macros with sensitive structured field (name = value) — multiline-aware
+    (
+        r"(?i)(warn|error|info|debug|trace)!\s*\([^;]{0,300}?\b(password|secret|token|credential|api_key|auth_token|access_token|refresh_token|client_secret|private_key|bearer_token)\s*[=%?]",
+        "sensitive structured field in tracing macro",
+    ),
+    // tracing shorthand fields: info!(%auth_token), info!(?password), info!(token)
+    (
+        r"(?i)(warn|error|info|debug|trace)!\s*\([^;]{0,300}?[%?]\s*(password|secret|token|credential|api_key|auth_token|access_token|refresh_token|client_secret|private_key|bearer_token)\b",
+        "sensitive shorthand field in tracing macro",
+    ),
+    // tracing bare fields: info!(password, ...) or warn!(token, ...)
+    // Overlap with patterns 2-3 is resolved by deduplication in the scanner.
+    (
+        r"(?i)(warn|error|info|debug|trace)!\s*\([^;]{0,300}?\b(password|secret|token|credential|api_key|auth_token|access_token|refresh_token|client_secret|private_key|bearer_token)\s*,",
+        "sensitive bare field in tracing macro",
+    ),
+];
+
+/// Scan all workspace `src/**/*.rs` files for potential secret leakage patterns.
+///
+/// Uses whole-file regex scanning (not per-line) so multiline macro calls like:
+///   format!(
+///       "password={}",
+///       self.password
+///   )
+/// are correctly detected. Match positions are mapped back to line numbers.
+pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, String> {
+    use regex::Regex;
+    use std::path::Component;
+    use walkdir::WalkDir;
+
+    let compiled: Vec<(Regex, &str)> = SECRET_PATTERNS
+        .iter()
+        .map(|(pat, rule)| {
+            Regex::new(pat)
+                .map(|re| (re, *rule))
+                .map_err(|e| format!("Invalid secret pattern '{pat}': {e}")) // allow-secret
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut violations = Vec::new();
+
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        // Only scan files under a src/ directory (portable)
+        if !path
+            .components()
+            .any(|c| c == Component::Normal("src".as_ref()))
+        {
+            continue;
+        }
+        if path
+            .components()
+            .any(|c| c == Component::Normal("target".as_ref()))
+        {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+
+        // Build a table of line-start byte offsets for O(log n) line lookup.
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(content.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+
+        // Maps a byte offset to a 1-based line number.
+        let byte_to_line =
+            |offset: usize| -> usize { line_starts.partition_point(|&s| s <= offset) };
+
+        for (re, rule) in &compiled {
+            let mut search_from = 0;
+            while let Some(m) = re.find_at(&content, search_from) {
+                let line_num = byte_to_line(m.start());
+                let line_start = line_starts[line_num - 1];
+                let line_end = content[line_start..]
+                    .find('\n')
+                    .map(|i| line_start + i)
+                    .unwrap_or(content.len());
+                let first_line = &content[line_start..line_end];
+
+                // Skip comment-only lines
+                if !first_line.trim().starts_with("//") && !first_line.contains("// allow-secret") {
+                    violations.push(SecretViolation {
+                        file: path.to_string_lossy().to_string(),
+                        line: line_num,
+                        snippet: first_line.to_string(),
+                        rule: rule.to_string(),
+                    });
+                }
+
+                // Advance past this match; guard against zero-length matches.
+                search_from = m.end().max(m.start() + 1);
+            }
+        }
+    }
+
+    // Deduplicate violations by (file, line) — multiple patterns may match the
+    // same line (e.g. structured field + bare field). Keep the first match.
+    let mut seen = std::collections::HashSet::new();
+    violations.retain(|v| seen.insert((v.file.clone(), v.line)));
+
+    Ok(violations)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,5 +858,290 @@ mod tests {
         assert_eq!(result, None);
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(test)]
+    mod lint_unwrap_tests {
+        use super::*;
+        use std::fs;
+        use std::path::PathBuf;
+
+        fn tmp_workspace(files: &[(&str, &str)]) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "xtask-lint-test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            ));
+            for (rel_path, content) in files {
+                let full = dir.join(rel_path);
+                fs::create_dir_all(full.parent().unwrap()).unwrap();
+                fs::write(&full, content).unwrap();
+            }
+            // Create bridges/ sentinel so find_workspace_root_from works
+            fs::create_dir_all(dir.join("bridges")).unwrap();
+            fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+            dir
+        }
+
+        #[test]
+        fn detects_unwrap_in_production_code() {
+            let ws = tmp_workspace(&[(
+                "crates/foo/src/lib.rs",
+                "fn run() {\n    let x = some_result().unwrap();\n}\n",
+            )]);
+            let violations = lint_unwrap(&ws).unwrap();
+            assert_eq!(violations.len(), 1);
+            assert!(violations[0].snippet.contains(".unwrap()"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allows_escape_hatch_comment() {
+            let ws = tmp_workspace(&[(
+                "crates/foo/src/lib.rs",
+                "fn run() {\n    let x = lock.unwrap(); // allow-unwrap\n}\n",
+            )]);
+            let violations = lint_unwrap(&ws).unwrap();
+            assert!(violations.is_empty());
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn skips_tests_directory() {
+            let ws = tmp_workspace(&[(
+                "crates/foo/tests/integration.rs",
+                "fn run() {\n    let x = something().unwrap();\n}\n",
+            )]);
+            let violations = lint_unwrap(&ws).unwrap();
+            assert!(violations.is_empty());
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn detects_expect_in_production_code() {
+            let ws = tmp_workspace(&[(
+                "crates/foo/src/lib.rs",
+                r#"fn run() { let x = val.expect("must exist"); }"#,
+            )]);
+            let violations = lint_unwrap(&ws).unwrap();
+            assert_eq!(violations.len(), 1);
+            assert!(violations[0].snippet.contains(".expect("));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn skips_entire_cfg_test_mod_with_multiple_test_fns() {
+            // Bug guard: nested #[test] attrs inside #[cfg(test)] mod must not
+            // reset the scope tracker and leak production code into the skip zone.
+            let ws = tmp_workspace(&[(
+                "crates/foo/src/lib.rs",
+                "#[cfg(test)]\nmod tests {\n    #[test]\n    fn a() { let x = v.unwrap(); }\n    #[test]\n    fn b() { let y = v.unwrap(); }\n}\n",
+            )]);
+            let violations = lint_unwrap(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "cfg(test) block must be fully skipped: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn does_not_skip_production_code_after_test_function() {
+            // Bug guard: production code that follows a #[test] fn must still be scanned.
+            let ws = tmp_workspace(&[(
+                "crates/foo/src/lib.rs",
+                "fn prod() { val.unwrap() }\n\n#[test]\nfn test_it() { val.unwrap() }\n\nfn prod2() { val.unwrap() }\n",
+            )]);
+            let violations = lint_unwrap(&ws).unwrap();
+            // prod() and prod2() should be flagged; test_it() should not
+            assert_eq!(
+                violations.len(),
+                2,
+                "expected 2 production violations: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn skips_tests_rs_files() {
+            let ws = tmp_workspace(&[(
+                "crates/foo/tests/integration.rs",
+                "fn run() { something().unwrap(); }\n",
+            )]);
+            let violations = lint_unwrap(&ws).unwrap();
+            assert!(violations.is_empty());
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn detects_unwrap_after_cfg_test_type_alias() {
+            // Bug guard: #[cfg(test)] type Foo = Bar; sets pending_test_attr but
+            // never opens a brace. The flag must be cleared so production code on
+            // the next line is still scanned.
+            let ws = tmp_workspace(&[(
+                "crates/foo/src/lib.rs",
+                "#[cfg(test)]\ntype TestAlias = i32;\nfn prod() { val.unwrap() }\n",
+            )]);
+            let violations = lint_unwrap(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "production unwrap after #[cfg(test)] type alias must be detected: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    mod lint_secrets_tests {
+        use super::*;
+        use std::fs;
+        use std::path::PathBuf;
+
+        fn tmp_workspace_secrets(files: &[(&str, &str)]) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "xtask-secrets-test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            ));
+            for (rel_path, content) in files {
+                let full = dir.join(rel_path);
+                fs::create_dir_all(full.parent().unwrap()).unwrap();
+                fs::write(&full, content).unwrap();
+            }
+            fs::create_dir_all(dir.join("bridges")).unwrap();
+            fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+            dir
+        }
+
+        #[test]
+        fn detects_password_in_format_macro() {
+            let ws = tmp_workspace_secrets(&[(
+                "crates/foo/src/lib.rs",
+                r#"fn log() { let msg = format!("connecting with password {}", self.password); }"#, // allow-secret
+            )]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "expected 1 violation, got: {violations:?}"
+            );
+            assert!(violations[0].rule.contains("format macro"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn detects_token_in_tracing_macro() {
+            let ws = tmp_workspace_secrets(&[(
+                "crates/foo/src/lib.rs",
+                r#"fn log() { warn!(token = %self.token, "auth failed"); }"#, // allow-secret
+            )]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "expected 1 violation, got: {violations:?}"
+            );
+            assert!(violations[0].rule.contains("tracing macro"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allows_escape_hatch_comment() {
+            let ws = tmp_workspace_secrets(&[(
+                "crates/foo/src/lib.rs",
+                r#"fn test() { let msg = format!("password {}", "dummy"); } // allow-secret"#,
+            )]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "expected no violations, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn clean_code_produces_no_violations() {
+            let ws = tmp_workspace_secrets(&[(
+                "crates/foo/src/lib.rs",
+                r#"fn connect(url: &str) { info!(url = %url, "connecting"); }"#,
+            )]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert!(
+                violations.is_empty(),
+                "expected no violations, got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn detects_multiline_format_macro() {
+            // Multiline macro calls must be caught even when the sensitive field
+            // is on a different line than the macro invocation.
+            let ws = tmp_workspace_secrets(&[(
+                "crates/foo/src/lib.rs",
+                "fn log() {\n    let msg = format!(\n        \"connecting with {}\",\n        self.password\n    );\n}\n", // allow-secret
+            )]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "multiline format! must be caught: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn detects_tracing_shorthand_field() {
+            // Shorthand tracing fields like info!(%auth_token) must be caught.
+            let ws = tmp_workspace_secrets(&[(
+                "crates/foo/src/lib.rs",
+                r#"fn log() { info!(%auth_token, "authenticating"); }"#, // allow-secret
+            )]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "shorthand %field must be caught: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn detects_bare_tracing_field() {
+            // Bare tracing fields like info!(password, "msg") must be caught.
+            let ws = tmp_workspace_secrets(&[(
+                "crates/foo/src/lib.rs",
+                r#"fn log() { info!(password, "msg"); }"#, // allow-secret
+            )]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "bare field must be caught: {violations:?}"
+            );
+            assert!(violations[0].rule.contains("bare field"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn detects_expanded_credential_names() {
+            // Expanded credential names like client_secret must be caught.
+            let ws = tmp_workspace_secrets(&[(
+                "crates/foo/src/lib.rs",
+                r#"fn log() { format!("client_secret={}", s); }"#, // allow-secret
+            )]);
+            let violations = lint_secrets(&ws).unwrap();
+            assert_eq!(
+                violations.len(),
+                1,
+                "client_secret in format! must be caught: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
     }
 }

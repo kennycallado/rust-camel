@@ -37,3 +37,6 @@ futures.workspace = true
 [features]
 runner-tests = []
 docker-tests = []
+
+[lints]
+workspace = true

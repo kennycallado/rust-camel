@@ -24,3 +24,6 @@ tokio.workspace = true
 camel-component-timer.workspace = true
 camel-component-direct.workspace = true
 camel-component-mock.workspace = true
+
+[lints]
+workspace = true

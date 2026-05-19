@@ -19,3 +19,6 @@ tracing-subscriber.workspace = true
 
 [features]
 default = ["camel-core/lang-jsonpath"]
+
+[lints]
+workspace = true

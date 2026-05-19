@@ -55,7 +55,7 @@ impl EpochTicker {
                     }
                 }
             })
-            .expect("failed to spawn wasm-epoch-ticker thread");
+            .expect("failed to spawn wasm-epoch-ticker thread"); // allow-unwrap
 
         Self {
             handle: Some(handle),

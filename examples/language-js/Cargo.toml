@@ -17,3 +17,6 @@ tracing-subscriber.workspace = true
 
 [features]
 default = ["camel-core/lang-js"]
+
+[lints]
+workspace = true

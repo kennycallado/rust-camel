@@ -21,3 +21,6 @@ tonic = { workspace = true }
 [dev-dependencies]
 tonic = { workspace = true }
 async-trait = { workspace = true }
+
+[lints]
+workspace = true

@@ -23,7 +23,7 @@ async fn main() -> Result<(), CamelError> {
     println!("Log level: {}", config.log_level);
 
     // Create context
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
 
     // Register components
     ctx.register_component(TimerComponent::new());

@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 static ENV_RE: OnceLock<Regex> = OnceLock::new();
 
 fn env_regex() -> &'static Regex {
-    ENV_RE.get_or_init(|| Regex::new(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}").unwrap())
+    ENV_RE.get_or_init(|| Regex::new(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}").unwrap()) // allow-unwrap
 }
 
 /// Interpolates `${env:VAR_NAME}` placeholders in the source string.

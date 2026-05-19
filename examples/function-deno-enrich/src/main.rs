@@ -75,7 +75,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.start().await?;
     println!("[3] Running. Messages every 2s. Ctrl+C to stop.");
 
-    tokio::signal::ctrl_c().await.expect("Ctrl+C");
+    tokio::signal::ctrl_c().await.expect("Ctrl+C"); // allow-unwrap
 
     println!("Shutting down...");
     ctx.stop().await?;

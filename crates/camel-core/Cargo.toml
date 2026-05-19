@@ -77,3 +77,6 @@ harness = false
 [[bench]]
 name = "pipeline_throughput"
 harness = false
+
+[lints]
+workspace = true

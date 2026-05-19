@@ -294,7 +294,7 @@ async fn run(
             );
             bean_reg
                 .lock()
-                .expect("beans registry lock")
+                .expect("beans registry lock") // allow-unwrap
                 .register(bean_name, wasm_bean)
                 .unwrap_or_else(|e| {
                     eprintln!("Bean registration failed for '{}': {}", bean_name, e);
@@ -509,7 +509,7 @@ async fn run(
             #[cfg(unix)]
             {
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("Failed to install SIGTERM handler")
+                    .expect("Failed to install SIGTERM handler") // allow-unwrap
                     .recv()
                     .await
             }

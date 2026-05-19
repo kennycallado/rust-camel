@@ -1134,7 +1134,7 @@ impl RouteController for DefaultRouteController {
             let managed = self
                 .routes
                 .get(route_id)
-                .expect("invariant: route must exist after prior existence check");
+                .expect("invariant: route must exist after prior existence check"); // allow-unwrap
             (
                 managed.from_uri.clone(),
                 Arc::clone(&managed.pipeline),
@@ -1166,7 +1166,7 @@ impl RouteController for DefaultRouteController {
         let managed = self
             .routes
             .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
 
         // Create channel for consumer to send exchanges
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(256);
@@ -1181,7 +1181,7 @@ impl RouteController for DefaultRouteController {
         let managed = self
             .routes
             .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
 
         if let Some(split) = managed.aggregate_split.as_ref() {
             let (late_tx, late_rx) = mpsc::channel::<Exchange>(256);
@@ -1238,7 +1238,7 @@ impl RouteController for DefaultRouteController {
                                     let ex = {
                                         let cloned_svc = agg
                                             .lock()
-                                            .expect("mutex poisoned: another thread panicked while holding this lock")
+                                            .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
                                             .clone();
                                         cloned_svc.oneshot(ex).await
                                     };
@@ -1266,7 +1266,7 @@ impl RouteController for DefaultRouteController {
                             {
                                 let guard = agg
                                     .lock()
-                                    .expect("mutex poisoned: another thread panicked while holding this lock");
+                                    .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
                                 guard.force_complete_all();
                             }
                             let mut rx_guard = late_rx.lock().await;
@@ -1298,7 +1298,7 @@ impl RouteController for DefaultRouteController {
             let managed = self
                 .routes
                 .get_mut(route_id)
-                .expect("invariant: route must exist");
+                .expect("invariant: route must exist"); // allow-unwrap
             managed.consumer_handle = Some(consumer_handle);
             managed.pipeline_handle = Some(pipeline_handle);
             managed.channel_sender = Some(tx_for_storage);
@@ -1369,7 +1369,7 @@ impl RouteController for DefaultRouteController {
                         tokio::spawn(async move {
                             // Acquire semaphore permit if bounded
                             let _permit = match &sem {
-                                Some(s) => Some(s.acquire().await.expect("semaphore closed")),
+                                Some(s) => Some(s.acquire().await.expect("semaphore closed")), // allow-unwrap
                                 None => None,
                             };
 
@@ -1417,7 +1417,7 @@ impl RouteController for DefaultRouteController {
         let managed = self
             .routes
             .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
         managed.consumer_handle = Some(consumer_handle);
         managed.pipeline_handle = Some(pipeline_handle);
         managed.channel_sender = Some(tx_for_storage);
@@ -1461,14 +1461,14 @@ impl RouteController for DefaultRouteController {
         let managed = self
             .routes
             .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
         managed.consumer_cancel_token.cancel();
 
         // Take and join consumer handle
         let managed = self
             .routes
             .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
         let consumer_handle = managed.consumer_handle.take();
 
         // Wait for consumer task to complete with timeout
@@ -1487,7 +1487,7 @@ impl RouteController for DefaultRouteController {
         let managed = self
             .routes
             .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
 
         // Create fresh cancellation token for consumer (for resume)
         managed.consumer_cancel_token = CancellationToken::new();
@@ -1540,7 +1540,7 @@ impl RouteController for DefaultRouteController {
         let managed = self
             .routes
             .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
 
         // Create child token for consumer lifecycle
         let consumer_cancel = managed.consumer_cancel_token.child_token();
@@ -1565,7 +1565,7 @@ impl RouteController for DefaultRouteController {
         let managed = self
             .routes
             .get_mut(route_id)
-            .expect("invariant: route must exist after prior existence check");
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
         managed.consumer_handle = Some(consumer_handle);
 
         info!(route_id = %route_id, "Route resumed");

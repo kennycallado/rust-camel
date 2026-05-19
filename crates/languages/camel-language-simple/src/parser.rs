@@ -103,7 +103,7 @@ pub fn parse(input: &str) -> Result<Expr, LanguageError> {
         if pos != tokens.len() {
             return Err(LanguageError::ParseError {
                 expr: input.to_string(),
-                reason: format!("unexpected token after position {pos}"),
+                reason: format!("unexpected token after position {pos}"), // allow-secret
             });
         }
         Ok(expr)
@@ -282,7 +282,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, LanguageError> {
             }
         }
 
-        let ch = rest.chars().next().unwrap();
+        let ch = rest.chars().next().unwrap(); // allow-unwrap
         text_buf.push(ch);
         i += ch.len_utf8();
     }
@@ -411,7 +411,7 @@ fn token_to_atom(token: &Token) -> Result<Expr, LanguageError> {
         Token::Null => Ok(Expr::Null),
         Token::Text(s) => Ok(Expr::StringLit(s.clone())),
         Token::Op(_) | Token::And | Token::Or => Err(LanguageError::ParseError {
-            expr: format!("{token:?}"),
+            expr: format!("{token:?}"), // allow-secret
             reason: "operator cannot appear where an atom is expected".to_string(),
         }),
     }
@@ -522,7 +522,7 @@ fn parse_body_path(path: &str) -> Result<Vec<PathSegment>, LanguageError> {
         // (except "0" itself). This way "01" is treated as Key("01").
         let is_index = seg.parse::<usize>().is_ok() && (seg == "0" || !seg.starts_with('0'));
         if is_index {
-            segments.push(PathSegment::Index(seg.parse::<usize>().unwrap()));
+            segments.push(PathSegment::Index(seg.parse::<usize>().unwrap())); // allow-unwrap
         } else {
             segments.push(PathSegment::Key(seg.to_string()));
         }

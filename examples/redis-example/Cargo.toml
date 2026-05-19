@@ -17,3 +17,6 @@ tracing-subscriber.workspace = true
 testcontainers.workspace = true
 testcontainers-modules = { workspace = true }
 redis = { version = "1", features = ["tokio-comp", "aio"] }
+
+[lints]
+workspace = true

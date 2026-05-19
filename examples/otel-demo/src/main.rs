@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx = CamelContext::builder()
         .build()
         .await
-        .unwrap()
+        .unwrap() // allow-unwrap
         .with_lifecycle(otel_service)
         .with_tracer_config(TracerConfig {
             enabled: true,

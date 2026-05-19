@@ -56,19 +56,19 @@ async fn main() -> Result<(), CamelError> {
         .with_wait_for(WaitFor::message_on_stdout("Listening for connections at:"))
         .start()
         .await
-        .expect("Failed to start ActiveMQ container — is Docker running?");
+        .expect("Failed to start ActiveMQ container — is Docker running?"); // allow-unwrap
     let port = _container
         .get_host_port_ipv4(61616)
         .await
-        .expect("Failed to get ActiveMQ port");
+        .expect("Failed to get ActiveMQ port"); // allow-unwrap
     let broker_url = format!("tcp://127.0.0.1:{port}");
     println!("ActiveMQ broker available at {broker_url}");
 
     // Register all three JMS schemes against a shared bridge pool.
     let pool_config = JmsPoolConfig::single_broker(&broker_url, BrokerType::ActiveMq);
-    let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
+    let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap()); // allow-unwrap
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(JmsComponent::with_scheme("jms", Arc::clone(&pool)));

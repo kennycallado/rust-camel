@@ -32,7 +32,7 @@ impl MetricsServer {
             .unwrap_or_else(|e| panic!("Failed to bind to {}: {}", addr, e));
 
         info!("Prometheus metrics server listening on {}", addr);
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(listener, app).await.unwrap(); // allow-unwrap
     }
 
     pub async fn run_with_listener(listener: TcpListener, metrics: Arc<PrometheusMetrics>) {
@@ -52,9 +52,9 @@ impl MetricsServer {
 
         info!(
             "Prometheus metrics server listening on {}",
-            listener.local_addr().unwrap()
+            listener.local_addr().unwrap() // allow-unwrap
         );
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(listener, app).await.unwrap(); // allow-unwrap
     }
 
     async fn metrics_handler(State(metrics): State<Arc<PrometheusMetrics>>) -> impl IntoResponse {

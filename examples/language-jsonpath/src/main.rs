@@ -15,20 +15,20 @@ use serde_json::json;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
     ctx.register_language("jsonpath", Box::new(JsonPathLanguage))
-        .expect("jsonpath not yet registered");
+        .expect("jsonpath not yet registered"); // allow-unwrap
 
     let lang = JsonPathLanguage;
 
     let customer_expr = lang
         .create_expression("$.customer")
-        .expect("valid expression");
+        .expect("valid expression"); // allow-unwrap
 
-    let active_pred = lang.create_predicate("$.active").expect("valid predicate");
+    let active_pred = lang.create_predicate("$.active").expect("valid predicate"); // allow-unwrap
 
     let customer_expr = Arc::new(customer_expr);
     let active_pred = Arc::new(active_pred);

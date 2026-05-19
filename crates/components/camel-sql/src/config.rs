@@ -464,7 +464,7 @@ impl UriConfig for SqlEndpointConfig {
                         v
                     )));
                 }
-                Ok(v.chars().next().unwrap())
+                Ok(v.chars().next().unwrap()) // allow-unwrap
             })
             .transpose()?
             .unwrap_or('#');

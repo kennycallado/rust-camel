@@ -132,29 +132,29 @@ async fn start_k3s() -> (ContainerAsync<K3s>, kube::Client) {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
+            .expect("system clock should be after unix epoch") // allow-unwrap
             .as_nanos()
     ));
-    std::fs::create_dir_all(&conf_dir).expect("k3s config directory should be created");
+    std::fs::create_dir_all(&conf_dir).expect("k3s config directory should be created"); // allow-unwrap
     let k3s = K3s::default()
         .with_conf_mount(&conf_dir)
         .with_privileged(true)
         .with_userns_mode("host");
 
-    let container = k3s.start().await.expect("k3s container should start");
+    let container = k3s.start().await.expect("k3s container should start"); // allow-unwrap
 
     let kubeconfig_yaml = container
         .image()
         .read_kube_config()
-        .expect("should read kube config");
+        .expect("should read kube config"); // allow-unwrap
 
     let mut kubeconfig =
-        kube::config::Kubeconfig::from_yaml(&kubeconfig_yaml).expect("should parse kubeconfig");
+        kube::config::Kubeconfig::from_yaml(&kubeconfig_yaml).expect("should parse kubeconfig"); // allow-unwrap
 
     let port = container
         .get_host_port_ipv4(KUBE_SECURE_PORT)
         .await
-        .expect("should expose k3s secure port");
+        .expect("should expose k3s secure port"); // allow-unwrap
     kubeconfig.clusters.iter_mut().for_each(|cluster| {
         if let Some(server) = cluster.cluster.as_mut().and_then(|c| c.server.as_mut()) {
             *server = format!("https://127.0.0.1:{port}");
@@ -166,9 +166,9 @@ async fn start_k3s() -> (ContainerAsync<K3s>, kube::Client) {
         &kube::config::KubeConfigOptions::default(),
     )
     .await
-    .expect("should build kube config");
+    .expect("should build kube config"); // allow-unwrap
 
-    let client = kube::Client::try_from(config).expect("should create client");
+    let client = kube::Client::try_from(config).expect("should create client"); // allow-unwrap
 
     // Wait until both the core API and the Coordination/Leases API are ready.
     let timeout = std::time::Duration::from_secs(90);

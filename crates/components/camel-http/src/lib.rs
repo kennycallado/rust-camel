@@ -538,7 +538,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         return Response::builder()
             .status(StatusCode::PAYLOAD_TOO_LARGE)
             .body(AxumBody::from("Request body exceeds configured limit"))
-            .expect("infallible");
+            .expect("infallible"); // allow-unwrap
     }
 
     let _permit = match Arc::clone(&state.inflight).try_acquire_owned() {
@@ -547,7 +547,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
             return Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .body(AxumBody::from("Service Unavailable"))
-                .expect("infallible");
+                .expect("infallible"); // allow-unwrap
         }
     };
 
@@ -579,7 +579,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(AxumBody::from("No consumer registered for this path"))
-            .expect("infallible");
+            .expect("infallible"); // allow-unwrap
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<HttpReply>();
@@ -596,7 +596,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         return Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .body(AxumBody::from("Consumer unavailable"))
-            .expect("infallible");
+            .expect("infallible"); // allow-unwrap
     }
 
     match reply_rx.await {
@@ -627,7 +627,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(AxumBody::from("Invalid response headers from consumer"))
-                        .expect("infallible")
+                        .expect("infallible") // allow-unwrap
                 }),
                 HttpReplyBody::Stream(stream) => builder
                     .body(AxumBody::from_stream(stream))
@@ -635,14 +635,14 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
                         Response::builder()
                             .status(StatusCode::INTERNAL_SERVER_ERROR)
                             .body(AxumBody::from("Invalid response headers from consumer"))
-                            .expect("infallible")
+                            .expect("infallible") // allow-unwrap
                     }),
             }
         }
         Err(_) => Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .body(AxumBody::from("Pipeline error"))
-            .expect("Response::builder() with a known-valid status code and body is infallible"),
+            .expect("Response::builder() with a known-valid status code and body is infallible"), // allow-unwrap
     }
 }
 
@@ -943,7 +943,7 @@ fn build_client(config: &HttpConfig) -> reqwest::Client {
 
     builder
         .build()
-        .expect("reqwest::Client::build() with valid config should not fail")
+        .expect("reqwest::Client::build() with valid config should not fail") // allow-unwrap
 }
 
 impl HttpComponent {

@@ -55,11 +55,11 @@ impl DefaultFunctionInvoker {
             }
             match self.provider.health(handle).await {
                 Ok(HealthReport::Healthy) => {
-                    *handle.state.lock().expect("state") = RunnerState::Healthy;
+                    *handle.state.lock().expect("state") = RunnerState::Healthy; // allow-unwrap
                     return Ok(());
                 }
                 Ok(HealthReport::Unhealthy(reason)) => {
-                    *handle.state.lock().expect("state") = RunnerState::Unhealthy {
+                    *handle.state.lock().expect("state") = RunnerState::Unhealthy { // allow-unwrap
                         since: std::time::Instant::now(),
                         reason,
                     };
@@ -79,10 +79,10 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
     fn stage_pending(&self, def: FunctionDefinition, route_id: Option<&str>, generation: u64) {
         let rid = route_id.map(ToOwned::to_owned);
         if !self.started.load(Ordering::SeqCst) {
-            self.pending.lock().expect("pending").push((def, rid));
+            self.pending.lock().expect("pending").push((def, rid)); // allow-unwrap
             return;
         }
-        let mut staging = self.staging.lock().expect("staging");
+        let mut staging = self.staging.lock().expect("staging"); // allow-unwrap
         let entry = staging.entry(generation).or_default();
         let did = def.id.clone();
         let rid_owned = rid.clone();
@@ -92,7 +92,7 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
     }
 
     fn discard_staging(&self, generation: u64) {
-        self.staging.lock().expect("staging").remove(&generation);
+        self.staging.lock().expect("staging").remove(&generation); // allow-unwrap
     }
 
     fn begin_reload(&self) -> u64 {
@@ -100,7 +100,7 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
         self.current_generation.store(generation, Ordering::SeqCst);
         self.staging
             .lock()
-            .expect("staging")
+            .expect("staging") // allow-unwrap
             .entry(generation)
             .or_default();
         generation
@@ -120,7 +120,7 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
         route_id: &str,
         generation: u64,
     ) -> Vec<(FunctionId, Option<String>)> {
-        let staging = self.staging.lock().expect("staging");
+        let staging = self.staging.lock().expect("staging"); // allow-unwrap
         staging
             .get(&generation)
             .map(|entries| {
@@ -138,7 +138,7 @@ impl FunctionInvokerSync for DefaultFunctionInvoker {
         route_id: &str,
         generation: u64,
     ) -> Vec<(FunctionDefinition, Option<String>)> {
-        let staging = self.staging.lock().expect("staging");
+        let staging = self.staging.lock().expect("staging"); // allow-unwrap
         staging
             .get(&generation)
             .map(|entries| {
@@ -194,7 +194,7 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             .or_insert(1);
         self.function_timeouts
             .lock()
-            .expect("function_timeouts")
+            .expect("function_timeouts") // allow-unwrap
             .insert(def.id.clone(), def.timeout_ms);
         self.pool.function_to_key.insert(ref_key, key);
         Ok(())
@@ -223,7 +223,7 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             if !still_used_by_other_route {
                 self.function_timeouts
                     .lock()
-                    .expect("function_timeouts")
+                    .expect("function_timeouts") // allow-unwrap
                     .remove(id);
                 if let Some(handle) = self.pool.handles.get(&pool_key) {
                     self.provider
@@ -270,7 +270,7 @@ impl FunctionInvoker for DefaultFunctionInvoker {
             .ok_or_else(|| FunctionInvocationError::RunnerUnavailable {
                 reason: "missing handle".into(),
             })?;
-        let state = handle.state.lock().expect("state").clone();
+        let state = handle.state.lock().expect("state").clone(); // allow-unwrap
         match state {
             RunnerState::Failed { reason } => {
                 return Err(FunctionInvocationError::RunnerUnavailable { reason });
@@ -283,7 +283,7 @@ impl FunctionInvoker for DefaultFunctionInvoker {
         let timeout = std::time::Duration::from_millis(
             self.function_timeouts
                 .lock()
-                .expect("function_timeouts")
+                .expect("function_timeouts") // allow-unwrap
                 .get(id)
                 .copied()
                 .unwrap_or(self.config.default_timeout_ms),
@@ -309,7 +309,7 @@ impl FunctionInvoker for DefaultFunctionInvoker {
         }
 
         {
-            let mut staging = self.staging.lock().expect("staging");
+            let mut staging = self.staging.lock().expect("staging"); // allow-unwrap
             let before = staging.len();
             staging.retain(|g, _| *g >= current_gen);
             let purged = before - staging.len();
@@ -336,7 +336,7 @@ impl FunctionInvoker for DefaultFunctionInvoker {
                             );
                         }
                     }
-                    self.staging.lock().expect("staging").remove(&generation);
+                    self.staging.lock().expect("staging").remove(&generation); // allow-unwrap
                     return Err(e);
                 }
             }
@@ -352,7 +352,7 @@ impl FunctionInvoker for DefaultFunctionInvoker {
         for (id, route_id) in &diff.removed {
             self.unregister(id, route_id.as_deref()).await?;
         }
-        self.staging.lock().expect("staging").remove(&generation);
+        self.staging.lock().expect("staging").remove(&generation); // allow-unwrap
         Ok(())
     }
 
@@ -370,12 +370,12 @@ impl FunctionInvoker for DefaultFunctionInvoker {
                 );
             }
         }
-        self.staging.lock().expect("staging").remove(&generation);
+        self.staging.lock().expect("staging").remove(&generation); // allow-unwrap
         Ok(())
     }
 
     async fn commit_staged(&self) -> Result<(), FunctionInvocationError> {
-        let entries = self.staging.lock().expect("staging").remove(&0);
+        let entries = self.staging.lock().expect("staging").remove(&0); // allow-unwrap
         if let Some(entries) = entries {
             let mut committed: Vec<(FunctionId, Option<String>)> = Vec::new();
             for (def, route_id) in entries {

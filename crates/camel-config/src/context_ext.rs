@@ -93,7 +93,7 @@ impl CamelConfig {
         // for the tracing-opentelemetry layer and the log bridge.
         #[cfg(feature = "otel")]
         let otel_service_opt = if otel_enabled {
-            let otel_cfg = config.observability.otel.as_ref().unwrap();
+            let otel_cfg = config.observability.otel.as_ref().unwrap(); // allow-unwrap
 
             let protocol = match otel_cfg.protocol {
                 OtelProtocol::Grpc => OtelProtocolOtel::Grpc,
@@ -160,7 +160,7 @@ impl CamelConfig {
         let create_checker = || {
             let state = Arc::clone(&health_state);
             Arc::new(move || {
-                let guard = state.lock().unwrap();
+                let guard = state.lock().unwrap(); // allow-unwrap
                 let services: Vec<camel_api::ServiceHealth> = guard
                     .iter()
                     .map(|(name, status_arc)| camel_api::ServiceHealth {
@@ -203,7 +203,7 @@ impl CamelConfig {
             prom_service.set_health_checker(create_checker());
             health_state
                 .lock()
-                .unwrap()
+                .unwrap() // allow-unwrap
                 .push(("prometheus".to_string(), prom_service.status_arc()));
             ctx = ctx.with_lifecycle(prom_service);
         }
@@ -223,7 +223,7 @@ impl CamelConfig {
                 camel_health::HealthServer::new_with_checker(addr, Some(create_checker()));
             health_state
                 .lock()
-                .unwrap()
+                .unwrap() // allow-unwrap
                 .push(("health".to_string(), health_server.status_arc()));
             ctx = ctx.with_lifecycle(health_server);
         }

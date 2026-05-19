@@ -153,7 +153,7 @@ impl AsyncRead for StreamAsyncRead {
             }
         }
         // Delegate to the active reader
-        Pin::new(self.reader.as_mut().unwrap()).poll_read(cx, buf)
+        Pin::new(self.reader.as_mut().unwrap()).poll_read(cx, buf) // allow-unwrap
     }
 }
 

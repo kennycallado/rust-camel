@@ -24,3 +24,6 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

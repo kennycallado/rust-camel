@@ -14,3 +14,6 @@ categories.workspace = true
 [dependencies]
 camel-api.workspace = true
 thiserror.workspace = true
+
+[lints]
+workspace = true

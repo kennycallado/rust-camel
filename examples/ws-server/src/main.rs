@@ -7,7 +7,7 @@ use camel_core::context::CamelContext;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(WsComponent::new());
 
     // Echo: messages are sent back to the same connection.

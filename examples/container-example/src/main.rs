@@ -31,7 +31,7 @@ async fn main() -> Result<(), CamelError> {
         .with_target(false)
         .init();
 
-    let mut ctx = CamelContext::builder().build().await.unwrap();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
     ctx.register_component(DirectComponent::new());
@@ -53,7 +53,7 @@ async fn main() -> Result<(), CamelError> {
         .process(|mut exchange| async move {
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap() // allow-unwrap
                 .as_millis();
             let name = format!("example-{}", timestamp);
             exchange
@@ -78,7 +78,7 @@ async fn main() -> Result<(), CamelError> {
         .process(|mut exchange| async move {
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap() // allow-unwrap
                 .as_millis();
             let name = format!("exec-demo-{}", timestamp);
             exchange
@@ -115,7 +115,7 @@ async fn main() -> Result<(), CamelError> {
         .process(|mut exchange| async move {
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap() // allow-unwrap
                 .as_millis();
             let name = format!("camel-net-{}", timestamp);
             exchange.input.set_header(

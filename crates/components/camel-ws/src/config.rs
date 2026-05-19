@@ -82,7 +82,7 @@ impl WsEndpointConfig {
 
         let (host, port) = match host_port.rsplit_once(':') {
             Some((h, p)) if p.parse::<u16>().is_ok() => {
-                let parsed_port = p.parse::<u16>().unwrap();
+                let parsed_port = p.parse::<u16>().unwrap(); // allow-unwrap
                 (h.to_string(), parsed_port)
             }
             _ => (

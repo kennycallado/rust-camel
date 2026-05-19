@@ -165,7 +165,7 @@ impl LeadershipService for KubernetesLeadershipService {
         if let Some(existing) = self
             .locks
             .lock()
-            .expect("mutex poisoned: leadership locks map")
+            .expect("mutex poisoned: leadership locks map") // allow-unwrap
             .get(lock_name)
             .cloned()
             .filter(|lock| !lock.cancel.is_cancelled() && !lock.terminated.load(Ordering::Acquire))
@@ -181,7 +181,7 @@ impl LeadershipService for KubernetesLeadershipService {
             let mut locks = self
                 .locks
                 .lock()
-                .expect("mutex poisoned: leadership locks map");
+                .expect("mutex poisoned: leadership locks map"); // allow-unwrap
             if let Some(existing) = locks.get(lock_name).cloned().filter(|lock| {
                 !lock.cancel.is_cancelled() && !lock.terminated.load(Ordering::Acquire)
             }) {
@@ -283,7 +283,7 @@ impl LeadershipService for KubernetesLeadershipService {
 
             let mut locks = locks_map
                 .lock()
-                .expect("mutex poisoned: leadership locks map");
+                .expect("mutex poisoned: leadership locks map"); // allow-unwrap
             if locks
                 .get(&lock_name_owned)
                 .is_some_and(|current| Arc::ptr_eq(current, &cached_lock_task))

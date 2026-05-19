@@ -283,3 +283,11 @@ opt-level = 2
 lto = "thin"
 strip = true
 codegen-units = 1
+
+[workspace.lints.rust]
+unused_must_use = "warn"
+unused_imports  = "warn"
+dead_code       = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

@@ -379,7 +379,7 @@ impl Service<Exchange> for OpenSearchProducer {
                 if guard.is_none() {
                     *guard = Some(Self::build_client(&config)?);
                 }
-                guard.as_ref().unwrap().clone()
+                guard.as_ref().unwrap().clone() // allow-unwrap
             };
 
             // Operation resolution: header > URI param (already in config.operation)

@@ -98,7 +98,7 @@ impl CxfProducer {
                 version: crate::BRIDGE_VERSION.to_string(),
                 bind_address: None,
             })
-            .expect("valid test pool config"),
+            .expect("valid test pool config"), // allow-unwrap
         );
 
         let key = CxfBridgePool::slot_key();

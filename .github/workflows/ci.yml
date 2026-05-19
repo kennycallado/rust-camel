@@ -123,3 +123,23 @@ jobs:
         run: cargo build --workspace
       - name: Run coverage check
         run: ./scripts/coverage.sh
+
+  quality:
+    name: Quality Gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install libclang for bindgen
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - name: fmt check
+        run: cargo fmt --check --all
+      - name: clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: lint-unwrap
+        run: cargo xtask lint-unwrap
+      - name: lint-secrets
+        run: cargo xtask lint-secrets
