@@ -21,8 +21,9 @@ static JMS_ARTEMIS_AUTH: OnceCell<JmsComponent> = OnceCell::const_new();
 
 /// Returns a clone of the shared ActiveMQ-backed JmsComponent.
 ///
-/// All callers share the same bridge process. The bridge is started lazily on
-/// first use and reused for the lifetime of the test binary.
+/// All callers share the same bridge process. The bridge is started eagerly
+/// during init so that pure-producer tests do not hit a cold bridge on their
+/// first send attempt.
 pub async fn shared_jms_activemq() -> JmsComponent {
     JMS_ACTIVEMQ
         .get_or_init(|| async {
@@ -43,6 +44,10 @@ pub async fn shared_jms_activemq() -> JmsComponent {
             };
 
             let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
+            // Eagerly start the bridge so gRPC + JMS-broker connection are both
+            // established before any test timer fires. Errors are surfaced when
+            // the individual test tries to use JMS.
+            let _ = pool.get_or_create_slot("default").await;
             JmsComponent::with_scheme("jms", pool)
         })
         .await
@@ -70,6 +75,8 @@ pub async fn shared_jms_artemis() -> JmsComponent {
             };
 
             let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
+            // Eagerly start the bridge — same reason as shared_jms_activemq.
+            let _ = pool.get_or_create_slot("default").await;
             JmsComponent::with_scheme("jms", pool)
         })
         .await

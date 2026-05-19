@@ -39,6 +39,28 @@ impl XsltBridgeRuntime {
         }
     }
 
+    /// Trigger bridge start from `poll_ready`.
+    ///
+    /// Unlike `ensure_bridge_started`, on failure this transitions the state
+    /// to `Degraded` so that `poll_ready` can surface the error on the next
+    /// poll instead of looping forever in `Starting`.
+    pub(crate) async fn ensure_started_or_degrade(
+        &self,
+        reconnect_handler: &dyn BridgeReconnectHandler,
+    ) {
+        if matches!(
+            &*self.state_rx.borrow(),
+            BridgeState::Ready { .. } | BridgeState::Stopped | BridgeState::Degraded(_)
+        ) {
+            return;
+        }
+        if let Err(e) = self.ensure_bridge_started(reconnect_handler).await {
+            let _ = self
+                .state_tx
+                .send(BridgeState::Degraded(e.to_string()));
+        }
+    }
+
     pub(crate) async fn ensure_bridge_started(
         &self,
         reconnect_handler: &dyn BridgeReconnectHandler,

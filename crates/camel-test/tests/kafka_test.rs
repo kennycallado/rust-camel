@@ -45,11 +45,12 @@ async fn start_kafka() -> (testcontainers::ContainerAsync<apache::Kafka>, String
 }
 
 async fn kafka_probe_send(brokers: &str) -> Result<(), String> {
-    let mut config = KafkaEndpointConfig::from_uri(&format!(
+    let config = KafkaEndpointConfig::from_uri(&format!(
         "kafka:__camel_ready_probe?brokers={brokers}&acks=all&requestTimeoutMs=1500"
     ))
-    .map_err(|e| format!("probe config parse failed: {e}"))?;
-    config.resolve_defaults();
+    .map_err(|e| format!("probe config parse failed: {e}"))?
+    .resolve()
+    .map_err(|e| format!("probe config resolve failed: {e}"))?;
 
     let mut producer =
         KafkaProducer::new(config).map_err(|e| format!("probe producer create failed: {e}"))?;

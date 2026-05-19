@@ -47,11 +47,26 @@ impl Service<Exchange> for XsltProducer {
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match &*self.runtime.state_rx().borrow() {
             BridgeState::Ready { .. } => Poll::Ready(Ok(())),
-            BridgeState::Starting | BridgeState::Restarting { .. } => {
-                // Spawn a task that waits for the next state change and then
-                // wakes this future. Avoids busy-poll while honouring Tower contract.
-                // Guard with try_current: in contexts without a Tokio runtime (e.g.
-                // unit tests) fall back to an immediate wake so the caller can retry.
+            BridgeState::Starting => {
+                // Bridge hasn't been started yet — trigger start now and wake when done.
+                // `ensure_started_or_degrade` is idempotent (`start_lock` gates concurrent
+                // starts) and transitions to Degraded on failure so we never loop in Starting.
+                let waker = cx.waker().clone();
+                let runtime = Arc::clone(&self.runtime);
+                let client = Arc::clone(&self.client);
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        runtime.ensure_started_or_degrade(client.as_ref()).await;
+                        waker.wake();
+                    });
+                } else {
+                    waker.wake_by_ref();
+                }
+                Poll::Pending
+            }
+            BridgeState::Restarting { .. } => {
+                // Restart already triggered by call() after a transport error.
+                // Just wait for the state to change (to Ready or Degraded).
                 let waker = cx.waker().clone();
                 let state_rx_arc = Arc::clone(self.runtime.state_rx());
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
