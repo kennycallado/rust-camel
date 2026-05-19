@@ -138,7 +138,14 @@ jobs:
       - name: fmt check
         run: cargo fmt --check --all
       - name: clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
+        # camel-component-kafka's --all-features enables `dynamic-linking` which
+        # requires a system librdkafka ≥2.12.1 not available on ubuntu-latest.
+        # Exclude it from the all-features pass and lint it separately without
+        # the build-infrastructure features (dynamic-linking / cmake-build do
+        # not gate any Rust code paths, so clippy coverage is not reduced).
+        run: |
+          cargo clippy --workspace --all-features --exclude camel-component-kafka -- -D warnings
+          cargo clippy -p camel-component-kafka -- -D warnings
       - name: lint-unwrap
         run: cargo xtask lint-unwrap
       - name: lint-secrets
