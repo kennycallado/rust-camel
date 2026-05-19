@@ -2787,7 +2787,21 @@ mod tests {
         let ctx = ConsumerContext::new(tx, token.clone());
 
         tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Wait until the server is actually accepting connections (CI runners can be slow).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("HTTP server did not start within 5s on port {port}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
 
         let client = reqwest::Client::new();
         let resp = client
