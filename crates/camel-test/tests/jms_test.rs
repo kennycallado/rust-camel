@@ -40,7 +40,7 @@ async fn jms_producer_sends_to_activemq() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1&delay=2000")
         .set_body("hello-jms".to_string())
         .to("jms:queue:test-produce")
         .to("mock:sent")
