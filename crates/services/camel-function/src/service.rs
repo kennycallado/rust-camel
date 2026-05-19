@@ -86,7 +86,8 @@ impl FunctionRuntimeService {
             runtime: runtime.to_string(),
         };
         if let Some(handle) = self.invoker.pool.handles.get(&key) {
-            *handle.state.lock().expect("state") = RunnerState::Failed { // allow-unwrap
+            *handle.state.lock().expect("state") = RunnerState::Failed {
+                // allow-unwrap
                 reason: reason.to_string(),
             };
         }
@@ -107,7 +108,8 @@ impl FunctionRuntimeService {
                     return Ok(());
                 }
                 Ok(HealthReport::Unhealthy(reason)) => {
-                    *handle.state.lock().expect("state") = RunnerState::Unhealthy { // allow-unwrap
+                    *handle.state.lock().expect("state") = RunnerState::Unhealthy {
+                        // allow-unwrap
                         since: std::time::Instant::now(),
                         reason,
                     };

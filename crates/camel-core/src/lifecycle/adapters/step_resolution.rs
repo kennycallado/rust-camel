@@ -574,7 +574,8 @@ pub(crate) fn resolve_steps(
             }
             BuilderStep::Bean { name, method } => {
                 // Lock beans registry to lookup bean
-                let beans = beans.lock().expect( // allow-unwrap
+                let beans = beans.lock().expect(
+                    // allow-unwrap
                     "beans mutex poisoned: another thread panicked while holding this lock",
                 );
 

@@ -59,7 +59,8 @@ impl DefaultFunctionInvoker {
                     return Ok(());
                 }
                 Ok(HealthReport::Unhealthy(reason)) => {
-                    *handle.state.lock().expect("state") = RunnerState::Unhealthy { // allow-unwrap
+                    *handle.state.lock().expect("state") = RunnerState::Unhealthy {
+                        // allow-unwrap
                         since: std::time::Instant::now(),
                         reason,
                     };

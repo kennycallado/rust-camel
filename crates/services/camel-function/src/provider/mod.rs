@@ -116,7 +116,8 @@ pub mod fake {
                 .expect("calls") // allow-unwrap
                 .push(FakeCall::Spawn(key.clone()));
             self.spawned.lock().expect("spawned").push(key.clone()); // allow-unwrap
-            if self.config.lock().expect("config").fail_on_spawn { // allow-unwrap
+            if self.config.lock().expect("config").fail_on_spawn {
+                // allow-unwrap
                 return Err(ProviderError::SpawnFailed("configured".into()));
             }
             Ok(RunnerHandle {
@@ -147,7 +148,8 @@ pub mod fake {
                 .lock()
                 .expect("calls") // allow-unwrap
                 .push(FakeCall::Health(handle.id.clone()));
-            if self.config.lock().expect("config").fail_on_health { // allow-unwrap
+            if self.config.lock().expect("config").fail_on_health {
+                // allow-unwrap
                 return Ok(HealthReport::Unhealthy("configured".into()));
             }
             Ok(HealthReport::Healthy)
