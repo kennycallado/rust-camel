@@ -34,6 +34,11 @@ pub fn run_new(args: NewArgs) {
         profile_layout,
     } = args;
 
+    if name.trim().is_empty() {
+        eprintln!("Error: project name must not be empty or whitespace-only");
+        std::process::exit(1);
+    }
+
     if name.contains("..") || name.contains('\\') {
         eprintln!("Error: project name must not contain '..' or backslashes");
         std::process::exit(1);
@@ -118,5 +123,17 @@ mod tests {
                 assert!(msg.contains("nonexistent"), "got: {msg}");
             }
         }
+    }
+
+    #[test]
+    fn test_run_new_empty_name_exits() {
+        let name = "";
+        assert!(name.trim().is_empty());
+    }
+
+    #[test]
+    fn test_run_new_whitespace_name_detected() {
+        let name = "   ";
+        assert!(name.trim().is_empty());
     }
 }

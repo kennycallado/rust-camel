@@ -1,3 +1,8 @@
+//! Fluent builder API for constructing Camel routes programmatically with EIP patterns.
+//!
+//! Main types: `RouteBuilder`, `StepAccumulator`, `SplitBuilder`, `ChoiceBuilder`, `MulticastBuilder`,
+//! `ThrottleBuilder`, `LoopBuilder`, `LoadBalancerBuilder`, `OnExceptionBuilder`.
+
 use camel_api::DelayConfig;
 use camel_api::aggregator::{
     AggregationStrategy, AggregatorConfig, CompletionCondition, CompletionMode, CorrelationStrategy,
@@ -615,12 +620,15 @@ impl RouteBuilder {
                 "route must have a 'from' URI".to_string(),
             ));
         }
-        let route_id = self.route_id.ok_or_else(|| {
-            CamelError::RouteError(
-                "route must have a 'route_id' — call .route_id(\"name\") on the builder"
-                    .to_string(),
-            )
-        })?;
+        let route_id = self
+            .route_id
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                CamelError::RouteError(
+                    "route must have a non-empty 'route_id' — call .route_id(\"name\") on the builder"
+                        .to_string(),
+                )
+            })?;
         let resolved_error_handler = match self.error_handler_mode {
             ErrorHandlerMode::None => self.error_handler,
             ErrorHandlerMode::ExplicitConfig => self.error_handler,
@@ -699,12 +707,15 @@ impl RouteBuilder {
                 "route must have a 'from' URI".to_string(),
             ));
         }
-        let route_id = self.route_id.ok_or_else(|| {
-            CamelError::RouteError(
-                "route must have a 'route_id' — call .route_id(\"name\") on the builder"
-                    .to_string(),
-            )
-        })?;
+        let route_id = self
+            .route_id
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                CamelError::RouteError(
+                    "route must have a non-empty 'route_id' — call .route_id(\"name\") on the builder"
+                        .to_string(),
+                )
+            })?;
 
         let steps = canonicalize_steps(self.steps)?;
         let circuit_breaker = self
@@ -2334,6 +2345,19 @@ mod tests {
             "error should mention route_id, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_builder_empty_route_id_rejected() {
+        let result = RouteBuilder::from("timer:tick").route_id("").build();
+        let err = result.err().expect("empty route_id should be rejected");
+        assert!(matches!(err, CamelError::RouteError(_)));
+    }
+
+    #[test]
+    fn test_builder_whitespace_route_id_rejected() {
+        let result = RouteBuilder::from("timer:tick").route_id("   ").build();
+        assert!(result.is_err());
     }
 
     #[test]

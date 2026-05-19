@@ -79,7 +79,9 @@ pub fn parse_json_to_canonical(json: &str) -> Result<Vec<CanonicalRouteSpec>, Ca
 pub fn load_json_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| CamelError::Io(format!("Failed to read {}: {e}", path.display())))?;
-    parse_json(&content)
+    parse_json(&content).map_err(|e| {
+        CamelError::RouteError(format!("{e} (in {})", path.display()))
+    })
 }
 
 #[cfg(test)]

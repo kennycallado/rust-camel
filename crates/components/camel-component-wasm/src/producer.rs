@@ -3,6 +3,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use tower::Service;
@@ -25,6 +26,7 @@ pub struct WasmProducer {
     runtime: Arc<std::sync::Mutex<Option<Arc<WasmRuntime>>>>,
     config: crate::config::WasmConfig,
     state_store: crate::state_store::StateStore,
+    init_failed: Arc<AtomicBool>,
 }
 
 impl WasmProducer {
@@ -39,6 +41,7 @@ impl WasmProducer {
             runtime: Arc::new(std::sync::Mutex::new(None)),
             config,
             state_store: crate::state_store::StateStore::new(),
+            init_failed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -81,6 +84,11 @@ impl Service<Exchange> for WasmProducer {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.init_failed.load(Ordering::Relaxed) {
+            return Poll::Ready(Err(CamelError::ProcessorError(
+                "wasm runtime initialization failed".to_string(),
+            )));
+        }
         Poll::Ready(Ok(()))
     }
 
@@ -88,8 +96,12 @@ impl Service<Exchange> for WasmProducer {
         let this = self.clone();
         Box::pin(async move {
             let runtime = match this.ensure_runtime().await {
-                Ok(rt) => rt,
+                Ok(rt) => {
+                    this.init_failed.store(false, Ordering::Relaxed);
+                    rt
+                }
                 Err(e) => {
+                    this.init_failed.store(true, Ordering::Relaxed);
                     warn!(
                         module = %this.module_path.display(),
                         error = %e,
@@ -162,5 +174,34 @@ mod tests {
             config,
         );
         let _cloned = producer.clone();
+    }
+
+    #[test]
+    fn test_poll_ready_before_init_failure() {
+        let config = WasmConfig::default();
+        let mut producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            config,
+        );
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let result = producer.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+    }
+
+    #[test]
+    fn test_poll_ready_after_init_failure() {
+        let config = WasmConfig::default();
+        let mut producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            config,
+        );
+        producer.init_failed.store(true, Ordering::Relaxed);
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let result = producer.poll_ready(&mut cx);
+        assert!(
+            matches!(result, Poll::Ready(Err(CamelError::ProcessorError(msg))) if msg.contains("wasm runtime initialization failed"))
+        );
     }
 }

@@ -1,3 +1,18 @@
+//! CXF/SOAP bridge component for rust-camel — connects to a Java CXF bridge
+//! process via gRPC/Tonic, enabling SOAP WebService calls from Rust routes.
+//!
+//! Main types: `CxfBundle`, `CxfComponent`, `CxfBridgePool`, `CxfError`.
+//! Main modules: `component`, `config`, `consumer`, `pool`, `producer`.
+//!
+//! # Limitations
+//!
+//! - Requires the `camel-cxf-bridge` Java process to be running and reachable over gRPC.
+//!   Without the bridge, all producers/consumers will remain in `Starting` state indefinitely.
+//! - SOAP/WSDL parsing is delegated to the Java CXF bridge; complex WS-Security policies
+//!   must be configured on the Java side.
+//! - Only synchronous request-reply SOAP calls are supported; one-way SOAP operations
+//!   are not currently modelled.
+
 pub mod bundle;
 pub mod component;
 pub mod config;

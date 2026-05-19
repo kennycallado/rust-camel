@@ -17,7 +17,18 @@ pub struct PrometheusMetrics {
 }
 
 impl PrometheusMetrics {
-    /// Creates a new PrometheusMetrics instance with all metrics registered
+    /// Creates a new PrometheusMetrics instance with all metrics registered.
+    ///
+    /// # Panics
+    ///
+    /// Panics if metric creation or registration fails. This can only happen if:
+    /// - A metric name is invalid (must match `^[a-zA-Z_:][a-zA-Z0-9_:]*$`). All names are
+    ///   hardcoded below and comply with this requirement by convention.
+    /// - A metric is registered twice. This is impossible here because each call creates a
+    ///   fresh [`Registry`].
+    ///
+    /// Since both conditions are static invariants enforced by code review, these `expect()`
+    /// calls are intentional and will never fail in practice.
     pub fn new() -> Self {
         let registry = Registry::new();
 

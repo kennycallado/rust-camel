@@ -24,7 +24,7 @@ pub(crate) struct XsltBridgeRuntime {
 }
 
 impl XsltBridgeRuntime {
-    fn new(
+    pub(crate) fn new(
         config: XsltComponentConfig,
         process: Arc<Mutex<Option<BridgeProcess>>>,
         state_tx: watch::Sender<BridgeState>,
@@ -133,6 +133,10 @@ impl XsltBridgeRuntime {
             || msg.contains("transport")
     }
 
+    pub(crate) fn state_rx(&self) -> &Arc<watch::Receiver<BridgeState>> {
+        &self.state_rx
+    }
+
     async fn start_bridge_process(
         &self,
     ) -> Result<(BridgeProcess, tonic::transport::Channel, u16), XsltError> {
@@ -144,7 +148,7 @@ impl XsltBridgeRuntime {
                 &self.config.bridge_cache_dir,
             )
             .await
-            .map_err(|e| XsltError::Bridge(e.to_string()))?,
+            .map_err(|e| XsltError::Bridge(format!("failed to resolve xml-bridge binary: {e}")))?,
         };
 
         let process = BridgeProcess::start(&BridgeProcessConfig::xml(
@@ -152,12 +156,14 @@ impl XsltBridgeRuntime {
             self.config.bridge_start_timeout_ms,
         ))
         .await
-        .map_err(|e| XsltError::Bridge(e.to_string()))?;
+        .map_err(|e| XsltError::Bridge(format!("failed to start xml-bridge process: {e}")))?;
         let port = process.grpc_port();
 
-        let channel = connect_channel(port)
-            .await
-            .map_err(|e| XsltError::Bridge(e.to_string()))?;
+        let channel = connect_channel(port).await.map_err(|e| {
+            XsltError::Bridge(format!(
+                "failed to connect to xml-bridge on port {port}: {e}"
+            ))
+        })?;
 
         Ok((process, channel, port))
     }

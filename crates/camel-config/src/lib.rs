@@ -1,3 +1,8 @@
+//! Configuration layer for rust-camel — YAML/JSON loading, route discovery, and property resolution.
+//!
+//! Main types: `CamelConfig`, `JournalConfig`, `ComponentsConfig`, `PropertiesResolver`.
+//! Main modules: `config`, `context_ext`, `discovery`, `properties`, `yaml`.
+
 pub mod config;
 pub mod context_ext;
 pub mod discovery;

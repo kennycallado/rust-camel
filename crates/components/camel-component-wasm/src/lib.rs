@@ -1,3 +1,19 @@
+//! WebAssembly component for rust-camel — executes WASM modules as route processors via a Wasmtime runtime.
+//!
+//! Main types: `WasmComponent`, `WasmBundle`, `WasmConfig`, `WasmEndpoint`, `StateStore`.
+//! Main modules: `runtime`, `bindings`, `state_store`, `host_functions`.
+//!
+//! # Limitations
+//!
+//! - Only the [Wasmtime](https://wasmtime.dev) runtime is supported; other WASM runtimes
+//!   (Wasmer, WasmEdge, etc.) are not compatible.
+//! - WASM modules must export a specific interface defined by `camel_wasm_bindings`; arbitrary
+//!   WASM binaries cannot be dropped in without meeting this contract.
+//! - The WASM sandbox has no access to the host filesystem or network by default;
+//!   host functions are limited to what is explicitly exposed via `host_functions`.
+//! - Epoch-based fuel/interruption requires the `epoch` feature; long-running modules
+//!   without epoch support may block the async executor.
+
 pub mod bean;
 pub mod bean_bindings;
 pub mod bindings;

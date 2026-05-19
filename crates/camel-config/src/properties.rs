@@ -11,6 +11,12 @@ pub enum ResolveError {
     MissingKey { key: String },
 }
 
+impl Default for PropertiesResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PropertiesResolver {
     pub fn new() -> Self {
         Self {

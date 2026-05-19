@@ -15,6 +15,7 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 use tower::Service;
+use tracing::{debug, error, warn};
 
 use crate::codec::RawBytesCodec;
 use crate::mode::GrpcMode;
@@ -35,10 +36,12 @@ fn json_to_protobuf(
         .map_err(|e| CamelError::TypeConversionFailed(format!("failed to serialize JSON: {e}")))?;
     let mut de = serde_json::Deserializer::from_str(&json_str);
     let dyn_msg = DynamicMessage::deserialize(desc, &mut de).map_err(|e| {
+        warn!(error = %e, "proto conversion failed");
         CamelError::TypeConversionFailed(format!("failed to parse JSON into protobuf: {e}"))
     })?;
     let mut buf = BytesMut::new();
     dyn_msg.encode(&mut buf).map_err(|e| {
+        warn!(error = %e, "proto conversion failed");
         CamelError::TypeConversionFailed(format!("failed to encode protobuf message: {e}"))
     })?;
     Ok(buf.to_vec())
@@ -49,9 +52,11 @@ fn protobuf_to_json(
     desc: MessageDescriptor,
 ) -> Result<serde_json::Value, CamelError> {
     let dyn_msg = DynamicMessage::decode(desc, bytes.as_slice()).map_err(|e| {
+        warn!(error = %e, "proto conversion failed");
         CamelError::TypeConversionFailed(format!("failed to decode protobuf bytes: {e}"))
     })?;
     serde_json::to_value(&dyn_msg).map_err(|e| {
+        warn!(error = %e, "proto conversion failed");
         CamelError::TypeConversionFailed(format!("failed to serialize protobuf to JSON: {e}"))
     })
 }
@@ -73,7 +78,8 @@ impl GrpcProducer {
         method_name: String,
         mode: GrpcMode,
     ) -> Result<Self, CamelError> {
-        let endpoint = Endpoint::from_shared(addr).map_err(|e| {
+        let endpoint = Endpoint::from_shared(addr.clone()).map_err(|e| {
+            error!(error = %e, "grpc producer creation failed");
             CamelError::EndpointCreationFailed(format!("invalid grpc endpoint: {e}"))
         })?;
         let channel = endpoint.connect_lazy();
@@ -82,28 +88,37 @@ impl GrpcProducer {
         let pool = cache
             .get_or_compile(&proto_path, std::iter::empty::<&Path>())
             .map_err(|e| {
+                error!(error = %e, "grpc producer creation failed");
                 CamelError::EndpointCreationFailed(format!("failed to compile proto: {e}"))
             })?;
 
         let svc = pool.get_service_by_name(&service_name).ok_or_else(|| {
-            CamelError::EndpointCreationFailed(format!(
+            let err = CamelError::EndpointCreationFailed(format!(
                 "service descriptor not found: {service_name}"
-            ))
+            ));
+            error!(service = %service_name, error = %err, "grpc producer creation failed");
+            err
         })?;
 
         let method = svc
             .methods()
             .find(|m| m.name() == method_name)
             .ok_or_else(|| {
-                CamelError::EndpointCreationFailed(format!(
+                let err = CamelError::EndpointCreationFailed(format!(
                     "method descriptor not found: {service_name}/{method_name}"
-                ))
+                ));
+                error!(service = %service_name, method = %method_name, error = %err, "grpc producer creation failed");
+                err
             })?;
         let req_descriptor = method.input();
         let resp_descriptor = method.output();
         let path = PathAndQuery::from_maybe_shared(format!("/{service_name}/{method_name}"))
-            .map_err(|e| CamelError::EndpointCreationFailed(format!("invalid gRPC path: {e}")))?;
+            .map_err(|e| {
+                error!(error = %e, "grpc producer creation failed");
+                CamelError::EndpointCreationFailed(format!("invalid gRPC path: {e}"))
+            })?;
 
+        debug!(addr = %addr, service = %service_name, method = %method_name, "grpc producer created");
         Ok(Self {
             channel,
             path,
@@ -158,6 +173,7 @@ impl GrpcProducer {
         let resp_desc = self.resp_descriptor.clone();
 
         Box::pin(async move {
+            debug!(path = %path, "grpc unary call");
             let json = Self::body_to_json(exchange.input.body.clone())?;
             let buf = json_to_protobuf(json, req_df)?;
             let mut request = Request::new(buf);
@@ -170,7 +186,10 @@ impl GrpcProducer {
             let response = grpc
                 .unary(request, path, RawBytesCodec)
                 .await
-                .map_err(Self::tonic_to_camel_error)?;
+                .map_err(|status| {
+                    error!(code = %status.code(), "grpc unary call failed");
+                    Self::tonic_to_camel_error(status)
+                })?;
 
             let resp_json = protobuf_to_json(response.into_inner(), resp_desc)?;
             exchange.input.body = Body::Json(resp_json);
@@ -185,6 +204,7 @@ impl GrpcProducer {
         let resp_desc = self.resp_descriptor.clone();
 
         Box::pin(async move {
+            debug!(path = %path, "grpc server streaming call");
             let json = Self::body_to_json(exchange.input.body.clone())?;
             let buf = json_to_protobuf(json, req_df)?;
             let mut request = Request::new(buf);
@@ -197,7 +217,10 @@ impl GrpcProducer {
             let response = grpc
                 .server_streaming(request, path, RawBytesCodec)
                 .await
-                .map_err(Self::tonic_to_camel_error)?;
+                .map_err(|status| {
+                    error!(code = %status.code(), "grpc server streaming call failed");
+                    Self::tonic_to_camel_error(status)
+                })?;
 
             let mut results = Vec::new();
             let mut stream = response.into_inner();
@@ -219,6 +242,7 @@ impl GrpcProducer {
         let resp_desc = self.resp_descriptor.clone();
 
         Box::pin(async move {
+            debug!(path = %path, "grpc client streaming call");
             let json = Self::body_to_json(exchange.input.body.clone())?;
             let items = json.as_array().ok_or_else(|| {
                 CamelError::TypeConversionFailed(
@@ -243,7 +267,10 @@ impl GrpcProducer {
             let response = grpc
                 .client_streaming(request, path, RawBytesCodec)
                 .await
-                .map_err(Self::tonic_to_camel_error)?;
+                .map_err(|status| {
+                    error!(code = %status.code(), "grpc client streaming call failed");
+                    Self::tonic_to_camel_error(status)
+                })?;
 
             let resp_json = protobuf_to_json(response.into_inner(), resp_desc)?;
             exchange.input.body = Body::Json(resp_json);
@@ -258,6 +285,7 @@ impl GrpcProducer {
         let resp_desc = self.resp_descriptor.clone();
 
         Box::pin(async move {
+            debug!(path = %path, "grpc bidi streaming call");
             let json = Self::body_to_json(exchange.input.body.clone())?;
             let items = json.as_array().ok_or_else(|| {
                 CamelError::TypeConversionFailed(
@@ -279,10 +307,13 @@ impl GrpcProducer {
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("grpc client not ready: {e}")))?;
 
-            let response = grpc
-                .streaming(request, path, RawBytesCodec)
-                .await
-                .map_err(Self::tonic_to_camel_error)?;
+            let response =
+                grpc.streaming(request, path, RawBytesCodec)
+                    .await
+                    .map_err(|status| {
+                        error!(code = %status.code(), "grpc bidi streaming call failed");
+                        Self::tonic_to_camel_error(status)
+                    })?;
 
             let mut results = Vec::new();
             let mut stream = response.into_inner();

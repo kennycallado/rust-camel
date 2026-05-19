@@ -1,3 +1,8 @@
+//! Runtime `.proto` file compilation using vendored `protoc` with SHA-256 content caching.
+//!
+//! Main types: `ProtoCache`, `ProtoCompileError`, `compile_proto`.
+//! Main modules: `cache`, `compiler`.
+
 mod cache;
 mod compiler;
 

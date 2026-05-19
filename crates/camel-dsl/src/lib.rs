@@ -1,3 +1,8 @@
+//! YAML/JSON DSL for defining Camel routes — declarative route parsing and compilation to canonical specs.
+//!
+//! Main types: `DeclarativeRoute`, `DeclarativeStep`, `YamlRoute`, `YamlStep`.
+//! Main modules: `canonical`, `compile`, `contract`, `discovery`, `json`, `model`, `yaml`, `yaml_ast`.
+
 pub mod canonical;
 pub mod compile;
 pub mod contract;

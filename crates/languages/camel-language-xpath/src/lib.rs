@@ -5,6 +5,7 @@ use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use serde_json::Value as JsonValue;
 use sxd_document::parser;
 use sxd_xpath::{Context, Factory, Value as SxdValue};
+use tracing::{debug, warn};
 
 pub struct XPathLanguage;
 
@@ -38,28 +39,42 @@ fn compile_xpath(query: &str) -> Result<sxd_xpath::XPath, LanguageError> {
     let factory = Factory::new();
     factory
         .build(query)
-        .map_err(|e| LanguageError::ParseError {
-            expr: query.to_string(),
-            reason: e.to_string(),
+        .map_err(|e| {
+            warn!(error = %e, "xpath expression compile failed");
+            LanguageError::ParseError {
+                expr: query.to_string(),
+                reason: e.to_string(),
+            }
         })
         .and_then(|opt| {
-            opt.ok_or_else(|| LanguageError::ParseError {
-                expr: query.to_string(),
-                reason: "empty XPath expression".into(),
+            opt.ok_or_else(|| {
+                warn!("xpath expression compile failed");
+                LanguageError::ParseError {
+                    expr: query.to_string(),
+                    reason: "empty XPath expression".into(),
+                }
             })
         })
 }
 
 fn run_query(query: &str, xml: &str) -> Result<JsonValue, LanguageError> {
-    let package = parser::parse(xml).map_err(|e| {
-        LanguageError::EvalError(format!("xml parse error for xpath '{query}': {e}"))
+    let package = parser::parse(xml).map_err(|_| {
+        // sxd parse errors can embed document-derived content (e.g. MismatchedTag
+        // includes tag names from the exchange body which may be sensitive).
+        // Return a generic message; do NOT include the raw error in logs or errors.
+        warn!("xpath: body XML could not be parsed");
+        LanguageError::EvalError("xml parse error: body is not valid XML".to_string())
     })?;
     let doc = package.as_document();
     let xpath = compile_xpath(query)?;
     let context = Context::new();
-    let result = xpath
-        .evaluate(&context, doc.root())
-        .map_err(|e| LanguageError::EvalError(format!("xpath query '{query}' failed: {e}")))?;
+    let result = xpath.evaluate(&context, doc.root()).map_err(|_| {
+        // sxd_xpath eval errors describe query structure issues (unknown variable/function,
+        // type mismatch). No document-derived values are embedded, but we follow the
+        // same conservative pattern: generic message, no raw external error strings.
+        warn!("xpath: expression evaluation failed");
+        LanguageError::EvalError("xpath query failed: expression could not be evaluated".to_string())
+    })?;
 
     Ok(match result {
         SxdValue::Nodeset(ns) => {
@@ -112,6 +127,7 @@ impl Language for XPathLanguage {
 
     fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
         compile_xpath(script)?;
+        debug!("xpath expression compiled");
         Ok(Box::new(XPathExpression {
             query: script.to_string(),
         }))
@@ -119,6 +135,7 @@ impl Language for XPathLanguage {
 
     fn create_predicate(&self, script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
         compile_xpath(script)?;
+        debug!("xpath expression compiled");
         Ok(Box::new(XPathPredicate {
             query: script.to_string(),
         }))

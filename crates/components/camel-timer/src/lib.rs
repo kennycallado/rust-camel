@@ -1,3 +1,8 @@
+//! Timer component for rust-camel — fires `Exchange` events on configurable period, delay, and repeat-count schedules.
+//!
+//! Main types: `TimerComponent`, `TimerConsumer`, `TimerConfig`.
+//! URI format: `timer:name?period=1000&delay=0&repeatCount=0`.
+
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -59,6 +64,11 @@ impl UriConfig for TimerConfig {
     }
 
     fn validate(self) -> Result<Self, CamelError> {
+        if self.name.trim().is_empty() {
+            return Err(CamelError::InvalidUri(
+                "timer name must not be empty".to_string(),
+            ));
+        }
         if self.period.is_zero() {
             return Err(CamelError::InvalidUri(
                 "timer period must be greater than 0".to_string(),
@@ -219,6 +229,14 @@ mod tests {
         assert!(result.is_err(), "period=0 should be rejected");
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("period"), "error should mention 'period'");
+    }
+
+    #[test]
+    fn test_timer_empty_name_rejected() {
+        let result = TimerConfig::from_uri("timer:");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must not be empty"), "unexpected error: {err}");
     }
 
     #[test]

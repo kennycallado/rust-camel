@@ -1,16 +1,22 @@
+//! In-memory direct component for rust-camel — synchronous point-to-point
+//! channel between routes sharing the same context with no serialization overhead.
+//!
+//! Main types: `DirectComponent`, `DirectEndpoint`, `DirectConsumer`, `DirectProducer`.
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tower::Service;
 
 use camel_component_api::UriConfig;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
 use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
+use tracing::{debug, error, info};
 
 // ---------------------------------------------------------------------------
 // Shared state: maps endpoint names to senders that deliver exchanges to the
@@ -79,6 +85,13 @@ impl Component for DirectComponent {
         _ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let config = DirectConfig::from_uri(uri)?;
+        if config.name.trim().is_empty() {
+            return Err(CamelError::InvalidUri(
+                "direct: endpoint name must not be empty".to_string(),
+            ));
+        }
+        let name = config.name.clone();
+        debug!(endpoint_name = %name, "direct endpoint created");
         Ok(Box::new(DirectEndpoint {
             uri: uri.to_string(),
             name: config.name,
@@ -137,15 +150,17 @@ impl Consumer for DirectConsumer {
 
         // Register ourselves so producers can find us.
         {
-            let mut reg = self.registry.lock().await;
+            let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
             reg.insert(self.name.clone(), tx);
         }
+
+        info!(endpoint_name = %self.name, "direct consumer started");
 
         // Process incoming exchanges with cooperative cancellation.
         loop {
             tokio::select! {
                 _ = context.cancelled() => {
-                    tracing::debug!("Direct '{}' received cancellation, stopping", self.name);
+                    debug!(endpoint_name = %self.name, "direct consumer received cancellation");
                     break;
                 }
                 msg = rx.recv() => {
@@ -162,17 +177,20 @@ impl Consumer for DirectConsumer {
 
         // Cleanup: remove from registry on exit
         {
-            let mut reg = self.registry.lock().await;
+            let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
             reg.remove(&self.name);
         }
+
+        debug!(endpoint_name = %self.name, "direct consumer stopped");
 
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
         // Remove from registry so no new producers can send to us.
-        let mut reg = self.registry.lock().await;
+        let mut reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
         reg.remove(&self.name);
+        debug!(endpoint_name = %self.name, "direct consumer stopped");
         Ok(())
     }
 }
@@ -195,7 +213,20 @@ impl Service<Exchange> for DirectProducer {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
+        let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        match reg.get(&self.name) {
+            None => Poll::Ready(Err(CamelError::EndpointCreationFailed(format!(
+                "direct endpoint '{}' not registered",
+                self.name
+            )))),
+            Some(sender) if sender.is_closed() => {
+                Poll::Ready(Err(CamelError::EndpointCreationFailed(format!(
+                    "direct endpoint '{}' channel closed",
+                    self.name
+                ))))
+            }
+            Some(_) => Poll::Ready(Ok(())),
+        }
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
@@ -203,24 +234,32 @@ impl Service<Exchange> for DirectProducer {
         let registry = Arc::clone(&self.registry);
 
         Box::pin(async move {
-            let reg = registry.lock().await;
-            let sender = reg.get(&name).ok_or_else(|| {
-                CamelError::EndpointCreationFailed(format!(
-                    "no consumer registered for direct:{name}"
-                ))
-            })?;
+            let sender = {
+                let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+                reg.get(&name)
+                    .ok_or_else(|| {
+                        let err = CamelError::EndpointCreationFailed(format!(
+                            "no consumer registered for direct:{name}"
+                        ));
+                        error!(endpoint_name = %name, error = %err, "direct send failed");
+                        err
+                    })?
+                    .clone()
+            };
 
             let (reply_tx, reply_rx) = oneshot::channel();
-            sender
-                .send((exchange, reply_tx))
-                .await
-                .map_err(|_| CamelError::ChannelClosed)?;
+            sender.send((exchange, reply_tx)).await.map_err(|err| {
+                error!(endpoint_name = %name, error = %err, "direct send failed");
+                CamelError::ChannelClosed
+            })?;
 
-            // Drop the lock before awaiting the reply to avoid deadlocks.
-            drop(reg);
+            let result = reply_rx.await.map_err(|err| {
+                error!(endpoint_name = %name, error = %err, "direct send failed");
+                CamelError::ChannelClosed
+            })?;
 
-            // Propagate Ok or Err from the subroute pipeline.
-            reply_rx.await.map_err(|_| CamelError::ChannelClosed)?
+            debug!(endpoint_name = %name, "direct message sent");
+            result
         })
     }
 }
@@ -235,7 +274,14 @@ mod tests {
     use camel_component_api::ExchangeEnvelope;
     use camel_component_api::Message;
     use camel_component_api::NoOpComponentContext;
+    use std::task::RawWakerVTable;
     use tower::ServiceExt;
+
+    fn noop_waker() -> std::task::Waker {
+        const VTABLE: RawWakerVTable = RawWakerVTable::new(|_| RAW, |_| {}, |_| {}, |_| {});
+        const RAW: std::task::RawWaker = std::task::RawWaker::new(std::ptr::null(), &VTABLE);
+        unsafe { std::task::Waker::from_raw(RAW) }
+    }
 
     fn test_producer_ctx() -> ProducerContext {
         ProducerContext::new()
@@ -299,6 +345,18 @@ mod tests {
             .create_endpoint("direct:foo", &NoOpComponentContext)
             .unwrap();
         assert!(endpoint.create_producer(&ctx).is_ok());
+    }
+
+    #[test]
+    fn test_direct_empty_name_rejected() {
+        let component = DirectComponent::new();
+        match component.create_endpoint("direct:", &NoOpComponentContext) {
+            Err(e) => assert!(
+                e.to_string().contains("must not be empty"),
+                "unexpected error: {e}"
+            ),
+            Ok(_) => panic!("expected error for empty name"),
+        }
     }
 
     #[tokio::test]
@@ -423,7 +481,7 @@ mod tests {
 
         // Verify the name is registered
         {
-            let reg = component.registry.lock().await;
+            let reg = component.registry.lock().unwrap_or_else(|e| e.into_inner());
             assert!(reg.contains_key("cleanup"));
         }
 
@@ -436,7 +494,7 @@ mod tests {
 
         // Verify removed from registry
         {
-            let reg = component.registry.lock().await;
+            let reg = component.registry.lock().unwrap_or_else(|e| e.into_inner());
             assert!(!reg.contains_key("cleanup"));
         }
 
@@ -462,7 +520,12 @@ mod tests {
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(registry.lock().await.contains_key("cancel-test"));
+        assert!(
+            registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key("cancel-test")
+        );
 
         token.cancel();
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
@@ -472,7 +535,12 @@ mod tests {
         );
 
         // After cancellation, the consumer should have cleaned up the registry
-        assert!(!registry.lock().await.contains_key("cancel-test"));
+        assert!(
+            !registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key("cancel-test")
+        );
     }
 
     #[tokio::test]
@@ -484,5 +552,60 @@ mod tests {
         };
         let result = consumer.stop().await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_poll_ready_endpoint_not_registered() {
+        let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let producer = DirectProducer {
+            name: "missing".to_string(),
+            registry,
+        };
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut producer = producer;
+        let result = producer.poll_ready(&mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(CamelError::EndpointCreationFailed(_)))
+        ));
+    }
+
+    #[test]
+    fn test_poll_ready_endpoint_registered() {
+        let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) =
+            mpsc::channel::<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>(1);
+        registry.lock().unwrap().insert("active".to_string(), tx);
+        let producer = DirectProducer {
+            name: "active".to_string(),
+            registry,
+        };
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut producer = producer;
+        let result = producer.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+    }
+
+    #[test]
+    fn test_poll_ready_channel_closed() {
+        let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) =
+            mpsc::channel::<(Exchange, oneshot::Sender<Result<Exchange, CamelError>>)>(1);
+        drop(rx);
+        registry.lock().unwrap().insert("closed".to_string(), tx);
+        let producer = DirectProducer {
+            name: "closed".to_string(),
+            registry,
+        };
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut producer = producer;
+        let result = producer.poll_ready(&mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(CamelError::EndpointCreationFailed(_)))
+        ));
     }
 }

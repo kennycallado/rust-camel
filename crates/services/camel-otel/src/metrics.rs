@@ -128,7 +128,7 @@ impl MetricsCollector for OtelMetrics {
 
     fn set_queue_depth(&self, route_id: &str, depth: usize) {
         let depth_i64 = depth as i64;
-        let mut map = self.queue_depths.lock().unwrap();
+        let mut map = self.queue_depths.lock().unwrap_or_else(|e| e.into_inner());
         let prev = map.insert(route_id.to_string(), depth_i64).unwrap_or(0);
         let delta = depth_i64 - prev;
         drop(map);
@@ -148,7 +148,7 @@ impl MetricsCollector for OtelMetrics {
             _ => return,
         };
 
-        let mut map = self.cb_states.lock().unwrap();
+        let mut map = self.cb_states.lock().unwrap_or_else(|e| e.into_inner());
         let prev = map.insert(route_id.to_string(), to_value).unwrap_or(0);
         let delta = to_value - prev;
         drop(map);

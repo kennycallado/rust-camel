@@ -1,3 +1,8 @@
+//! Master/leader-election component — wraps a delegate consumer with distributed lock-based leadership coordination.
+//!
+//! Main types: `MasterComponent`, `MasterBundle`.
+//! Main modules: `bundle`, `config`.
+
 pub mod bundle;
 mod config;
 
@@ -16,7 +21,7 @@ use camel_language_api::Language;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::{MasterComponentConfig, MasterUriConfig};
 
@@ -193,7 +198,13 @@ async fn stop_delegate(state: &mut DelegateState, drain_timeout: Duration) {
     {
         run_token.cancel();
         match timeout(drain_timeout, &mut handle).await {
-            Ok(_) => {}
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if e.is_panic() => {
+                error!(error = %e, "master delegate task panicked");
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "master delegate task cancelled");
+            }
             Err(_) => {
                 warn!("master delegate shutdown timed out, aborting");
                 handle.abort();
@@ -382,10 +393,19 @@ impl Consumer for MasterConsumer {
             token.cancel();
         }
 
-        if let Some(task) = self.leadership_task.take()
-            && timeout(self.drain_timeout, task).await.is_err()
-        {
-            warn!("master leadership loop shutdown timed out");
+        if let Some(task) = self.leadership_task.take() {
+            match timeout(self.drain_timeout, task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) if e.is_panic() => {
+                    error!(lock = %self.lock_name, error = %e, "leadership task panicked");
+                }
+                Ok(Err(e)) => {
+                    warn!(lock = %self.lock_name, error = %e, "leadership task cancelled");
+                }
+                Err(_) => {
+                    warn!("master leadership loop shutdown timed out");
+                }
+            }
         }
 
         Ok(())

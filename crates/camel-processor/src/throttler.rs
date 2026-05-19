@@ -62,6 +62,10 @@ pub struct ThrottlerService {
 
 impl ThrottlerService {
     pub fn new(config: ThrottlerConfig, next: BoxProcessor) -> Self {
+        assert!(
+            config.period > Duration::ZERO,
+            "throttler period must be > 0"
+        );
         let limiter = RateLimiter::new(config.max_requests, config.period);
         Self {
             config,
@@ -138,6 +142,15 @@ mod tests {
 
     fn passthrough() -> BoxProcessor {
         BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }))
+    }
+
+    #[test]
+    fn test_throttler_zero_period_rejected() {
+        let config = ThrottlerConfig::new(5, Duration::ZERO);
+        let result = std::panic::catch_unwind(|| {
+            ThrottlerService::new(config, passthrough());
+        });
+        assert!(result.is_err(), "zero period should panic");
     }
 
     #[tokio::test]

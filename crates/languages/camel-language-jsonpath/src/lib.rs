@@ -1,3 +1,8 @@
+//! JSONPath language for rust-camel — evaluates `jsonpath_rust` queries against exchange bodies.
+//!
+//! Main types: `JsonPathLanguage`, `JsonPathExpression`, `JsonPathPredicate`.
+//! Provides expressions and predicates for JSON-based routing and transformation.
+
 use camel_language_api::{Body, Exchange, Value};
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use jsonpath_rust::JsonPath;

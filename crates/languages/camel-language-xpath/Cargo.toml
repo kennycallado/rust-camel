@@ -16,3 +16,4 @@ camel-language-api.workspace = true
 sxd-document = "0.3"
 sxd-xpath = "0.4"
 serde_json.workspace = true
+tracing.workspace = true

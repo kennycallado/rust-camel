@@ -1,3 +1,8 @@
+//! Serverless function lifecycle management — WASM and container function runtime for rust-camel.
+//!
+//! Main types: `FunctionConfig`, `FunctionRuntimeService`, `RunnerHandle`, `ContainerProvider`.
+//! Main modules: `protocol`, `provider`.
+
 pub use camel_api::function::*;
 
 mod config;

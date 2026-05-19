@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tonic::transport::Channel;
-use tracing::warn;
+use tracing::{error, warn};
 
 pub type StylesheetId = String;
 
@@ -231,7 +231,7 @@ impl BridgeReconnectHandler for XsltBridgeClient {
 
         handle.spawn(async move {
             if let Err(err) = backend.recompile_all(port, stylesheets).await {
-                warn!(error = %err, "failed to re-seed stylesheets after reconnect");
+                error!(error = %err, "failed to re-seed stylesheets after reconnect");
             }
         });
 

@@ -14,3 +14,4 @@ categories.workspace = true
 [dependencies]
 camel-language-api.workspace = true
 rhai.workspace = true
+tracing.workspace = true

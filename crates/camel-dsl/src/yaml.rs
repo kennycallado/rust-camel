@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use tracing::{debug, error, info};
+
 use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
 
@@ -64,8 +66,11 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 24] = [
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
 
 pub fn parse_yaml_to_declarative(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
-    let routes: YamlRoutes = serde_yaml::from_str(yaml)
-        .map_err(|e| CamelError::RouteError(format!("YAML parse error: {e}")))?;
+    let routes: YamlRoutes = serde_yaml::from_str(yaml).map_err(|e| {
+        error!(error = %e, "yaml parse failed");
+        CamelError::RouteError(format!("YAML parse error: {e}"))
+    })?;
+    debug!(route_count = %routes.routes.len(), "yaml routes parsed successfully");
 
     routes
         .routes
@@ -110,9 +115,10 @@ pub(crate) fn yaml_route_to_declarative_route(
     }
 
     if route.sequential && route.concurrent.is_some() {
-        return Err(CamelError::RouteError(
-            "route cannot set both 'sequential' and 'concurrent'".into(),
-        ));
+        return Err(CamelError::RouteError(format!(
+            "route '{}': cannot set both 'sequential' and 'concurrent'",
+            route.id
+        )));
     }
 
     let concurrency = if route.sequential {
@@ -154,10 +160,20 @@ pub(crate) fn yaml_route_to_declarative_route(
         }),
     });
 
-    let circuit_breaker = route.circuit_breaker.map(|cb| DeclarativeCircuitBreaker {
-        failure_threshold: cb.failure_threshold,
-        open_duration_ms: cb.open_duration_ms,
-    });
+    let circuit_breaker = route
+        .circuit_breaker
+        .map(|cb| {
+            if cb.failure_threshold == 0 {
+                return Err(CamelError::RouteError(
+                    "circuit_breaker: failure_threshold must be > 0".into(),
+                ));
+            }
+            Ok(DeclarativeCircuitBreaker {
+                failure_threshold: cb.failure_threshold,
+                open_duration_ms: cb.open_duration_ms,
+            })
+        })
+        .transpose()?;
 
     let unit_of_work = if route.on_complete.is_some() || route.on_failure.is_some() {
         Some(camel_api::UnitOfWorkConfig {
@@ -189,8 +205,18 @@ pub(crate) fn yaml_route_to_declarative_route(
 
 pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<DeclarativeStep, CamelError> {
     match step {
-        YamlStep::To(ToStep { to }) => Ok(DeclarativeStep::To(ToStepDef::new(to))),
+        YamlStep::To(ToStep { to }) => {
+            if to.trim().is_empty() {
+                return Err(CamelError::RouteError("to: URI must not be empty".into()));
+            }
+            Ok(DeclarativeStep::To(ToStepDef::new(to)))
+        }
         YamlStep::WireTap(WireTapStep { wire_tap }) => {
+            if wire_tap.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "wire_tap: URI must not be empty".into(),
+                ));
+            }
             Ok(DeclarativeStep::WireTap(WireTapStepDef { uri: wire_tap }))
         }
         YamlStep::Stop(StopStep { stop }) => {
@@ -262,6 +288,11 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             Ok(DeclarativeStep::Log(LogStepDef { message, level }))
         }
         YamlStep::SetHeader(SetHeaderStep { set_header }) => {
+            if set_header.key.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "set_header: key must not be empty".into(),
+                ));
+            }
             let value = parse_value_source(
                 set_header.value,
                 set_header.language,
@@ -278,6 +309,11 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             }))
         }
         YamlStep::SetProperty(SetPropertyStep { set_property }) => {
+            if set_property.name.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "set_property: key must not be empty".into(),
+                ));
+            }
             let value = parse_value_source(
                 set_property.value,
                 set_property.language,
@@ -540,16 +576,33 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
             Ok(DeclarativeStep::ConvertBodyTo(def))
         }
         YamlStep::Marshal(MarshalStep { marshal }) => {
+            if marshal.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "marshal: format must not be empty".into(),
+                ));
+            }
             Ok(DeclarativeStep::Marshal(DataFormatDef { format: marshal }))
         }
         YamlStep::Unmarshal(UnmarshalStep { unmarshal }) => {
+            if unmarshal.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "unmarshal: format must not be empty".into(),
+                ));
+            }
             Ok(DeclarativeStep::Unmarshal(DataFormatDef {
                 format: unmarshal,
             }))
         }
         YamlStep::Bean(BeanStep {
             bean: BeanStepData { name, method },
-        }) => Ok(DeclarativeStep::Bean(BeanStepDef::new(name, method))),
+        }) => {
+            if name.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "bean: name must not be empty".into(),
+                ));
+            }
+            Ok(DeclarativeStep::Bean(BeanStepDef::new(name, method)))
+        }
         YamlStep::DynamicRouter(DynamicRouterStep {
             dynamic_router:
                 DynamicRouterData {
@@ -712,6 +765,11 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 .into_iter()
                 .map(yaml_step_to_declarative_step)
                 .collect::<Result<Vec<_>, _>>()?;
+            if max_requests == 0 {
+                return Err(CamelError::RouteError(
+                    "throttle: max_requests must be > 0".into(),
+                ));
+            }
             Ok(DeclarativeStep::Throttle(ThrottleStepDef {
                 max_requests,
                 period_ms: period_secs.saturating_mul(1000),
@@ -724,6 +782,9 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 DelayBody::Short(ms) => (ms, None),
                 DelayBody::Full(cfg) => (cfg.delay_ms, cfg.dynamic_header),
             };
+            if delay_ms == 0 {
+                return Err(CamelError::RouteError("delay: delay_ms must be > 0".into()));
+            }
             Ok(DeclarativeStep::Delay(DelayStepDef {
                 delay_ms,
                 dynamic_header,
@@ -990,9 +1051,14 @@ fn parse_language_expression(
 }
 
 pub fn load_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| CamelError::Io(format!("Failed to read {}: {e}", path.display())))?;
-    parse_yaml(&content)
+    info!(path = %path.display(), "loading routes from file");
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        error!(path = %path.display(), error = %e, "failed to load routes from file");
+        CamelError::Io(format!("Failed to read {}: {e}", path.display()))
+    })?;
+    parse_yaml(&content).map_err(|e| {
+        CamelError::RouteError(format!("{e} (in {})", path.display()))
+    })
 }
 
 #[cfg(test)]
@@ -1015,6 +1081,23 @@ routes:
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].route_id(), "test-route");
         assert_eq!(defs[0].from_uri(), "timer:tick?period=1000");
+    }
+
+    #[test]
+    fn test_parse_invalid_yaml_produces_parse_error() {
+        let yaml = r#"
+routes:
+  - id: [invalid
+    from: "timer:tick"
+"#;
+        let err = match parse_yaml(yaml) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected parse error for invalid YAML"),
+        };
+        assert!(
+            err.contains("YAML parse error"),
+            "expected 'YAML parse error' in message, got: {err}"
+        );
     }
 
     #[test]
@@ -1928,6 +2011,187 @@ routes:
         let err = parse_yaml_to_canonical(yaml).unwrap_err().to_string();
         assert!(
             err.contains("canonical v1 does not support step `function`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_empty_to_uri_rejected() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "timer:tick"
+    steps:
+      - to: ""
+"#;
+        let err = match parse_yaml(yaml) {
+            Ok(_) => panic!("expected error, got success"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("URI must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_empty_wire_tap_uri_rejected() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "timer:tick"
+    steps:
+      - wire_tap: ""
+"#;
+        let err = match parse_yaml(yaml) {
+            Ok(_) => panic!("expected error, got success"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("URI must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_empty_header_key_rejected() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "timer:tick"
+    steps:
+      - set_header:
+          key: ""
+          value: "test"
+"#;
+        let err = match parse_yaml(yaml) {
+            Ok(_) => panic!("expected error, got success"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("key must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_empty_property_key_rejected() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "timer:tick"
+    steps:
+      - set_property:
+          name: ""
+          value: "test"
+"#;
+        let err = match parse_yaml(yaml) {
+            Ok(_) => panic!("expected error, got success"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("key must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_zero_delay_rejected() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "timer:tick"
+    steps:
+      - delay: 0
+"#;
+        let err = match parse_yaml(yaml) {
+            Ok(_) => panic!("expected error, got success"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("delay_ms must be > 0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_zero_throttle_rejected() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "timer:tick"
+    steps:
+      - throttle:
+          max_requests: 0
+"#;
+        let err = match parse_yaml(yaml) {
+            Ok(_) => panic!("expected error, got success"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("max_requests must be > 0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_zero_failure_threshold_rejected() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "timer:tick"
+    circuit_breaker:
+      failure_threshold: 0
+      open_duration_ms: 5000
+    steps:
+      - to: "log:info"
+"#;
+        let err = match parse_yaml(yaml) {
+            Ok(_) => panic!("expected error, got success"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("failure_threshold must be > 0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_empty_marshal_format_rejected() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "timer:tick"
+    steps:
+      - marshal: ""
+"#;
+        let err = match parse_yaml(yaml) {
+            Ok(_) => panic!("expected error, got success"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("format must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_empty_bean_name_rejected() {
+        let yaml = r#"
+routes:
+  - id: test
+    from: "timer:tick"
+    steps:
+      - bean:
+          name: ""
+          method: "process"
+"#;
+        let err = match parse_yaml(yaml) {
+            Ok(_) => panic!("expected error, got success"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("name must not be empty"),
             "unexpected error: {err}"
         );
     }

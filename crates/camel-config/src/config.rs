@@ -52,6 +52,26 @@ pub struct CamelConfig {
     pub beans: HashMap<String, BeanConfig>,
 }
 
+impl Default for CamelConfig {
+    fn default() -> Self {
+        Self {
+            routes: Vec::new(),
+            watch: false,
+            runtime_journal: None,
+            log_level: default_log_level(),
+            timeout_ms: default_timeout_ms(),
+            drain_timeout_ms: default_drain_timeout_ms(),
+            watch_debounce_ms: default_watch_debounce_ms(),
+            components: ComponentsConfig::default(),
+            observability: ObservabilityConfig::default(),
+            supervision: None,
+            platform: PlatformCamelConfig::default(),
+            stream_caching: StreamCachingConfig::default(),
+            beans: HashMap::new(),
+        }
+    }
+}
+
 /// Platform selection for leader election, readiness, and identity.
 ///
 /// `[platform]` in Camel.toml. Defaults to noop (always leader, always ready).
@@ -422,6 +442,26 @@ fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
 }
 
 impl CamelConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.timeout_ms == 0 {
+            return Err("timeout_ms must be > 0".to_string());
+        }
+        if self.drain_timeout_ms == 0 {
+            return Err("drain_timeout_ms must be > 0".to_string());
+        }
+        if let Some(ref journal) = self.runtime_journal
+            && journal.path.as_os_str().is_empty()
+        {
+            return Err("runtime_journal.path must not be empty".to_string());
+        }
+        for (name, bean) in &self.beans {
+            if bean.plugin.trim().is_empty() {
+                return Err(format!("bean '{}' must have a non-empty plugin", name));
+            }
+        }
+        Ok(())
+    }
+
     pub fn from_file(path: &str) -> Result<Self, ConfigError> {
         Self::from_file_with_profile(path, None)
     }
@@ -480,7 +520,9 @@ impl CamelConfig {
             ))
             .build()?;
 
-        config.try_deserialize()
+        let config: Self = config.try_deserialize()?;
+        config.validate().map_err(ConfigError::Message)?;
+        Ok(config)
     }
 
     pub fn from_file_with_profile_and_env(
@@ -537,7 +579,9 @@ impl CamelConfig {
             .add_source(config::Environment::with_prefix("CAMEL").try_parsing(true))
             .build()?;
 
-        config.try_deserialize()
+        let config: Self = config.try_deserialize()?;
+        config.validate().map_err(ConfigError::Message)?;
+        Ok(config)
     }
 
     pub fn from_env_or_default() -> Result<Self, ConfigError> {
@@ -1093,5 +1137,81 @@ base_url = "https://prod.example.com"
             auth.config.get("base_url").unwrap(),
             "https://prod.example.com"
         );
+    }
+}
+
+#[cfg(test)]
+mod config_validation_tests {
+    use super::*;
+
+    #[test]
+    fn test_config_zero_timeout_rejected() {
+        let config = CamelConfig {
+            timeout_ms: 0,
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_zero_drain_timeout_rejected() {
+        let config = CamelConfig {
+            drain_timeout_ms: 0,
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_empty_journal_path_rejected() {
+        let config = CamelConfig {
+            runtime_journal: Some(JournalConfig {
+                path: std::path::PathBuf::from(""),
+                durability: JournalDurability::default(),
+                compaction_threshold_events: 10_000,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_empty_bean_plugin_rejected() {
+        let mut beans = HashMap::new();
+        beans.insert(
+            "my-bean".to_string(),
+            BeanConfig {
+                plugin: "".to_string(),
+                config: HashMap::new(),
+            },
+        );
+        let config = CamelConfig {
+            beans,
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_whitespace_bean_plugin_rejected() {
+        let mut beans = HashMap::new();
+        beans.insert(
+            "my-bean".to_string(),
+            BeanConfig {
+                plugin: "   ".to_string(),
+                config: HashMap::new(),
+            },
+        );
+        let config = CamelConfig {
+            beans,
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_valid_defaults_pass() {
+        let config = CamelConfig::default();
+        assert!(config.validate().is_ok());
     }
 }

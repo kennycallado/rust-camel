@@ -21,6 +21,8 @@ pub enum BridgeError {
     UrlNotAllowed(String),
     #[error("Transport error: {0}")]
     Transport(String),
+    #[error("Config error: {0}")]
+    Config(String),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -54,6 +56,8 @@ impl std::str::FromStr for BrokerType {
     }
 }
 
+// Intentionally no Debug: contains keystore_password, truststore_password, sig_password. See BRG-004.
+#[allow(missing_debug_implementations)]
 /// Environment variables for a single CXF profile, used by the bridge Java side.
 pub struct CxfProfileEnvVars {
     pub name: String,
@@ -132,6 +136,8 @@ impl CxfProfileEnvVars {
     }
 }
 
+// Intentionally no Debug: contains password field. See BRG-004.
+#[allow(missing_debug_implementations)]
 pub struct BridgeProcessConfig {
     pub spec: &'static BridgeSpec,
     pub binary_path: PathBuf,
@@ -217,6 +223,13 @@ impl BridgeProcessConfig {
             env_vars,
         }
     }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.start_timeout_ms == 0 {
+            return Err("start_timeout_ms must be > 0".to_string());
+        }
+        Ok(())
+    }
 }
 
 pub struct BridgeProcess {
@@ -238,6 +251,8 @@ impl BridgeProcess {
         use tokio::io::AsyncBufReadExt;
         use tokio::process::Command;
         use tokio::time::{Duration, timeout};
+
+        config.validate().map_err(BridgeError::Config)?;
 
         // Bind :0 to let the OS pick a free port, then release so the bridge can use it.
         let free_port = {
@@ -627,5 +642,19 @@ mod tests {
         assert!(keys.contains(&"CXF_PROFILE_FULL_SIG_PASSWORD"));
         assert!(keys.contains(&"CXF_PROFILE_FULL_SECURITY_ACTIONS_OUT"));
         assert!(keys.contains(&"CXF_PROFILE_FULL_SECURITY_ACTIONS_IN"));
+    }
+
+    #[test]
+    fn test_start_timeout_zero_rejected() {
+        let config = BridgeProcessConfig::jms(
+            PathBuf::from("/usr/bin/echo"),
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            0,
+        );
+        let result = config.validate();
+        assert!(result.is_err());
     }
 }

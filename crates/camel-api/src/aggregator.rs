@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::error::CamelError;
 use crate::exchange::Exchange;
 
 /// Aggregation function — left-fold binary: (accumulated, next) -> merged.
@@ -219,18 +220,25 @@ impl AggregatorConfigBuilder {
         self
     }
 
-    /// Build the config. Panics if no completion condition was set.
-    pub fn build(self) -> AggregatorConfig {
-        AggregatorConfig {
+    pub fn try_build(self) -> Result<AggregatorConfig, CamelError> {
+        let completion = self.completion.ok_or_else(|| {
+            CamelError::ProcessorError("completion condition required for AggregatorConfig".into())
+        })?;
+        Ok(AggregatorConfig {
             header_name: self.header_name,
-            completion: self.completion.expect("completion condition required"),
+            completion,
             correlation: self.correlation,
             strategy: self.strategy,
             max_buckets: self.max_buckets,
             bucket_ttl: self.bucket_ttl,
             force_completion_on_stop: self.force_completion_on_stop,
             discard_on_timeout: self.discard_on_timeout,
-        }
+        })
+    }
+
+    /// Build the config. Panics if no completion condition was set.
+    pub fn build(self) -> AggregatorConfig {
+        self.try_build().expect("completion condition required")
     }
 }
 
@@ -397,5 +405,11 @@ mod tests {
         assert!(
             matches!(config.correlation, CorrelationStrategy::HeaderName(ref h) if h == "second")
         );
+    }
+
+    #[test]
+    fn test_aggregator_try_build_missing_completion_returns_error() {
+        let result = AggregatorConfig::correlate_by("key").try_build();
+        assert!(result.is_err());
     }
 }

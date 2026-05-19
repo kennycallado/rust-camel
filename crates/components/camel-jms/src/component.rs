@@ -674,13 +674,28 @@ impl Service<Exchange> for LazyJmsProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         // Check existing slot state if one is already present.
         // If no slot exists yet, return Ready — call() will handle async bridge start.
         if let Some(slot) = self.pool.slots.get(&self.broker_name) {
             match &*slot.state_rx.borrow() {
                 BridgeState::Ready { .. } => return Poll::Ready(Ok(())),
                 BridgeState::Starting | BridgeState::Restarting { .. } => {
+                    // Register a waker so the executor is notified when bridge state
+                    // changes. Without this, Poll::Pending would stall callers that use
+                    // strict Tower semantics (poll_ready loop before call()).
+                    // Guard with try_current: fall back to wake_by_ref when no Tokio
+                    // runtime is active (e.g. unit tests).
+                    let waker = cx.waker().clone();
+                    let mut rx = slot.state_rx.clone();
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        handle.spawn(async move {
+                            let _ = rx.changed().await;
+                            waker.wake();
+                        });
+                    } else {
+                        waker.wake_by_ref();
+                    }
                     return Poll::Pending;
                 }
                 BridgeState::Degraded(reason) => {

@@ -1,3 +1,8 @@
+//! Log component for rust-camel — routes exchange body and headers to the
+//! `tracing` subsystem at a configurable log level, primarily for debugging.
+//!
+//! Main types: `LogComponent`, `LogEndpoint`, `LogProducer`, `LogLevel`.
+
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;

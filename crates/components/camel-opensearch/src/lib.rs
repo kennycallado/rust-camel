@@ -1,3 +1,9 @@
+//! OpenSearch/Elasticsearch component for rust-camel — indexes, searches, and
+//! manages documents with support for CRUD, bulk, and multi-get operations.
+//!
+//! Main types: `OpenSearchBundle`, `OpenSearchComponent`, `OpenSearchConfig`,
+//! `OpenSearchProducer`. Main modules: `bundle`, `config`, `producer`.
+
 pub mod bundle;
 pub mod config;
 pub mod producer;

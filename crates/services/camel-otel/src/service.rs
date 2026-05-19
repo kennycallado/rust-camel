@@ -253,6 +253,19 @@ impl OtelService {
                 ratio
             )));
         }
+        if self.config.service_name.trim().is_empty() {
+            return Err(CamelError::Config(
+                "service_name must not be empty".to_string(),
+            ));
+        }
+        if self.config.endpoint.trim().is_empty() {
+            return Err(CamelError::Config("endpoint must not be empty".to_string()));
+        }
+        if self.config.metrics_interval_ms == 0 {
+            return Err(CamelError::Config(
+                "metrics_interval_ms must be > 0".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -576,6 +589,44 @@ mod tests {
             err.to_string()
                 .contains("TraceIdRatioBased sampler ratio must be in [0.0, 1.0]")
         );
+    }
+
+    #[test]
+    fn test_validate_config_empty_service_name() {
+        let config =
+            OtelConfig::new("http://localhost:4317", "").with_sampler(OtelSampler::AlwaysOn);
+        let service = OtelService::new(config);
+        let err = service.validate_config().unwrap_err();
+        assert!(err.to_string().contains("service_name must not be empty"));
+
+        let config =
+            OtelConfig::new("http://localhost:4317", "   ").with_sampler(OtelSampler::AlwaysOn);
+        let service = OtelService::new(config);
+        let err = service.validate_config().unwrap_err();
+        assert!(err.to_string().contains("service_name must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_config_empty_endpoint() {
+        let config = OtelConfig::new("", "test-service").with_sampler(OtelSampler::AlwaysOn);
+        let service = OtelService::new(config);
+        let err = service.validate_config().unwrap_err();
+        assert!(err.to_string().contains("endpoint must not be empty"));
+
+        let config = OtelConfig::new("   ", "test-service").with_sampler(OtelSampler::AlwaysOn);
+        let service = OtelService::new(config);
+        let err = service.validate_config().unwrap_err();
+        assert!(err.to_string().contains("endpoint must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_config_zero_interval() {
+        let config = OtelConfig::new("http://localhost:4317", "test-service")
+            .with_sampler(OtelSampler::AlwaysOn)
+            .with_metrics_interval_ms(0);
+        let service = OtelService::new(config);
+        let err = service.validate_config().unwrap_err();
+        assert!(err.to_string().contains("metrics_interval_ms must be > 0"));
     }
 
     #[test]

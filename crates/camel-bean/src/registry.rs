@@ -2,6 +2,7 @@ use crate::{BeanError, BeanProcessor};
 use camel_api::{CamelError, Exchange};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::{debug, warn};
 
 pub struct BeanRegistry {
     beans: HashMap<String, Arc<dyn BeanProcessor>>,
@@ -19,10 +20,15 @@ impl BeanRegistry {
         B: BeanProcessor + 'static,
     {
         let name = name.into();
+        if name.trim().is_empty() {
+            return Err(BeanError::InvalidName(name));
+        }
         if self.beans.contains_key(&name) {
+            warn!(bean_name = %name, "bean already registered");
             return Err(BeanError::DuplicateName(name));
         }
-        self.beans.insert(name, Arc::new(bean));
+        self.beans.insert(name.clone(), Arc::new(bean));
+        debug!(bean_name = %name, "bean registered");
         Ok(())
     }
 
@@ -36,15 +42,22 @@ impl BeanRegistry {
         method: &str,
         exchange: &mut Exchange,
     ) -> Result<(), CamelError> {
-        let bean = self
-            .get(bean_name)
-            .ok_or_else(|| BeanError::NotFound(bean_name.to_string()))?;
+        debug!(bean_name = %bean_name, method = %method, "invoking bean");
+
+        let bean = self.get(bean_name).ok_or_else(|| {
+            warn!(bean_name = %bean_name, "bean not found");
+            BeanError::NotFound(bean_name.to_string())
+        })?;
 
         if !bean.methods().iter().any(|m| m == method) {
+            warn!(bean_name = %bean_name, method = %method, "bean method not found");
             return Err(BeanError::MethodNotFound(method.to_string()).into());
         }
 
-        bean.call(method, exchange).await
+        bean.call(method, exchange).await.map_err(|err| {
+            warn!(bean_name = %bean_name, method = %method, error = %err, "bean invocation failed");
+            err
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -171,6 +184,22 @@ mod tests {
         let result = registry.invoke("mock", "unknown", &mut exchange).await;
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_register_empty_name_rejected() {
+        let mut registry = BeanRegistry::new();
+        let result = registry.register("", MockBean);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), BeanError::InvalidName(_)));
+    }
+
+    #[test]
+    fn test_register_whitespace_name_rejected() {
+        let mut registry = BeanRegistry::new();
+        let result = registry.register("   ", MockBean);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), BeanError::InvalidName(_)));
     }
 
     #[tokio::test]

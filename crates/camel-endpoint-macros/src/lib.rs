@@ -1,3 +1,7 @@
+//! Proc-macro derive for `UriConfig` — generates URI parsing implementations from struct field attributes.
+//!
+//! Main macro: `#[derive(UriConfig)]`. Supports `#[uri_scheme]`, `#[uri_param]`, and related attributes.
+
 mod uri_config;
 
 use proc_macro::TokenStream;

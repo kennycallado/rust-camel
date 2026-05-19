@@ -14,6 +14,9 @@ pub enum BeanError {
     #[error("Handler execution failed: {0}")]
     ExecutionFailed(String),
 
+    #[error("Bean name must not be empty or whitespace-only: '{0}'")]
+    InvalidName(String),
+
     #[error("Bean already registered: {0}")]
     DuplicateName(String),
 }

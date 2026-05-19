@@ -64,5 +64,5 @@ where
     let _ = std::fs::remove_file(&descriptor_file);
 
     DescriptorPool::decode(bytes.as_slice())
-        .map_err(|e| ProtoCompileError::DescriptorDecode(e.to_string()))
+        .map_err(|e| ProtoCompileError::DescriptorDecode(format!("{}: {e}", proto_path.display())))
 }

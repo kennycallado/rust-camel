@@ -1,3 +1,8 @@
+//! Simple expression language for rust-camel — lightweight header/body/property expression parser and evaluator.
+//!
+//! Main types: `SimpleLanguage`, `SimpleExpression`, `SimplePredicate`.
+//! Main modules: `parser`, `evaluator`. No scripting dependencies.
+
 mod evaluator;
 mod parser;
 

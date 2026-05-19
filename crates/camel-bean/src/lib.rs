@@ -1,3 +1,7 @@
+//! Bean component for rust-camel — register and invoke named beans as route processors.
+//!
+//! Main types: `BeanRegistry`, `BeanProcessor`. Main modules: `error`, `processor`, `registry`.
+
 mod error;
 mod processor;
 mod registry;

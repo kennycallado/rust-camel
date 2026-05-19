@@ -21,7 +21,7 @@ use kube::api::{DeleteParams, PostParams, Preconditions};
 use kube::{Api, Client};
 use tokio::sync::{Notify, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::identity::KubernetesPlatformIdentity;
 
@@ -205,9 +205,12 @@ impl LeadershipService for KubernetesLeadershipService {
         tokio::spawn(async move {
             let leases: Api<Lease> = Api::namespaced(client, &namespace);
             let mut currently_leader = false;
+            #[allow(unused_assignments)]
+            let mut cancelled = false;
 
             loop {
                 if cancel_task.is_cancelled() {
+                    cancelled = true;
                     break;
                 }
 
@@ -244,9 +247,21 @@ impl LeadershipService for KubernetesLeadershipService {
                 };
 
                 tokio::select! {
-                    _ = cancel_task.cancelled() => break,
+                    _ = cancel_task.cancelled() => {
+                        cancelled = true;
+                        break;
+                    }
                     _ = tokio::time::sleep(sleep_for) => {}
                 }
+            }
+
+            if !cancelled {
+                error!(
+                    lease_name = %lease_name,
+                    namespace = %namespace,
+                    holder_identity = %holder_identity,
+                    "leader election loop terminated without cancellation"
+                );
             }
 
             if currently_leader {

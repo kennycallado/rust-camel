@@ -1,8 +1,24 @@
+//! Rhai scripting language for rust-camel — sandboxed script evaluation with configurable operation and module limits.
+//!
+//! Main types: `RhaiLanguage`, `RhaiExpression`, `RhaiPredicate`, `RhaiMutatingExpression`.
+//! Scripts have access to `body`, `headers`, `header()`, `set_header()`, `property()`, `set_property()`.
+//!
+//! # Limitations
+//!
+//! - Scripts run in a sandboxed Rhai engine with no access to the host filesystem, network,
+//!   or OS interfaces. Only the exchange API exposed via built-in functions is available.
+//! - Rhai modules and `import` statements are disabled; each script is self-contained.
+//! - Resource limits are enforced (default: 100 000 operations, 1 MB strings, 10 000-element
+//!   arrays/maps). Scripts exceeding these limits will fail with an `EvalError`.
+//! - The `body` variable is always a string. Structured access to JSON/XML bodies requires
+//!   explicit parsing within the script using Rhai's built-in map/array types.
+
 use camel_language_api::{
     Body, Exchange, Expression, Language, LanguageError, MutatingExpression, Predicate, Value,
 };
 use rhai::{Engine, Scope};
 use std::sync::{Arc, RwLock};
+use tracing::{debug, warn};
 
 /// Default maximum number of Rhai operations per evaluation (prevents infinite loops).
 const DEFAULT_MAX_OPERATIONS: u64 = 100_000;
@@ -133,7 +149,25 @@ impl RhaiLanguage {
 
         let result: rhai::Dynamic = engine
             .eval_with_scope::<rhai::Dynamic>(&mut scope, script)
-            .map_err(|e| LanguageError::EvalError(e.to_string()))?;
+            .map_err(|e| {
+                let pos = e.position();
+                let location = match (pos.line(), pos.position()) {
+                    (Some(l), Some(c)) => format!(" at line {l}, column {c}"),
+                    (Some(l), None) => format!(" at line {l}"),
+                    _ => String::new(),
+                };
+                // EvalAltResult::ErrorRuntime embeds the thrown value verbatim,
+                // which may contain exchange body/header secrets (e.g. `throw headers["Authorization"]`).
+                // Emit only the error kind and position; never the thrown value.
+                let safe_kind = if matches!(*e, rhai::EvalAltResult::ErrorRuntime(_, _)) {
+                    "script threw an exception (thrown value not logged)".to_string()
+                } else {
+                    format!("{e}")
+                };
+                let err_msg = format!("rhai evaluation error{location}: {safe_kind}");
+                warn!("rhai expression eval failed{location}");
+                LanguageError::EvalError(err_msg)
+            })?;
 
         dynamic_to_json(result)
     }
@@ -296,7 +330,23 @@ impl MutatingExpression for RhaiMutatingExpression {
                 exchange.input.headers = original_headers;
                 exchange.properties = original_properties;
                 exchange.input.body = original_body;
-                return Err(LanguageError::EvalError(e.to_string()));
+                let pos = e.position();
+                let location = match (pos.line(), pos.position()) {
+                    (Some(l), Some(c)) => format!(" at line {l}, column {c}"),
+                    (Some(l), None) => format!(" at line {l}"),
+                    _ => String::new(),
+                };
+                // EvalAltResult::ErrorRuntime embeds the thrown value verbatim,
+                // which may contain exchange body/header secrets (e.g. `throw headers["Authorization"]`).
+                // Emit only the error kind and position; never the thrown value.
+                let safe_kind = if matches!(*e, rhai::EvalAltResult::ErrorRuntime(_, _)) {
+                    "script threw an exception (thrown value not logged)".to_string()
+                } else {
+                    format!("{e}")
+                };
+                let err_msg = format!("rhai evaluation error{location}: {safe_kind}");
+                warn!("rhai expression eval failed{location}");
+                return Err(LanguageError::EvalError(err_msg));
             }
         };
 
@@ -322,24 +372,28 @@ impl Language for RhaiLanguage {
 
     fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
         // Syntax-only validation — function resolution happens at eval time
-        self.engine
-            .compile(script)
-            .map_err(|e| LanguageError::ParseError {
+        self.engine.compile(script).map_err(|e| {
+            warn!(error = %e, "rhai expression compile failed");
+            LanguageError::ParseError {
                 expr: script.to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
+        debug!("rhai expression compiled");
         Ok(Box::new(RhaiExpression {
             script: script.to_string(),
         }))
     }
 
     fn create_predicate(&self, script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
-        self.engine
-            .compile(script)
-            .map_err(|e| LanguageError::ParseError {
+        self.engine.compile(script).map_err(|e| {
+            warn!(error = %e, "rhai expression compile failed");
+            LanguageError::ParseError {
                 expr: script.to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
+        debug!("rhai expression compiled");
         Ok(Box::new(RhaiPredicate {
             script: script.to_string(),
         }))
@@ -353,12 +407,14 @@ impl Language for RhaiLanguage {
         &self,
         script: &str,
     ) -> Result<Box<dyn MutatingExpression>, LanguageError> {
-        self.engine
-            .compile(script)
-            .map_err(|e| LanguageError::ParseError {
+        self.engine.compile(script).map_err(|e| {
+            warn!(error = %e, "rhai expression compile failed");
+            LanguageError::ParseError {
                 expr: script.to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
+        debug!("rhai expression compiled");
         Ok(Box::new(RhaiMutatingExpression {
             script: script.to_string(),
         }))
@@ -491,6 +547,19 @@ mod tests {
         let ex = exchange_with_body("test");
         let result = expr.evaluate(&ex);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rhai_eval_error_contains_location_info() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("nonexistent_fn()").unwrap();
+        let ex = exchange_with_body("test");
+        let err = expr.evaluate(&ex).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rhai evaluation error"),
+            "error should contain 'rhai evaluation error', got: {msg}"
+        );
     }
 
     #[test]

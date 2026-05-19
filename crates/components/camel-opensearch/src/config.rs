@@ -66,7 +66,7 @@ impl TryFrom<String> for OpenSearchOperation {
 ///
 /// This struct holds component-level defaults that can be set via Camel.toml
 /// and applied to endpoint configurations when specific values aren't provided.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 pub struct OpenSearchConfig {
     #[serde(default = "OpenSearchConfig::default_host")]
     pub host: String,
@@ -130,6 +130,19 @@ impl Default for OpenSearchConfig {
     }
 }
 
+impl fmt::Debug for OpenSearchConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenSearchConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("default_operation", &self.default_operation)
+            .field("index_name", &self.index_name)
+            .finish()
+    }
+}
+
 // --- OpenSearchEndpointConfig (parsed from URI) ---
 
 /// Configuration parsed from an OpenSearch URI.
@@ -155,7 +168,7 @@ impl Default for OpenSearchConfig {
 /// - `index_name` - Target index name (required)
 /// - `operation` - OpenSearch operation to perform (default: SEARCH)
 /// - `is_tls` - Whether to use HTTPS (determined by scheme: `opensearchs` = true)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenSearchEndpointConfig {
     /// OpenSearch server hostname. `None` if not set in URI.
     pub host: Option<String>,
@@ -177,6 +190,20 @@ pub struct OpenSearchEndpointConfig {
 
     /// Whether to use HTTPS. Determined by scheme (`opensearchs` = true).
     pub is_tls: bool,
+}
+
+impl fmt::Debug for OpenSearchEndpointConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenSearchEndpointConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("index_name", &self.index_name)
+            .field("operation", &self.operation)
+            .field("is_tls", &self.is_tls)
+            .finish()
+    }
 }
 
 impl OpenSearchEndpointConfig {
@@ -228,6 +255,32 @@ impl OpenSearchEndpointConfig {
             .find(|s| !s.is_empty())
             .ok_or_else(|| CamelError::InvalidUri("missing index name in URI path".to_string()))?
             .to_string();
+
+        // Validate index name against OpenSearch naming rules
+        if index_name.contains('\0') {
+            return Err(CamelError::InvalidUri(
+                "index name must not contain null bytes".into(),
+            ));
+        }
+        if index_name.contains("..") {
+            return Err(CamelError::InvalidUri(
+                "index name must not contain '..'".into(),
+            ));
+        }
+        if !index_name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        {
+            return Err(CamelError::InvalidUri(
+                "index name must contain only lowercase letters, digits, hyphens, and underscores"
+                    .into(),
+            ));
+        }
+        if index_name.len() > 255 {
+            return Err(CamelError::InvalidUri(
+                "index name must be at most 255 bytes".into(),
+            ));
+        }
 
         // Parse operation (default to SEARCH)
         let operation = parts
@@ -550,5 +603,107 @@ mod tests {
         assert_eq!(cfg.default_operation, Some(OpenSearchOperation::BULK));
         assert_eq!(cfg.username, Some("admin".to_string()));
         assert_eq!(cfg.password, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn test_opensearch_config_debug_redacts_password() {
+        let cfg = OpenSearchConfig::default()
+            .with_host("es-prod")
+            .with_password("hunter2");
+        let debug_output = format!("{:?}", cfg);
+        assert!(
+            !debug_output.contains("hunter2"),
+            "debug output must not contain the real password: {}",
+            debug_output
+        );
+        assert!(
+            debug_output.contains("<redacted>"),
+            "debug output must contain <redacted>: {}",
+            debug_output
+        );
+    }
+
+    #[test]
+    fn test_opensearch_endpoint_config_debug_redacts_password() {
+        let cfg = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/myindex?operation=GET&username=admin&password=hunter2",
+        )
+        .unwrap();
+        let debug_output = format!("{:?}", cfg);
+        assert!(
+            !debug_output.contains("hunter2"),
+            "debug output must not contain the real password: {}",
+            debug_output
+        );
+        assert!(
+            debug_output.contains("<redacted>"),
+            "debug output must contain <redacted>: {}",
+            debug_output
+        );
+    }
+
+    #[test]
+    fn test_opensearch_config_debug_no_password_shows_none() {
+        let cfg = OpenSearchConfig::default();
+        let debug_output = format!("{:?}", cfg);
+        assert!(
+            !debug_output.contains("<redacted>"),
+            "debug output must not contain <redacted> when password is None: {}",
+            debug_output
+        );
+    }
+
+    #[test]
+    fn test_opensearch_endpoint_config_debug_no_password_shows_none() {
+        let cfg =
+            OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex?operation=GET")
+                .unwrap();
+        let debug_output = format!("{:?}", cfg);
+        assert!(
+            !debug_output.contains("<redacted>"),
+            "debug output must not contain <redacted> when password is None: {}",
+            debug_output
+        );
+    }
+
+    #[test]
+    fn test_index_name_null_bytes_rejected() {
+        let result = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/my%00index?operation=SEARCH",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_index_name_dotdot_rejected() {
+        let result = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/my..index?operation=SEARCH",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_index_name_uppercase_rejected() {
+        let result = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/MyIndex?operation=SEARCH",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_index_name_special_chars_rejected() {
+        let result = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/my@index?operation=SEARCH",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_index_name_valid_lowercase_with_digits_hyphens_underscores() {
+        let cfg = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/my-index_01?operation=SEARCH",
+        )
+        .unwrap();
+        assert_eq!(cfg.index_name, "my-index_01");
     }
 }

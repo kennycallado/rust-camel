@@ -1,3 +1,8 @@
+//! WebSocket component for rust-camel — Axum-based WebSocket server and Tokio-tungstenite client for bidirectional messaging.
+//!
+//! Main types: `WsComponent`, `WsBundle`, `WsConfig`, `WsServerConfig`, `WsClientConfig`, `WsEndpointConfig`.
+//! Main modules: `bundle`, `config`.
+
 pub mod bundle;
 pub mod config;
 

@@ -1,3 +1,8 @@
+//! Mock component for rust-camel — testing utility that records received
+//! exchanges for later assertion, useful for verifying route output in tests.
+//!
+//! Main types: `MockComponent`, `MockEndpoint`, `MockProducer`.
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -10,6 +15,7 @@ use tower::Service;
 use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+use tracing::debug;
 
 // ---------------------------------------------------------------------------
 // MockComponent
@@ -89,6 +95,7 @@ impl Component for MockComponent {
             })
             .clone();
 
+        debug!(endpoint_name = %inner.name, "mock endpoint created");
         Ok(Box::new(MockEndpoint(inner)))
     }
 }
@@ -214,6 +221,7 @@ impl Endpoint for MockEndpoint {
 
     fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(MockProducer {
+            name: self.0.name.clone(),
             received: Arc::clone(&self.0.received),
             notify: Arc::clone(&self.0.notify),
         }))
@@ -227,6 +235,7 @@ impl Endpoint for MockEndpoint {
 /// A producer that simply records each exchange it processes.
 #[derive(Clone)]
 struct MockProducer {
+    name: String,
     received: Arc<Mutex<Vec<Exchange>>>,
     notify: Arc<Notify>,
 }
@@ -241,10 +250,13 @@ impl Service<Exchange> for MockProducer {
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
+        let name = self.name.clone();
         let received = Arc::clone(&self.received);
         let notify = Arc::clone(&self.notify);
         Box::pin(async move {
             received.lock().await.push(exchange.clone());
+            let count = received.lock().await.len();
+            debug!(endpoint_name = %name, count = %count, "exchange recorded on mock");
             notify.notify_waiters();
             Ok(exchange)
         })

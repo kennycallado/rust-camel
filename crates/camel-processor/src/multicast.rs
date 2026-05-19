@@ -35,6 +35,11 @@ pub struct MulticastService {
 impl MulticastService {
     /// Create a new `MulticastService` from a list of endpoints and a [`MulticastConfig`].
     pub fn new(endpoints: Vec<BoxProcessor>, config: MulticastConfig) -> Self {
+        if config.parallel
+            && let Some(limit) = config.parallel_limit
+        {
+            assert!(limit > 0, "parallel_limit must be > 0");
+        }
         Self { endpoints, config }
     }
 }
@@ -248,6 +253,19 @@ mod tests {
         BoxProcessor::from_fn(|_ex| {
             Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
         })
+    }
+
+    #[test]
+    fn test_multicast_zero_parallel_limit_rejected() {
+        let config = MulticastConfig::new().parallel(true).parallel_limit(0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            MulticastService::new(vec![passthrough_processor()], config);
+        }));
+        assert!(result.is_err(), "zero parallel_limit should panic");
+    }
+
+    fn passthrough_processor() -> BoxProcessor {
+        BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }))
     }
 
     // ── 1. Sequential + LastWins ───────────────────────────────────────

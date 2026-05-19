@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock, watch};
 use tonic::Code;
 use tonic::transport::Channel;
-use tracing::warn;
+use tracing::error;
 
 use crate::error::ValidatorError;
 use crate::proto;
@@ -328,7 +328,7 @@ impl BridgeReconnectHandler for XsdBridgeBackend {
                     )
                     .await
                 {
-                    warn!(schema_id = %schema_id, error = %e, "re-seed schema failed after reconnect");
+                    error!(schema_id = %schema_id, error = %e, "re-seed schema failed after reconnect");
                 }
             }
         });

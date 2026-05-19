@@ -6,6 +6,7 @@ use crate::PrometheusMetrics;
 use async_trait::async_trait;
 use camel_api::{CamelError, HealthChecker, Lifecycle, MetricsCollector, ServiceStatus};
 use tokio::task::JoinHandle;
+use tracing::{debug, info};
 
 pub struct PrometheusService {
     addr: SocketAddr,
@@ -110,6 +111,7 @@ impl Lifecycle for PrometheusService {
 
         self.server_handle = Some(handle);
         self.status.store(1, Ordering::SeqCst);
+        info!(port = %actual_port, "prometheus metrics service started");
         Ok(())
     }
 
@@ -118,6 +120,7 @@ impl Lifecycle for PrometheusService {
             handle.abort();
         }
         self.status.store(0, Ordering::SeqCst);
+        debug!("prometheus metrics service stopped");
         Ok(())
     }
 }

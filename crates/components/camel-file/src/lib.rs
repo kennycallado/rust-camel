@@ -1,3 +1,9 @@
+//! File system component for rust-camel — polls directories for new or changed
+//! files as consumer, writes exchange bodies to files as producer.
+//!
+//! Main types: `FileBundle`, `FileComponent`, `FileConsumer`, `FileProducer`.
+//! Main modules: `bundle`.
+
 pub mod bundle;
 
 pub use bundle::FileBundle;

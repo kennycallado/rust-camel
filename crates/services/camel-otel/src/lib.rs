@@ -1,3 +1,8 @@
+//! OpenTelemetry integration — tracing, metrics, and context propagation for rust-camel pipelines.
+//!
+//! Main types: `OtelService`, `OtelConfig`, `OtelMetrics`, `OtelProtocol`.
+//! Main modules: `config`, `metrics`, `propagation`, `service`.
+
 pub mod config;
 pub mod metrics;
 pub mod propagation;

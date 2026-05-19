@@ -8,7 +8,7 @@ use tower::Service;
 use tracing::debug;
 
 use crate::error::CxfError;
-use crate::pool::CxfBridgePool;
+use crate::pool::{BridgeState, CxfBridgePool};
 use crate::proto::{SoapRequest, cxf_bridge_client::CxfBridgeClient};
 
 fn is_transport_error(status: &tonic::Status) -> bool {
@@ -130,7 +130,39 @@ impl Service<Exchange> for CxfProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if let Some(slot) = self.pool.slots.get(&CxfBridgePool::slot_key()) {
+            match &*slot.state_rx.borrow() {
+                BridgeState::Ready { .. } => return Poll::Ready(Ok(())),
+                BridgeState::Starting | BridgeState::Restarting { .. } => {
+                    // Spawn a task that waits for the next state change and then
+                    // wakes this future. Avoids busy-poll while honouring Tower contract.
+                    // Guard with try_current: in contexts without a Tokio runtime (e.g.
+                    // unit tests) fall back to an immediate wake so the caller can retry.
+                    let waker = cx.waker().clone();
+                    let mut rx = slot.state_rx.clone();
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        handle.spawn(async move {
+                            let _ = rx.changed().await;
+                            waker.wake();
+                        });
+                    } else {
+                        waker.wake_by_ref();
+                    }
+                    return Poll::Pending;
+                }
+                BridgeState::Degraded(reason) => {
+                    return Poll::Ready(Err(CamelError::ProcessorError(format!(
+                        "cxf bridge degraded: {reason}"
+                    ))));
+                }
+                BridgeState::Stopped => {
+                    return Poll::Ready(Err(CamelError::ProcessorError(
+                        "cxf bridge stopped".to_string(),
+                    )));
+                }
+            }
+        }
         Poll::Ready(Ok(()))
     }
 
@@ -241,10 +273,12 @@ impl Service<Exchange> for CxfProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pool::{BridgeSlot, CxfBridgePool};
     use camel_component_api::StreamBody;
     use futures::stream;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+    use tokio::sync::watch;
 
     fn test_pool() -> Arc<CxfBridgePool> {
         let pool_config = crate::config::CxfPoolConfig {
@@ -276,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn producer_poll_ready() {
+    fn test_poll_ready_no_slot() {
         let pool = test_pool();
         let mut producer = CxfProducer::new(
             pool,
@@ -290,6 +324,125 @@ mod tests {
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);
         assert!(matches!(poll, Poll::Ready(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn test_poll_ready_bridge_ready() {
+        let pool = test_pool();
+        let channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        let slot = BridgeSlot::new_ready_for_test(channel);
+        pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
+
+        let mut producer = CxfProducer::new(
+            pool,
+            "test".to_string(),
+            "/wsdl/hello.wsdl".to_string(),
+            "Svc".to_string(),
+            "Port".to_string(),
+            None,
+            "op".to_string(),
+        );
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let poll = producer.poll_ready(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn test_poll_ready_bridge_starting() {
+        let pool = test_pool();
+        let _channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        let slot = BridgeSlot {
+            key: CxfBridgePool::slot_key(),
+            configured_profiles: vec![],
+            bind_address: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
+
+        let mut producer = CxfProducer::new(
+            pool,
+            "test".to_string(),
+            "/wsdl/hello.wsdl".to_string(),
+            "Svc".to_string(),
+            "Port".to_string(),
+            None,
+            "op".to_string(),
+        );
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let poll = producer.poll_ready(&mut cx);
+        assert!(matches!(poll, Poll::Pending));
+    }
+
+    #[tokio::test]
+    async fn test_poll_ready_bridge_degraded() {
+        let pool = test_pool();
+        let _channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        let (state_tx, state_rx) =
+            watch::channel(BridgeState::Degraded("connection lost".to_string()));
+        let slot = BridgeSlot {
+            key: CxfBridgePool::slot_key(),
+            configured_profiles: vec![],
+            bind_address: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
+
+        let mut producer = CxfProducer::new(
+            pool,
+            "test".to_string(),
+            "/wsdl/hello.wsdl".to_string(),
+            "Svc".to_string(),
+            "Port".to_string(),
+            None,
+            "op".to_string(),
+        );
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let poll = producer.poll_ready(&mut cx);
+        match poll {
+            Poll::Ready(Err(e)) => assert!(e.to_string().contains("degraded")),
+            other => panic!("expected Ready(Err), got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_poll_ready_bridge_stopped() {
+        let pool = test_pool();
+        let _channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        let (state_tx, state_rx) = watch::channel(BridgeState::Stopped);
+        let slot = BridgeSlot {
+            key: CxfBridgePool::slot_key(),
+            configured_profiles: vec![],
+            bind_address: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
+
+        let mut producer = CxfProducer::new(
+            pool,
+            "test".to_string(),
+            "/wsdl/hello.wsdl".to_string(),
+            "Svc".to_string(),
+            "Port".to_string(),
+            None,
+            "op".to_string(),
+        );
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let poll = producer.poll_ready(&mut cx);
+        match poll {
+            Poll::Ready(Err(e)) => assert!(e.to_string().contains("stopped")),
+            other => panic!("expected Ready(Err), got: {other:?}"),
+        }
     }
 
     #[test]

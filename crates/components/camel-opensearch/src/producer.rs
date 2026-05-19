@@ -11,6 +11,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower::Service;
+use tracing::{debug, error};
 
 use crate::config::{OpenSearchEndpointConfig, OpenSearchOperation};
 
@@ -41,7 +42,9 @@ impl OpenSearchProducer {
     fn build_client(config: &OpenSearchEndpointConfig) -> Result<OpenSearch, CamelError> {
         let url = config.base_url();
         let parsed_url = url::Url::parse(&url).map_err(|e| {
-            CamelError::EndpointCreationFailed(format!("Invalid OpenSearch URL: {}", e))
+            let err = CamelError::EndpointCreationFailed(format!("Invalid OpenSearch URL: {}", e));
+            error!(endpoint = %url, error = %e, "opensearch client init failed");
+            err
         })?;
         let pool = SingleNodeConnectionPool::new(parsed_url);
         let mut builder = TransportBuilder::new(pool);
@@ -49,8 +52,10 @@ impl OpenSearchProducer {
             builder = builder.auth(Credentials::Basic(username.clone(), password.clone()));
         }
         let transport = builder.build().map_err(|e| {
+            error!(endpoint = %url, error = %e, "opensearch client init failed");
             CamelError::EndpointCreationFailed(format!("Failed to build transport: {}", e))
         })?;
+        debug!(endpoint = %url, "opensearch client initialized");
         Ok(OpenSearch::new(transport))
     }
 
@@ -132,6 +137,7 @@ impl OpenSearchProducer {
         config: &OpenSearchEndpointConfig,
         exchange: &Exchange,
     ) -> Result<serde_json::Value, CamelError> {
+        debug!(index = %config.index_name, "indexing document");
         let body = Self::extract_body(exchange)?;
         let doc_id = exchange
             .input
@@ -154,7 +160,13 @@ impl OpenSearchProducer {
                     .await
             }
         }
-        .map_err(|e| CamelError::ProcessorError(format!("Index request failed: {}", e)))?;
+        .map_err(|e| {
+            error!(index = %config.index_name, error = %e, "index operation failed");
+            CamelError::ProcessorError(format!(
+                "Index request failed for index '{}': {}",
+                config.index_name, e
+            ))
+        })?;
 
         Self::read_response(response).await
     }
@@ -164,6 +176,7 @@ impl OpenSearchProducer {
         config: &OpenSearchEndpointConfig,
         exchange: &Exchange,
     ) -> Result<serde_json::Value, CamelError> {
+        debug!(index = %config.index_name, "searching");
         let body = Self::extract_body(exchange)?;
 
         let response = client
@@ -171,7 +184,13 @@ impl OpenSearchProducer {
             .body(body)
             .send()
             .await
-            .map_err(|e| CamelError::ProcessorError(format!("Search request failed: {}", e)))?;
+            .map_err(|e| {
+                error!(index = %config.index_name, error = %e, "search failed");
+                CamelError::ProcessorError(format!(
+                    "Search request failed for index '{}': {}",
+                    config.index_name, e
+                ))
+            })?;
 
         Self::read_response(response).await
     }
@@ -181,6 +200,7 @@ impl OpenSearchProducer {
         config: &OpenSearchEndpointConfig,
         exchange: &Exchange,
     ) -> Result<serde_json::Value, CamelError> {
+        debug!(index = %config.index_name, "getting document");
         let doc_id = exchange
             .input
             .header("CamelOpenSearch.Id")
@@ -195,7 +215,13 @@ impl OpenSearchProducer {
             .get(GetParts::IndexId(&config.index_name, doc_id))
             .send()
             .await
-            .map_err(|e| CamelError::ProcessorError(format!("Get request failed: {}", e)))?;
+            .map_err(|e| {
+                error!(index = %config.index_name, error = %e, "get failed");
+                CamelError::ProcessorError(format!(
+                    "Get request failed for index '{}', id '{}': {}",
+                    config.index_name, doc_id, e
+                ))
+            })?;
 
         Self::read_response(response).await
     }
@@ -205,6 +231,7 @@ impl OpenSearchProducer {
         config: &OpenSearchEndpointConfig,
         exchange: &Exchange,
     ) -> Result<serde_json::Value, CamelError> {
+        debug!(index = %config.index_name, "deleting document");
         let doc_id = exchange
             .input
             .header("CamelOpenSearch.Id")
@@ -219,7 +246,13 @@ impl OpenSearchProducer {
             .delete(DeleteParts::IndexId(&config.index_name, doc_id))
             .send()
             .await
-            .map_err(|e| CamelError::ProcessorError(format!("Delete request failed: {}", e)))?;
+            .map_err(|e| {
+                error!(index = %config.index_name, error = %e, "delete failed");
+                CamelError::ProcessorError(format!(
+                    "Delete request failed for index '{}', id '{}': {}",
+                    config.index_name, doc_id, e
+                ))
+            })?;
 
         Self::read_response(response).await
     }
@@ -229,6 +262,7 @@ impl OpenSearchProducer {
         config: &OpenSearchEndpointConfig,
         exchange: &Exchange,
     ) -> Result<serde_json::Value, CamelError> {
+        debug!(index = %config.index_name, "updating document");
         let doc_id = exchange
             .input
             .header("CamelOpenSearch.Id")
@@ -246,7 +280,13 @@ impl OpenSearchProducer {
             .body(body)
             .send()
             .await
-            .map_err(|e| CamelError::ProcessorError(format!("Update request failed: {}", e)))?;
+            .map_err(|e| {
+                error!(index = %config.index_name, error = %e, "update failed");
+                CamelError::ProcessorError(format!(
+                    "Update request failed for index '{}', id '{}': {}",
+                    config.index_name, doc_id, e
+                ))
+            })?;
 
         Self::read_response(response).await
     }
@@ -256,6 +296,7 @@ impl OpenSearchProducer {
         config: &OpenSearchEndpointConfig,
         exchange: &Exchange,
     ) -> Result<serde_json::Value, CamelError> {
+        debug!(index = %config.index_name, "bulk operation");
         let body = Self::extract_body(exchange)?;
 
         // Convert JSON value to NDJSON lines (Vec<String>)
@@ -280,7 +321,13 @@ impl OpenSearchProducer {
             .body(lines)
             .send()
             .await
-            .map_err(|e| CamelError::ProcessorError(format!("Bulk request failed: {}", e)))?;
+            .map_err(|e| {
+                error!(index = %config.index_name, error = %e, "bulk operation failed");
+                CamelError::ProcessorError(format!(
+                    "Bulk request failed for index '{}': {}",
+                    config.index_name, e
+                ))
+            })?;
 
         Self::read_response(response).await
     }
@@ -290,6 +337,7 @@ impl OpenSearchProducer {
         config: &OpenSearchEndpointConfig,
         exchange: &Exchange,
     ) -> Result<serde_json::Value, CamelError> {
+        debug!(index = %config.index_name, "multiget operation");
         let body = Self::extract_body(exchange)?;
 
         let response = client
@@ -297,7 +345,13 @@ impl OpenSearchProducer {
             .body(body)
             .send()
             .await
-            .map_err(|e| CamelError::ProcessorError(format!("MultiGet request failed: {}", e)))?;
+            .map_err(|e| {
+                error!(index = %config.index_name, error = %e, "multiget failed");
+                CamelError::ProcessorError(format!(
+                    "MultiGet request failed for index '{}': {}",
+                    config.index_name, e
+                ))
+            })?;
 
         Self::read_response(response).await
     }
@@ -330,6 +384,7 @@ impl Service<Exchange> for OpenSearchProducer {
 
             // Operation resolution: header > URI param (already in config.operation)
             let operation = Self::resolve_operation(&req, &config);
+            debug!(operation = %operation, "opensearch call dispatched");
 
             let result = match operation {
                 OpenSearchOperation::INDEX => {

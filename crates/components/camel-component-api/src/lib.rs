@@ -1,3 +1,8 @@
+//! Core component trait API — the foundation all rust-camel components implement.
+//!
+//! Main types: `Component`, `Endpoint`, `Consumer`, `ProducerContext`, `ExchangeEnvelope`, `ComponentBundle`.
+//! Main modules: `component`, `endpoint`, `consumer`, `producer`, `registrar`.
+
 pub mod bundle;
 pub mod component;
 pub mod component_context;

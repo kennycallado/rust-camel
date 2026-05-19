@@ -42,6 +42,11 @@ pub struct SplitterService {
 impl SplitterService {
     /// Create a new `SplitterService` from a [`SplitterConfig`] and a sub-pipeline.
     pub fn new(config: SplitterConfig, sub_pipeline: BoxProcessor) -> Self {
+        if config.parallel
+            && let Some(limit) = config.parallel_limit
+        {
+            assert!(limit > 0, "parallel_limit must be > 0");
+        }
         Self {
             expression: config.expression,
             sub_pipeline,
@@ -267,6 +272,17 @@ mod tests {
 
     fn make_exchange(text: &str) -> Exchange {
         Exchange::new(Message::new(text))
+    }
+
+    #[test]
+    fn test_splitter_zero_parallel_limit_rejected() {
+        let config = SplitterConfig::new(camel_api::split_body_lines())
+            .parallel(true)
+            .parallel_limit(0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            SplitterService::new(config, passthrough_pipeline());
+        }));
+        assert!(result.is_err(), "zero parallel_limit should panic");
     }
 
     // ── 1. Sequential + LastWins ───────────────────────────────────────
