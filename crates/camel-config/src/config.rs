@@ -227,7 +227,7 @@ pub enum OtelSampler {
 }
 
 /// OpenTelemetry configuration for `[observability.otel]` in Camel.toml.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct OtelCamelConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -258,6 +258,23 @@ pub struct OtelCamelConfig {
 
     #[serde(default)]
     pub resource_attrs: HashMap<String, String>,
+}
+
+impl Default for OtelCamelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_otel_endpoint(),
+            service_name: default_otel_service_name(),
+            log_level: default_otel_log_level(),
+            protocol: OtelProtocol::default(),
+            sampler: OtelSampler::default(),
+            sampler_ratio: None,
+            metrics_interval_ms: default_otel_metrics_interval_ms(),
+            logs_enabled: true,
+            resource_attrs: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
