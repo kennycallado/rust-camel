@@ -55,9 +55,7 @@ impl XsltBridgeRuntime {
             return;
         }
         if let Err(e) = self.ensure_bridge_started(reconnect_handler).await {
-            let _ = self
-                .state_tx
-                .send(BridgeState::Degraded(e.to_string()));
+            let _ = self.state_tx.send(BridgeState::Degraded(e.to_string()));
         }
     }
 
