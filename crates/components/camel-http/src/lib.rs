@@ -800,17 +800,21 @@ impl Consumer for HttpConsumer {
                                     .map(|s| s as u16)
                                     .unwrap_or(200);
 
-                                let reply_body: HttpReplyBody = match out.input.body {
-                                    Body::Empty => HttpReplyBody::Bytes(bytes::Bytes::new()),
-                                    Body::Bytes(b) => HttpReplyBody::Bytes(b),
-                                    Body::Text(s) => HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())),
-                                    Body::Xml(s) => HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())),
-                                    Body::Json(v) => HttpReplyBody::Bytes(bytes::Bytes::from(
+                                let (reply_body, inferred_content_type): (HttpReplyBody, Option<String>) = match out.input.body {
+                                    Body::Empty => (HttpReplyBody::Bytes(bytes::Bytes::new()), None),
+                                    Body::Bytes(b) => (HttpReplyBody::Bytes(b), None),
+                                    Body::Text(s) => (HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())), Some("text/plain; charset=utf-8".to_string())),
+                                    Body::Xml(s) => (HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())), Some("application/xml".to_string())),
+                                    Body::Json(v) => (HttpReplyBody::Bytes(bytes::Bytes::from(
                                         v.to_string().into_bytes(),
-                                    )),
+                                    )), Some("application/json".to_string())),
                                     Body::Stream(s) => {
+                                        let ct = s.metadata.content_type.clone();
                                         match s.stream.lock().await.take() {
-                                            Some(stream) => HttpReplyBody::Stream(stream),
+                                            Some(stream) => (
+                                                HttpReplyBody::Stream(stream),
+                                                ct,
+                                            ),
                                             None => {
                                                 tracing::error!(
                                                     "Body::Stream already consumed before HTTP reply — returning 500"
@@ -829,7 +833,7 @@ impl Consumer for HttpConsumer {
                                     }
                                 };
 
-                                let resp_headers: Vec<(String, String)> = out
+                                let mut resp_headers: Vec<(String, String)> = out
                                     .input
                                     .headers
                                     .iter()
@@ -842,7 +846,7 @@ impl Consumer for HttpConsumer {
                                             k.to_lowercase().as_str(),
                                             // RFC 2616 Section 4.5 - General headers
                                             "content-length" |      // Auto-calculated by framework
-                                            "content-type" |        // Auto-calculated from body
+                                            "content-type" |        // Inferred from body type below
                                             "transfer-encoding" |   // Hop-by-hop
                                             "connection" |          // Hop-by-hop
                                             "cache-control" |       // Hop-by-hop
@@ -880,6 +884,10 @@ impl Consumer for HttpConsumer {
                                         v.as_str().map(|s| (k.clone(), s.to_string()))
                                     })
                                     .collect();
+
+                                if let Some(ct) = inferred_content_type {
+                                    resp_headers.push(("Content-Type".to_string(), ct));
+                                }
 
                                 HttpReply {
                                     status,
@@ -3424,5 +3432,266 @@ mod tests {
 
         assert!(!exceeds_max_response_body(10, 10));
         assert!(exceeds_max_response_body(11, 10));
+    }
+
+    // -----------------------------------------------------------------------
+    // Content-Type inference tests
+    // -----------------------------------------------------------------------
+
+    async fn setup_consumer_on_free_port(
+        path: &str,
+    ) -> (
+        u16,
+        tokio::sync::mpsc::Receiver<camel_component_api::ExchangeEnvelope>,
+        tokio_util::sync::CancellationToken,
+    ) {
+        use camel_component_api::ConsumerContext;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let consumer_cfg = HttpServerConfig {
+            host: "127.0.0.1".to_string(),
+            port,
+            path: path.to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: 1024,
+        };
+        let mut consumer = HttpConsumer::new(consumer_cfg);
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone());
+
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        (port, rx, token)
+    }
+
+    #[tokio::test]
+    async fn test_content_type_inferred_for_json_body() {
+        let (port, mut rx, token) = setup_consumer_on_free_port("/json").await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client.get(format!("http://127.0.0.1:{port}/json")).send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body =
+                    camel_component_api::Body::Json(serde_json::json!({"message": "hello"}));
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("Content-Type header should be present");
+        assert_eq!(ct, "application/json");
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, r#"{"message":"hello"}"#);
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_content_type_inferred_for_text_body() {
+        let (port, mut rx, token) = setup_consumer_on_free_port("/text").await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client.get(format!("http://127.0.0.1:{port}/text")).send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body =
+                    camel_component_api::Body::Text("plain text response".to_string());
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("Content-Type header should be present");
+        assert_eq!(ct, "text/plain; charset=utf-8");
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "plain text response");
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_content_type_inferred_for_xml_body() {
+        let (port, mut rx, token) = setup_consumer_on_free_port("/xml").await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client.get(format!("http://127.0.0.1:{port}/xml")).send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body =
+                    camel_component_api::Body::Xml("<root><item>value</item></root>".to_string());
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("Content-Type header should be present");
+        assert_eq!(ct, "application/xml");
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "<root><item>value</item></root>");
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_no_content_type_for_empty_body() {
+        let (port, mut rx, token) = setup_consumer_on_free_port("/empty").await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client.get(format!("http://127.0.0.1:{port}/empty")).send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body = camel_component_api::Body::Empty;
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        assert!(
+            resp.headers().get("content-type").is_none(),
+            "Empty body should not set Content-Type"
+        );
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_no_content_type_for_raw_bytes_body() {
+        let (port, mut rx, token) = setup_consumer_on_free_port("/bytes").await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client.get(format!("http://127.0.0.1:{port}/bytes")).send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body =
+                    camel_component_api::Body::Bytes(bytes::Bytes::from_static(b"\x00\x01\x02"));
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        assert!(
+            resp.headers().get("content-type").is_none(),
+            "Raw Bytes body should not set Content-Type"
+        );
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_content_type_from_stream_metadata() {
+        use camel_component_api::{StreamBody, StreamMetadata};
+        use futures::stream;
+
+        let (port, mut rx, token) = setup_consumer_on_free_port("/stream-ct").await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client
+            .get(format!("http://127.0.0.1:{port}/stream-ct"))
+            .send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                let chunks: Vec<Result<bytes::Bytes, CamelError>> =
+                    vec![Ok(bytes::Bytes::from("audio data"))];
+                let stream = Box::pin(stream::iter(chunks));
+                envelope.exchange.input.body = camel_component_api::Body::Stream(StreamBody {
+                    stream: Arc::new(tokio::sync::Mutex::new(Some(stream))),
+                    metadata: StreamMetadata {
+                        size_hint: None,
+                        content_type: Some("audio/mpeg".to_string()),
+                        origin: None,
+                    },
+                });
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("Content-Type header should be present");
+        assert_eq!(ct, "audio/mpeg");
+        let body = resp.text().await.unwrap();
+        assert_eq!(body, "audio data");
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_user_content_type_header_is_filtered() {
+        let (port, mut rx, token) = setup_consumer_on_free_port("/override-ct").await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client
+            .get(format!("http://127.0.0.1:{port}/override-ct"))
+            .send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body =
+                    camel_component_api::Body::Json(serde_json::json!({"ok": true}));
+                envelope.exchange.input.set_header(
+                    "Content-Type",
+                    serde_json::Value::String("text/html".to_string()),
+                );
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("Content-Type header should be present");
+        assert_eq!(
+            ct, "application/json",
+            "User-set Content-Type should be ignored; inferred type should win"
+        );
+
+        token.cancel();
     }
 }
