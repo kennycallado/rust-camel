@@ -139,12 +139,14 @@ jobs:
         run: cargo fmt --check --all
       - name: clippy
         # --all-features activates dynamic-linking which requires system librdkafka
-        # (unavailable on ubuntu-latest). Exclude camel-cli so kafka/dynamic-linking
-        # don't propagate; check them separately with default features.
+        # (unavailable on ubuntu-latest). Exclude camel-cli and camel-component-kafka
+        # so dynamic-linking doesn't propagate; check them separately with defaults.
         run: |
           cargo clippy --workspace --all-features \
             --exclude camel-cli \
+            --exclude camel-component-kafka \
             -- -D warnings
+          cargo clippy -p camel-component-kafka -- -D warnings
           cargo clippy -p camel-cli -- -D warnings
       - name: lint-unwrap
         run: cargo xtask lint-unwrap
