@@ -2783,3 +2783,140 @@ async fn mock_new_assertion_api() {
 
     h.stop().await;
 }
+
+#[tokio::test]
+async fn http_consumer_string_status_code_e2e() {
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .build()
+        .await;
+
+    let route = RouteBuilder::from("http://0.0.0.0:18083/string-status")
+        .route_id("test-string-status-code")
+        .set_header("CamelHttpResponseCode", Value::String("202".into()))
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("http://127.0.0.1:18083/string-status")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "String \"202\" should be parsed as HTTP 202"
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn http_consumer_invalid_string_status_code_fallback_e2e() {
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .build()
+        .await;
+
+    let route = RouteBuilder::from("http://0.0.0.0:18084/invalid-status")
+        .route_id("test-invalid-status-code")
+        .set_header(
+            "CamelHttpResponseCode",
+            Value::String("not-a-number".into()),
+        )
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("http://127.0.0.1:18084/invalid-status")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "Invalid string should fall back to 200"
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn http_consumer_overflow_status_code_fallback_e2e() {
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .build()
+        .await;
+
+    let route = RouteBuilder::from("http://0.0.0.0:18086/overflow-status")
+        .route_id("test-overflow-status-code")
+        .set_header("CamelHttpResponseCode", Value::String("70000".into()))
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("http://127.0.0.1:18086/overflow-status")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "Out-of-range numeric string should fall back to 200"
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn http_consumer_stop_returns_204_e2e() {
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .build()
+        .await;
+
+    let route = RouteBuilder::from("http://0.0.0.0:18085/stop-route")
+        .route_id("test-stop-204")
+        .stop()
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("http://127.0.0.1:18085/stop-route")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NO_CONTENT,
+        "Stopped route should return 204, not 500"
+    );
+    let body = resp.bytes().await.unwrap();
+    assert!(
+        body.is_empty(),
+        "204 response should have empty body, got: {:?}",
+        body
+    );
+
+    h.stop().await;
+}

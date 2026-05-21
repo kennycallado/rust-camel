@@ -796,8 +796,12 @@ impl Consumer for HttpConsumer {
                                 let status = out
                                     .input
                                     .header("CamelHttpResponseCode")
-                                    .and_then(|v| v.as_u64())
-                                    .map(|s| s as u16)
+                                    .and_then(|v| {
+                                        let raw = v.as_u64()
+                                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))?;
+                                        let code = raw as u16;
+                                        (100..1000).contains(&code).then_some(code)
+                                    })
                                     .unwrap_or(200);
 
                                 let (reply_body, inferred_content_type): (HttpReplyBody, Option<String>) = match out.input.body {
@@ -893,6 +897,14 @@ impl Consumer for HttpConsumer {
                                     status,
                                     headers: resp_headers,
                                     body: reply_body,
+                                }
+                            }
+                            Err(CamelError::Stopped) => {
+                                tracing::debug!(path = %path_clone, "Route stopped — returning 204 No Content");
+                                HttpReply {
+                                    status: 204,
+                                    headers: vec![],
+                                    body: HttpReplyBody::Bytes(bytes::Bytes::new()),
                                 }
                             }
                             Err(e) => {
