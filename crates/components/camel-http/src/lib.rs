@@ -650,6 +650,19 @@ fn exceeds_max_response_body(len: usize, max: usize) -> bool {
     len > max
 }
 
+fn title_case_header(name: &str) -> String {
+    name.split('-')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars.as_str().chars()).collect(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 // ---------------------------------------------------------------------------
 // HttpConsumer
 // ---------------------------------------------------------------------------
@@ -707,11 +720,11 @@ impl Consumer for HttpConsumer {
                     msg.set_header("CamelHttpQuery",
                         serde_json::Value::String(envelope.query.clone()));
 
-                    // Forward HTTP headers (skip pseudo-headers)
+                    // Forward HTTP headers with Title-Case names (hyper lowercases them)
                     for (k, v) in &envelope.headers {
                         if let Ok(val_str) = v.to_str() {
                             msg.set_header(
-                                k.as_str(),
+                                title_case_header(k.as_str()),
                                 serde_json::Value::String(val_str.to_string()),
                             );
                         }
@@ -1341,9 +1354,10 @@ impl Service<Exchange> for HttpProducer {
 
             for (key, value) in response.headers() {
                 if let Ok(val_str) = value.to_str() {
-                    exchange
-                        .input
-                        .set_header(key.as_str(), serde_json::Value::String(val_str.to_string()));
+                    exchange.input.set_header(
+                        title_case_header(key.as_str()),
+                        serde_json::Value::String(val_str.to_string()),
+                    );
                 }
             }
 
@@ -1823,8 +1837,8 @@ mod tests {
         let result = producer.oneshot(exchange).await.unwrap();
 
         assert!(
-            result.input.header("content-type").is_some()
-                || result.input.header("Content-Type").is_some()
+            result.input.header("Content-Type").is_some(),
+            "Response should have Content-Type header"
         );
         assert!(result.input.header("CamelHttpResponseText").is_some());
     }
@@ -3408,6 +3422,17 @@ mod tests {
         cfg.allow_private_ips = true;
         let allowed = validate_url_for_ssrf("http://127.0.0.1/api", &cfg);
         assert!(allowed.is_ok());
+    }
+
+    #[test]
+    fn test_title_case_header() {
+        assert_eq!(title_case_header("content-type"), "Content-Type");
+        assert_eq!(title_case_header("authorization"), "Authorization");
+        assert_eq!(title_case_header("x-custom-header"), "X-Custom-Header");
+        assert_eq!(title_case_header("host"), "Host");
+        assert_eq!(title_case_header("x-b3-traceid"), "X-B3-Traceid");
+        assert_eq!(title_case_header("single"), "Single");
+        assert_eq!(title_case_header(""), "");
     }
 
     #[test]

@@ -2911,10 +2911,75 @@ async fn http_consumer_stop_returns_204_e2e() {
         reqwest::StatusCode::NO_CONTENT,
         "Stopped route should return 204, not 500"
     );
-    let body = resp.bytes().await.unwrap();
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn http_consumer_headers_arrive_title_case_e2e() {
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .build()
+        .await;
+
+    let route = RouteBuilder::from("http://0.0.0.0:18087/title-case-headers")
+        .route_id("test-title-case-headers")
+        .process(|mut ex: camel_api::Exchange| {
+            let auth = ex.input.header("Authorization").cloned();
+            let ct = ex.input.header("Content-Type").cloned();
+            let x_custom = ex.input.header("X-Custom-Header").cloned();
+
+            let mut parts = Vec::new();
+            if let Some(v) = auth {
+                parts.push(format!("auth={}", v.as_str().unwrap_or("?")));
+            }
+            if let Some(v) = ct {
+                parts.push(format!("ct={}", v.as_str().unwrap_or("?")));
+            }
+            if let Some(v) = x_custom {
+                parts.push(format!("xcustom={}", v.as_str().unwrap_or("?")));
+            }
+
+            let body = if parts.is_empty() {
+                "none".to_string()
+            } else {
+                parts.join(",")
+            };
+            ex.input.body = camel_api::Body::Bytes(body.into_bytes().into());
+            async move { Ok(ex) }
+        })
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("http://127.0.0.1:18087/title-case-headers")
+        .header("Authorization", "Bearer test123")
+        .header("Content-Type", "application/json")
+        .header("X-Custom-Header", "foo")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body = resp.text().await.unwrap();
     assert!(
-        body.is_empty(),
-        "204 response should have empty body, got: {:?}",
+        body.contains("auth=Bearer test123"),
+        "Authorization header should be Title-Case, got: {}",
+        body
+    );
+    assert!(
+        body.contains("ct=application/json"),
+        "Content-Type header should be Title-Case, got: {}",
+        body
+    );
+    assert!(
+        body.contains("xcustom=foo"),
+        "X-Custom-Header should be Title-Case, got: {}",
         body
     );
 
