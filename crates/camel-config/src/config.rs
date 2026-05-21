@@ -1,3 +1,4 @@
+use crate::PropertiesResolver;
 use camel_core::TracerConfig;
 use config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
@@ -459,6 +460,21 @@ fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
 }
 
 impl CamelConfig {
+    fn resolve_bean_placeholders(&mut self) {
+        let resolver = PropertiesResolver::new();
+        for bean in self.beans.values_mut() {
+            let resolved: HashMap<String, String> = bean
+                .config
+                .drain()
+                .map(|(k, v)| match resolver.resolve(&v) {
+                    Ok(resolved) => (k, resolved),
+                    Err(_) => (k, v),
+                })
+                .collect();
+            bean.config = resolved;
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.timeout_ms == 0 {
             return Err("timeout_ms must be > 0".to_string());
@@ -537,7 +553,8 @@ impl CamelConfig {
             ))
             .build()?;
 
-        let config: Self = config.try_deserialize()?;
+        let mut config: Self = config.try_deserialize()?;
+        config.resolve_bean_placeholders();
         config.validate().map_err(ConfigError::Message)?;
         Ok(config)
     }
@@ -596,7 +613,8 @@ impl CamelConfig {
             .add_source(config::Environment::with_prefix("CAMEL").try_parsing(true))
             .build()?;
 
-        let config: Self = config.try_deserialize()?;
+        let mut config: Self = config.try_deserialize()?;
+        config.resolve_bean_placeholders();
         config.validate().map_err(ConfigError::Message)?;
         Ok(config)
     }

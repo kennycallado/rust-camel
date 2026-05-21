@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::sync::RwLock;
 
 pub struct PropertiesResolver {
@@ -31,8 +32,19 @@ impl PropertiesResolver {
             .insert(key.to_string(), value.to_string());
     }
 
-    pub fn resolve(&self, input: &str) -> Result<String, ResolveError> {
+    fn lookup(&self, key: &str) -> Option<String> {
+        if let Some(rest) = key.strip_prefix("env:") {
+            let env_key = rest.trim();
+            if env_key.is_empty() {
+                return None;
+            }
+            return env::var(env_key).ok();
+        }
         let props = self.properties.read().unwrap(); // allow-unwrap
+        props.get(key).cloned()
+    }
+
+    pub fn resolve(&self, input: &str) -> Result<String, ResolveError> {
         let mut result = input.to_string();
         let mut start = 0;
 
@@ -42,21 +54,27 @@ impl PropertiesResolver {
                 let close_abs = open_abs + close + 2;
                 let inner = &result[open_abs + 2..open_abs + close];
 
-                let (key, default) = if let Some(colon) = inner.find(':') {
+                let (key, default) = if let Some(rest) = inner.strip_prefix("env:") {
+                    let env_key = rest.trim();
+                    if let Some(colon) = env_key.find(':') {
+                        (&inner[..4 + colon], Some(&env_key[colon + 1..]))
+                    } else {
+                        (inner, None)
+                    }
+                } else if let Some(colon) = inner.find(':') {
                     (&inner[..colon], Some(&inner[colon + 1..]))
                 } else {
                     (inner, None)
                 };
 
-                // Treat empty key (e.g. "{{}}") as missing
                 if key.trim().is_empty() {
                     return Err(ResolveError::MissingKey {
                         key: key.to_string(),
                     });
                 }
 
-                let value = match (props.get(key), default) {
-                    (Some(v), _) => v.clone(),
+                let value = match (self.lookup(key), default) {
+                    (Some(v), _) => v,
                     (None, Some(d)) => d.to_string(),
                     (None, None) => {
                         return Err(ResolveError::MissingKey {
@@ -133,5 +151,95 @@ mod tests {
             resolver.resolve("redis://{{host:localhost}:6379"),
             Ok("redis://{{host:localhost}:6379".to_string())
         );
+    }
+
+    #[test]
+    fn test_resolve_env_placeholder() {
+        unsafe {
+            env::set_var("RUST_CAMEL_TEST_HOST", "redis.prod.example.com");
+        }
+        let resolver = PropertiesResolver::new();
+        assert_eq!(
+            resolver.resolve("redis://{{env:RUST_CAMEL_TEST_HOST}}:6379"),
+            Ok("redis://redis.prod.example.com:6379".to_string())
+        );
+        unsafe {
+            env::remove_var("RUST_CAMEL_TEST_HOST");
+        }
+    }
+
+    #[test]
+    fn test_resolve_env_missing_without_default_returns_error() {
+        unsafe {
+            env::remove_var("RUST_CAMEL_TEST_DEFINITELY_MISSING");
+        }
+        let resolver = PropertiesResolver::new();
+        let result = resolver.resolve("{{env:RUST_CAMEL_TEST_DEFINITELY_MISSING}}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_env_with_default_uses_default_when_missing() {
+        unsafe {
+            env::remove_var("RUST_CAMEL_TEST_MISSING_HOST");
+        }
+        let resolver = PropertiesResolver::new();
+        assert_eq!(
+            resolver.resolve("redis://{{env:RUST_CAMEL_TEST_MISSING_HOST:localhost}}:6379"),
+            Ok("redis://localhost:6379".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_env_with_default_uses_env_when_present() {
+        unsafe {
+            env::set_var("RUST_CAMEL_TEST_DB_HOST", "db.prod.example.com");
+        }
+        let resolver = PropertiesResolver::new();
+        assert_eq!(
+            resolver.resolve("{{env:RUST_CAMEL_TEST_DB_HOST:localhost}}"),
+            Ok("db.prod.example.com".to_string())
+        );
+        unsafe {
+            env::remove_var("RUST_CAMEL_TEST_DB_HOST");
+        }
+    }
+
+    #[test]
+    fn test_resolve_mixed_env_and_property() {
+        unsafe {
+            env::set_var("RUST_CAMEL_TEST_PORT", "6380");
+        }
+        let resolver = PropertiesResolver::new();
+        resolver.set("host", "localhost");
+        assert_eq!(
+            resolver.resolve("redis://{{host}}:{{env:RUST_CAMEL_TEST_PORT}}"),
+            Ok("redis://localhost:6380".to_string())
+        );
+        unsafe {
+            env::remove_var("RUST_CAMEL_TEST_PORT");
+        }
+    }
+
+    #[test]
+    fn test_resolve_env_empty_key_returns_error() {
+        let resolver = PropertiesResolver::new();
+        let result = resolver.resolve("{{env:}}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_env_value_with_colons() {
+        unsafe {
+            env::set_var("RUST_CAMEL_TEST_CONN", "user:pass@host:5432");
+        }
+        let resolver = PropertiesResolver::new();
+        assert_eq!(
+            resolver.resolve("{{env:RUST_CAMEL_TEST_CONN}}"),
+            Ok("user:pass@host:5432".to_string())
+        );
+        unsafe {
+            env::remove_var("RUST_CAMEL_TEST_CONN");
+        }
     }
 }
