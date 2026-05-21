@@ -12,8 +12,7 @@ pub struct BridgeSpec {
     pub cache_subdir: &'static str,
     /// Prefix used in GitHub release tag names (e.g. `"jms-bridge-v"`).
     pub release_tag_prefix: &'static str,
-    /// Default version string used when no version is specified by the caller.
-    pub default_version: &'static str,
+
     /// Template for the stderr log file name; `{pid}` is replaced at runtime.
     /// Example: `"jms-bridge-{pid}.log"`
     pub log_file_template: &'static str,
@@ -29,7 +28,6 @@ pub const JMS_BRIDGE: BridgeSpec = BridgeSpec {
     env_release_url: "CAMEL_JMS_BRIDGE_RELEASE_URL",
     cache_subdir: "jms-bridge",
     release_tag_prefix: "jms-bridge-v",
-    default_version: env!("CARGO_PKG_VERSION"),
     log_file_template: "jms-bridge-{pid}.log",
     macos_supported: false,
 };
@@ -41,7 +39,6 @@ pub const XML_BRIDGE: BridgeSpec = BridgeSpec {
     env_release_url: "CAMEL_XML_BRIDGE_RELEASE_URL",
     cache_subdir: "xml-bridge",
     release_tag_prefix: "xml-bridge-v",
-    default_version: env!("CARGO_PKG_VERSION"),
     log_file_template: "xml-bridge-{pid}.log",
     macos_supported: true,
 };
@@ -53,7 +50,6 @@ pub const CXF_BRIDGE: BridgeSpec = BridgeSpec {
     env_release_url: "CAMEL_CXF_BRIDGE_RELEASE_URL",
     cache_subdir: "cxf-bridge",
     release_tag_prefix: "cxf-bridge-v",
-    default_version: env!("CARGO_PKG_VERSION"),
     log_file_template: "cxf-bridge-{pid}.log",
     macos_supported: false,
 };
