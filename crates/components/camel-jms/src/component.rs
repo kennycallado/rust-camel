@@ -3,6 +3,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,7 @@ use crate::proto::{HealthRequest, bridge_service_client::BridgeServiceClient};
 /// helper (`is_bridge_transport_error`) reference this constant so that a
 /// format-string drift cannot silently break retry logic.
 pub const BRIDGE_TRANSPORT_ERROR_PREFIX: &str = "JMS gRPC ";
+const MAX_RESTART_ATTEMPTS: u32 = 10;
 
 // ── BridgeState ──────────────────────────────────────────────────────────────
 
@@ -86,6 +88,7 @@ pub struct JmsBridgePool {
     pub(crate) max_bridges: usize,
     /// Serializes bridge admission (check + insert) to prevent race on max_bridges.
     bridge_create_lock: Mutex<()>,
+    pub(crate) shutting_down: Arc<AtomicBool>,
 }
 
 impl JmsBridgePool {
@@ -101,6 +104,7 @@ impl JmsBridgePool {
             bridge_cache_dir: pool_config.bridge_cache_dir,
             max_bridges: pool_config.max_bridges,
             bridge_create_lock: Mutex::new(()),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -306,8 +310,13 @@ impl JmsBridgePool {
         Ok(())
     }
 
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+    }
+
     /// Shutdown all slots: stop all bridge processes and await health monitors.
     pub async fn shutdown(&self) -> Result<(), CamelError> {
+        self.begin_shutdown();
         let names: Vec<String> = self.slots.iter().map(|e| e.key().clone()).collect();
         let mut errors: Vec<String> = Vec::new();
 
@@ -364,6 +373,8 @@ impl JmsBridgePool {
         let bridge_cache_dir = self.bridge_cache_dir.clone();
         let start_timeout_ms = self.bridge_start_timeout_ms;
         let handle_ref = Arc::clone(&slot.health_monitor_handle);
+        let shutting_down = Arc::clone(&self.shutting_down);
+        let broker_name = slot.name.clone();
 
         let handle = tokio::spawn(async move {
             loop {
@@ -405,12 +416,27 @@ impl JmsBridgePool {
                         if matches!(*slot.state_rx.borrow(), BridgeState::Stopped) {
                             break;
                         }
+                        if shutting_down.load(Ordering::SeqCst) {
+                            tracing::info!(
+                                "Pool shutting down — not restarting bridge for broker '{}'",
+                                broker_name
+                            );
+                            break;
+                        }
                         let _ = slot.state_tx.send(BridgeState::Restarting {
                             attempt: 0,
                             next_at: Instant::now(),
                         });
                     }
                     BridgeState::Restarting { attempt, next_at } => {
+                        if shutting_down.load(Ordering::SeqCst) {
+                            tracing::info!(
+                                "Pool shutting down — aborting restart for broker '{}'",
+                                broker_name
+                            );
+                            break;
+                        }
+
                         let now = Instant::now();
                         if now < next_at {
                             tokio::time::sleep(next_at - now).await;
@@ -421,6 +447,19 @@ impl JmsBridgePool {
                             slot.name,
                             attempt + 1
                         );
+
+                        if attempt >= MAX_RESTART_ATTEMPTS {
+                            tracing::error!(
+                                "Max restart attempts ({}) reached for broker '{}' — staying degraded",
+                                attempt,
+                                broker_name
+                            );
+                            let _ = slot.state_tx.send(BridgeState::Degraded(format!(
+                                "max restart attempts ({}) exceeded",
+                                attempt
+                            )));
+                            break;
+                        }
 
                         let old_process = {
                             let mut guard = slot.process.lock().await;

@@ -100,6 +100,25 @@ The component manages a Java bridge process (GraalVM native-image binary) intern
 
 No Java runtime is required on the host — the bridge is a native binary.
 
+### Bridge Health Monitor
+
+The bridge runs a background health monitor that:
+- Checks bridge health periodically (default: every 5s)
+- Auto-restarts the bridge process on failure with exponential backoff (1s → 2s → 4s → ... up to 30s)
+- Caps restart attempts at **10** before transitioning to a permanent `Degraded` state
+
+### Graceful Shutdown
+
+When using the bridge pool programmatically, call `begin_shutdown()` **before** `ctx.stop()` to prevent the health monitor from restarting the bridge during shutdown:
+
+```rust
+pool.begin_shutdown();          // Signal health monitors to stop restarting
+ctx.stop().await?;             // Stop routes and services
+pool.shutdown().await?;        // Clean up bridge processes
+```
+
+When using `camel-cli`, Ctrl+C handles shutdown automatically. A second Ctrl+C force-exits if shutdown hangs.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -144,7 +163,8 @@ cargo run -p cxf-example
 - WSDL-first development
 - PAYLOAD mode (raw XML body)
 - Auto-managed bridge lifecycle
-- Health monitoring and auto-restart
+- Health monitoring and auto-restart (max 10 retries, then Degraded)
+- Graceful shutdown with `begin_shutdown()` / `shutdown()` pattern
 - Concurrent request support
 - Profile-aware dispatch cache
 

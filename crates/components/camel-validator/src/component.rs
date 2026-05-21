@@ -16,18 +16,28 @@ use camel_component_api::{
 
 pub struct ValidatorComponent {
     xsd_bridge: Arc<dyn XsdBridge>,
+    xsd_backend: Option<Arc<XsdBridgeBackend>>,
 }
 
 impl ValidatorComponent {
     pub fn new() -> Self {
+        let xsd_backend = Arc::new(XsdBridgeBackend::new());
         Self {
-            xsd_bridge: Arc::new(XsdBridgeBackend::new()),
+            xsd_bridge: Arc::clone(&xsd_backend) as Arc<dyn XsdBridge>,
+            xsd_backend: Some(xsd_backend),
         }
+    }
+
+    pub fn xsd_bridge_backend(&self) -> Option<Arc<XsdBridgeBackend>> {
+        self.xsd_backend.as_ref().map(Arc::clone)
     }
 
     #[cfg(test)]
     fn with_xsd_bridge(xsd_bridge: Arc<dyn XsdBridge>) -> Self {
-        Self { xsd_bridge }
+        Self {
+            xsd_bridge,
+            xsd_backend: None,
+        }
     }
 }
 

@@ -6,7 +6,35 @@ use camel_language_rhai::RhaiLanguage;
 use camel_language_xpath::XPathLanguage;
 
 use clap::{Parser, Subcommand};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+struct BridgeCleanup {
+    xslt: Arc<camel_xslt::XsltBridgeRuntime>,
+    xj: Arc<camel_xj::XjBridgeRuntime>,
+    validator: Option<Arc<camel_component_validator::xsd_bridge::XsdBridgeBackend>>,
+}
+
+#[async_trait::async_trait]
+impl camel_api::lifecycle::Lifecycle for BridgeCleanup {
+    fn name(&self) -> &str {
+        "bridge-cleanup"
+    }
+
+    async fn start(&mut self) -> Result<(), camel_api::CamelError> {
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<(), camel_api::CamelError> {
+        self.xslt.shutdown().await;
+        self.xj.shutdown().await;
+        if let Some(validator) = &self.validator {
+            validator.shutdown().await;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -346,9 +374,23 @@ async fn run(
     ctx.register_component(camel_component_direct::DirectComponent::new());
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
-    ctx.register_component(camel_component_validator::ValidatorComponent::new());
-    ctx.register_component(camel_xslt::XsltComponent::default());
-    ctx.register_component(camel_xj::XjComponent::default());
+    let validator_component = camel_component_validator::ValidatorComponent::new();
+    let validator_backend = validator_component.xsd_bridge_backend();
+    ctx.register_component(validator_component);
+
+    let xslt_component = camel_xslt::XsltComponent::default();
+    let xslt_runtime = xslt_component.bridge_runtime();
+    ctx.register_component(xslt_component);
+
+    let xj_component = camel_xj::XjComponent::default();
+    let xj_runtime = xj_component.bridge_runtime();
+    ctx.register_component(xj_component);
+
+    ctx = ctx.with_lifecycle(BridgeCleanup {
+        xslt: xslt_runtime,
+        xj: xj_runtime,
+        validator: validator_backend,
+    });
 
     // Register HTTP, WS, File, Container (always-on in camel-cli, no feature flag)
     register_bundle!(ctx, camel_config, camel_component_http::HttpBundle);
@@ -520,19 +562,41 @@ async fn run(
         } => tracing::info!("Received SIGTERM"),
     }
 
+    // Second Ctrl+C = force exit
+    let force_exit = tokio::spawn(async {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::warn!("Second Ctrl+C — forcing exit");
+        std::process::exit(1);
+    });
+
     tracing::info!("camel-cli: shutting down...");
     watcher_shutdown.cancel();
+
+    // Signal pools to stop restarting BEFORE context shutdown
+    jms_pool.begin_shutdown();
+    cxf_pool.begin_shutdown();
+
+    // Stop context (routes + lifecycle services)
     ctx.stop().await.unwrap_or_else(|e| {
         tracing::error!("Error during shutdown: {}", e);
     });
 
-    if let Err(e) = jms_pool.shutdown().await {
-        tracing::error!("JMS pool shutdown error: {e}");
+    // Tear down bridge pools with timeouts
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+    match tokio::time::timeout(SHUTDOWN_TIMEOUT, jms_pool.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!("JMS pool shutdown failed: {}", e),
+        Err(_) => tracing::warn!("JMS pool shutdown timed out after 30s"),
     }
 
-    if let Err(e) = cxf_pool.shutdown().await {
-        tracing::error!("CXF pool shutdown error: {e}");
+    match tokio::time::timeout(SHUTDOWN_TIMEOUT, cxf_pool.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!("CXF pool shutdown failed: {}", e),
+        Err(_) => tracing::warn!("CXF pool shutdown timed out after 30s"),
     }
+
+    force_exit.abort();
 
     tracing::info!("camel-cli: stopped");
     Ok(())

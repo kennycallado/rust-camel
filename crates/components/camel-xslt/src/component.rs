@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 use tonic::Code;
 
-pub(crate) struct XsltBridgeRuntime {
+pub struct XsltBridgeRuntime {
     config: XsltComponentConfig,
     process: Arc<Mutex<Option<BridgeProcess>>>,
     state_tx: watch::Sender<BridgeState>,
@@ -157,6 +157,14 @@ impl XsltBridgeRuntime {
         &self.state_rx
     }
 
+    pub async fn shutdown(&self) {
+        let mut guard = self.process.lock().await;
+        if let Some(p) = guard.take()
+            && let Err(e) = p.stop().await {
+                tracing::warn!("Failed to stop XSLT bridge process: {}", e);
+            }
+    }
+
     async fn start_bridge_process(
         &self,
     ) -> Result<(BridgeProcess, tonic::transport::Channel, u16), XsltError> {
@@ -231,6 +239,10 @@ impl XsltComponent {
         ));
 
         Self { runtime, client }
+    }
+
+    pub fn bridge_runtime(&self) -> Arc<XsltBridgeRuntime> {
+        Arc::clone(&self.runtime)
     }
 
     fn read_stylesheet(&self, stylesheet_uri: &str) -> Result<Vec<u8>, XsltError> {

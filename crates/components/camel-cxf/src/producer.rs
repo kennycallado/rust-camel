@@ -110,6 +110,7 @@ impl CxfProducer {
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
         });
         pool.slots.insert(key, slot);
 
@@ -361,6 +362,7 @@ mod tests {
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
         };
         pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
 
@@ -392,6 +394,7 @@ mod tests {
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
         };
         pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
 
@@ -425,6 +428,7 @@ mod tests {
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
         };
         pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
 

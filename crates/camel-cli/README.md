@@ -183,6 +183,16 @@ routes:
 
 See [camel-dsl](../crates/camel-dsl) for the full step reference.
 
+### Graceful Shutdown
+
+Press **Ctrl+C** to stop the Camel context:
+- **First Ctrl+C:** initiates graceful shutdown — stops routes, cleans up bridge processes (JMS, CXF, XSLT, XJ, Validator), then exits.
+- **Second Ctrl+C:** force-exits immediately (`exit(1)`). Use only if shutdown hangs.
+
+Bridge pool shutdowns have a 30-second timeout. If a pool doesn't shut down within that window, a warning is logged and the process continues.
+
+Bridge health monitors are stopped before route shutdown to prevent restart loops during the shutdown sequence.
+
 ## Configuration reference
 
 | Key | Type | Default | Description |

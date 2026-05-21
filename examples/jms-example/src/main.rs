@@ -101,7 +101,12 @@ async fn main() -> Result<(), CamelError> {
 
     // Run for ~15 seconds, then shut down cleanly.
     tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+
+    // Signal pool to stop restarting before context shutdown.
+    pool.begin_shutdown();
     ctx.stop().await?;
+    pool.shutdown().await?;
+
     println!("JMS example finished.");
     Ok(())
 }

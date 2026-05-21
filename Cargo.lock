@@ -904,6 +904,7 @@ dependencies = [
 name = "camel-cli"
 version = "0.10.0"
 dependencies = [
+ "async-trait",
  "camel-api",
  "camel-bean",
  "camel-component-api",

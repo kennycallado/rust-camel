@@ -103,6 +103,25 @@ The component manages a Java bridge process (jlink native binary) internally:
 
 No Java runtime is required on the host — the bridge is a native binary.
 
+### Bridge Health Monitor
+
+Each bridge runs a background health monitor that:
+- Checks bridge health periodically (default: every 5s)
+- Auto-restarts the bridge process on failure with exponential backoff (5s → 10s → 20s → ... up to 120s)
+- Caps restart attempts at **10** before transitioning to a permanent `Degraded` state
+
+### Graceful Shutdown
+
+When using the bridge pool programmatically, call `begin_shutdown()` **before** `ctx.stop()` to prevent the health monitor from restarting the bridge during shutdown:
+
+```rust
+pool.begin_shutdown();          // Signal health monitors to stop restarting
+ctx.stop().await?;             // Stop routes and services
+pool.shutdown().await?;        // Clean up bridge processes
+```
+
+When using `camel-cli`, Ctrl+C handles shutdown automatically. A second Ctrl+C force-exits if shutdown hangs.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -144,6 +163,7 @@ cargo run -p jms-example
 
 - IBM MQ not supported (planned for a future release)
 - No durable topic subscribers yet
+- Bridge uses `AUTO_ACKNOWLEDGE` — messages are acknowledged on delivery, not after processing. Failed messages cannot be redelivered by the broker.
 
 ## Installation
 

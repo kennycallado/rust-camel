@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use camel_bridge::channel::connect_channel;
@@ -11,7 +12,7 @@ use camel_component_api::CamelError;
 use dashmap::DashMap;
 use tokio::sync::watch;
 use tonic::transport::Channel;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::{CxfPoolConfig, validate_profile_name};
 use crate::error::CxfError;
@@ -37,6 +38,7 @@ pub struct BridgeSlot {
     pub state_rx: watch::Receiver<BridgeState>,
     pub(crate) state_tx: watch::Sender<BridgeState>,
     pub process: Arc<tokio::sync::Mutex<Option<BridgeProcess>>>,
+    pub(crate) health_monitor_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -50,6 +52,7 @@ impl BridgeSlot {
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 }
@@ -65,8 +68,11 @@ impl std::fmt::Debug for BridgeSlot {
 
 // ── CxfBridgePool ────────────────────────────────────────────────────────────
 
+const MAX_RESTART_ATTEMPTS: u32 = 10;
+
 pub struct CxfBridgePool {
     pub(crate) slots: DashMap<String, Arc<BridgeSlot>>,
+    pub(crate) shutting_down: Arc<AtomicBool>,
     pub(crate) max_bridges: usize,
     pub(crate) bridge_start_timeout_ms: u64,
     pub(crate) health_check_interval_ms: u64,
@@ -88,6 +94,7 @@ impl CxfBridgePool {
         let configured_profiles = pool_config.profiles.clone();
         Ok(Self {
             slots: DashMap::new(),
+            shutting_down: Arc::new(AtomicBool::new(false)),
             max_bridges: pool_config.max_bridges,
             bridge_start_timeout_ms: pool_config.bridge_start_timeout_ms,
             health_check_interval_ms: pool_config.health_check_interval_ms,
@@ -105,6 +112,10 @@ impl CxfBridgePool {
     #[cfg(any(test, feature = "test-util"))]
     pub fn insert_slot_for_test(&self, key: String, slot: BridgeSlot) {
         self.slots.insert(key, Arc::new(slot));
+    }
+
+    pub fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
     }
 
     pub async fn get_channel(self: &Arc<Self>) -> Result<Channel, CxfError> {
@@ -148,6 +159,7 @@ impl CxfBridgePool {
                     state_rx,
                     state_tx,
                     process: Arc::new(tokio::sync::Mutex::new(None)),
+                    health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
                 });
                 entry.insert(Arc::clone(&slot));
                 slot
@@ -173,7 +185,7 @@ impl CxfBridgePool {
             }
         }
 
-        Self::spawn_health_monitor(Arc::clone(self), Arc::clone(&slot));
+        Self::spawn_health_monitor(Arc::clone(self), Arc::clone(&slot)).await;
 
         Ok(slot)
     }
@@ -266,18 +278,19 @@ impl CxfBridgePool {
         Ok(result)
     }
 
-    fn spawn_health_monitor(pool: Arc<CxfBridgePool>, slot: Arc<BridgeSlot>) {
+    async fn spawn_health_monitor(pool: Arc<CxfBridgePool>, slot: Arc<BridgeSlot>) {
         let health_interval = pool.health_check_interval_ms;
         let bridge_version = pool.bridge_version.clone();
         let bridge_cache_dir = pool.bridge_cache_dir.clone();
         let start_timeout_ms = pool.bridge_start_timeout_ms;
 
-        tokio::spawn(async move {
+        let monitor_slot = Arc::clone(&slot);
+        let handle = tokio::spawn(async move {
             loop {
-                let state = slot.state_rx.borrow().clone();
+                let state = monitor_slot.state_rx.borrow().clone();
                 match state {
                     BridgeState::Stopped => {
-                        info!("Health monitor for '{}' exiting (Stopped)", slot.key);
+                        info!("Health monitor for '{}' exiting (Stopped)", monitor_slot.key);
                         break;
                     }
                     BridgeState::Ready { ref channel } => {
@@ -291,23 +304,24 @@ impl CxfBridgePool {
                                 let inner = resp.into_inner();
                                 if !inner.healthy {
                                     warn!(
-                                        key = %slot.key,
+                                        key = %monitor_slot.key,
                                         message = %inner.message,
                                         "CXF bridge unhealthy"
                                     );
-                                    let _ = slot.state_tx.send(BridgeState::Degraded(format!(
-                                        "unhealthy: {}",
-                                        inner.message
-                                    )));
+                                    let _ = monitor_slot.state_tx.send(BridgeState::Degraded(
+                                        format!("unhealthy: {}", inner.message),
+                                    ));
                                 }
                             }
                             Ok(Err(e)) => {
                                 warn!(
-                                    key = %slot.key,
+                                    key = %monitor_slot.key,
                                     error = %e,
                                     "CXF bridge health check failed"
                                 );
-                                let _ = slot.state_tx.send(BridgeState::Degraded(e.to_string()));
+                                let _ = monitor_slot
+                                    .state_tx
+                                    .send(BridgeState::Degraded(e.to_string()));
                             }
                             Err(_) => {
                                 let msg = format!(
@@ -315,44 +329,64 @@ impl CxfBridgePool {
                                     health_timeout.as_millis()
                                 );
                                 warn!(
-                                    key = %slot.key,
+                                    key = %monitor_slot.key,
                                     "CXF bridge health check timed out"
                                 );
-                                let _ = slot.state_tx.send(BridgeState::Degraded(msg));
+                                let _ = monitor_slot.state_tx.send(BridgeState::Degraded(msg));
                             }
                         }
                     }
                     BridgeState::Degraded(_) | BridgeState::Starting => {
-                        if matches!(*slot.state_rx.borrow(), BridgeState::Stopped) {
+                        if matches!(*monitor_slot.state_rx.borrow(), BridgeState::Stopped) {
+                            break;
+                        }
+                        if pool.shutting_down.load(Ordering::SeqCst) {
+                            tracing::info!("Pool shutting down — not restarting bridge");
                             break;
                         }
                         info!(
                             "Health monitor for '{}' found degraded/starting, triggering restart",
-                            slot.key
+                            monitor_slot.key
                         );
-                        let _ = slot.state_tx.send(BridgeState::Restarting {
+                        let _ = monitor_slot.state_tx.send(BridgeState::Restarting {
                             attempt: 0,
                             next_at: Instant::now(),
                         });
                     }
                     BridgeState::Restarting { attempt, next_at } => {
+                        if pool.shutting_down.load(Ordering::SeqCst) {
+                            tracing::info!("Pool shutting down — aborting restart");
+                            break;
+                        }
+                        if attempt >= MAX_RESTART_ATTEMPTS {
+                            error!(
+                                "Max restart attempts ({}) reached — staying degraded",
+                                attempt
+                            );
+                            let _ = monitor_slot.state_tx.send(BridgeState::Degraded(format!(
+                                "max restart attempts ({}) exceeded",
+                                attempt
+                            )));
+                            break;
+                        }
+
                         let now = Instant::now();
                         if now < next_at {
                             tokio::time::sleep(next_at - now).await;
                         }
 
-                        if matches!(*slot.state_rx.borrow(), BridgeState::Stopped) {
+                        if matches!(*monitor_slot.state_rx.borrow(), BridgeState::Stopped) {
                             break;
                         }
 
                         info!(
                             "Restarting CXF bridge for '{}' (attempt {})",
-                            slot.key,
+                            monitor_slot.key,
                             attempt + 1
                         );
 
                         let old_process = {
-                            let mut guard = slot.process.lock().await;
+                            let mut guard = monitor_slot.process.lock().await;
                             guard.take()
                         };
                         if let Some(p) = old_process {
@@ -360,7 +394,7 @@ impl CxfBridgePool {
                         }
 
                         let start_result: Result<(BridgeProcess, Channel), CxfError> = async {
-                            let profiles = &slot.configured_profiles;
+                            let profiles = &monitor_slot.configured_profiles;
                             let binary_path = ensure_binary_for_spec(
                                 &CXF_BRIDGE,
                                 &bridge_version,
@@ -405,7 +439,7 @@ impl CxfBridgePool {
                                 start_timeout_ms,
                             );
                             let mut config = config;
-                            if let Some(addr) = slot.bind_address.as_ref() {
+                            if let Some(addr) = monitor_slot.bind_address.as_ref() {
                                 config
                                     .env_vars
                                     .push(("CXF_ADDRESS".to_string(), addr.clone()));
@@ -435,29 +469,32 @@ impl CxfBridgePool {
 
                         match start_result {
                             Ok((process, channel)) => {
-                                if matches!(*slot.state_rx.borrow(), BridgeState::Stopped) {
+                                if matches!(*monitor_slot.state_rx.borrow(), BridgeState::Stopped) {
                                     let _ = process.stop().await;
                                     break;
                                 }
                                 {
-                                    let mut guard = slot.process.lock().await;
+                                    let mut guard = monitor_slot.process.lock().await;
                                     *guard = Some(process);
                                 }
-                                let _ = slot.state_tx.send(BridgeState::Ready { channel });
-                                info!("CXF bridge '{}' restarted successfully", slot.key);
+                                let _ = monitor_slot.state_tx.send(BridgeState::Ready { channel });
+                                info!(
+                                    "CXF bridge '{}' restarted successfully",
+                                    monitor_slot.key
+                                );
                             }
                             Err(e) => {
-                                if matches!(*slot.state_rx.borrow(), BridgeState::Stopped) {
+                                if matches!(*monitor_slot.state_rx.borrow(), BridgeState::Stopped) {
                                     break;
                                 }
                                 let delay_secs = std::cmp::min(2u64.pow(attempt.min(5)), 30);
                                 let next = Instant::now() + Duration::from_secs(delay_secs);
                                 warn!(
                                     "Failed to restart CXF bridge for '{}' (attempt {}): {e}. Retry in {delay_secs}s",
-                                    slot.key,
+                                    monitor_slot.key,
                                     attempt + 1
                                 );
-                                let _ = slot.state_tx.send(BridgeState::Restarting {
+                                let _ = monitor_slot.state_tx.send(BridgeState::Restarting {
                                     attempt: attempt + 1,
                                     next_at: next,
                                 });
@@ -467,6 +504,9 @@ impl CxfBridgePool {
                 }
             }
         });
+
+        let mut guard = slot.health_monitor_handle.lock().await;
+        *guard = Some(handle);
     }
 
     pub fn restart_slot(&self, key: &str) {
@@ -518,6 +558,7 @@ impl CxfBridgePool {
     }
 
     pub async fn shutdown(&self) -> Result<(), CamelError> {
+        self.begin_shutdown();
         let mut tasks = Vec::new();
         for entry in self.slots.iter() {
             let slot = Arc::clone(entry.value());
@@ -530,6 +571,10 @@ impl CxfBridgePool {
                 if let Some(p) = process {
                     let _ = p.stop().await;
                 }
+                if let Some(handle) = slot.health_monitor_handle.lock().await.take()
+                    && let Err(e) = handle.await {
+                        tracing::warn!("Health monitor task panicked: {}", e);
+                    }
             }));
         }
         for t in tasks {
@@ -635,6 +680,7 @@ mod tests {
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
         });
         pool.slots.insert("test-key".to_string(), slot);
 
@@ -693,6 +739,7 @@ mod tests {
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
         });
 
         let rt = tokio::runtime::Runtime::new().unwrap();

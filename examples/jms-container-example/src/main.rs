@@ -341,7 +341,9 @@ async fn main() -> Result<(), CamelError> {
     tokio::time::sleep(Duration::from_secs(30)).await;
 
     println!("==> Stopping routes...");
+    pool.begin_shutdown();
     ctx.stop().await?;
+    pool.shutdown().await?;
 
     println!("==> Cleaning up broker container...");
     cleanup_tracked_containers().await;

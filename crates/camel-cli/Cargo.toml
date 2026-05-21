@@ -20,6 +20,7 @@ name = "camel"
 path = "src/main.rs"
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 clap = { version = "4", features = ["derive"] }
 config.workspace = true
@@ -78,7 +79,12 @@ otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # `kafka,dynamic-linking` to link against a system librdkafka, or
 # `kafka-static` to force a cmake source build explicitly.
 kafka = ["dep:camel-component-kafka"]
-grpc = ["dep:camel-component-grpc", "dep:camel-dataformat-protobuf", "dep:camel-proto-compiler", "camel-dsl/protobuf"]
+grpc = [
+  "dep:camel-component-grpc",
+  "dep:camel-dataformat-protobuf",
+  "dep:camel-proto-compiler",
+  "camel-dsl/protobuf",
+]
 wasm = ["dep:camel-component-wasm"]
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]

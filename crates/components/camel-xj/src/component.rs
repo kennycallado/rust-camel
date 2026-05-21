@@ -36,7 +36,7 @@ impl Default for XjComponentConfig {
     }
 }
 
-pub(crate) struct XjBridgeRuntime {
+pub struct XjBridgeRuntime {
     config: XjComponentConfig,
     process: Arc<Mutex<Option<BridgeProcess>>>,
     state_tx: watch::Sender<BridgeState>,
@@ -158,6 +158,14 @@ impl XjBridgeRuntime {
             || msg.contains("transport")
     }
 
+    pub async fn shutdown(&self) {
+        let mut guard = self.process.lock().await;
+        if let Some(p) = guard.take()
+            && let Err(e) = p.stop().await {
+                tracing::warn!("Failed to stop XJ bridge process: {}", e);
+            }
+    }
+
     async fn start_bridge_process(
         &self,
     ) -> Result<(BridgeProcess, tonic::transport::Channel, u16), XjError> {
@@ -229,6 +237,10 @@ impl XjComponent {
         ));
 
         Self { runtime, client }
+    }
+
+    pub fn bridge_runtime(&self) -> Arc<XjBridgeRuntime> {
+        Arc::clone(&self.runtime)
     }
 
     fn read_stylesheet(

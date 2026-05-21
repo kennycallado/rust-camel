@@ -20,7 +20,7 @@ Schema is compiled and cached when the validator endpoint is created.
 
 ## Build requirement
 
-XSD validation is delegated to `xml-bridge` (gRPC backend) and no longer depends on `libxml2` in this crate.
+XSD validation is delegated to `xml-bridge` (gRPC backend) and no longer depends on `libxml2` in this crate. The bridge process is cleaned up when the Camel context stops via the `Lifecycle` service.
 
 ## Installation
 

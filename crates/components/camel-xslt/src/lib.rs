@@ -19,7 +19,7 @@ mod producer;
 pub const BRIDGE_VERSION: &str = "0.1.0";
 
 pub use client::{BridgeState, StylesheetId, XsltBridgeClient, XsltTransformBackend};
-pub use component::XsltComponent;
+pub use component::{XsltBridgeRuntime, XsltComponent};
 pub use config::{XsltComponentConfig, XsltEndpointConfig};
 pub use error::XsltError;
 
