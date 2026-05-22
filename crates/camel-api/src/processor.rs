@@ -61,10 +61,7 @@ impl SyncBoxProcessor {
     }
 
     pub fn clone_inner(&self) -> BoxProcessor {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
