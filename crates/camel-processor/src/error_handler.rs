@@ -21,7 +21,7 @@ async fn execute_on_steps(
     ex.set_error(original_err.clone());
     let mut pipeline = on_steps.clone_inner();
     let step_result = async {
-        let mut svc = pipeline.ready().await?;
+        let svc = pipeline.ready().await?;
         svc.call(ex).await
     }
     .await;
@@ -669,15 +669,24 @@ mod tests {
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
         assert!(result.error.is_none(), "handled:true should clear error");
         assert!(
-            result.properties.get(camel_api::exchange::PROPERTY_EXCEPTION_MESSAGE).is_none(),
+            result
+                .properties
+                .get(camel_api::exchange::PROPERTY_EXCEPTION_MESSAGE)
+                .is_none(),
             "handled:true should clear exception properties"
         );
         assert!(
-            result.properties.get(camel_api::exchange::PROPERTY_EXCEPTION_KIND).is_none(),
+            result
+                .properties
+                .get(camel_api::exchange::PROPERTY_EXCEPTION_KIND)
+                .is_none(),
             "handled:true should clear exception kind property"
         );
         assert!(
-            result.properties.get(camel_api::exchange::PROPERTY_EXCEPTION_CAUGHT).is_none(),
+            result
+                .properties
+                .get(camel_api::exchange::PROPERTY_EXCEPTION_CAUGHT)
+                .is_none(),
             "handled:true should clear exception caught property"
         );
     }

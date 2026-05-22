@@ -409,7 +409,10 @@ mod tests {
         let mut ex = Exchange::default();
         ex.set_error(CamelError::RouteError("Unauthorized".to_string()));
         let result = evaluate(&Expr::ExceptionMessage, &ex, &None).unwrap();
-        assert_eq!(result, Value::String("Route error: Unauthorized".to_string()));
+        assert_eq!(
+            result,
+            Value::String("Route error: Unauthorized".to_string())
+        );
     }
 
     #[test]
@@ -432,7 +435,10 @@ mod tests {
             &None,
         )
         .unwrap();
-        assert_eq!(result, Value::String("Error: Route error: Unauthorized".to_string()));
+        assert_eq!(
+            result,
+            Value::String("Error: Route error: Unauthorized".to_string())
+        );
     }
 
     #[test]

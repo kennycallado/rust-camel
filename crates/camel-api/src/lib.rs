@@ -71,7 +71,9 @@ pub use platform::{
     NoopPlatformService, NoopReadinessGate, PlatformError, PlatformIdentity, PlatformService,
     ReadinessGate,
 };
-pub use processor::{BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn, SyncBoxProcessor};
+pub use processor::{
+    BoxProcessor, BoxProcessorExt, IdentityProcessor, Processor, ProcessorFn, SyncBoxProcessor,
+};
 pub use producer::ProducerContext;
 pub use route_controller::{RouteAction, RouteController, RouteStatus};
 pub use routing_slip::{RoutingSlipConfig, RoutingSlipExpression};

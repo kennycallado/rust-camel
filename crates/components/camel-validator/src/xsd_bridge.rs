@@ -279,9 +279,10 @@ impl XsdBridgeBackend {
     pub async fn shutdown(&self) {
         let mut guard = self.slot.process.lock().await;
         if let Some(p) = guard.take()
-            && let Err(e) = p.stop().await {
-                tracing::warn!("Failed to stop XSD bridge process: {}", e);
-            }
+            && let Err(e) = p.stop().await
+        {
+            tracing::warn!("Failed to stop XSD bridge process: {}", e);
+        }
     }
 
     async fn register_with_channel(

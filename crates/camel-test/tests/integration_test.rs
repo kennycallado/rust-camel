@@ -3003,8 +3003,10 @@ async fn http_on_exception_steps_returns_custom_error_e2e() {
     // Build a steps pipeline that sets a custom HTTP 401 response
     let steps_pipeline = BoxProcessor::from_fn(|mut ex: camel_api::Exchange| {
         Box::pin(async move {
-            ex.input
-                .set_header("CamelHttpResponseCode", serde_json::Value::Number(401.into()));
+            ex.input.set_header(
+                "CamelHttpResponseCode",
+                serde_json::Value::Number(401.into()),
+            );
             ex.input.body = Body::Bytes(br#"{"error":"Unauthorized"}"#.to_vec().into());
             Ok(ex)
         })
@@ -3019,9 +3021,7 @@ async fn http_on_exception_steps_returns_custom_error_e2e() {
     let route = RouteBuilder::from("http://0.0.0.0:18088/on-exception-steps")
         .route_id("test-on-exception-steps")
         .process(|_ex: camel_api::Exchange| {
-            Box::pin(async move {
-                Err(CamelError::RouteError("Unauthorized".into()))
-            })
+            Box::pin(async move { Err(CamelError::RouteError("Unauthorized".into())) })
         })
         .error_handler(eh)
         .build()
@@ -3067,8 +3067,10 @@ async fn http_on_exception_handled_false_propagates_e2e() {
     // means the error should still propagate to the default handler
     let steps_pipeline = BoxProcessor::from_fn(|mut ex: camel_api::Exchange| {
         Box::pin(async move {
-            ex.input
-                .set_header("CamelHttpResponseCode", serde_json::Value::Number(401.into()));
+            ex.input.set_header(
+                "CamelHttpResponseCode",
+                serde_json::Value::Number(401.into()),
+            );
             Ok(ex)
         })
     });

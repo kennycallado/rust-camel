@@ -817,6 +817,11 @@ impl Consumer for HttpConsumer {
                                     })
                                     .unwrap_or(200);
 
+                                let user_content_type = out
+                                    .input
+                                    .header("Content-Type")
+                                    .and_then(|v| v.as_str().map(|s| s.to_string()));
+
                                 let (reply_body, inferred_content_type): (HttpReplyBody, Option<String>) = match out.input.body {
                                     Body::Empty => (HttpReplyBody::Bytes(bytes::Bytes::new()), None),
                                     Body::Bytes(b) => (HttpReplyBody::Bytes(b), None),
@@ -854,47 +859,42 @@ impl Consumer for HttpConsumer {
                                     .input
                                     .headers
                                     .iter()
-                                    // Filter Camel internal headers
                                     .filter(|(k, _)| !k.starts_with("Camel"))
-                                    // Filter hop-by-hop and request-only headers
-                                    // Based on Apache Camel's HttpUtil.addCommonFilters()
                                     .filter(|(k, _)| {
                                         !matches!(
                                             k.to_lowercase().as_str(),
-                                            // RFC 2616 Section 4.5 - General headers
-                                            "content-length" |      // Auto-calculated by framework
-                                            "content-type" |        // Inferred from body type below
-                                            "transfer-encoding" |   // Hop-by-hop
-                                            "connection" |          // Hop-by-hop
-                                            "cache-control" |       // Hop-by-hop
-                                            "date" |                // Auto-generated
-                                            "pragma" |              // Hop-by-hop
-                                            "trailer" |             // Hop-by-hop
-                                            "upgrade" |             // Hop-by-hop
-                                            "via" |                 // Hop-by-hop
-                                            "warning" |             // Hop-by-hop
-                                            // Request-only headers
-                                            "host" |                // Request-only
-                                            "user-agent" |          // Request-only
-                                            "accept" |              // Request-only
-                                            "accept-encoding" |     // Request-only
-                                            "accept-language" |     // Request-only
-                                            "accept-charset" |      // Request-only
-                                            "authorization" |       // Request-only (security)
-                                            "proxy-authorization" | // Request-only (security)
-                                            "cookie" |              // Request-only
-                                            "expect" |              // Request-only
-                                            "from" |                // Request-only
-                                            "if-match" |            // Request-only
-                                            "if-modified-since" |   // Request-only
-                                            "if-none-match" |       // Request-only
-                                            "if-range" |            // Request-only
-                                            "if-unmodified-since" | // Request-only
-                                            "max-forwards" |        // Request-only
-                                            "proxy-connection" |    // Request-only
-                                            "range" |               // Request-only
-                                            "referer" |             // Request-only
-                                            "te"                    // Request-only
+                                            "content-length"
+                                            | "content-type"
+                                            | "transfer-encoding"
+                                            | "connection"
+                                            | "cache-control"
+                                            | "date"
+                                            | "pragma"
+                                            | "trailer"
+                                            | "upgrade"
+                                            | "via"
+                                            | "warning"
+                                            | "host"
+                                            | "user-agent"
+                                            | "accept"
+                                            | "accept-encoding"
+                                            | "accept-language"
+                                            | "accept-charset"
+                                            | "authorization"
+                                            | "proxy-authorization"
+                                            | "cookie"
+                                            | "expect"
+                                            | "from"
+                                            | "if-match"
+                                            | "if-modified-since"
+                                            | "if-none-match"
+                                            | "if-range"
+                                            | "if-unmodified-since"
+                                            | "max-forwards"
+                                            | "proxy-connection"
+                                            | "range"
+                                            | "referer"
+                                            | "te"
                                         )
                                     })
                                     .filter_map(|(k, v)| {
@@ -902,7 +902,9 @@ impl Consumer for HttpConsumer {
                                     })
                                     .collect();
 
-                                if let Some(ct) = inferred_content_type {
+                                let content_type = user_content_type
+                                    .or(inferred_content_type);
+                                if let Some(ct) = content_type {
                                     resp_headers.push(("Content-Type".to_string(), ct));
                                 }
 
@@ -3696,7 +3698,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_user_content_type_header_is_filtered() {
+    async fn test_user_content_type_overrides_inferred() {
         let (port, mut rx, token) = setup_consumer_on_free_port("/override-ct").await;
 
         let client = reqwest::Client::new();
@@ -3725,8 +3727,45 @@ mod tests {
             .get("content-type")
             .expect("Content-Type header should be present");
         assert_eq!(
+            ct, "text/html",
+            "User-set Content-Type should take precedence over inferred type"
+        );
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_user_content_type_with_bytes_body() {
+        let (port, mut rx, token) = setup_consumer_on_free_port("/bytes-ct").await;
+
+        let client = reqwest::Client::new();
+        let send_fut = client
+            .get(format!("http://127.0.0.1:{port}/bytes-ct"))
+            .send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(mut envelope) = rx.recv().await {
+                envelope.exchange.input.body =
+                    camel_component_api::Body::Bytes(bytes::Bytes::from_static(b"{\"ok\":true}"));
+                envelope.exchange.input.set_header(
+                    "Content-Type",
+                    serde_json::Value::String("application/json".to_string()),
+                );
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .expect("Content-Type header should be present for Bytes body with user header");
+        assert_eq!(
             ct, "application/json",
-            "User-set Content-Type should be ignored; inferred type should win"
+            "User Content-Type should be sent for Bytes body"
         );
 
         token.cancel();

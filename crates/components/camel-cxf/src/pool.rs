@@ -290,7 +290,10 @@ impl CxfBridgePool {
                 let state = monitor_slot.state_rx.borrow().clone();
                 match state {
                     BridgeState::Stopped => {
-                        info!("Health monitor for '{}' exiting (Stopped)", monitor_slot.key);
+                        info!(
+                            "Health monitor for '{}' exiting (Stopped)",
+                            monitor_slot.key
+                        );
                         break;
                     }
                     BridgeState::Ready { ref channel } => {
@@ -478,10 +481,7 @@ impl CxfBridgePool {
                                     *guard = Some(process);
                                 }
                                 let _ = monitor_slot.state_tx.send(BridgeState::Ready { channel });
-                                info!(
-                                    "CXF bridge '{}' restarted successfully",
-                                    monitor_slot.key
-                                );
+                                info!("CXF bridge '{}' restarted successfully", monitor_slot.key);
                             }
                             Err(e) => {
                                 if matches!(*monitor_slot.state_rx.borrow(), BridgeState::Stopped) {
@@ -572,9 +572,10 @@ impl CxfBridgePool {
                     let _ = p.stop().await;
                 }
                 if let Some(handle) = slot.health_monitor_handle.lock().await.take()
-                    && let Err(e) = handle.await {
-                        tracing::warn!("Health monitor task panicked: {}", e);
-                    }
+                    && let Err(e) = handle.await
+                {
+                    tracing::warn!("Health monitor task panicked: {}", e);
+                }
             }));
         }
         for t in tasks {

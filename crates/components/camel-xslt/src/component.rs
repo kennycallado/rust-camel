@@ -160,9 +160,10 @@ impl XsltBridgeRuntime {
     pub async fn shutdown(&self) {
         let mut guard = self.process.lock().await;
         if let Some(p) = guard.take()
-            && let Err(e) = p.stop().await {
-                tracing::warn!("Failed to stop XSLT bridge process: {}", e);
-            }
+            && let Err(e) = p.stop().await
+        {
+            tracing::warn!("Failed to stop XSLT bridge process: {}", e);
+        }
     }
 
     async fn start_bridge_process(

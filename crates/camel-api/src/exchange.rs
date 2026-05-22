@@ -119,14 +119,10 @@ impl Exchange {
             PROPERTY_EXCEPTION_MESSAGE.to_string(),
             Value::String(msg.clone()),
         );
-        self.properties.insert(
-            PROPERTY_EXCEPTION_KIND.to_string(),
-            Value::String(kind),
-        );
-        self.properties.insert(
-            PROPERTY_EXCEPTION_CAUGHT.to_string(),
-            Value::String(msg),
-        );
+        self.properties
+            .insert(PROPERTY_EXCEPTION_KIND.to_string(), Value::String(kind));
+        self.properties
+            .insert(PROPERTY_EXCEPTION_CAUGHT.to_string(), Value::String(msg));
         self.error = Some(error);
     }
 
@@ -146,11 +142,6 @@ impl Exchange {
     /// Sets `CamelExceptionHandled = true` then calls `clear_error()`.
     /// This matches Java Camel's `Exchange.EXCEPTION_HANDLED` semantics.
     pub fn handle_error(&mut self) {
-        let msg = self
-            .properties
-            .get(PROPERTY_EXCEPTION_MESSAGE)
-            .cloned()
-            .unwrap_or(Value::Bool(true));
         self.properties
             .insert(PROPERTY_EXCEPTION_HANDLED.to_string(), Value::Bool(true));
         self.clear_error();

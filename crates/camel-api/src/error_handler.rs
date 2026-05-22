@@ -216,8 +216,8 @@ pub type ExponentialBackoff = RedeliveryPolicy;
 #[cfg(test)]
 mod tests {
     use super::*;
-use crate::BoxProcessor;
-use crate::CamelError;
+    use crate::BoxProcessor;
+    use crate::CamelError;
     use std::time::Duration;
 
     #[test]
