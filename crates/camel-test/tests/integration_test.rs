@@ -2791,7 +2791,7 @@ async fn http_consumer_string_status_code_e2e() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18083/string-status")
+    let route = RouteBuilder::from("http://0.0.0.0:18091/string-status")
         .route_id("test-string-status-code")
         .set_header("CamelHttpResponseCode", Value::String("202".into()))
         .build()
@@ -2803,7 +2803,7 @@ async fn http_consumer_string_status_code_e2e() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .get("http://127.0.0.1:18083/string-status")
+        .get("http://127.0.0.1:18091/string-status")
         .send()
         .await
         .unwrap();
@@ -2823,7 +2823,7 @@ async fn http_consumer_invalid_string_status_code_fallback_e2e() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18084/invalid-status")
+    let route = RouteBuilder::from("http://0.0.0.0:18092/invalid-status")
         .route_id("test-invalid-status-code")
         .set_header(
             "CamelHttpResponseCode",
@@ -2838,7 +2838,7 @@ async fn http_consumer_invalid_string_status_code_fallback_e2e() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .get("http://127.0.0.1:18084/invalid-status")
+        .get("http://127.0.0.1:18092/invalid-status")
         .send()
         .await
         .unwrap();
