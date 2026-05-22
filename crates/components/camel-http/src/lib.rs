@@ -2932,7 +2932,7 @@ mod tests {
             assert_eq!(status, 200);
 
             // The test server echoes back the received traceparent header
-            let traceparent = result.input.header("x-received-traceparent");
+            let traceparent = result.input.header("X-Received-Traceparent");
             assert!(
                 traceparent.is_some(),
                 "traceparent header should have been sent"

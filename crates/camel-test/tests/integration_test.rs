@@ -1238,11 +1238,11 @@ async fn http_response_headers_mapped_e2e() {
 
     // Custom response headers should be mapped into exchange headers
     assert_eq!(
-        ex.input.header("x-custom-header"),
+        ex.input.header("X-Custom-Header"),
         Some(&serde_json::Value::String("custom-value".into()))
     );
     assert_eq!(
-        ex.input.header("x-request-id"),
+        ex.input.header("X-Request-Id"),
         Some(&serde_json::Value::String("req-42".into()))
     );
 }
@@ -2890,7 +2890,7 @@ async fn http_consumer_stop_returns_204_e2e() {
         .build()
         .await;
 
-    let route = RouteBuilder::from("http://0.0.0.0:18085/stop-route")
+    let route = RouteBuilder::from("http://0.0.0.0:18090/stop-route")
         .route_id("test-stop-204")
         .stop()
         .build()
@@ -2902,7 +2902,7 @@ async fn http_consumer_stop_returns_204_e2e() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .get("http://127.0.0.1:18085/stop-route")
+        .get("http://127.0.0.1:18090/stop-route")
         .send()
         .await
         .unwrap();
