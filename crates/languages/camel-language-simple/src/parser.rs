@@ -9,6 +9,7 @@ pub enum Expr {
     /// Array indexing: `${body.items.0}` → `BodyField([Key("items"), Index(0)])`
     BodyField(Vec<PathSegment>),
     ExchangeProperty(String),
+    ExceptionMessage,
     LanguageDelegate {
         language: String,
         expression: String,
@@ -447,6 +448,10 @@ fn parse_expr_atom(s: &str) -> Result<Expr, LanguageError> {
         return Ok(Expr::ExchangeProperty(key.to_string()));
     }
 
+    if s == "exception.message" {
+        return Ok(Expr::ExceptionMessage);
+    }
+
     if let Some((language, expression)) = s.split_once(':')
         && !expression.is_empty()
         && !language.is_empty()
@@ -649,5 +654,30 @@ mod tests {
         assert!(parse("\"abc").is_err());
         assert!(parse("&& true").is_err());
         assert!(parse("${Unknown:expr}").is_err());
+    }
+
+    #[test]
+    fn parse_exception_message() {
+        assert_eq!(
+            parse("${exception.message}").unwrap(),
+            Expr::ExceptionMessage
+        );
+    }
+
+    #[test]
+    fn parse_exception_message_in_interpolation() {
+        let result = parse("Error: ${exception.message}").unwrap();
+        assert_eq!(
+            result,
+            Expr::Interpolated(vec![
+                InterpolatedPart::Literal("Error: ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::ExceptionMessage)),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_exception_kind_unsupported() {
+        assert!(parse("${exception.kind}").is_err());
     }
 }

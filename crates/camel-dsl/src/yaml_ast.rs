@@ -47,6 +47,10 @@ pub struct YamlOnException {
     pub message_contains: Option<String>,
     #[serde(default)]
     pub retry: Option<YamlRedeliveryPolicy>,
+    #[serde(default)]
+    pub steps: Vec<YamlStep>,
+    #[serde(default)]
+    pub handled: Option<bool>,
 }
 
 #[derive(Deserialize)]

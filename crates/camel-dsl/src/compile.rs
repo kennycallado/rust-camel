@@ -21,7 +21,7 @@ use camel_api::{
     },
 };
 use camel_component_api::ConcurrencyModel;
-use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition};
+use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition, compose_pipeline};
 use camel_processor::{
     ConvertBodyTo, LogLevel, MarshalService, StopService, StreamCacheService, UnmarshalService,
     builtin_data_format,
@@ -328,6 +328,7 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
 
             let kind = clause.kind;
             let message_contains = clause.message_contains;
+            let handled = clause.handled.unwrap_or(false);
             let mut builder = config.on_exception(move |e| {
                 let kind_ok = kind
                     .as_deref()
@@ -350,6 +351,52 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                 if let Some(uri) = retry.handled_by {
                     builder = builder.handled_by(uri);
                 }
+            }
+
+            let has_steps = !clause.steps.is_empty();
+            if has_steps {
+                let compiled_steps = compile_declarative_steps(clause.steps, 0)?;
+                let total = compiled_steps.len();
+                let processors: Vec<camel_api::BoxProcessor> = compiled_steps
+                    .into_iter()
+                    .filter_map(|step| match step {
+                        camel_core::route::BuilderStep::Processor(p) => Some(p),
+                        _ => None,
+                    })
+                    .collect();
+                let filtered = total - processors.len();
+                if filtered > 0 {
+                    tracing::warn!(
+                        filtered,
+                        total,
+                        "on_exceptions: {filtered}/{total} steps require registry resolution \
+                         and are not supported inline — use handled_by instead"
+                    );
+                }
+                if processors.is_empty() {
+                    if handled {
+                        return Err(CamelError::RouteError(
+                            "error_handler.on_exceptions: handled=true but no executable steps remain \
+                             (all steps require registry resolution — use handled_by instead)"
+                                .to_string(),
+                        ));
+                    }
+                    tracing::warn!(
+                        total,
+                        "on_exceptions: all {total} steps require registry resolution and \
+                         cannot be executed inline — use handled_by instead"
+                    );
+                } else {
+                    builder = builder.on_steps(compose_pipeline(processors));
+                }
+            }
+            if let Some(handled) = clause.handled {
+                if handled && !has_steps {
+                    return Err(CamelError::RouteError(
+                        "error_handler.on_exceptions: handled=true requires steps".to_string(),
+                    ));
+                }
+                builder = builder.handled(handled);
             }
 
             config = builder.build();
@@ -1118,6 +1165,7 @@ mod tests {
         StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef,
         WhenStepDef, WireTapStepDef,
     };
+    use serde_json::Value;
 
     fn make_predicate(simple_src: &str) -> LanguageExpressionDef {
         LanguageExpressionDef {
@@ -1143,6 +1191,8 @@ mod tests {
                         jitter_factor: 0.0,
                         handled_by: Some("log:io".into()),
                     }),
+                    steps: vec![],
+                    handled: None,
                 },
                 DeclarativeOnException {
                     kind: Some("ProcessorError".into()),
@@ -1155,6 +1205,8 @@ mod tests {
                         jitter_factor: 0.0,
                         handled_by: None,
                     }),
+                    steps: vec![],
+                    handled: None,
                 },
             ]),
         })
@@ -1180,6 +1232,8 @@ mod tests {
                 kind: Some("NotRealKind".into()),
                 message_contains: None,
                 retry: None,
+                steps: vec![],
+                handled: None,
             }]),
         })
         .err()
@@ -1197,6 +1251,8 @@ mod tests {
                 kind: None,
                 message_contains: None,
                 retry: None,
+                steps: vec![],
+                handled: None,
             }]),
         })
         .err()
@@ -1268,6 +1324,8 @@ mod tests {
                         jitter_factor: 0.0,
                         handled_by: Some("log:validation".into()),
                     }),
+                    steps: vec![],
+                    handled: None,
                 },
                 DeclarativeOnException {
                     kind: Some("Io".into()),
@@ -1280,6 +1338,8 @@ mod tests {
                         jitter_factor: 0.0,
                         handled_by: Some("log:io".into()),
                     }),
+                    steps: vec![],
+                    handled: None,
                 },
             ]),
         })
@@ -1308,6 +1368,8 @@ mod tests {
                 kind: None,
                 message_contains: Some("validation".into()),
                 retry: None,
+                steps: vec![],
+                handled: None,
             }]),
         })
         .expect("compile should succeed");
@@ -1330,6 +1392,8 @@ mod tests {
                 kind: Some("Stopped".into()),
                 message_contains: None,
                 retry: None,
+                steps: vec![],
+                handled: None,
             }]),
         })
         .expect("compile should succeed");
@@ -1337,6 +1401,45 @@ mod tests {
         assert_eq!(config.policies.len(), 1);
         assert!(config.policies[0].retry.is_none());
         assert!((config.policies[0].matches)(&CamelError::Stopped));
+    }
+
+    #[test]
+    fn test_compile_error_handler_on_exception_with_steps() {
+        let def = DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("RouteError".to_string()),
+                message_contains: None,
+                retry: None,
+                steps: vec![DeclarativeStep::Log(LogStepDef {
+                    message: ValueSourceDef::Literal(Value::String("error".to_string())),
+                    level: LogLevelDef::Info,
+                })],
+                handled: Some(true),
+            }]),
+        };
+        let config = compile_error_handler(def).unwrap();
+        assert_eq!(config.policies.len(), 1);
+        assert!(config.policies[0].on_steps.is_some());
+        assert!(config.policies[0].handled);
+    }
+
+    #[test]
+    fn test_compile_error_handler_handled_without_steps_is_error() {
+        let def = DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("RouteError".to_string()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: Some(true),
+            }]),
+        };
+        let result = compile_error_handler(def);
+        assert!(result.is_err());
     }
 
     #[test]

@@ -943,7 +943,7 @@ mod tests {
         let inner = component.get_endpoint("err-pass").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut ex = Exchange::new(Message::new("body"));
-        ex.error = Some(camel_component_api::CamelError::ProcessorError(
+        ex.set_error(camel_component_api::CamelError::ProcessorError(
             "oops".to_string(),
         ));
         producer.call(ex).await.unwrap();
@@ -1003,7 +1003,7 @@ mod tests {
         let inner = component.get_endpoint("no-err-fail").unwrap();
         let mut producer = endpoint.create_producer(&ctx).unwrap();
         let mut ex = Exchange::new(Message::new("body"));
-        ex.error = Some(camel_component_api::CamelError::ProcessorError(
+        ex.set_error(camel_component_api::CamelError::ProcessorError(
             "oops".to_string(),
         ));
         producer.call(ex).await.unwrap();

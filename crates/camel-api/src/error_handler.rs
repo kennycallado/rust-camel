@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::CamelError;
+use crate::{BoxProcessor, CamelError, SyncBoxProcessor};
 
 /// Camel-compatible header names for redelivery state.
 pub const HEADER_REDELIVERED: &str = "CamelRedelivered";
@@ -83,6 +83,10 @@ pub struct ExceptionPolicy {
     pub retry: Option<RedeliveryPolicy>,
     /// Optional URI of a specific endpoint to route failed exchanges to.
     pub handled_by: Option<String>,
+    /// Optional custom pipeline executed when this policy triggers.
+    pub on_steps: Option<SyncBoxProcessor>,
+    /// Whether the exception is considered handled (suppresses re-throw).
+    pub handled: bool,
 }
 
 impl ExceptionPolicy {
@@ -92,6 +96,8 @@ impl ExceptionPolicy {
             matches: Arc::new(matches),
             retry: None,
             handled_by: None,
+            on_steps: None,
+            handled: false,
         }
     }
 }
@@ -102,6 +108,8 @@ impl Clone for ExceptionPolicy {
             matches: Arc::clone(&self.matches),
             retry: self.retry.clone(),
             handled_by: self.handled_by.clone(),
+            on_steps: self.on_steps.clone(),
+            handled: self.handled,
         }
     }
 }
@@ -182,6 +190,18 @@ impl ExceptionPolicyBuilder {
         self
     }
 
+    /// Attach a custom pipeline to execute when this policy triggers.
+    pub fn on_steps(mut self, pipeline: BoxProcessor) -> Self {
+        self.policy.on_steps = Some(SyncBoxProcessor::new(pipeline));
+        self
+    }
+
+    /// Mark the exception as handled (suppresses re-throw to upstream).
+    pub fn handled(mut self, handled: bool) -> Self {
+        self.policy.handled = handled;
+        self
+    }
+
     /// Finish this policy and return the updated config.
     pub fn build(mut self) -> ErrorHandlerConfig {
         self.config.policies.push(self.policy);
@@ -196,7 +216,8 @@ pub type ExponentialBackoff = RedeliveryPolicy;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CamelError;
+use crate::BoxProcessor;
+use crate::CamelError;
     use std::time::Duration;
 
     #[test]

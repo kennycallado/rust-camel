@@ -40,6 +40,11 @@ pub fn evaluate(
 
         Expr::ExchangeProperty(key) => Ok(exchange.property(key).cloned().unwrap_or(Value::Null)),
 
+        Expr::ExceptionMessage => match &exchange.error {
+            Some(err) => Ok(Value::String(err.to_string())),
+            None => Ok(Value::Null),
+        },
+
         Expr::LanguageDelegate {
             language,
             expression,
@@ -170,6 +175,7 @@ fn to_f64(v: &Value) -> Result<f64, LanguageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::error::CamelError;
     use camel_language_api::{Expression, Language, Message};
     use serde_json::json;
     use std::sync::Arc;
@@ -396,5 +402,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(or_short, Value::Bool(true));
+    }
+
+    #[test]
+    fn evaluate_exception_message_with_error() {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::RouteError("Unauthorized".to_string()));
+        let result = evaluate(&Expr::ExceptionMessage, &ex, &None).unwrap();
+        assert_eq!(result, Value::String("Route error: Unauthorized".to_string()));
+    }
+
+    #[test]
+    fn evaluate_exception_message_without_error() {
+        let ex = Exchange::default();
+        let result = evaluate(&Expr::ExceptionMessage, &ex, &None).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn evaluate_exception_message_interpolation() {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::RouteError("Unauthorized".to_string()));
+        let result = evaluate(
+            &Expr::Interpolated(vec![
+                InterpolatedPart::Literal("Error: ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::ExceptionMessage)),
+            ]),
+            &ex,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(result, Value::String("Error: Route error: Unauthorized".to_string()));
+    }
+
+    #[test]
+    fn evaluate_exception_message_interpolation_no_error() {
+        let ex = Exchange::default();
+        let result = evaluate(
+            &Expr::Interpolated(vec![
+                InterpolatedPart::Literal("Error: ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::ExceptionMessage)),
+            ]),
+            &ex,
+            &None,
+        )
+        .unwrap();
+        assert_eq!(result, Value::String("Error: ".to_string()));
     }
 }

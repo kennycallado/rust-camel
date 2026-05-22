@@ -1537,6 +1537,7 @@ dependencies = [
 name = "camel-language-simple"
 version = "0.10.0"
 dependencies = [
+ "camel-api",
  "camel-language-api",
  "criterion",
  "serde_json",

@@ -10,6 +10,15 @@ use crate::from_body::FromBody;
 use crate::message::Message;
 use crate::value::Value;
 
+/// Property key for the exception message (error Display string).
+pub const PROPERTY_EXCEPTION_MESSAGE: &str = "CamelExceptionMessage";
+/// Property key for the exception kind (error variant name via classify()).
+pub const PROPERTY_EXCEPTION_KIND: &str = "CamelExceptionKind";
+/// Property key for the caught exception (Java Camel parity alias).
+pub const PROPERTY_EXCEPTION_CAUGHT: &str = "CamelExceptionCaught";
+/// Property key set when an exception has been handled (Java Camel parity).
+pub const PROPERTY_EXCEPTION_HANDLED: &str = "CamelExceptionHandled";
+
 /// The exchange pattern (fire-and-forget or request-reply).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExchangePattern {
@@ -97,8 +106,54 @@ impl Exchange {
     }
 
     /// Set an error on this exchange.
+    ///
+    /// Automatically populates exchange properties with error context so that
+    /// all languages can access error information via their property mechanisms:
+    /// - `CamelExceptionMessage` — the error's Display string
+    /// - `CamelExceptionKind` — the error variant name (via `CamelError::classify()`)
+    /// - `CamelExceptionCaught` — alias for Java Camel parity
     pub fn set_error(&mut self, error: CamelError) {
+        let msg = error.to_string();
+        let kind = error.classify().to_string();
+        self.properties.insert(
+            PROPERTY_EXCEPTION_MESSAGE.to_string(),
+            Value::String(msg.clone()),
+        );
+        self.properties.insert(
+            PROPERTY_EXCEPTION_KIND.to_string(),
+            Value::String(kind),
+        );
+        self.properties.insert(
+            PROPERTY_EXCEPTION_CAUGHT.to_string(),
+            Value::String(msg),
+        );
         self.error = Some(error);
+    }
+
+    /// Clear the error and remove all exception properties.
+    ///
+    /// Called after `handled:true` in on_exception steps to prevent stale
+    /// error state from leaking into subsequent processing.
+    pub fn clear_error(&mut self) {
+        self.error = None;
+        self.properties.remove(PROPERTY_EXCEPTION_MESSAGE);
+        self.properties.remove(PROPERTY_EXCEPTION_KIND);
+        self.properties.remove(PROPERTY_EXCEPTION_CAUGHT);
+    }
+
+    /// Mark the exception as handled and clear the error.
+    ///
+    /// Sets `CamelExceptionHandled = true` then calls `clear_error()`.
+    /// This matches Java Camel's `Exchange.EXCEPTION_HANDLED` semantics.
+    pub fn handle_error(&mut self) {
+        let msg = self
+            .properties
+            .get(PROPERTY_EXCEPTION_MESSAGE)
+            .cloned()
+            .unwrap_or(Value::Bool(true));
+        self.properties
+            .insert(PROPERTY_EXCEPTION_HANDLED.to_string(), Value::Bool(true));
+        self.clear_error();
     }
 
     /// Store a non-serializable extension value (e.g. a channel sender).
@@ -185,6 +240,41 @@ mod tests {
         assert!(!ex.has_error());
         ex.set_error(CamelError::ProcessorError("test".into()));
         assert!(ex.has_error());
+    }
+
+    #[test]
+    fn test_set_error_populates_properties() {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::ProcessorError("boom".into()));
+
+        assert!(ex.has_error());
+        assert_eq!(
+            ex.properties.get(PROPERTY_EXCEPTION_MESSAGE),
+            Some(&Value::String("Processor error: boom".to_string()))
+        );
+        assert_eq!(
+            ex.properties.get(PROPERTY_EXCEPTION_KIND),
+            Some(&Value::String("processor".to_string()))
+        );
+        assert_eq!(
+            ex.properties.get(PROPERTY_EXCEPTION_CAUGHT),
+            Some(&Value::String("Processor error: boom".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_clear_error_removes_properties() {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::RouteError("fail".into()));
+        assert!(ex.has_error());
+        assert!(ex.properties.contains_key(PROPERTY_EXCEPTION_MESSAGE));
+
+        ex.clear_error();
+
+        assert!(!ex.has_error());
+        assert!(!ex.properties.contains_key(PROPERTY_EXCEPTION_MESSAGE));
+        assert!(!ex.properties.contains_key(PROPERTY_EXCEPTION_KIND));
+        assert!(!ex.properties.contains_key(PROPERTY_EXCEPTION_CAUGHT));
     }
 
     #[test]

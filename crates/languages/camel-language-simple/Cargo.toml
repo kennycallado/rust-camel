@@ -16,6 +16,7 @@ camel-language-api.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+camel-api.workspace = true
 criterion.workspace = true
 
 [[bench]]

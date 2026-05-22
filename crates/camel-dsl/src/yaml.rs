@@ -131,34 +131,47 @@ pub(crate) fn yaml_route_to_declarative_route(
             })
     };
 
-    let error_handler = route.error_handler.map(|eh| DeclarativeErrorHandler {
-        dead_letter_channel: eh.dead_letter_channel,
-        retry: eh.retry.map(|retry| DeclarativeRedeliveryPolicy {
-            max_attempts: retry.max_attempts,
-            initial_delay_ms: retry.initial_delay_ms,
-            multiplier: retry.multiplier,
-            max_delay_ms: retry.max_delay_ms,
-            jitter_factor: retry.jitter_factor,
-            handled_by: retry.handled_by,
-        }),
-        on_exceptions: eh.on_exceptions.map(|clauses| {
+    let error_handler = route.error_handler.map(|eh| -> Result<DeclarativeErrorHandler, CamelError> {
+        let on_exceptions = eh.on_exceptions.map(|clauses| {
             clauses
                 .into_iter()
-                .map(|clause| DeclarativeOnException {
-                    kind: clause.kind,
-                    message_contains: clause.message_contains,
-                    retry: clause.retry.map(|retry| DeclarativeRedeliveryPolicy {
-                        max_attempts: retry.max_attempts,
-                        initial_delay_ms: retry.initial_delay_ms,
-                        multiplier: retry.multiplier,
-                        max_delay_ms: retry.max_delay_ms,
-                        jitter_factor: retry.jitter_factor,
-                        handled_by: retry.handled_by,
-                    }),
+                .map(|clause| {
+                    let steps = clause
+                        .steps
+                        .into_iter()
+                        .map(yaml_step_to_declarative_step)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok::<_, CamelError>(DeclarativeOnException {
+                        kind: clause.kind,
+                        message_contains: clause.message_contains,
+                        retry: clause.retry.map(|retry| DeclarativeRedeliveryPolicy {
+                            max_attempts: retry.max_attempts,
+                            initial_delay_ms: retry.initial_delay_ms,
+                            multiplier: retry.multiplier,
+                            max_delay_ms: retry.max_delay_ms,
+                            jitter_factor: retry.jitter_factor,
+                            handled_by: retry.handled_by,
+                        }),
+                        steps,
+                        handled: clause.handled,
+                    })
                 })
-                .collect()
-        }),
-    });
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+        Ok(DeclarativeErrorHandler {
+            dead_letter_channel: eh.dead_letter_channel,
+            retry: eh.retry.map(|retry| DeclarativeRedeliveryPolicy {
+                max_attempts: retry.max_attempts,
+                initial_delay_ms: retry.initial_delay_ms,
+                multiplier: retry.multiplier,
+                max_delay_ms: retry.max_delay_ms,
+                jitter_factor: retry.jitter_factor,
+                handled_by: retry.handled_by,
+            }),
+            on_exceptions,
+        })
+    }).transpose()?;
 
     let circuit_breaker = route
         .circuit_breaker

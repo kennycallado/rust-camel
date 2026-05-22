@@ -27,6 +27,8 @@ pub struct DeclarativeOnException {
     pub kind: Option<String>,
     pub message_contains: Option<String>,
     pub retry: Option<DeclarativeRedeliveryPolicy>,
+    pub steps: Vec<DeclarativeStep>,
+    pub handled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

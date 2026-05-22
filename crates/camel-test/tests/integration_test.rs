@@ -2985,3 +2985,125 @@ async fn http_consumer_headers_arrive_title_case_e2e() {
 
     h.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// L2: on_exception inline steps integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn http_on_exception_steps_returns_custom_error_e2e() {
+    use camel_api::error_handler::ErrorHandlerConfig;
+    use camel_api::{Body, BoxProcessor, BoxProcessorExt, CamelError};
+
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .build()
+        .await;
+
+    // Build a steps pipeline that sets a custom HTTP 401 response
+    let steps_pipeline = BoxProcessor::from_fn(|mut ex: camel_api::Exchange| {
+        Box::pin(async move {
+            ex.input
+                .set_header("CamelHttpResponseCode", serde_json::Value::Number(401.into()));
+            ex.input.body = Body::Bytes(br#"{"error":"Unauthorized"}"#.to_vec().into());
+            Ok(ex)
+        })
+    });
+
+    let eh = ErrorHandlerConfig::log_only()
+        .on_exception(|e| matches!(e, CamelError::RouteError(_)))
+        .on_steps(steps_pipeline)
+        .handled(true)
+        .build();
+
+    let route = RouteBuilder::from("http://0.0.0.0:18088/on-exception-steps")
+        .route_id("test-on-exception-steps")
+        .process(|_ex: camel_api::Exchange| {
+            Box::pin(async move {
+                Err(CamelError::RouteError("Unauthorized".into()))
+            })
+        })
+        .error_handler(eh)
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("http://127.0.0.1:18088/on-exception-steps")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "on_steps pipeline should set HTTP 401"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("Unauthorized"),
+        "Response body should contain 'Unauthorized', got: {}",
+        body
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn http_on_exception_handled_false_propagates_e2e() {
+    use camel_api::error_handler::ErrorHandlerConfig;
+    use camel_api::{BoxProcessor, BoxProcessorExt, CamelError};
+
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .build()
+        .await;
+
+    // Build a steps pipeline that tries to set HTTP 401, but handled=false
+    // means the error should still propagate to the default handler
+    let steps_pipeline = BoxProcessor::from_fn(|mut ex: camel_api::Exchange| {
+        Box::pin(async move {
+            ex.input
+                .set_header("CamelHttpResponseCode", serde_json::Value::Number(401.into()));
+            Ok(ex)
+        })
+    });
+
+    let eh = ErrorHandlerConfig::log_only()
+        .on_exception(|e| matches!(e, CamelError::RouteError(_)))
+        .on_steps(steps_pipeline)
+        .handled(false)
+        .build();
+
+    let route = RouteBuilder::from("http://0.0.0.0:18089/on-exception-propagate")
+        .route_id("test-on-exception-propagate")
+        .process(|_ex: camel_api::Exchange| {
+            Box::pin(async move { Err(CamelError::RouteError("fail".into())) })
+        })
+        .error_handler(eh)
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("http://127.0.0.1:18089/on-exception-propagate")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        "handled=false should propagate error to default handler returning 500"
+    );
+
+    h.stop().await;
+}

@@ -7,7 +7,44 @@ use tower::{Layer, Service, ServiceExt};
 use camel_api::error_handler::{
     ExceptionPolicy, HEADER_REDELIVERED, HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER,
 };
-use camel_api::{BoxProcessor, CamelError, Exchange, Value};
+use camel_api::{BoxProcessor, CamelError, Exchange, SyncBoxProcessor, Value};
+
+async fn execute_on_steps(
+    original: Exchange,
+    original_err: CamelError,
+    on_steps: &SyncBoxProcessor,
+    handled: bool,
+    handler: Option<BoxProcessor>,
+) -> Result<Exchange, CamelError> {
+    let snapshot = original.clone();
+    let mut ex = original;
+    ex.set_error(original_err.clone());
+    let mut pipeline = on_steps.clone_inner();
+    let step_result = async {
+        let mut svc = pipeline.ready().await?;
+        svc.call(ex).await
+    }
+    .await;
+
+    match step_result {
+        Ok(mut ex) => {
+            if handled {
+                ex.handle_error();
+                Ok(ex)
+            } else {
+                // handled:false — steps execute for side-effects (e.g. logging) but
+                // the modified exchange is discarded and the original error propagated.
+                Err(original_err)
+            }
+        }
+        Err(_) => {
+            tracing::warn!(error = %original_err, "on_steps pipeline failed, falling back to handler/DLC");
+            let mut ex = snapshot;
+            ex.set_error(original_err);
+            send_to_handler(ex, handler).await
+        }
+    }
+}
 
 /// Tower Layer that wraps a pipeline with error handling behaviour.
 ///
@@ -155,28 +192,45 @@ where
 
                         match inner.ready().await?.call(ex).await {
                             Ok(ex) => return Ok(ex),
-                            Err(_e) => {
+                            Err(retry_err) => {
                                 if attempt + 1 == backoff.max_attempts {
                                     // Retries exhausted — send to handler.
-                                    let mut ex = original.clone();
-                                    ex.input.set_header(HEADER_REDELIVERED, Value::Bool(true));
-                                    ex.input.set_header(
+                                    let mut original = original.clone();
+                                    original
+                                        .input
+                                        .set_header(HEADER_REDELIVERED, Value::Bool(true));
+                                    original.input.set_header(
                                         HEADER_REDELIVERY_COUNTER,
                                         Value::Number(backoff.max_attempts.into()),
                                     );
-                                    ex.input.set_header(
+                                    original.input.set_header(
                                         HEADER_REDELIVERY_MAX_COUNTER,
                                         Value::Number(backoff.max_attempts.into()),
                                     );
-                                    ex.set_error(_e);
+                                    if let Some(ref steps) = policy.on_steps {
+                                        let handler = policy_producer.clone().or(dlc.clone());
+                                        return execute_on_steps(
+                                            original,
+                                            retry_err,
+                                            steps,
+                                            policy.handled,
+                                            handler,
+                                        )
+                                        .await;
+                                    }
+                                    original.set_error(retry_err);
                                     let handler = policy_producer.or(dlc);
-                                    return send_to_handler(ex, handler).await;
+                                    return send_to_handler(original, handler).await;
                                 }
                             }
                         }
                     }
                 }
                 // No retry configured (or 0 attempts) — send to policy handler or DLC.
+                if let Some(ref steps) = policy.on_steps {
+                    let handler = policy_producer.or(dlc);
+                    return execute_on_steps(original, err, steps, policy.handled, handler).await;
+                }
                 let mut ex = original.clone();
                 ex.set_error(err);
                 let handler = policy_producer.or(dlc);
@@ -224,7 +278,7 @@ async fn send_to_handler(
 mod tests {
     use super::*;
     use camel_api::{
-        BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message, Value,
+        BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message, SyncBoxProcessor, Value,
         error_handler::RedeliveryPolicy,
     };
     use std::sync::{
@@ -304,6 +358,8 @@ mod tests {
                 jitter_factor: 0.0,
             }),
             handled_by: None,
+            on_steps: None,
+            handled: false,
         };
         let svc = ErrorHandlerService::new(inner, None, vec![(policy, None)]);
         let result = svc.oneshot(make_exchange()).await;
@@ -333,6 +389,8 @@ mod tests {
                 jitter_factor: 0.0,
             }),
             handled_by: None,
+            on_steps: None,
+            handled: false,
         };
         let svc = ErrorHandlerService::new(inner, Some(dlc), vec![(policy, None)]);
         let result = svc.oneshot(make_exchange()).await;
@@ -435,6 +493,8 @@ mod tests {
                 jitter_factor: 0.0,
             }),
             handled_by: None,
+            on_steps: None,
+            handled: false,
         };
 
         let svc = ErrorHandlerService::new(inner, Some(dlc), vec![(policy, None)]);
@@ -480,6 +540,8 @@ mod tests {
                 jitter_factor: 0.5,
             }),
             handled_by: None,
+            on_steps: None,
+            handled: false,
         };
 
         let start = Instant::now();
@@ -532,6 +594,91 @@ mod tests {
         assert!(
             !dlc_called.load(std::sync::atomic::Ordering::SeqCst),
             "DLC should not be called for Stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_steps_handled_true_consumes_error() {
+        use tower::ServiceExt;
+
+        let steps_pipeline = BoxProcessor::new(tower::service_fn(|mut ex: Exchange| {
+            ex.input.body = camel_api::Body::Bytes("handled".into());
+            async move { Ok(ex) }
+        }));
+        let policy = ExceptionPolicy {
+            matches: Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
+            handled: true,
+        };
+        let inner = tower::service_fn(|_ex: Exchange| async {
+            Err::<Exchange, CamelError>(CamelError::RouteError("fail".to_string()))
+        });
+        let mut svc = ErrorHandlerService::new(inner, None, vec![(policy, None)]);
+        let ex = Exchange::default();
+        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        assert!(result.error.is_none(), "handled:true should clear error");
+        assert!(matches!(result.input.body, camel_api::Body::Bytes(_)));
+    }
+
+    #[tokio::test]
+    async fn test_on_steps_handled_false_propagates_error() {
+        use tower::ServiceExt;
+
+        let steps_pipeline = BoxProcessor::new(tower::service_fn(|mut ex: Exchange| {
+            ex.input.body = camel_api::Body::Bytes("handled".into());
+            async move { Ok(ex) }
+        }));
+        let policy = ExceptionPolicy {
+            matches: Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
+            handled: false,
+        };
+        let inner = tower::service_fn(|_ex: Exchange| async {
+            Err::<Exchange, CamelError>(CamelError::RouteError("fail".to_string()))
+        });
+        let mut svc = ErrorHandlerService::new(inner, None, vec![(policy, None)]);
+        let ex = Exchange::default();
+        let result = svc.ready().await.unwrap().call(ex).await;
+        assert!(result.is_err(), "handled:false should propagate error");
+    }
+
+    #[tokio::test]
+    async fn test_on_steps_handled_true_clears_exception_properties() {
+        use tower::ServiceExt;
+
+        let steps_pipeline = BoxProcessor::new(tower::service_fn(|mut ex: Exchange| {
+            ex.input.body = camel_api::Body::Bytes("handled".into());
+            async move { Ok(ex) }
+        }));
+        let policy = ExceptionPolicy {
+            matches: Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: Some(SyncBoxProcessor::new(steps_pipeline)),
+            handled: true,
+        };
+        let inner = tower::service_fn(|_ex: Exchange| async {
+            Err::<Exchange, CamelError>(CamelError::RouteError("fail".to_string()))
+        });
+        let mut svc = ErrorHandlerService::new(inner, None, vec![(policy, None)]);
+        let ex = Exchange::default();
+        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        assert!(result.error.is_none(), "handled:true should clear error");
+        assert!(
+            result.properties.get(camel_api::exchange::PROPERTY_EXCEPTION_MESSAGE).is_none(),
+            "handled:true should clear exception properties"
+        );
+        assert!(
+            result.properties.get(camel_api::exchange::PROPERTY_EXCEPTION_KIND).is_none(),
+            "handled:true should clear exception kind property"
+        );
+        assert!(
+            result.properties.get(camel_api::exchange::PROPERTY_EXCEPTION_CAUGHT).is_none(),
+            "handled:true should clear exception caught property"
         );
     }
 }

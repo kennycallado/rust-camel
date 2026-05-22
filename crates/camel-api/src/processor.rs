@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use tower::Service;
@@ -45,6 +45,31 @@ impl Service<Exchange> for IdentityProcessor {
 /// of a processor pipeline — a composed chain of Tower Services erased to a
 /// single boxed type.
 pub type BoxProcessor = tower::util::BoxCloneService<Exchange, Exchange, CamelError>;
+
+/// Thread-safe wrapper for [`BoxProcessor`].
+///
+/// `BoxProcessor` (`BoxCloneService`) is `Send` but not `Sync` because the
+/// inner `Box<dyn CloneServiceInner>` lacks a `Sync` bound. This wrapper
+/// stores the processor behind `Arc<Mutex<...>>`, providing safe `Send+Sync`
+/// access. The Mutex is only held briefly during `clone()` — each caller
+/// gets an independent `BoxProcessor` copy.
+pub struct SyncBoxProcessor(Arc<Mutex<BoxProcessor>>);
+
+impl SyncBoxProcessor {
+    pub fn new(processor: BoxProcessor) -> Self {
+        SyncBoxProcessor(Arc::new(Mutex::new(processor)))
+    }
+
+    pub fn clone_inner(&self) -> BoxProcessor {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl Clone for SyncBoxProcessor {
+    fn clone(&self) -> Self {
+        SyncBoxProcessor(self.0.clone())
+    }
+}
 
 /// Extension trait for [`BoxProcessor`] providing ergonomic constructors.
 ///
