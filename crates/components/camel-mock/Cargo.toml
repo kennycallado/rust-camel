@@ -17,11 +17,16 @@ serde_json.workspace = true
 tower.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
 bytes.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true

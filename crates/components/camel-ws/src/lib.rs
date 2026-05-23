@@ -642,6 +642,7 @@ impl Component for WsComponent {
         uri: &str,
         _ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
+        self.config.validate()?;
         let mut cfg = WsEndpointConfig::from_uri(uri)?;
         if let Some(v) = self.config.max_connections {
             cfg.max_connections = v;
@@ -660,6 +661,15 @@ impl Component for WsComponent {
         }
         if let Some(v) = self.config.response_timeout_ms {
             cfg.response_timeout = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = self.config.send_timeout_ms {
+            cfg.send_timeout = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = self.config.binary_payload {
+            cfg.binary_payload = v;
+        }
+        if let Some(ref v) = self.config.subprotocols {
+            cfg.subprotocols = v.clone();
         }
         Ok(Box::new(WsEndpoint {
             uri: uri.to_string(),
@@ -700,6 +710,7 @@ impl Component for WssComponent {
         uri: &str,
         _ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
+        self.config.validate()?;
         let mut cfg = WsEndpointConfig::from_uri(uri)?;
         if let Some(v) = self.config.max_connections {
             cfg.max_connections = v;
@@ -718,6 +729,15 @@ impl Component for WssComponent {
         }
         if let Some(v) = self.config.response_timeout_ms {
             cfg.response_timeout = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = self.config.send_timeout_ms {
+            cfg.send_timeout = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = self.config.binary_payload {
+            cfg.binary_payload = v;
+        }
+        if let Some(ref v) = self.config.subprotocols {
+            cfg.subprotocols = v.clone();
         }
         Ok(Box::new(WsEndpoint {
             uri: uri.to_string(),
@@ -1074,29 +1094,52 @@ impl Service<Exchange> for WsProducer {
                 }
             }
 
-            // Retry transient connect/open failures before write occurs (WS-008)
-            let max_retries = 3usize;
-            let mut retries_left = max_retries;
-            let mut last_err: Option<CamelError> = None;
+            // Add Sec-WebSocket-Protocol header if subprotocols configured (WS-007)
+            if !cfg.inner.subprotocols.is_empty() {
+                let proto_value = cfg.inner.subprotocols.join(", ");
+                if let (Ok(name), Ok(val)) = (
+                    http::header::HeaderName::from_bytes(b"Sec-WebSocket-Protocol"),
+                    http::header::HeaderValue::from_str(&proto_value),
+                ) {
+                    request.headers_mut().insert(name, val);
+                }
+            }
+
+            // Determine message type: respect binary_payload config (WS-018)
+            let effective_message_type = if cfg.inner.binary_payload {
+                "binary"
+            } else {
+                &message_type
+            };
+
+            let max_retries = if cfg.inner.reconnect {
+                cfg.inner.reconnect_max_attempts as usize
+            } else {
+                0
+            };
+            let mut attempts = 0usize;
             let mut ws_stream = loop {
                 let connect_future = tokio_tungstenite::connect_async(request.clone());
                 match tokio::time::timeout(cfg.inner.connect_timeout, connect_future).await {
                     Ok(Ok((stream, _))) => break stream,
                     Ok(Err(e)) => {
                         let err = map_connect_error(e, &url);
-                        // Only retry transient connect failures (connection refused, timeout)
                         let is_transient = err.to_string().contains("connection refused")
-                            || err.to_string().contains("timeout");
-                        if retries_left > 0 && is_transient {
+                            || err.to_string().contains("timeout")
+                            || err.to_string().contains("connection failed");
+                        if is_transient && attempts < max_retries {
+                            attempts += 1;
                             tracing::warn!(
                                 url = url,
                                 error = %err,
-                                retries_left,
+                                attempt = attempts,
+                                max_retries,
                                 "WebSocket connect failed — retrying"
                             );
-                            last_err = Some(err);
-                            retries_left -= 1;
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                cfg.inner.reconnect_delay_ms,
+                            ))
+                            .await;
                             continue;
                         }
                         return Err(err);
@@ -1106,28 +1149,33 @@ impl Service<Exchange> for WsProducer {
                             "WebSocket connect timeout ({:?}) to {url}",
                             cfg.inner.connect_timeout
                         ));
-                        if retries_left > 0 {
+                        if attempts < max_retries {
+                            attempts += 1;
                             tracing::warn!(
                                 url = url,
-                                retries_left,
+                                attempt = attempts,
+                                max_retries,
                                 "WebSocket connect timeout — retrying"
                             );
-                            last_err = Some(err);
-                            retries_left -= 1;
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                cfg.inner.reconnect_delay_ms,
+                            ))
+                            .await;
                             continue;
                         }
                         return Err(err);
                     }
                 }
             };
-            if let Some(ref _err) = last_err {
+            if attempts > 0 {
                 tracing::info!(url = url, "WebSocket producer connected after retry");
             }
 
-            let out_msg =
-                body_to_client_ws_message(std::mem::take(&mut exchange.input.body), &message_type)
-                    .await?;
+            let out_msg = body_to_client_ws_message(
+                std::mem::take(&mut exchange.input.body),
+                effective_message_type,
+            )
+            .await?;
 
             ws_stream
                 .send(out_msg)
@@ -1168,6 +1216,22 @@ impl Service<Exchange> for WsProducer {
                     if normal {
                         tracing::debug!(url = url, "WebSocket producer received normal close");
                         exchange.input.body = CamelBody::Empty;
+                    } else if cfg.inner.reconnect && attempts < max_retries {
+                        attempts += 1;
+                        tracing::warn!(
+                            url = url,
+                            attempt = attempts,
+                            max_retries,
+                            "WebSocket closed by peer — reconnecting"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            cfg.inner.reconnect_delay_ms,
+                        ))
+                        .await;
+                        return Err(CamelError::ProcessorError(format!(
+                            "WebSocket reconnect required after close: code {}",
+                            frame.map(|f| u16::from(f.code)).unwrap_or_default()
+                        )));
                     } else {
                         let code = frame.map(|f| u16::from(f.code)).unwrap_or_default();
                         return Err(CamelError::ProcessorError(format!(
@@ -1342,6 +1406,12 @@ mod tests {
         assert_eq!(cfg.allow_origin, "*");
         assert_eq!(cfg.tls_cert, None);
         assert_eq!(cfg.tls_key, None);
+        assert!(cfg.reconnect);
+        assert_eq!(cfg.reconnect_max_attempts, 5);
+        assert_eq!(cfg.reconnect_delay_ms, 1000);
+        assert_eq!(cfg.send_timeout, Duration::from_secs(30));
+        assert!(!cfg.binary_payload);
+        assert!(cfg.subprotocols.is_empty());
     }
 
     #[test]
@@ -1363,6 +1433,19 @@ mod tests {
         assert_eq!(cfg.allow_origin, "https://example.com");
         assert_eq!(cfg.tls_cert.as_deref(), Some("/tmp/cert.pem"));
         assert_eq!(cfg.tls_key.as_deref(), Some("/tmp/key.pem"));
+        assert!(cfg.reconnect);
+        assert_eq!(cfg.reconnect_max_attempts, 5);
+        assert_eq!(cfg.reconnect_delay_ms, 1000);
+    }
+
+    #[test]
+    fn endpoint_config_parses_reconnect_uri_params() {
+        let uri =
+            "ws://localhost:9001/chat?reconnect=false&reconnectMaxAttempts=2&reconnectDelayMs=25";
+        let cfg = WsEndpointConfig::from_uri(uri).unwrap();
+        assert!(!cfg.reconnect);
+        assert_eq!(cfg.reconnect_max_attempts, 2);
+        assert_eq!(cfg.reconnect_delay_ms, 25);
     }
 
     #[test]
@@ -1684,8 +1767,6 @@ mod tests {
 
     #[tokio::test]
     async fn client_mode_producer_connects_and_echoes() {
-        let port = free_port();
-
         let app = Router::new().route(
             "/echo",
             axum::routing::get(|ws: WebSocketUpgrade| async move {
@@ -1705,9 +1786,9 @@ mod tests {
                 })
             }),
         );
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-            .await
-            .unwrap();
+        // Bind to port 0 directly to avoid TOCTOU race with free_port() + re-bind
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
         let server_task = tokio::spawn(async move {
             let _ = serve(listener, app).await;
         });
@@ -2276,7 +2357,10 @@ mod tests {
         // Use a port that nothing is listening on
         let port = free_port();
         // Ensure nothing is on this port
-        let cfg = WsEndpointConfig::from_uri(&format!("ws://127.0.0.1:{port}/retry")).unwrap();
+        let cfg = WsEndpointConfig::from_uri(&format!(
+            "ws://127.0.0.1:{port}/retry?reconnect=true&reconnectMaxAttempts=2&reconnectDelayMs=50"
+        ))
+        .unwrap();
         let producer = WsProducer::new(cfg.client_config());
 
         let exchange = Exchange::new(CamelMessage::new(CamelBody::Text("hello".into())));
@@ -2393,5 +2477,65 @@ mod tests {
             "stop should succeed when server is healthy: {:?}",
             result
         );
+    }
+
+    // === H-10 Finding Tests ===
+
+    // WS-007: subprotocol negotiation support
+    #[test]
+    fn endpoint_config_parses_subprotocols() {
+        let cfg = WsEndpointConfig::from_uri(
+            "ws://localhost:9001/chat?subprotocols=graphql-ws,graphql-transport-ws",
+        )
+        .unwrap();
+        assert_eq!(cfg.subprotocols, vec!["graphql-ws", "graphql-transport-ws"]);
+    }
+
+    #[test]
+    fn endpoint_config_default_subprotocols_empty() {
+        let cfg = WsEndpointConfig::default();
+        assert!(cfg.subprotocols.is_empty());
+    }
+
+    // WS-017: sendTimeoutMs URI option
+    #[test]
+    fn endpoint_config_parses_send_timeout() {
+        let cfg =
+            WsEndpointConfig::from_uri("ws://localhost:9001/chat?sendTimeoutMs=5000").unwrap();
+        assert_eq!(cfg.send_timeout, Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn endpoint_config_default_send_timeout() {
+        let cfg = WsEndpointConfig::default();
+        assert_eq!(cfg.send_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn endpoint_config_rejects_invalid_send_timeout() {
+        let err =
+            WsEndpointConfig::from_uri("ws://localhost:9001/chat?sendTimeoutMs=abc").unwrap_err();
+        assert!(err.to_string().contains("sendTimeoutMs"));
+    }
+
+    // WS-018: binaryPayload URI option
+    #[test]
+    fn endpoint_config_parses_binary_payload() {
+        let cfg =
+            WsEndpointConfig::from_uri("ws://localhost:9001/chat?binaryPayload=true").unwrap();
+        assert!(cfg.binary_payload);
+    }
+
+    #[test]
+    fn endpoint_config_default_binary_payload_false() {
+        let cfg = WsEndpointConfig::default();
+        assert!(!cfg.binary_payload);
+    }
+
+    #[test]
+    fn endpoint_config_rejects_invalid_binary_payload() {
+        let err =
+            WsEndpointConfig::from_uri("ws://localhost:9001/chat?binaryPayload=yes").unwrap_err();
+        assert!(err.to_string().contains("binaryPayload"));
     }
 }

@@ -363,8 +363,13 @@ impl ContainerConfig {
     }
 
     #[allow(clippy::type_complexity)]
-    fn parse_ports(&self) -> Option<(Vec<String>, HashMap<String, Option<Vec<PortBinding>>>)> {
-        let ports_str = self.ports.as_ref()?;
+    fn parse_ports(
+        &self,
+    ) -> Result<(Vec<String>, HashMap<String, Option<Vec<PortBinding>>>), CamelError> {
+        let ports_str = match self.ports.as_ref() {
+            Some(s) => s,
+            None => return Ok((Vec::new(), HashMap::new())),
+        };
 
         let mut exposed_ports: Vec<String> = Vec::new();
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
@@ -375,7 +380,12 @@ impl ContainerConfig {
                 continue;
             }
 
-            let (host_port, container_spec) = mapping.split_once(':')?;
+            let (host_port, container_spec) = mapping.split_once(':').ok_or_else(|| {
+                CamelError::ProcessorError(format!(
+                    "malformed port mapping '{}': expected hostPort:containerPort",
+                    mapping
+                ))
+            })?;
 
             let (container_port, protocol) = if container_spec.contains('/') {
                 let parts: Vec<&str> = container_spec.split('/').collect();
@@ -397,11 +407,7 @@ impl ContainerConfig {
             );
         }
 
-        if exposed_ports.is_empty() {
-            None
-        } else {
-            Some((exposed_ports, port_bindings))
-        }
+        Ok((exposed_ports, port_bindings))
     }
 
     fn parse_env(&self) -> Option<Vec<String>> {
@@ -750,7 +756,7 @@ async fn handle_run(
         .as_ref()
         .map(|c| c.split_whitespace().map(|s| s.to_string()).collect());
     let auto_remove = config.auto_remove;
-    let (exposed_ports, port_bindings) = config.parse_ports().unwrap_or_default();
+    let (exposed_ports, port_bindings) = config.parse_ports()?;
     let env_vars = config.parse_env();
     let network_mode = config.network.clone();
 
@@ -1015,7 +1021,9 @@ async fn handle_exec(
             .await
             .map_err(|e| CamelError::ProcessorError(format!("Failed to inspect exec: {}", e)))?;
 
-        let exit_code: i64 = inspect.exit_code.unwrap_or(0);
+        let exit_code: i64 = inspect.exit_code.ok_or_else(|| {
+            CamelError::ProcessorError("container exec returned no exit code".into())
+        })?;
 
         let output = output.trim_end().to_string();
         exchange.input.body = Body::Text(output);
@@ -1636,6 +1644,8 @@ impl Component for ContainerComponent {
 ///
 /// This endpoint creates producers for executing container operations
 /// and consumers for receiving container events.
+// TODO(CON-003): Forward container health status (inspect healthcheck / Health field) to
+// Camel's health subsystem so the route can react to unhealthy containers.
 pub struct ContainerEndpoint {
     uri: String,
     config: ContainerConfig,
@@ -1938,7 +1948,9 @@ mod tests {
     #[test]
     fn test_parse_ports_none() {
         let config = ContainerConfig::from_uri("container:run?image=nginx").unwrap();
-        assert!(config.parse_ports().is_none());
+        let (exposed, bindings) = config.parse_ports().unwrap();
+        assert!(exposed.is_empty());
+        assert!(bindings.is_empty());
     }
 
     #[test]
@@ -2738,8 +2750,14 @@ mod tests {
 
     #[test]
     fn test_parse_ports_invalid_and_whitespace_entries() {
+        // "8080" without colon is malformed — must fail-fast
         let cfg = ContainerConfig::from_uri("container:run?ports= , ,8080").unwrap();
-        assert!(cfg.parse_ports().is_none());
+        let err = cfg.parse_ports().unwrap_err();
+        assert!(
+            err.to_string().contains("malformed port mapping"),
+            "expected malformed port error, got: {}",
+            err
+        );
 
         let cfg =
             ContainerConfig::from_uri("container:run?ports= 8080:80 ,  5353:53/udp ").unwrap();
@@ -2747,6 +2765,19 @@ mod tests {
         assert!(exposed.contains(&"80/tcp".to_string()));
         assert!(exposed.contains(&"53/udp".to_string()));
         assert_eq!(bindings.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_ports_fail_fast_on_malformed() {
+        // First entry valid, second malformed — must fail on the malformed one
+        let cfg = ContainerConfig::from_uri("container:run?ports=8080:80,badentry").unwrap();
+        let err = cfg.parse_ports().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("malformed port mapping 'badentry'"),
+            "expected fail-fast on 'badentry', got: {}",
+            err
+        );
     }
 
     #[test]

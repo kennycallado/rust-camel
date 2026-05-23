@@ -5,6 +5,12 @@ use camel_component_api::{BoxProcessor, CamelError, Consumer, Endpoint, Producer
 use camel_xslt::StylesheetId;
 use std::sync::Arc;
 
+/// XML↔JSON transformation endpoint.
+///
+/// # Body Contract
+///
+/// Input: XML or JSON string/bytes depending on `transform_direction`
+/// Output: transformed JSON or XML string
 pub struct XjEndpoint {
     uri: String,
     stylesheet_id: StylesheetId,
@@ -12,9 +18,13 @@ pub struct XjEndpoint {
     client: Arc<camel_xslt::XsltBridgeClient>,
     runtime: Arc<XjBridgeRuntime>,
     direction: Direction,
+    max_payload_bytes: Option<usize>,
+    retry_count: u32,
+    retry_delay_ms: u64,
 }
 
 impl XjEndpoint {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         uri: String,
         stylesheet_id: StylesheetId,
@@ -22,6 +32,9 @@ impl XjEndpoint {
         client: Arc<camel_xslt::XsltBridgeClient>,
         runtime: Arc<XjBridgeRuntime>,
         direction: Direction,
+        max_payload_bytes: Option<usize>,
+        retry_count: u32,
+        retry_delay_ms: u64,
     ) -> Self {
         Self {
             uri,
@@ -30,6 +43,9 @@ impl XjEndpoint {
             client,
             runtime,
             direction,
+            max_payload_bytes,
+            retry_count,
+            retry_delay_ms,
         }
     }
 }
@@ -52,6 +68,9 @@ impl Endpoint for XjEndpoint {
             Arc::clone(&self.client),
             Arc::clone(&self.runtime),
             self.direction,
+            self.max_payload_bytes,
+            self.retry_count,
+            self.retry_delay_ms,
         )))
     }
 }

@@ -247,14 +247,14 @@ impl CamelContext {
         {
             languages.insert(
                 "jsonpath".to_string(),
-                Arc::new(camel_language_jsonpath::JsonPathLanguage),
+                Arc::new(camel_language_jsonpath::JsonPathLanguage::new()),
             );
         }
         #[cfg(feature = "lang-xpath")]
         {
             languages.insert(
                 "xpath".to_string(),
-                Arc::new(camel_language_xpath::XPathLanguage),
+                Arc::new(camel_language_xpath::XPathLanguage::new()),
             );
         }
         Arc::new(std::sync::Mutex::new(languages))
@@ -650,10 +650,14 @@ impl CamelContext {
             })
             .collect();
 
-        let status = if services.iter().all(|s| s.status == ServiceStatus::Started) {
-            HealthStatus::Healthy
-        } else {
+        let has_failed = services.iter().any(|s| s.status == ServiceStatus::Failed);
+        let has_stopped = services.iter().any(|s| s.status == ServiceStatus::Stopped);
+        let status = if has_failed {
             HealthStatus::Unhealthy
+        } else if has_stopped {
+            HealthStatus::Degraded
+        } else {
+            HealthStatus::Healthy
         };
 
         HealthReport {

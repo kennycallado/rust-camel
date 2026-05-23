@@ -21,6 +21,7 @@ pub struct WasmHostState {
     pub call_depth: u32,
     pub limits: wasmtime::StoreLimits,
     pub state_store: crate::state_store::StateStore,
+    pub tokio_handle: tokio::runtime::Handle,
 }
 
 impl wasmtime_wasi::WasiView for WasmHostState {
@@ -51,6 +52,7 @@ impl WasmRuntime {
 
         let mut config = Config::new();
         config.wasm_component_model(true);
+        #[cfg(feature = "epoch-interruption")]
         config.epoch_interruption(true);
 
         let engine =
@@ -89,6 +91,7 @@ impl WasmRuntime {
         registry: Arc<std::sync::Mutex<Registry>>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
+        tokio_handle: tokio::runtime::Handle,
     ) -> WasmHostState {
         WasmHostState {
             table: ResourceTable::new(),
@@ -98,6 +101,7 @@ impl WasmRuntime {
             call_depth: 0,
             limits: wasmtime::StoreLimits::default(),
             state_store,
+            tokio_handle,
         }
     }
 
@@ -133,8 +137,9 @@ impl WasmRuntime {
         registry: Arc<std::sync::Mutex<Registry>>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
+        tokio_handle: tokio::runtime::Handle,
     ) -> Result<(), WasmError> {
-        let host_state = Self::create_host_state(registry, properties, state_store);
+        let host_state = Self::create_host_state(registry, properties, state_store, tokio_handle);
         let mut store = Store::new(&self.engine, host_state);
         store.limiter(|state| &mut state.limits);
         store.set_epoch_deadline(self.config.epoch_deadline());
@@ -163,9 +168,10 @@ impl WasmRuntime {
         registry: Arc<std::sync::Mutex<Registry>>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
+        tokio_handle: tokio::runtime::Handle,
         exchange: WasmExchange,
     ) -> Result<WasmExchange, WasmError> {
-        let host_state = Self::create_host_state(registry, properties, state_store);
+        let host_state = Self::create_host_state(registry, properties, state_store, tokio_handle);
         let mut store = Store::new(&self.engine, host_state);
         store.limiter(|state| &mut state.limits);
         store.set_epoch_deadline(self.config.epoch_deadline());
@@ -201,6 +207,14 @@ impl WasmRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+
+    fn test_tokio_handle() -> tokio::runtime::Handle {
+        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RT.get_or_init(|| tokio::runtime::Runtime::new().expect("test runtime"))
+            .handle()
+            .clone()
+    }
 
     #[test]
     fn test_wasm_host_state_creation() {
@@ -214,6 +228,7 @@ mod tests {
             call_depth: 0,
             limits: wasmtime::StoreLimits::default(),
             state_store: crate::state_store::StateStore::new(),
+            tokio_handle: test_tokio_handle(),
         };
         assert!(state.properties.is_empty());
         assert_eq!(state.call_depth, 0);
@@ -226,6 +241,7 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
+            test_tokio_handle(),
         );
         let _limits: &wasmtime::StoreLimits = &state.limits;
     }
@@ -241,6 +257,7 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
+            test_tokio_handle(),
         );
         let mut store = Store::new(&engine, host_state);
         store.set_epoch_deadline(500);
@@ -261,6 +278,7 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
+            test_tokio_handle(),
         );
         host_state.limits = wasmtime::StoreLimitsBuilder::new()
             .memory_size(1024)

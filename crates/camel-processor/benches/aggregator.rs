@@ -19,7 +19,8 @@ fn bench_aggregator_sizes(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let config = AggregatorConfig::correlate_by("corr-id")
                     .complete_when_size(size)
-                    .build();
+                    .build()
+                    .unwrap();
                 let (tx, _rx) = mpsc::channel(1024);
                 let registry: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
                 let cancel = CancellationToken::new();

@@ -452,7 +452,7 @@ mod tests {
             timeout: 1,
             password: None,
             db: 0,
-            ssl: false,
+            ssl: Some(false),
         }
     }
 
@@ -781,6 +781,60 @@ mod tests {
         let ctx2 = ConsumerContext::new(tx2, cancel_token2.clone());
         assert!(consumer.start(ctx2).await.is_ok());
         tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Final cleanup
+        assert!(consumer.stop().await.is_ok());
+    }
+
+    // REDIS-016: stop() must fully reset internal state so start() creates fresh handles
+    #[tokio::test]
+    async fn test_redis_restart_after_stop() {
+        let config = create_test_config(RedisCommand::Blpop);
+        let mut consumer = RedisConsumer::new(config).expect("Blpop should be valid");
+
+        let (tx, _rx) = mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel_token.clone());
+
+        // Start the consumer
+        assert!(consumer.start(ctx).await.is_ok());
+        assert!(
+            consumer.task_handle.is_some(),
+            "task_handle should be Some after start"
+        );
+        assert!(
+            consumer.cancel_token.is_some(),
+            "cancel_token should be Some after start"
+        );
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Stop the consumer
+        assert!(consumer.stop().await.is_ok());
+
+        // After stop, ALL internal state must be cleared
+        assert!(
+            consumer.task_handle.is_none(),
+            "task_handle must be None after stop — stale JoinHandle would leak"
+        );
+        assert!(
+            consumer.cancel_token.is_none(),
+            "cancel_token must be None after stop — stale token would cause issues on restart"
+        );
+
+        // Start again — must create fresh state without panic or error
+        let (tx2, _rx2) = mpsc::channel(16);
+        let cancel_token2 = CancellationToken::new();
+        let ctx2 = ConsumerContext::new(tx2, cancel_token2.clone());
+        assert!(consumer.start(ctx2).await.is_ok());
+        assert!(
+            consumer.task_handle.is_some(),
+            "task_handle should be Some after restart"
+        );
+        assert!(
+            consumer.cancel_token.is_some(),
+            "cancel_token should be Some after restart"
+        );
 
         // Final cleanup
         assert!(consumer.stop().await.is_ok());

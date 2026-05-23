@@ -13,11 +13,13 @@ categories.workspace = true
 
 [dependencies]
 camel-language-api.workspace = true
+async-trait.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 camel-api.workspace = true
 criterion.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [[bench]]
 name = "expression_eval"

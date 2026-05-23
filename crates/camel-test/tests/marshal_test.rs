@@ -28,7 +28,7 @@ async fn send_to_direct(h: &CamelTestContext, endpoint_uri: &str, exchange: Exch
         .expect("failed to send exchange to direct endpoint");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn json_round_trip() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -39,7 +39,9 @@ async fn json_round_trip() {
     let route = RouteBuilder::from("direct:in")
         .route_id("test-marshal-roundtrip")
         .unmarshal("json")
+        .unwrap()
         .marshal("json")
+        .unwrap()
         .to("mock:out")
         .build()
         .unwrap();
@@ -68,7 +70,7 @@ async fn json_round_trip() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn unmarshal_produces_structured_body() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -79,6 +81,7 @@ async fn unmarshal_produces_structured_body() {
     let route = RouteBuilder::from("direct:in")
         .route_id("test-marshal-structured")
         .unmarshal("json")
+        .unwrap()
         .to("mock:out")
         .build()
         .unwrap();
@@ -105,7 +108,7 @@ async fn unmarshal_produces_structured_body() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn unmarshal_invalid_json_propagates_error() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -118,6 +121,7 @@ async fn unmarshal_invalid_json_propagates_error() {
     let route = RouteBuilder::from("direct:in")
         .route_id("test-marshal-error")
         .unmarshal("json")
+        .unwrap()
         .error_handler(ErrorHandlerConfig::dead_letter_channel("mock:dlc"))
         .to("mock:out")
         .build()

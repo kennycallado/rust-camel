@@ -95,9 +95,9 @@ impl From<BeanWasmPattern> for WasmPattern {
     }
 }
 
-pub fn exchange_to_wasm(exchange: &Exchange) -> WasmExchange {
-    let input = message_to_wasm(&exchange.input);
-    let output = exchange.output.as_ref().map(message_to_wasm);
+pub fn exchange_to_wasm(exchange: &Exchange) -> Result<WasmExchange, CamelError> {
+    let input = message_to_wasm(&exchange.input)?;
+    let output = exchange.output.as_ref().map(message_to_wasm).transpose()?;
 
     let properties = values_to_kv_list(&exchange.properties);
 
@@ -106,13 +106,13 @@ pub fn exchange_to_wasm(exchange: &Exchange) -> WasmExchange {
         ExchangePattern::InOut => WasmPattern::InOut,
     };
 
-    WasmExchange {
+    Ok(WasmExchange {
         input,
         output,
         properties,
         pattern,
         correlation_id: exchange.correlation_id.clone(),
-    }
+    })
 }
 
 pub fn wasm_to_exchange(wasm: WasmExchange, original: &mut Exchange) {
@@ -161,10 +161,10 @@ pub fn camel_error_to_wasm_error(error: CamelError) -> WasmError {
     }
 }
 
-fn message_to_wasm(message: &Message) -> WasmMessage {
+fn message_to_wasm(message: &Message) -> Result<WasmMessage, CamelError> {
     let headers = values_to_kv_list(&message.headers);
-    let body = body_to_wasm(&message.body);
-    WasmMessage { headers, body }
+    let body = body_to_wasm(&message.body)?;
+    Ok(WasmMessage { headers, body })
 }
 
 fn wasm_to_message(message: WasmMessage) -> Message {
@@ -201,14 +201,16 @@ fn kv_list_to_values(values: Vec<(String, String)>) -> HashMap<String, Value> {
         .collect()
 }
 
-fn body_to_wasm(body: &Body) -> WasmBody {
+fn body_to_wasm(body: &Body) -> Result<WasmBody, CamelError> {
     match body {
-        Body::Empty => WasmBody::Empty,
-        Body::Text(s) => WasmBody::Text(s.clone()),
-        Body::Bytes(b) => WasmBody::Bytes(b.to_vec()),
-        Body::Json(v) => WasmBody::Json(serde_json::to_string(v).unwrap_or_default()),
-        Body::Xml(s) => WasmBody::Xml(s.clone()),
-        Body::Stream(_) => WasmBody::Empty,
+        Body::Empty => Ok(WasmBody::Empty),
+        Body::Text(s) => Ok(WasmBody::Text(s.clone())),
+        Body::Bytes(b) => Ok(WasmBody::Bytes(b.to_vec())),
+        Body::Json(v) => Ok(WasmBody::Json(serde_json::to_string(v).unwrap_or_default())),
+        Body::Xml(s) => Ok(WasmBody::Xml(s.clone())),
+        Body::Stream(_) => Err(CamelError::ProcessorError(
+            "wasm: streaming body not supported".into(),
+        )),
     }
 }
 
@@ -240,7 +242,7 @@ mod tests {
         let mut exchange = Exchange::new(msg);
         exchange.set_property("enabled", Value::Bool(true));
 
-        let wasm = exchange_to_wasm(&exchange);
+        let wasm = exchange_to_wasm(&exchange).expect("exchange_to_wasm should succeed");
 
         assert!(matches!(wasm.input.body, WasmBody::Text(ref s) if s == "hello"));
         assert_eq!(
@@ -277,7 +279,7 @@ mod tests {
         ];
 
         for body in variants {
-            let wasm = body_to_wasm(&body);
+            let wasm = body_to_wasm(&body).expect("non-stream body should convert");
             let back = wasm_to_body(wasm);
             match (body, back) {
                 (Body::Empty, Body::Empty)
@@ -300,7 +302,7 @@ mod tests {
         msg.set_header("a", json!([1, 2, 3]));
 
         let exchange = Exchange::new(msg);
-        let wasm = exchange_to_wasm(&exchange);
+        let wasm = exchange_to_wasm(&exchange).expect("exchange_to_wasm should succeed");
 
         let mut out = Exchange::new(Message::default());
         wasm_to_exchange(wasm, &mut out);
@@ -316,14 +318,14 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_body_drops_gracefully() {
+    fn test_stream_body_returns_error() {
         let body = Body::Stream(StreamBody {
             stream: Arc::new(Mutex::new(None)),
             metadata: StreamMetadata::default(),
         });
 
-        let wasm = body_to_wasm(&body);
-        assert!(matches!(wasm, WasmBody::Empty));
+        let err = body_to_wasm(&body).expect_err("stream must return error");
+        assert!(err.to_string().contains("streaming body not supported"));
     }
 
     #[test]
@@ -331,7 +333,7 @@ mod tests {
         let exchange = Exchange::new(Message::new("in"));
         let original_id = exchange.correlation_id.clone();
 
-        let mut wasm = exchange_to_wasm(&exchange);
+        let mut wasm = exchange_to_wasm(&exchange).expect("exchange_to_wasm should succeed");
         wasm.correlation_id = "guest-changed".into();
 
         let mut target = exchange.clone();

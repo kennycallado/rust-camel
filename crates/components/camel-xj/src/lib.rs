@@ -1,12 +1,13 @@
 //! XML↔JSON conversion component powered by the xml-bridge.
 //!
 //! Endpoint URI format:
-//! `xj:<stylesheet>?direction=xml2json|json2xml`
+//! `xj:<stylesheet>?direction=xml2json|json2xml[&transformDirection=XML2JSON|JSON2XML][&resourceUri=<uri>]`
 //!
 //! Example:
 //! ```rust,ignore
 //! let xml_to_json = "xj:classpath:identity?direction=xml2json";
 //! let json_to_xml = "xj:classpath:identity?direction=json2xml";
+//! let with_options = "xj:file:///tmp/transform.xslt?direction=xml2json&transformDirection=XML2JSON&resourceUri=classpath:extra.xslt";
 //! ```
 
 mod component;

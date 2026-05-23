@@ -9,7 +9,7 @@ use camel_test::CamelTestContext;
 use tower::ServiceExt;
 
 fn ensure_xpath_registered(ctx: &mut camel_core::CamelContext) {
-    match ctx.register_language("xpath", Box::new(XPathLanguage)) {
+    match ctx.register_language("xpath", Box::new(XPathLanguage::new())) {
         Ok(()) | Err(LanguageRegistryError::AlreadyRegistered { .. }) => {}
     }
 }
@@ -36,7 +36,7 @@ async fn send_to_direct(h: &CamelTestContext, endpoint_uri: &str, exchange: Exch
         .expect("failed to send exchange to direct endpoint");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn xpath_filter_with_xml_body() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -80,7 +80,7 @@ routes:
     assert_eq!(exchanges.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn xpath_set_header_from_body() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -129,7 +129,7 @@ routes:
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn xpath_set_body_from_query() {
     let h = CamelTestContext::builder()
         .with_direct()

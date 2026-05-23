@@ -23,6 +23,30 @@ use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use camel_processor::script_mutator::ScriptMutator;
 use camel_processor::{ChoiceService, WhenClause};
 
+/// Helper to evaluate an async expression from a sync closure context.
+///
+/// These closures are stored in sync callback types (FilterPredicate, SetBody callback, etc.)
+/// but are only executed at runtime inside Tower services (async context). We use
+/// `tokio::task::block_in_place` + `Handle::block_on` to bridge the sync→async gap.
+fn await_eval(expr: &Arc<dyn Expression>, exchange: &Exchange) -> Value {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::try_current()
+            .expect("await_eval: must be called from within a tokio runtime") // allow-unwrap
+            .block_on(expr.evaluate(exchange))
+    })
+    .unwrap_or(Value::Null)
+}
+
+/// Helper to evaluate an async predicate from a sync closure context.
+fn await_matches(pred: &Arc<dyn Predicate>, exchange: &Exchange) -> bool {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::try_current()
+            .expect("await_matches: must be called from within a tokio runtime") // allow-unwrap
+            .block_on(pred.matches(exchange))
+    })
+    .unwrap_or(false)
+}
+
 use crate::lifecycle::adapters::route_compiler::compose_pipeline;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::application::route_definition::{
@@ -80,7 +104,7 @@ pub(crate) fn compile_filter_predicate(
 ) -> Result<FilterPredicate, CamelError> {
     let predicate = compile_language_predicate(languages, expression)?;
     Ok(Arc::new(move |exchange: &Exchange| {
-        predicate.matches(exchange).unwrap_or(false)
+        await_matches(&predicate, exchange)
     }))
 }
 
@@ -208,9 +232,7 @@ pub(crate) fn resolve_steps(
                     let svc = camel_processor::DynamicSetHeader::new(
                         IdentityProcessor,
                         key,
-                        move |exchange: &Exchange| {
-                            expression.evaluate(exchange).unwrap_or(Value::Null)
-                        },
+                        move |exchange: &Exchange| await_eval(&expression, exchange),
                     );
                     processors.push((BoxProcessor::new(svc), None));
                 }
@@ -229,9 +251,7 @@ pub(crate) fn resolve_steps(
                     let svc = camel_processor::DynamicSetProperty::new(
                         IdentityProcessor,
                         key,
-                        move |exchange: &Exchange| {
-                            expression.evaluate(exchange).unwrap_or(Value::Null)
-                        },
+                        move |exchange: &Exchange| await_eval(&expression, exchange),
                     );
                     processors.push((BoxProcessor::new(svc), None));
                 }
@@ -250,7 +270,7 @@ pub(crate) fn resolve_steps(
                     let svc = camel_processor::SetBody::new(
                         IdentityProcessor,
                         move |exchange: &Exchange| {
-                            let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                            let value = await_eval(&expression, exchange);
                             value_to_body(value)
                         },
                     );
@@ -338,7 +358,7 @@ pub(crate) fn resolve_steps(
                         let svc = camel_processor::SetBody::new(
                             IdentityProcessor,
                             move |exchange: &Exchange| {
-                                let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                                let value = await_eval(&expression, exchange);
                                 value_to_body(value)
                             },
                         );
@@ -389,7 +409,7 @@ pub(crate) fn resolve_steps(
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
                 let splitter =
-                    camel_processor::splitter::SplitterService::new(config, sub_pipeline);
+                    camel_processor::splitter::SplitterService::new(config, sub_pipeline)?;
                 processors.push((BoxProcessor::new(splitter), None));
             }
             BuilderStep::DeclarativeSplit {
@@ -402,7 +422,7 @@ pub(crate) fn resolve_steps(
             } => {
                 let lang_expr = compile_language_expression(languages, &expression)?;
                 let split_fn = move |exchange: &Exchange| {
-                    let value = lang_expr.evaluate(exchange).unwrap_or(Value::Null);
+                    let value = await_eval(&lang_expr, exchange);
                     match value {
                         Value::String(s) => s
                             .lines()
@@ -448,7 +468,7 @@ pub(crate) fn resolve_steps(
                     sub_pairs.into_iter().map(|(p, _)| p).collect();
                 let sub_pipeline = compose_pipeline(sub_processors);
                 let splitter =
-                    camel_processor::splitter::SplitterService::new(config, sub_pipeline);
+                    camel_processor::splitter::SplitterService::new(config, sub_pipeline)?;
                 processors.push((BoxProcessor::new(splitter), None));
             }
             BuilderStep::Aggregate { config } => {
@@ -548,7 +568,7 @@ pub(crate) fn resolve_steps(
                     let endpoint = compose_pipeline(sub_processors);
                     endpoints.push(endpoint);
                 }
-                let svc = camel_processor::MulticastService::new(endpoints, config);
+                let svc = camel_processor::MulticastService::new(endpoints, config)?;
                 processors.push((BoxProcessor::new(svc), None));
             }
             BuilderStep::DeclarativeLog { level, message } => {
@@ -562,13 +582,16 @@ pub(crate) fn resolve_steps(
                 let expression = compile_language_expression(languages, &expression)?;
                 let svc =
                     camel_processor::log::DynamicLog::new(level, move |exchange: &Exchange| {
-                        expression
-                            .evaluate(exchange)
-                            .unwrap_or_else(|e| {
-                                warn!(error = %e, "log expression evaluation failed");
-                                Value::Null
-                            })
-                            .to_string()
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::try_current()
+                                .expect("DynamicLog expression: must be called from within a tokio runtime") // allow-unwrap
+                                .block_on(expression.evaluate(exchange))
+                        })
+                        .unwrap_or_else(|e| {
+                            warn!(error = %e, "log expression evaluation failed");
+                            Value::Null
+                        })
+                        .to_string()
                     });
                 processors.push((BoxProcessor::new(svc), None));
             }
@@ -709,7 +732,7 @@ pub(crate) fn resolve_steps(
                 let expression = compile_language_expression(languages, &expression)?;
                 let expression: camel_api::RouterExpression =
                     Arc::new(move |exchange: &Exchange| {
-                        let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                        let value = await_eval(&expression, exchange);
                         match value {
                             Value::Null => None,
                             Value::String(s) => Some(s),
@@ -792,7 +815,7 @@ pub(crate) fn resolve_steps(
                 let expression = compile_language_expression(languages, &expression)?;
                 let expression: camel_api::RoutingSlipExpression =
                     Arc::new(move |exchange: &Exchange| {
-                        let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                        let value = await_eval(&expression, exchange);
                         match value {
                             Value::Null => None,
                             Value::String(s) => Some(s),
@@ -858,7 +881,7 @@ pub(crate) fn resolve_steps(
                 });
 
                 let svc =
-                    camel_processor::recipient_list::RecipientListService::new(config, resolver);
+                    camel_processor::recipient_list::RecipientListService::new(config, resolver)?;
                 processors.push((BoxProcessor::new(svc), None));
             }
             BuilderStep::DeclarativeRecipientList {
@@ -874,7 +897,7 @@ pub(crate) fn resolve_steps(
                 let expression = compile_language_expression(languages, &expression)?;
                 let expression: camel_api::recipient_list::RecipientListExpression =
                     Arc::new(move |exchange: &Exchange| {
-                        let value = expression.evaluate(exchange).unwrap_or(Value::Null);
+                        let value = await_eval(&expression, exchange);
                         match value {
                             Value::Null => String::new(),
                             Value::String(s) => s,
@@ -917,7 +940,7 @@ pub(crate) fn resolve_steps(
 
                 let _ = aggregation; // aggregation strategy name — reserved for future use
                 let svc =
-                    camel_processor::recipient_list::RecipientListService::new(config, resolver);
+                    camel_processor::recipient_list::RecipientListService::new(config, resolver)?;
                 processors.push((BoxProcessor::new(svc), None));
             }
         }
@@ -931,7 +954,7 @@ mod tests {
     use crate::lifecycle::application::route_definition::LanguageExpressionDef;
     use crate::shared::components::domain::Registry;
 
-    fn languages_with_simple() -> SharedLanguageRegistry {
+    async fn languages_with_simple() -> SharedLanguageRegistry {
         let mut map: std::collections::HashMap<String, Arc<dyn Language>> =
             std::collections::HashMap::new();
         map.insert(
@@ -941,8 +964,8 @@ mod tests {
         Arc::new(std::sync::Mutex::new(map))
     }
 
-    #[test]
-    fn resolve_language_returns_error_for_unregistered_name() {
+    #[tokio::test]
+    async fn resolve_language_returns_error_for_unregistered_name() {
         let languages = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let err = match resolve_language(&languages, "missing") {
             Ok(_) => panic!("resolve_language should fail for unregistered language"),
@@ -951,9 +974,9 @@ mod tests {
         assert!(err.to_string().contains("missing"));
     }
 
-    #[test]
-    fn compile_language_expression_and_predicate_work_for_simple_language() {
-        let languages = languages_with_simple();
+    #[tokio::test]
+    async fn compile_language_expression_and_predicate_work_for_simple_language() {
+        let languages = languages_with_simple().await;
         let expression = LanguageExpressionDef {
             language: "simple".into(),
             source: "${header.answer}".into(),
@@ -972,15 +995,15 @@ mod tests {
         let exchange = Exchange::new(msg);
 
         assert_eq!(
-            compiled_expression.evaluate(&exchange).unwrap(),
+            compiled_expression.evaluate(&exchange).await.unwrap(),
             Value::String("42".into())
         );
-        assert!(compiled_predicate.matches(&exchange).unwrap());
+        assert!(compiled_predicate.matches(&exchange).await.unwrap());
     }
 
-    #[test]
-    fn compile_filter_predicate_returns_boolean_result() {
-        let languages = languages_with_simple();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compile_filter_predicate_returns_boolean_result() {
+        let languages = languages_with_simple().await;
         let expression = LanguageExpressionDef {
             language: "simple".into(),
             source: "${header.flag} == 'yes'".into(),
@@ -993,8 +1016,8 @@ mod tests {
         assert!(predicate(&exchange));
     }
 
-    #[test]
-    fn value_to_body_covers_null_string_and_json() {
+    #[tokio::test]
+    async fn value_to_body_covers_null_string_and_json() {
         assert!(matches!(value_to_body(Value::Null), Body::Empty));
         assert!(matches!(
             value_to_body(Value::String("x".into())),
@@ -1006,9 +1029,9 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn resolve_steps_validates_declarative_loop_shape() {
-        let languages = languages_with_simple();
+    #[tokio::test]
+    async fn resolve_steps_validates_declarative_loop_shape() {
+        let languages = languages_with_simple().await;
         let producer_ctx = ProducerContext::new();
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
@@ -1062,9 +1085,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_steps_returns_component_not_found_for_to_step() {
-        let languages = languages_with_simple();
+    #[tokio::test]
+    async fn resolve_steps_returns_component_not_found_for_to_step() {
+        let languages = languages_with_simple().await;
         let producer_ctx = ProducerContext::new();
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
@@ -1087,9 +1110,9 @@ mod tests {
         assert!(err.to_string().contains("unknown"));
     }
 
-    #[test]
-    fn compile_language_expression_and_predicate_propagate_compile_errors() {
-        let languages = languages_with_simple();
+    #[tokio::test]
+    async fn compile_language_expression_and_predicate_propagate_compile_errors() {
+        let languages = languages_with_simple().await;
         let bad_expr = LanguageExpressionDef {
             language: "simple".into(),
             source: "${header.a".into(),
@@ -1120,8 +1143,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_steps_covers_non_endpoint_variants() {
+    #[tokio::test]
+    async fn resolve_steps_covers_non_endpoint_variants() {
         use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
         use std::time::Duration;
 
@@ -1130,7 +1153,7 @@ mod tests {
             source: source.into(),
         };
 
-        let languages = languages_with_simple();
+        let languages = languages_with_simple().await;
         let producer_ctx = ProducerContext::new();
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
@@ -1201,7 +1224,8 @@ mod tests {
             BuilderStep::Aggregate {
                 config: camel_api::AggregatorConfig::correlate_by("id")
                     .complete_when_size(1)
-                    .build(),
+                    .build()
+                    .unwrap(),
             },
             BuilderStep::Filter {
                 predicate: Arc::new(|_| true),

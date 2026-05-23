@@ -6,7 +6,7 @@ use camel_core::{BuilderStep, Registry, RouteDefinition};
 use camel_function::provider::fake::{FakeCall, FakeProvider, FakeProviderConfig};
 use camel_function::{FunctionConfig, FunctionRuntimeService};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn compile_route_definition_does_not_contaminate_staging_for_later_add_route() {
     let provider = std::sync::Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let mut service =
@@ -79,7 +79,7 @@ async fn compile_route_definition_does_not_contaminate_staging_for_later_add_rou
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn failed_add_route_discards_direct_add_function_staging() {
     let provider = std::sync::Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let mut service =

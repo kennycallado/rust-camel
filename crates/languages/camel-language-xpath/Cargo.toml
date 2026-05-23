@@ -13,10 +13,14 @@ categories.workspace = true
 
 [dependencies]
 camel-language-api.workspace = true
+async-trait.workspace = true
 sxd-document = "0.3"
 sxd-xpath = "0.4"
 serde_json.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

@@ -631,7 +631,8 @@ mod tests {
             BuilderStep::Aggregate {
                 config: camel_api::AggregatorConfig::correlate_by("id")
                     .complete_when_size(1)
-                    .build(),
+                    .build()
+                    .unwrap(),
             },
             BuilderStep::Filter {
                 predicate: Arc::new(|_: &Exchange| true),

@@ -17,3 +17,12 @@ pub enum LanguageError {
     #[error("feature '{feature}' not supported by language '{language}'")]
     NotSupported { feature: String, language: String },
 }
+
+impl LanguageError {
+    /// Create an `EvalError` that includes the expression being evaluated.
+    ///
+    /// This preserves the expression context in the error message for easier debugging.
+    pub fn eval_error(expr: &str, message: impl std::fmt::Display) -> Self {
+        LanguageError::EvalError(format!("in expression `{expr}`: {message}"))
+    }
+}

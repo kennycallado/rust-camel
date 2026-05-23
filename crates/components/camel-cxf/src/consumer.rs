@@ -37,13 +37,12 @@ impl CxfConsumer {
 }
 
 fn build_exchange(req: &ConsumerRequest) -> Exchange {
-    let body_bytes = req.payload.clone();
-    let body = if body_bytes.is_empty() {
+    let body = if req.payload.is_empty() {
         Body::Empty
     } else {
-        match String::from_utf8(body_bytes.clone()) {
-            Ok(s) => Body::Text(s),
-            Err(_) => Body::Bytes(bytes::Bytes::from(body_bytes)),
+        match std::str::from_utf8(&req.payload) {
+            Ok(s) => Body::Text(s.to_string()),
+            Err(_) => Body::Bytes(bytes::Bytes::from(req.payload.clone())),
         }
     };
 
@@ -77,19 +76,23 @@ fn build_exchange(req: &ConsumerRequest) -> Exchange {
     exchange
 }
 
-fn build_response_body(exchange: &Exchange) -> Vec<u8> {
+fn build_response_body(exchange: &Exchange) -> Result<Vec<u8>, CamelError> {
     let body = exchange
         .output
         .as_ref()
         .map(|m| &m.body)
         .unwrap_or(&exchange.input.body);
     match body {
-        Body::Text(s) => s.as_bytes().to_vec(),
-        Body::Xml(s) => s.as_bytes().to_vec(),
-        Body::Bytes(b) => b.to_vec(),
-        Body::Json(v) => serde_json::to_vec(v).unwrap_or_default(),
-        Body::Empty => vec![],
-        Body::Stream(_) => vec![],
+        Body::Text(s) => Ok(s.as_bytes().to_vec()),
+        Body::Xml(s) => Ok(s.as_bytes().to_vec()),
+        Body::Bytes(b) => Ok(b.to_vec()),
+        Body::Json(v) => serde_json::to_vec(v).map_err(|e| {
+            CamelError::ProcessorError(format!("JSON serialization error in CXF response: {e}"))
+        }),
+        Body::Empty => Ok(vec![]),
+        Body::Stream(_) => Err(CamelError::ProcessorError(
+            "streaming body not supported by CXF component".into(),
+        )),
     }
 }
 
@@ -235,14 +238,26 @@ impl Consumer for CxfConsumer {
 
                                     let response = match result {
                                         Ok(resp_exchange) => {
-                                            let payload = build_response_body(&resp_exchange);
-                                            ConsumerResponse {
-                                                request_id,
-                                                payload,
-                                                fault: false,
-                                                fault_code: String::new(),
-                                                fault_string: String::new(),
-                                                security_profile,
+                                            match build_response_body(&resp_exchange) {
+                                                Ok(payload) => ConsumerResponse {
+                                                    request_id,
+                                                    payload,
+                                                    fault: false,
+                                                    fault_code: String::new(),
+                                                    fault_string: String::new(),
+                                                    security_profile,
+                                                },
+                                                Err(e) => {
+                                                    error!("CXF consumer response body error: {e}");
+                                                    ConsumerResponse {
+                                                        request_id,
+                                                        payload: vec![],
+                                                        fault: true,
+                                                        fault_code: "soap:Server".to_string(),
+                                                        fault_string: e.to_string(),
+                                                        security_profile,
+                                                    }
+                                                }
                                             }
                                         }
                                         Err(e) => {
@@ -313,10 +328,14 @@ impl Consumer for CxfConsumer {
         if let Some(cancel) = self.cancel_token.take() {
             cancel.cancel();
         }
-        if let Some(handle) = self.task_handle.take()
-            && let Err(join_err) = handle.await
+        if let Some(mut handle) = self.task_handle.take()
+            && tokio::time::timeout(Duration::from_secs(5), &mut handle)
+                .await
+                .is_err()
         {
-            warn!("CXF consumer task panicked on stop: {join_err}");
+            handle.abort();
+            let _ = handle.await;
+            warn!("CXF consumer task did not stop in 5s; aborted");
         }
         Ok(())
     }
@@ -439,19 +458,51 @@ mod tests {
         assert!(consumer.stop().await.is_ok());
     }
 
+    #[tokio::test]
+    async fn test_consumer_stop_cleans_up() {
+        let pool = test_pool();
+        let mut consumer = CxfConsumer::new(pool, "test".to_string());
+
+        // Simulate the internal state that start() would set up,
+        // but without actually trying to connect to a bridge.
+        let cancel = CancellationToken::new();
+        consumer.cancel_token = Some(cancel.clone());
+
+        // Spawn a trivial task that respects cancellation.
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+            }
+        });
+        consumer.task_handle = Some(handle);
+
+        // Stop must cancel the token and await the handle within timeout.
+        let stop_result = consumer.stop().await;
+        assert!(stop_result.is_ok(), "stop should succeed: {stop_result:?}");
+        assert!(
+            consumer.task_handle.is_none(),
+            "handle should be taken after stop"
+        );
+        assert!(
+            consumer.cancel_token.is_none(),
+            "cancel should be taken after stop"
+        );
+    }
+
     #[test]
     fn build_response_body_from_text() {
         let exchange = Exchange::new(Message::new(Body::Text(
             "<response>ok</response>".to_string(),
         )));
-        let body = build_response_body(&exchange);
+        let body = build_response_body(&exchange).unwrap();
         assert_eq!(body, b"<response>ok</response>");
     }
 
     #[test]
     fn build_response_body_from_empty() {
         let exchange = Exchange::new(Message::new(Body::Empty));
-        let body = build_response_body(&exchange);
+        let body = build_response_body(&exchange).unwrap();
         assert!(body.is_empty());
     }
 
@@ -459,7 +510,7 @@ mod tests {
     fn build_response_body_from_json() {
         let json = serde_json::json!({"status": "ok", "code": 200});
         let exchange = Exchange::new(Message::new(Body::Json(json.clone())));
-        let body = build_response_body(&exchange);
+        let body = build_response_body(&exchange).unwrap();
         let expected = serde_json::to_vec(&json).unwrap();
         assert_eq!(body, expected);
     }
@@ -468,7 +519,7 @@ mod tests {
     fn build_response_body_from_xml() {
         let xml = "<soap:Envelope><soap:Body><hello>world</hello></soap:Body></soap:Envelope>";
         let exchange = Exchange::new(Message::new(Body::Xml(xml.to_string())));
-        let body = build_response_body(&exchange);
+        let body = build_response_body(&exchange).unwrap();
         assert_eq!(body, xml.as_bytes());
     }
 
@@ -476,8 +527,29 @@ mod tests {
     fn build_response_body_from_bytes() {
         let raw = b"binary\x00data\xff".to_vec();
         let exchange = Exchange::new(Message::new(Body::Bytes(bytes::Bytes::from(raw.clone()))));
-        let body = build_response_body(&exchange);
+        let body = build_response_body(&exchange).unwrap();
         assert_eq!(body, raw);
+    }
+
+    #[test]
+    fn build_response_body_stream_returns_error() {
+        use camel_component_api::StreamBody;
+        use futures::stream;
+        use tokio::sync::Mutex;
+
+        let s = stream::empty::<Result<bytes::Bytes, CamelError>>();
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(s)))),
+            metadata: Default::default(),
+        });
+        let exchange = Exchange::new(Message::new(body));
+        let result = build_response_body(&exchange);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("streaming body not supported"),
+            "got: {err}"
+        );
     }
 
     #[test]

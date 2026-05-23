@@ -64,10 +64,13 @@ impl FunctionRuntimeService {
         self.invoker.clone() as Arc<dyn FunctionInvoker>
     }
 
-    pub fn provider(&self) -> &crate::provider::container::ContainerProvider {
+    pub fn provider(&self) -> Result<&crate::provider::container::ContainerProvider, CamelError> {
         self.container_provider
             .as_ref()
-            .expect("not a container provider") // allow-unwrap
+            .map(|arc| arc.as_ref())
+            .ok_or_else(|| {
+                CamelError::Config("unsupported provider type: not a container provider".into())
+            })
     }
 
     pub fn runner_state(&self, runtime: &str) -> Option<RunnerState> {
@@ -204,6 +207,7 @@ impl Lifecycle for FunctionRuntimeService {
     }
 
     async fn start(&mut self) -> Result<(), CamelError> {
+        self.config.validate()?;
         if self.status.load(Ordering::SeqCst) == STATUS_STARTED {
             return Ok(());
         }

@@ -52,7 +52,7 @@ fn write_invalid_xslt() -> tempfile::NamedTempFile {
     xslt
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn xslt_transform_produces_expected_output() {
     init_tracing();
     let binary_path = require_xml_bridge_binary();
@@ -122,7 +122,7 @@ routes:
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn xslt_compile_error_surfaces_on_transform() {
     init_tracing();
     let binary_path = require_xml_bridge_binary();

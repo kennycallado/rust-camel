@@ -324,6 +324,15 @@ impl KubernetesPlatformService {
         }
     }
 
+    /// Construct a `KubernetesPlatformService` from the default Kubernetes client and
+    /// environment-detected identity.
+    ///
+    /// # Readiness gate fallback
+    ///
+    /// This method always installs [`NoopReadinessGate`] for the readiness gate, meaning
+    /// pod readiness condition patches are **not** emitted. To enable cluster readiness
+    /// checks, construct a [`KubernetesReadinessGate`](crate::KubernetesReadinessGate)
+    /// manually and use [`from_parts`] instead.
     pub async fn try_default(config: KubernetesPlatformConfig) -> Result<Self, PlatformError> {
         config.validate()?;
 
@@ -339,6 +348,11 @@ impl KubernetesPlatformService {
             identity.clone(),
             config,
         )?);
+
+        warn!(
+            "Kubernetes client available, but using NoopReadinessGate — \
+             cluster readiness checks disabled; use KubernetesReadinessGate for full integration"
+        );
 
         Ok(Self::from_parts(
             identity,

@@ -530,7 +530,7 @@ fn canonical_step_to_builder_step(
                 builder = builder.discard_on_timeout(discard);
             }
 
-            let mut agg_config = builder.build();
+            let mut agg_config = builder.build()?;
             if let Some(expr) = config.correlation_key {
                 use camel_api::aggregator::CorrelationStrategy;
                 agg_config.correlation = CorrelationStrategy::Expression {

@@ -14,11 +14,63 @@ use camel_component_cxf::{CxfBridgePool, CxfComponent, CxfPoolConfig, CxfProfile
 use camel_dsl::parse_yaml;
 use camel_test::CamelTestContext;
 use reqwest::StatusCode;
+use support::bridge_bg_rt;
 use support::cxf::require_cxf_bridge_binary;
 use support::send_to_direct;
 use support::wait::wait_until;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::OnceCell;
+
+/// Shared bridge pool for producer-only tests.
+///
+/// Avoids N parallel JVM/native-binary spawns when producer tests run concurrently.
+/// Consumer tests still create their own pool because each needs a unique `bind_address`.
+/// Multi-profile tests create their own pool because they use a different profile set.
+///
+/// This mirrors the `ARTEMIS` / `ARTEMIS_AUTH` pattern in `support/artemis.rs`.
+static SHARED_CXF_POOL: OnceCell<Arc<CxfBridgePool>> = OnceCell::const_new();
+
+async fn get_shared_cxf_pool() -> Arc<CxfBridgePool> {
+    SHARED_CXF_POOL
+        .get_or_init(|| async {
+            let wsdl_path = cxf_wsdl_path();
+            let pool = Arc::new(
+                CxfBridgePool::from_config(CxfPoolConfig {
+                    profiles: vec![CxfProfileConfig {
+                        name: "test_profile".to_string(),
+                        address: Some("http://localhost:8080/service".to_string()),
+                        wsdl_path,
+                        service_name: "{http://example.com/hello}HelloService".to_string(),
+                        port_name: "{http://example.com/hello}HelloPort".to_string(),
+                        security: Default::default(),
+                    }],
+                    max_bridges: 4,
+                    bridge_start_timeout_ms: 30_000,
+                    health_check_interval_ms: 5_000,
+                    bridge_cache_dir: None,
+                    version: camel_component_cxf::BRIDGE_VERSION.to_string(),
+                    bind_address: None,
+                })
+                .unwrap(),
+            );
+            // Eagerly create the bridge slot on the permanent background runtime.
+            // This ensures the tonic Channel dispatch task and health monitor are
+            // bound to a runtime that outlives all individual test runtimes, so
+            // subsequent tests that reuse this pool do not get DispatchGone.
+            let pool_init = pool.clone();
+            let _ = bridge_bg_rt()
+                .spawn(async move {
+                    pool_init
+                        .get_or_create_slot(&CxfBridgePool::slot_key())
+                        .await
+                })
+                .await;
+            pool
+        })
+        .await
+        .clone()
+}
 
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
@@ -88,8 +140,8 @@ async fn start_mock_soap_fault_service() -> SocketAddr {
     addr
 }
 
-fn shared_cxf_component() -> CxfComponent {
-    cxf_component_with_bind(None)
+async fn shared_cxf_component() -> CxfComponent {
+    CxfComponent::new(get_shared_cxf_pool().await)
 }
 
 fn cxf_component_with_bind(bind_port: Option<u16>) -> CxfComponent {
@@ -131,7 +183,7 @@ fn reserve_local_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_producer_invokes_mock_soap_service() {
     init_tracing();
     let _binary = require_cxf_bridge_binary();
@@ -141,7 +193,7 @@ async fn cxf_producer_invokes_mock_soap_service() {
     let h = CamelTestContext::builder()
         .with_direct()
         .with_mock()
-        .with_component(shared_cxf_component())
+        .with_component(shared_cxf_component().await)
         .build()
         .await;
 
@@ -179,7 +231,7 @@ async fn cxf_producer_invokes_mock_soap_service() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_consumer_receives_request_and_returns_response() {
     init_tracing();
     let _binary = require_cxf_bridge_binary();
@@ -259,7 +311,7 @@ async fn cxf_consumer_receives_request_and_returns_response() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_native_health_check_responds_within_5s() {
     init_tracing();
     let binary = require_cxf_bridge_binary();
@@ -323,7 +375,7 @@ async fn cxf_native_health_check_responds_within_5s() {
     let _ = child.wait().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_producer_handles_soap_fault_response() {
     init_tracing();
     let _binary = require_cxf_bridge_binary();
@@ -333,7 +385,7 @@ async fn cxf_producer_handles_soap_fault_response() {
     let h = CamelTestContext::builder()
         .with_direct()
         .with_mock()
-        .with_component(shared_cxf_component())
+        .with_component(shared_cxf_component().await)
         .build()
         .await;
 
@@ -391,7 +443,7 @@ async fn cxf_producer_handles_soap_fault_response() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_producer_multiple_sequential_invocations() {
     init_tracing();
     let _binary = require_cxf_bridge_binary();
@@ -401,7 +453,7 @@ async fn cxf_producer_multiple_sequential_invocations() {
     let h = CamelTestContext::builder()
         .with_direct()
         .with_mock()
-        .with_component(shared_cxf_component())
+        .with_component(shared_cxf_component().await)
         .build()
         .await;
 
@@ -447,7 +499,7 @@ async fn cxf_producer_multiple_sequential_invocations() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_consumer_returns_health_check_on_get() {
     init_tracing();
     let _binary = require_cxf_bridge_binary();
@@ -500,7 +552,7 @@ async fn cxf_consumer_returns_health_check_on_get() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_consumer_handles_malformed_soap() {
     init_tracing();
     let _binary = require_cxf_bridge_binary();
@@ -561,7 +613,7 @@ async fn cxf_consumer_handles_malformed_soap() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_consumer_concurrent_requests() {
     init_tracing();
     let _binary = require_cxf_bridge_binary();
@@ -751,7 +803,7 @@ async fn start_mock_soap_service_with_response(response_body: &'static str) -> S
 
 /// Verifies that two profiles coexist in one pool and that each profile's producer
 /// routes to the correct backend (profile A → mock A, profile B → mock B).
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_multi_profile_producer_routes_to_correct_backend() {
     init_tracing();
     let _binary = require_cxf_bridge_binary();
@@ -862,7 +914,7 @@ async fn cxf_multi_profile_producer_routes_to_correct_backend() {
 }
 
 /// Verifies that a URI without `profile=` parameter is rejected at endpoint creation.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_multi_profile_rejects_uri_without_profile() {
     init_tracing();
 
@@ -895,7 +947,7 @@ async fn cxf_multi_profile_rejects_uri_without_profile() {
 }
 
 /// Verifies that a URI referencing an unknown profile name is rejected.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn cxf_multi_profile_rejects_unknown_profile() {
     init_tracing();
 

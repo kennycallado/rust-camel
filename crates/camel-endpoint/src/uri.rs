@@ -25,11 +25,23 @@ const SENSITIVE_KEYS: &[&str] = &[
     "privatekey",
 ];
 
+fn is_sensitive_key(key: &str) -> bool {
+    SENSITIVE_KEYS.contains(&key.to_lowercase().as_str())
+}
+
+fn unwrap_raw(value: &str) -> &str {
+    if value.starts_with("RAW(") && value.ends_with(')') {
+        &value[4..value.len() - 1]
+    } else {
+        value
+    }
+}
+
 impl std::fmt::Debug for UriComponents {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut redacted_params = std::collections::HashMap::new();
         for (k, v) in &self.params {
-            if SENSITIVE_KEYS.contains(&k.to_lowercase().as_str()) {
+            if is_sensitive_key(k) {
                 redacted_params.insert(k.clone(), "***".to_string());
             } else {
                 redacted_params.insert(k.clone(), v.clone());
@@ -55,8 +67,18 @@ pub fn parse_uri(uri: &str) -> Result<UriComponents, CamelError> {
         return Err(CamelError::InvalidUri(format!("empty scheme in '{uri}'")));
     }
 
+    // EP-005: Validate scheme characters — only alphanumeric and hyphens allowed.
+    if !scheme
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(CamelError::InvalidUri(format!(
+            "invalid scheme '{scheme}': must contain only alphanumeric characters and hyphens"
+        )));
+    }
+
     let (path, params) = match rest.split_once('?') {
-        Some((path, query)) => (path, parse_query(query)),
+        Some((path, query)) => (path, parse_query(query)?),
         None => (rest, HashMap::new()),
     };
 
@@ -67,15 +89,83 @@ pub fn parse_uri(uri: &str) -> Result<UriComponents, CamelError> {
     })
 }
 
-fn parse_query(query: &str) -> HashMap<String, String> {
-    query
-        .split('&')
+fn parse_query(query: &str) -> Result<HashMap<String, String>, CamelError> {
+    let mut params = HashMap::new();
+
+    for pair in split_query_pairs(query)
+        .into_iter()
         .filter(|s| !s.is_empty())
-        .filter_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            Some((key.to_string(), value.to_string()))
-        })
-        .collect()
+    {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(CamelError::InvalidUri(format!(
+                "query parameter '{}' has no value",
+                pair
+            )));
+        };
+
+        if params.contains_key(key) {
+            return Err(CamelError::InvalidUri(format!(
+                "duplicate query parameter: {}",
+                key
+            )));
+        }
+
+        let parsed_value = if is_sensitive_key(key) {
+            unwrap_raw(value).to_string()
+        } else {
+            value.to_string()
+        };
+
+        params.insert(key.to_string(), parsed_value);
+    }
+
+    Ok(params)
+}
+
+fn split_query_pairs(query: &str) -> Vec<&str> {
+    let mut pairs = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut raw_depth = 0usize;
+
+    while i < query.len() {
+        let rest = &query[i..];
+
+        if rest.starts_with("RAW(") {
+            raw_depth += 1;
+            i += 4;
+            continue;
+        }
+
+        let ch = rest.as_bytes()[0] as char;
+        match ch {
+            ')' if raw_depth > 0 => raw_depth -= 1,
+            '&' if raw_depth == 0 => {
+                pairs.push(&query[start..i]);
+                i += 1;
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    pairs.push(&query[start..]);
+    pairs
+}
+
+/// Parse a boolean parameter from a string, case-insensitively.
+///
+/// Accepts: "true"/"True"/"TRUE"/"1"/"yes" as true,
+///          "false"/"False"/"FALSE"/"0"/"no" as false.
+pub fn parse_bool_param(s: &str) -> Result<bool, String> {
+    match s.to_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(format!("invalid boolean value: '{}'", s)),
+    }
 }
 
 #[cfg(test)]
@@ -210,5 +300,157 @@ mod tests {
             !debug_output.contains("abc123"),
             "Debug must redact 'TOKEN' (uppercase)"
         );
+    }
+
+    #[test]
+    fn test_parse_bool_param_true_variants() {
+        for val in &["true", "True", "TRUE", "1", "yes", "Yes", "YES"] {
+            assert_eq!(
+                parse_bool_param(val),
+                Ok(true),
+                "parse_bool_param('{}') should be Ok(true)",
+                val
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_bool_param_false_variants() {
+        for val in &["false", "False", "FALSE", "0", "no", "No", "NO"] {
+            assert_eq!(
+                parse_bool_param(val),
+                Ok(false),
+                "parse_bool_param('{}') should be Ok(false)",
+                val
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_bool_param_invalid() {
+        for val in &["maybe", "yes ", " true", "2", "-1", ""] {
+            assert!(
+                parse_bool_param(val).is_err(),
+                "parse_bool_param('{}') should be Err",
+                val
+            );
+        }
+    }
+
+    #[test]
+    fn test_raw_token_extracts_value() {
+        assert_eq!(unwrap_raw("RAW(p@ss!)"), "p@ss!");
+        assert_eq!(unwrap_raw("RAW(user:pass@host)"), "user:pass@host");
+    }
+
+    #[test]
+    fn test_non_raw_value_unchanged() {
+        assert_eq!(unwrap_raw("plainvalue"), "plainvalue");
+        assert_eq!(unwrap_raw("RAW(unclosed"), "RAW(unclosed");
+    }
+
+    #[test]
+    fn test_uri_with_raw_password_parses_correctly() {
+        let result = parse_uri("redis://localhost?password=RAW(p@ss!)").unwrap();
+        assert_eq!(result.params.get("password"), Some(&"p@ss!".to_string()));
+    }
+
+    #[test]
+    fn test_uri_with_raw_password_containing_ampersand_parses_correctly() {
+        let result = parse_uri("redis://localhost?password=RAW(a&b)&db=0").unwrap();
+        assert_eq!(result.params.get("password"), Some(&"a&b".to_string()));
+        assert_eq!(result.params.get("db"), Some(&"0".to_string()));
+    }
+
+    #[test]
+    fn test_uri_with_non_sensitive_raw_value_is_unchanged() {
+        let result = parse_uri("timer:tick?name=RAW(p@ss!)").unwrap();
+        assert_eq!(result.params.get("name"), Some(&"RAW(p@ss!)".to_string()));
+    }
+
+    #[test]
+    fn test_parse_uri_duplicate_query_key_returns_error() {
+        let result = parse_uri("foo:bar?key=a&key=b");
+        assert!(result.is_err());
+        match result {
+            Err(CamelError::InvalidUri(msg)) => {
+                assert_eq!(msg, "duplicate query parameter: key");
+            }
+            _ => panic!("Expected InvalidUri for duplicate key"),
+        }
+    }
+
+    #[test]
+    fn test_parse_uri_bare_query_param_returns_error() {
+        let result = parse_uri("foo:bar?flag");
+        assert!(result.is_err());
+        match result {
+            Err(CamelError::InvalidUri(msg)) => {
+                assert_eq!(msg, "query parameter 'flag' has no value");
+            }
+            _ => panic!("Expected InvalidUri for bare query parameter"),
+        }
+    }
+
+    #[test]
+    fn test_parse_uri_duplicate_key_with_raw_ampersand_returns_error() {
+        let result = parse_uri("foo:bar?password=RAW(a&b)&password=RAW(c&d)");
+        assert!(result.is_err());
+        match result {
+            Err(CamelError::InvalidUri(msg)) => {
+                assert_eq!(msg, "duplicate query parameter: password");
+            }
+            _ => panic!("Expected InvalidUri for duplicate key with RAW value"),
+        }
+    }
+
+    // EP-005: scheme validation tests
+
+    #[test]
+    fn test_valid_scheme_alphanumeric() {
+        let result = parse_uri("timer:tick").unwrap();
+        assert_eq!(result.scheme, "timer");
+    }
+
+    #[test]
+    fn test_valid_scheme_with_hyphen() {
+        let result = parse_uri("my-component:path").unwrap();
+        assert_eq!(result.scheme, "my-component");
+    }
+
+    #[test]
+    fn test_valid_scheme_alphanumeric_only() {
+        let result = parse_uri("opensearchs://host:9200/idx").unwrap();
+        assert_eq!(result.scheme, "opensearchs");
+    }
+
+    #[test]
+    fn test_invalid_scheme_with_space() {
+        let result = parse_uri("bad scheme:path");
+        assert!(result.is_err());
+        match result {
+            Err(CamelError::InvalidUri(msg)) => {
+                assert!(msg.contains("invalid scheme"), "got: {msg}");
+            }
+            _ => panic!("Expected InvalidUri for scheme with space"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_scheme_with_dot() {
+        let result = parse_uri("bad.scheme:path");
+        assert!(result.is_err());
+        match result {
+            Err(CamelError::InvalidUri(msg)) => {
+                assert!(msg.contains("invalid scheme"), "got: {msg}");
+            }
+            _ => panic!("Expected InvalidUri for scheme with dot"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_scheme_with_underscore() {
+        let result = parse_uri("bad_scheme:path");
+        assert!(result.is_err());
     }
 }

@@ -10,18 +10,36 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tower::Service;
 use tracing::{debug, error};
 
 use crate::config::{ResolvedKafkaEndpointConfig, apply_security_config};
 
-#[derive(Clone)]
+type AcquireFut =
+    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>>;
 pub struct KafkaProducer {
     config: ResolvedKafkaEndpointConfig,
     producer: Arc<FutureProducer>,
     /// Set to true when the producer is stopped or in a failed state.
     /// Used by `poll_ready` to reject calls when the producer is unusable.
     stopped: Arc<AtomicBool>,
+    semaphore: Arc<Semaphore>,
+    pending_permit: Option<OwnedSemaphorePermit>,
+    acquire_fut: AcquireFut,
+}
+
+impl Clone for KafkaProducer {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            producer: self.producer.clone(),
+            stopped: self.stopped.clone(),
+            semaphore: self.semaphore.clone(),
+            pending_permit: None,
+            acquire_fut: None,
+        }
+    }
 }
 
 impl KafkaProducer {
@@ -39,9 +57,12 @@ impl KafkaProducer {
         })?;
 
         Ok(Self {
+            semaphore: Arc::new(Semaphore::new(config.max_poll_records as usize)),
             config,
             producer: Arc::new(producer),
             stopped: Arc::new(AtomicBool::new(false)),
+            pending_permit: None,
+            acquire_fut: None,
         })
     }
 
@@ -106,6 +127,50 @@ impl KafkaProducer {
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
     }
+
+    /// Health check: verifies that the Kafka brokers are reachable by
+    /// requesting cluster metadata.
+    ///
+    /// Returns `Ok(())` if the broker connection is healthy, or an error
+    /// describing the failure. Uses a short timeout (5 s) to avoid blocking.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let producer = KafkaProducer::new(resolved_config)?;
+    /// producer.check_connection().await?;
+    /// ```
+    pub async fn check_connection(&self) -> Result<(), CamelError> {
+        use rdkafka::admin::AdminClient;
+
+        // Build a lightweight admin client to fetch metadata
+        let mut cc = ClientConfig::new();
+        cc.set("bootstrap.servers", &self.config.brokers)
+            .set("request.timeout.ms", "5000")
+            .set("client.id", &self.config.client_id);
+        apply_security_config(&self.config, &mut cc);
+
+        let admin: AdminClient<_> = cc.create().map_err(|e| {
+            CamelError::ProcessorError(format!("Health check: failed to create admin client: {e}"))
+        })?;
+
+        // fetch_metadata is available on AdminClient via the inner client
+        let metadata = admin
+            .inner()
+            .fetch_metadata(None, Duration::from_secs(5))
+            .map_err(|e| {
+                CamelError::ProcessorError(format!(
+                    "Health check: failed to fetch metadata from brokers: {e}"
+                ))
+            })?;
+
+        if metadata.brokers().is_empty() {
+            return Err(CamelError::ProcessorError(
+                "Health check: no brokers found in metadata response".into(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 impl Service<Exchange> for KafkaProducer {
@@ -113,25 +178,41 @@ impl Service<Exchange> for KafkaProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // KAFKA-007: rdkafka's FutureProducer handles internal buffer
-        // backpressure (queue-full) internally via its librdkafka queue.
-        // We cannot observe that queue depth from Rust, so we rely on
-        // rdkafka's internal backpressure. We DO check for a stopped/failed
-        // state to reject calls when the producer is known unusable.
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if self.stopped.load(Ordering::SeqCst) {
             return Poll::Ready(Err(CamelError::ProcessorError(
                 "Kafka producer is stopped".into(),
             )));
         }
-        Poll::Ready(Ok(()))
+
+        if self.pending_permit.is_some() {
+            return Poll::Ready(Ok(()));
+        }
+
+        let fut = self
+            .acquire_fut
+            .get_or_insert_with(|| Box::pin(Arc::clone(&self.semaphore).acquire_owned()));
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(Ok(permit)) => {
+                self.acquire_fut = None;
+                self.pending_permit = Some(permit);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::ChannelClosed)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let config = self.config.clone();
         let producer = self.producer.clone();
+        let permit = self.pending_permit.take();
 
         Box::pin(async move {
+            let _permit = permit.ok_or_else(|| {
+                CamelError::ProcessorError("Kafka producer call without readiness permit".into())
+            })?;
+
             let topic = Self::resolve_topic(&exchange, &config)?.to_string();
             let payload = Self::body_to_bytes(&exchange.input.body)?;
 
@@ -210,6 +291,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+    use tower::ServiceExt;
 
     fn make_resolved_config() -> ResolvedKafkaEndpointConfig {
         KafkaEndpointConfig::from_uri("kafka:test-topic?brokers=localhost:9092")
@@ -329,6 +411,9 @@ mod tests {
         let exchange = Exchange::new(Message::new(Body::Text("hello".to_string())));
 
         let err = producer
+            .ready()
+            .await
+            .expect("poll_ready should succeed")
             .call(exchange)
             .await
             .expect_err("missing topic must fail");
@@ -348,6 +433,9 @@ mod tests {
         let exchange = Exchange::new(Message::new(body));
 
         let err = producer
+            .ready()
+            .await
+            .expect("poll_ready should succeed")
             .call(exchange)
             .await
             .expect_err("stream body must fail before network send");

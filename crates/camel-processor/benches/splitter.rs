@@ -31,7 +31,7 @@ fn bench_splitter_fragments(c: &mut Criterion) {
         }))
         .aggregation(AggregationStrategy::CollectAll);
 
-        let svc = SplitterService::new(config, pass_through());
+        let svc = SplitterService::new(config, pass_through()).unwrap();
         let body = make_lines_body(count);
 
         group.bench_with_input(BenchmarkId::new("split", count), &count, |b, _| {

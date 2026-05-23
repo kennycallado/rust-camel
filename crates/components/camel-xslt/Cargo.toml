@@ -6,6 +6,15 @@ license.workspace = true
 description = "XSLT Component for rust-camel (via xml-bridge)"
 readme = "README.md"
 
+# XSLT-015: Feature flags for alternative XSLT implementations.
+# Currently all XSLT processing goes through the xml-bridge gRPC sidecar
+# (built from bridges/xslt/). Future work could add optional backends:
+#   [features]
+#   default = ["bridge"]
+#   bridge  = []                    # xml-bridge sidecar (current behaviour)
+#   native  = ["xslt-lib"]          # hypothetical native Rust XSLT via libxslt
+#   xslt-lib = { package = "some-xslt-crate", version = "x.y", optional = true }
+
 [dependencies]
 camel-api = { workspace = true }
 camel-component-api = { workspace = true }

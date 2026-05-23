@@ -9,10 +9,12 @@ pub mod compiled;
 pub mod component;
 pub mod config;
 pub mod error;
+pub mod resolver;
 pub mod xsd_bridge;
 
 pub use component::ValidatorComponent;
 pub use config::{SchemaType, ValidatorConfig};
+pub use resolver::{FilesystemResolver, ResourceResolver};
 
 /// Version of the Java XML bridge binary this crate is compatible with.
 pub const BRIDGE_VERSION: &str = "0.1.0";

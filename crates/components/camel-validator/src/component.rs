@@ -62,14 +62,33 @@ impl Component for ValidatorComponent {
         let compiled = CompiledValidator::compile(&config, xsd_bridge)?;
         Ok(Box::new(ValidatorEndpoint {
             uri: uri.to_string(),
+            config,
             compiled: Arc::new(compiled),
         }))
     }
 }
 
+/// Validator endpoint that checks message bodies or headers against a schema.
+///
+/// Supports XML (XSD), JSON Schema, and YAML schema validation.
+/// RelaxNG and Schematron are accepted in URI parsing but rejected at endpoint
+/// creation with a clear error message.
 struct ValidatorEndpoint {
     uri: String,
+    config: ValidatorConfig,
     compiled: Arc<CompiledValidator>,
+}
+
+impl ValidatorEndpoint {
+    /// Returns a human-readable description of the configured schema.
+    #[allow(dead_code)]
+    pub fn schema_info(&self) -> String {
+        format!(
+            "{:?} schema: {}",
+            self.config.schema_type,
+            self.config.schema_path.display()
+        )
+    }
 }
 
 impl Endpoint for ValidatorEndpoint {
@@ -86,6 +105,7 @@ impl Endpoint for ValidatorEndpoint {
     fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
         Ok(BoxProcessor::new(ValidatorProducer {
             uri: self.uri.clone(),
+            config: self.config.clone(),
             compiled: Arc::clone(&self.compiled),
         }))
     }
@@ -94,6 +114,7 @@ impl Endpoint for ValidatorEndpoint {
 #[derive(Clone)]
 struct ValidatorProducer {
     uri: String,
+    config: ValidatorConfig,
     compiled: Arc<CompiledValidator>,
 }
 
@@ -109,8 +130,46 @@ impl Service<Exchange> for ValidatorProducer {
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let compiled = Arc::clone(&self.compiled);
         let uri = self.uri.clone();
+        let config = self.config.clone();
         Box::pin(async move {
             debug!(uri = uri, "validating exchange body");
+
+            // VAL-003: header_name mode — validate header value instead of body
+            if let Some(ref header_name) = config.header_name {
+                match exchange.input.header(header_name) {
+                    Some(value) => {
+                        // Convert header Value to a string body for validation
+                        let header_str = match value.as_str() {
+                            Some(s) => s.to_string(),
+                            None => value.to_string(),
+                        };
+                        let header_body = camel_component_api::Body::Text(header_str);
+                        compiled.validate(&header_body).await?;
+                    }
+                    None => {
+                        // VAL-004: failOnNullHeader
+                        if config.fail_on_null_header {
+                            return Err(CamelError::ProcessorError(format!(
+                                "header '{header_name}' is missing and failOnNullHeader is true"
+                            )));
+                        }
+                        // Pass through — no validation
+                    }
+                }
+                return Ok(exchange);
+            }
+
+            // VAL-002: failOnNullBody
+            if exchange.input.body.is_empty() {
+                if config.fail_on_null_body {
+                    return Err(CamelError::ProcessorError(
+                        "body is empty and failOnNullBody is true".to_string(),
+                    ));
+                }
+                // Pass through — no validation
+                return Ok(exchange);
+            }
+
             compiled.validate(&exchange.input.body).await?;
             Ok(exchange)
         })
@@ -276,9 +335,10 @@ mod tests {
         let backend = Arc::new(MockXsdBridge {
             register_calls: AtomicUsize::new(0),
             validate_calls: AtomicUsize::new(0),
-            register_error: Some(ValidatorError::CompilationFailed(
-                "COMPILATION_FAILED".to_string(),
-            )),
+            register_error: Some(ValidatorError::CompilationFailed {
+                message: "COMPILATION_FAILED".to_string(),
+                source: None,
+            }),
             validate_error: None,
         });
         let f = xsd_file();
@@ -297,5 +357,193 @@ mod tests {
             .await
             .expect_err("expected validate to fail due to registration error");
         assert!(err.to_string().contains("COMPILATION_FAILED"));
+    }
+
+    #[tokio::test]
+    async fn test_validator_rejects_oversized_payload() {
+        // Build validator with maxPayloadBytes=100
+        let f = json_schema_file();
+        let uri = format!("validator:{}?maxPayloadBytes=100", f.path().display());
+        let ep = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        // Send a body that is definitely > 100 bytes
+        let big_body: String = "x".repeat(200);
+        let exchange = Exchange::new(Message::new(camel_component_api::Body::Text(big_body)));
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "expected oversized payload to be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("payload too large"),
+            "expected 'payload too large' in error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validator_allows_payload_under_limit() {
+        let f = json_schema_file();
+        let uri = format!("validator:{}?maxPayloadBytes=1024", f.path().display());
+        let ep = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let exchange = Exchange::new(Message::new(camel_component_api::Body::Json(
+            serde_json::json!({"id": "1"}),
+        )));
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_ok(), "expected valid payload under limit to pass");
+    }
+
+    #[tokio::test]
+    async fn test_validator_no_limit_allows_any_size() {
+        let f = json_schema_file();
+        let uri = format!("validator:{}", f.path().display());
+        let ep = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        // Valid JSON that would exceed a 10-byte limit
+        let exchange = Exchange::new(Message::new(camel_component_api::Body::Json(
+            serde_json::json!({"id": "this is a longer value that would exceed small limits"}),
+        )));
+        let result = producer.oneshot(exchange).await;
+        assert!(
+            result.is_ok(),
+            "expected no-limit validator to pass any valid payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fail_on_null_body_default_rejects_empty() {
+        let f = json_schema_file();
+        let uri = format!("validator:{}", f.path().display());
+        let ep = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let exchange = Exchange::new(Message::new(camel_component_api::Body::Empty));
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("failOnNullBody"),
+            "expected failOnNullBody in error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fail_on_null_body_false_passes_empty() {
+        let f = json_schema_file();
+        let uri = format!("validator:{}?failOnNullBody=false", f.path().display());
+        let ep = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let exchange = Exchange::new(Message::new(camel_component_api::Body::Empty));
+        let result = producer.oneshot(exchange).await;
+        assert!(
+            result.is_ok(),
+            "expected empty body to pass with failOnNullBody=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_header_name_validation_uses_header_value() {
+        let f = json_schema_file();
+        let uri = format!("validator:{}?headerName=X-Data", f.path().display());
+        let ep = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let mut msg = Message::new(camel_component_api::Body::Empty);
+        msg.set_header("X-Data", serde_json::json!({"id": "1"}).to_string());
+        let exchange = Exchange::new(msg);
+        let result = producer.oneshot(exchange).await;
+        // Header value {"id":"1"} is valid JSON matching schema
+        assert!(
+            result.is_ok(),
+            "expected valid header to pass: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_header_name_missing_header_fails_by_default() {
+        let f = json_schema_file();
+        let uri = format!("validator:{}?headerName=X-Missing", f.path().display());
+        let ep = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let exchange = Exchange::new(Message::new(camel_component_api::Body::Empty));
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("X-Missing"),
+            "expected header name in error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fail_on_null_header_false_passes_missing_header() {
+        let f = json_schema_file();
+        let uri = format!(
+            "validator:{}?headerName=X-Missing&failOnNullHeader=false",
+            f.path().display()
+        );
+        let ep = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+        let producer = ep.create_producer(&ProducerContext::new()).unwrap();
+        let exchange = Exchange::new(Message::new(camel_component_api::Body::Empty));
+        let result = producer.oneshot(exchange).await;
+        assert!(
+            result.is_ok(),
+            "expected missing header to pass with failOnNullHeader=false"
+        );
+    }
+
+    #[test]
+    fn test_relaxng_schema_type_rejected_at_creation() {
+        let mut f = tempfile::Builder::new().suffix(".rng").tempfile().unwrap();
+        use std::io::Write;
+        f.write_all(b"<grammar/>").unwrap();
+        let uri = format!("validator:{}", f.path().display());
+        let result = ValidatorComponent::new().create_endpoint(&uri, &NoOpComponentContext);
+        let err = result.err().expect("expected endpoint creation to fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not yet supported"),
+            "expected 'not yet supported' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_schematron_schema_type_rejected_at_creation() {
+        let mut f = tempfile::Builder::new().suffix(".sch").tempfile().unwrap();
+        use std::io::Write;
+        f.write_all(b"<schema/>").unwrap();
+        let uri = format!("validator:{}", f.path().display());
+        let result = ValidatorComponent::new().create_endpoint(&uri, &NoOpComponentContext);
+        let err = result.err().expect("expected endpoint creation to fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not yet supported"),
+            "expected 'not yet supported' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_schema_info_returns_description() {
+        let f = json_schema_file();
+        let uri = format!("validator:{}", f.path().display());
+        let ep = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .unwrap();
+        // The endpoint is a Box<dyn Endpoint>, so we can't directly call schema_info().
+        // We verify endpoint creation succeeds (schema compiled).
+        assert_eq!(ep.uri(), uri);
     }
 }

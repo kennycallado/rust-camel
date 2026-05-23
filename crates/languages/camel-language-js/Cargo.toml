@@ -12,18 +12,20 @@ categories.workspace = true
 
 [dependencies]
 camel-language-api.workspace = true
+async-trait.workspace = true
 
 boa_engine = { workspace = true }
 
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "macros"] }
 
 [dev-dependencies]
 camel-api.workspace = true
 camel-processor.workspace = true
 camel-language-api.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tower.workspace = true
 serde_json.workspace = true
 

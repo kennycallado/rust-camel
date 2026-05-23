@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -83,7 +84,7 @@ impl XsdBridgeRpc for GrpcXsdBridgeRpc {
     ) -> Result<RegisterSchemaResponse, ValidatorError> {
         let mut client = proto::xsd_validator_client::XsdValidatorClient::new(channel);
         let response = client.register_schema(request).await.map_err(|e| {
-            ValidatorError::Transport(format!("xml-bridge register_schema RPC failed: {e}"))
+            ValidatorError::transport_with_source("xml-bridge register_schema RPC failed", e)
         })?;
         Ok(response.into_inner())
     }
@@ -95,7 +96,7 @@ impl XsdBridgeRpc for GrpcXsdBridgeRpc {
     ) -> Result<ValidateResponse, ValidatorError> {
         let mut client = proto::xsd_validator_client::XsdValidatorClient::new(channel);
         let response = client.validate_with(request).await.map_err(|e| {
-            ValidatorError::Transport(format!("xml-bridge validate_with RPC failed: {e}"))
+            ValidatorError::transport_with_source("xml-bridge validate_with RPC failed", e)
         })?;
         Ok(response.into_inner())
     }
@@ -105,6 +106,7 @@ impl XsdBridgeRpc for GrpcXsdBridgeRpc {
 pub struct XsdBridgeBackend {
     channel: Arc<RwLock<Option<Channel>>>,
     schemas: Arc<DashMap<SchemaId, Vec<u8>>>,
+    schema_cache_max_entries: Arc<AtomicUsize>,
     slot: Arc<XmlBridgeSlot>,
     rpc: Arc<dyn XsdBridgeRpc>,
     connect_fn: Arc<ConnectFn>,
@@ -135,6 +137,9 @@ impl XsdBridgeBackend {
         Self {
             channel: Arc::new(RwLock::new(None)),
             schemas: Arc::new(DashMap::new()),
+            schema_cache_max_entries: Arc::new(AtomicUsize::new(
+                crate::config::DEFAULT_SCHEMA_CACHE_MAX_ENTRIES,
+            )),
             slot,
             rpc: Arc::new(GrpcXsdBridgeRpc),
             connect_fn: Arc::new(|port| Box::pin(connect_channel(port))),
@@ -158,6 +163,9 @@ impl XsdBridgeBackend {
         Self {
             channel: Arc::new(RwLock::new(Some(channel))),
             schemas: Arc::new(DashMap::new()),
+            schema_cache_max_entries: Arc::new(AtomicUsize::new(
+                crate::config::DEFAULT_SCHEMA_CACHE_MAX_ENTRIES,
+            )),
             slot,
             rpc,
             connect_fn,
@@ -172,6 +180,16 @@ impl XsdBridgeBackend {
         let mut hasher = Sha256::new();
         hasher.update(xsd_bytes);
         format!("xsd-{}", hex::encode(hasher.finalize()))
+    }
+
+    /// Update the maximum number of entries allowed in the schema cache.
+    /// If the cache already exceeds the new limit, it is cleared immediately.
+    pub fn set_schema_cache_max_entries(&self, max_entries: usize) {
+        if self.schemas.len() > max_entries {
+            self.schemas.clear();
+        }
+        self.schema_cache_max_entries
+            .store(max_entries, Ordering::Relaxed);
     }
 
     async fn ensure_bridge_ready(&self) -> Result<Channel, ValidatorError> {
@@ -198,7 +216,7 @@ impl XsdBridgeBackend {
             channel: channel.clone(),
         });
         self.on_reconnect(port).map_err(|e| {
-            ValidatorError::Transport(format!("xml-bridge reconnect handler failed: {e}"))
+            ValidatorError::transport_with_source("xml-bridge reconnect handler failed", e)
         })?;
 
         Ok(channel)
@@ -231,7 +249,7 @@ impl XsdBridgeBackend {
         }
 
         self.on_reconnect(port).map_err(|e| {
-            ValidatorError::Transport(format!("xml-bridge reconnect handler failed: {e}"))
+            ValidatorError::transport_with_source("xml-bridge reconnect handler failed", e)
         })?;
         let _ = self.slot.state_tx.send(BridgeState::Ready {
             channel: channel.clone(),
@@ -304,6 +322,14 @@ impl XsdBridgeBackend {
 
         if let Some(err) = response.error {
             return Err(ValidatorError::from_bridge_error(&err));
+        }
+
+        // Evict the entire cache if it has reached capacity. A full clear is
+        // acceptable because schemas are re-registered on demand and also
+        // re-seeded after bridge reconnects.
+        let max_entries = self.schema_cache_max_entries.load(Ordering::Relaxed);
+        if self.schemas.len() >= max_entries && !self.schemas.contains_key(&schema_id) {
+            self.schemas.clear();
         }
 
         self.schemas.insert(schema_id.clone(), xsd_bytes);

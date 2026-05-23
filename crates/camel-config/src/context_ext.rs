@@ -46,6 +46,7 @@ impl CamelConfig {
     /// When OTel is enabled, the OtelService is created *before* the subscriber
     /// so the LoggerProvider can be wired into the tracing bridge for log export.
     pub async fn configure_context(config: &CamelConfig) -> Result<CamelContext, CamelError> {
+        // TODO(CONFIG-004): config.watch flag is parsed, but hot-reload wiring is not implemented here yet.
         Self::configure_context_with_beans(config, None).await
     }
 
@@ -160,7 +161,9 @@ impl CamelConfig {
         let create_checker = || {
             let state = Arc::clone(&health_state);
             Arc::new(move || {
-                let guard = state.lock().unwrap(); // allow-unwrap
+                let guard = state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let services: Vec<camel_api::ServiceHealth> = guard
                     .iter()
                     .map(|(name, status_arc)| camel_api::ServiceHealth {
@@ -172,13 +175,18 @@ impl CamelConfig {
                         },
                     })
                     .collect();
-                let status = if services
+                let has_failed = services
                     .iter()
-                    .all(|s| s.status == camel_api::ServiceStatus::Started)
-                {
-                    camel_api::HealthStatus::Healthy
-                } else {
+                    .any(|s| s.status == camel_api::ServiceStatus::Failed);
+                let has_stopped = services
+                    .iter()
+                    .any(|s| s.status == camel_api::ServiceStatus::Stopped);
+                let status = if has_failed {
                     camel_api::HealthStatus::Unhealthy
+                } else if has_stopped {
+                    camel_api::HealthStatus::Degraded
+                } else {
+                    camel_api::HealthStatus::Healthy
                 };
                 camel_api::HealthReport {
                     status,
@@ -203,7 +211,7 @@ impl CamelConfig {
             prom_service.set_health_checker(create_checker());
             health_state
                 .lock()
-                .unwrap() // allow-unwrap
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(("prometheus".to_string(), prom_service.status_arc()));
             ctx = ctx.with_lifecycle(prom_service);
         }
@@ -223,7 +231,7 @@ impl CamelConfig {
                 camel_health::HealthServer::new_with_checker(addr, Some(create_checker()));
             health_state
                 .lock()
-                .unwrap() // allow-unwrap
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(("health".to_string(), health_server.status_arc()));
             ctx = ctx.with_lifecycle(health_server);
         }
@@ -391,7 +399,7 @@ impl CamelConfig {
 
         let result = tracing_subscriber::registry().with(layers).try_init();
         if result.is_err() {
-            eprintln!(
+            tracing::warn!(
                 "WARNING: OTel tracing subscriber not installed — a global subscriber \
                  was already set. OTel span/log bridge is inactive. \
                  Ensure no other crate calls tracing_subscriber::init() before camel."
@@ -487,7 +495,7 @@ impl CamelConfig {
 
         let result = tracing_subscriber::registry().with(layers).try_init();
         if result.is_err() {
-            eprintln!(
+            tracing::warn!(
                 "WARNING: Tracing subscriber not installed — a global subscriber \
                  was already set. Trace output may be incomplete."
             );

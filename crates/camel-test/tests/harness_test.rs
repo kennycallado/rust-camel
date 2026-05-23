@@ -11,7 +11,7 @@ use camel_test::CamelTestContext;
 // Test 1: Basic timer → mock via harness
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_harness_basic_timer_to_mock() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -42,7 +42,7 @@ async fn test_harness_basic_timer_to_mock() {
 // Test 2: Custom component via with_component()
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_harness_with_direct_component() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -82,7 +82,7 @@ async fn test_harness_with_direct_component() {
 // Test 3: Multiple routes in the same harness
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_harness_multiple_routes() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -126,7 +126,7 @@ async fn test_harness_multiple_routes() {
 // Test 4: Explicit stop + drop = no panic, no double-stop
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_no_double_stop_on_explicit_plus_drop() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -239,7 +239,7 @@ async fn test_time_control_exact_tick_count() {
 // Test 7: shutdown() performs deterministic teardown
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_shutdown_consumes_and_stops() {
     let h = CamelTestContext::builder()
         .with_timer()

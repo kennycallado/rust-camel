@@ -4,7 +4,7 @@ use camel_component_api::{
     BoxProcessor, CamelError, Component, ComponentContext, Consumer, Endpoint, ProducerContext,
 };
 
-use crate::config::parse_grpc_uri;
+use crate::config::{GrpcConfig, parse_grpc_uri};
 use crate::consumer::{GrpcConsumer, resolve_grpc_mode};
 use crate::producer::GrpcProducer;
 
@@ -33,7 +33,7 @@ impl Component for GrpcComponent {
         _ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let (host, port, service_name, method_name, cfg) = parse_grpc_uri(uri)?;
-        let proto_file = cfg.proto_file.ok_or_else(|| {
+        let proto_file = cfg.proto_file.clone().ok_or_else(|| {
             CamelError::EndpointCreationFailed(
                 "missing required query parameter: protoFile".to_string(),
             )
@@ -47,6 +47,8 @@ impl Component for GrpcComponent {
             proto_path: PathBuf::from(proto_file),
             service_name,
             method_name,
+            deadline_ms: cfg.deadline_ms,
+            config: cfg,
         }))
     }
 }
@@ -59,6 +61,8 @@ struct GrpcEndpoint {
     proto_path: PathBuf,
     service_name: String,
     method_name: String,
+    deadline_ms: Option<u64>,
+    config: GrpcConfig,
 }
 
 impl Endpoint for GrpcEndpoint {
@@ -88,6 +92,8 @@ impl Endpoint for GrpcEndpoint {
             self.service_name.clone(),
             self.method_name.clone(),
             mode,
+            self.deadline_ms,
+            &self.config,
         )?;
         Ok(BoxProcessor::new(producer))
     }

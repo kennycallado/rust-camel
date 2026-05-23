@@ -9,4 +9,8 @@ pub mod server;
 
 pub use bundle::GrpcBundle;
 pub use component::GrpcComponent;
+pub use config::{
+    AuthConfig, ConsumerStrategy, GrpcConfig, GrpcServerConfig, InterceptorConfig,
+    ProducerStrategy, TlsConfig,
+};
 pub use mode::GrpcMode;

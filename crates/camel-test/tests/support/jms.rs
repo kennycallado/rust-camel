@@ -7,6 +7,7 @@ use tokio::sync::OnceCell;
 
 use super::activemq::shared_activemq;
 use super::artemis::{shared_artemis, shared_artemis_auth};
+use super::bridge_bg_rt;
 
 /// Shared JmsComponent backed by ActiveMQ Classic.
 /// Cloning this component shares the same underlying bridge process, so
@@ -21,9 +22,10 @@ static JMS_ARTEMIS_AUTH: OnceCell<JmsComponent> = OnceCell::const_new();
 
 /// Returns a clone of the shared ActiveMQ-backed JmsComponent.
 ///
-/// All callers share the same bridge process. The bridge is started eagerly
-/// during init so that pure-producer tests do not hit a cold bridge on their
-/// first send attempt.
+/// All callers share the same bridge process. The bridge slot is created
+/// eagerly on the permanent background runtime so that the tonic Channel
+/// dispatch task and health monitor are never killed when a test runtime
+/// is dropped between tests (prevents DispatchGone errors).
 pub async fn shared_jms_activemq() -> JmsComponent {
     JMS_ACTIVEMQ
         .get_or_init(|| async {
@@ -44,10 +46,13 @@ pub async fn shared_jms_activemq() -> JmsComponent {
             };
 
             let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
-            // Eagerly start the bridge so gRPC + JMS-broker connection are both
-            // established before any test timer fires. Errors are surfaced when
-            // the individual test tries to use JMS.
-            let _ = pool.get_or_create_slot("default").await;
+            // Eagerly start the bridge slot on the permanent background runtime so
+            // the tonic Channel dispatch task and health monitor outlive all
+            // individual test runtimes.
+            let pool_init = pool.clone();
+            let _ = bridge_bg_rt()
+                .spawn(async move { pool_init.get_or_create_slot("default").await })
+                .await;
             JmsComponent::with_scheme("jms", pool)
         })
         .await
@@ -75,8 +80,11 @@ pub async fn shared_jms_artemis() -> JmsComponent {
             };
 
             let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
-            // Eagerly start the bridge — same reason as shared_jms_activemq.
-            let _ = pool.get_or_create_slot("default").await;
+            // Eagerly start the bridge slot on the permanent background runtime.
+            let pool_init = pool.clone();
+            let _ = bridge_bg_rt()
+                .spawn(async move { pool_init.get_or_create_slot("default").await })
+                .await;
             JmsComponent::with_scheme("jms", pool)
         })
         .await
@@ -104,6 +112,11 @@ pub async fn shared_jms_artemis_auth() -> JmsComponent {
             };
 
             let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
+            // Eagerly start the bridge slot on the permanent background runtime.
+            let pool_init = pool.clone();
+            let _ = bridge_bg_rt()
+                .spawn(async move { pool_init.get_or_create_slot("default").await })
+                .await;
             JmsComponent::with_scheme("jms", pool)
         })
         .await

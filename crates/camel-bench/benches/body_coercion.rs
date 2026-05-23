@@ -7,6 +7,8 @@ fn noop() -> BoxProcessor {
     BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) }))
 }
 
+/// Benchmarks body-type coercion overhead: Json→Text conversion for single-step,
+/// no-contract, and mixed-contract (3-step) pipelines.
 fn bench_body_coercion(c: &mut Criterion) {
     let mut group = c.benchmark_group("integration/body_coercion");
     let rt = tokio::runtime::Runtime::new().unwrap();

@@ -1,18 +1,22 @@
-//! Rhai scripting language for rust-camel — sandboxed script evaluation with configurable operation and module limits.
+//! camel-language-rhai — Rhai script language for Camel Rust.
 //!
 //! Main types: `RhaiLanguage`, `RhaiExpression`, `RhaiPredicate`, `RhaiMutatingExpression`.
 //! Scripts have access to `body`, `headers`, `header()`, `set_header()`, `property()`, `set_property()`.
 //!
+//! # Sandboxing status
+//!
+//! Scripts are resource-limited (max 100 000 operations) and the `eval` and `import`
+//! symbols are disabled. Full filesystem/network sandboxing is not yet applied —
+//! see TODO(RHL-001) in `create_base_engine`.
+//!
 //! # Limitations
 //!
-//! - Scripts run in a sandboxed Rhai engine with no access to the host filesystem, network,
-//!   or OS interfaces. Only the exchange API exposed via built-in functions is available.
-//! - Rhai modules and `import` statements are disabled; each script is self-contained.
 //! - Resource limits are enforced (default: 100 000 operations, 1 MB strings, 10 000-element
 //!   arrays/maps). Scripts exceeding these limits will fail with an `EvalError`.
 //! - The `body` variable is always a string. Structured access to JSON/XML bodies requires
 //!   explicit parsing within the script using Rhai's built-in map/array types.
 
+use async_trait::async_trait;
 use camel_language_api::{
     Body, Exchange, Expression, Language, LanguageError, MutatingExpression, Predicate, Value,
 };
@@ -69,6 +73,13 @@ impl RhaiLanguage {
         engine.set_max_string_size(DEFAULT_MAX_STRING_SIZE);
         engine.set_max_array_size(DEFAULT_MAX_ARRAY_SIZE);
         engine.set_max_map_size(DEFAULT_MAX_MAP_SIZE);
+        // TODO(RHL-001): Full sandboxing is not yet applied. The engine currently
+        // allows file I/O, network access, and other host OS interactions via
+        // Rhai's built-in packages. To fully sandbox, register a custom `Module`
+        // that whitelists only safe operations, or call `engine.disable_symbol`
+        // for each dangerous symbol (e.g., `import`, `eval`, `File`, `http`).
+        engine.disable_symbol("eval");
+        engine.disable_symbol("import");
         engine
     }
 
@@ -252,14 +263,16 @@ struct RhaiPredicate {
     script: String,
 }
 
+#[async_trait]
 impl Expression for RhaiExpression {
-    fn evaluate(&self, exchange: &Exchange) -> Result<Value, LanguageError> {
+    async fn evaluate(&self, exchange: &Exchange) -> Result<Value, LanguageError> {
         RhaiLanguage::eval_to_value(&self.script, exchange)
     }
 }
 
+#[async_trait]
 impl Predicate for RhaiPredicate {
-    fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
+    async fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
         let val = RhaiLanguage::eval_to_value(&self.script, exchange)?;
         Ok(match &val {
             Value::Bool(b) => *b,
@@ -295,8 +308,9 @@ struct RhaiMutatingExpression {
     script: String,
 }
 
+#[async_trait]
 impl MutatingExpression for RhaiMutatingExpression {
-    fn evaluate(&self, exchange: &mut Exchange) -> Result<Value, LanguageError> {
+    async fn evaluate(&self, exchange: &mut Exchange) -> Result<Value, LanguageError> {
         // 1. Snapshot original state for rollback on error
         let original_headers = exchange.input.headers.clone();
         let original_properties = exchange.properties.clone();
@@ -443,46 +457,46 @@ mod tests {
         Exchange::new(Message::new(body))
     }
 
-    #[test]
-    fn test_rhai_predicate_simple() {
+    #[tokio::test]
+    async fn test_rhai_predicate_simple() {
         let lang = RhaiLanguage::new();
         let pred = lang
             .create_predicate(r#"header("type") == "order""#)
             .unwrap();
         let ex = exchange_with_header("type", "order");
-        assert!(pred.matches(&ex).unwrap());
+        assert!(pred.matches(&ex).await.unwrap());
     }
 
-    #[test]
-    fn test_rhai_predicate_false() {
+    #[tokio::test]
+    async fn test_rhai_predicate_false() {
         let lang = RhaiLanguage::new();
         let pred = lang
             .create_predicate(r#"header("type") == "order""#)
             .unwrap();
         let ex = exchange_with_header("type", "invoice");
-        assert!(!pred.matches(&ex).unwrap());
+        assert!(!pred.matches(&ex).await.unwrap());
     }
 
-    #[test]
-    fn test_rhai_expression_body() {
+    #[tokio::test]
+    async fn test_rhai_expression_body() {
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression("body").unwrap();
         let ex = exchange_with_body("hello");
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::String("hello".to_string()));
     }
 
-    #[test]
-    fn test_rhai_expression_concat() {
+    #[tokio::test]
+    async fn test_rhai_expression_concat() {
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression(r#"body + " world""#).unwrap();
         let ex = exchange_with_body("hello");
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::String("hello world".to_string()));
     }
 
-    #[test]
-    fn test_rhai_set_header_visible_within_script() {
+    #[tokio::test]
+    async fn test_rhai_set_header_visible_within_script() {
         let lang = RhaiLanguage::new();
         let expr = lang
             .create_expression(
@@ -493,22 +507,22 @@ mod tests {
             )
             .unwrap();
         let ex = exchange_with_body("test");
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::String("yes".to_string()));
     }
 
-    #[test]
-    fn test_rhai_property_access() {
+    #[tokio::test]
+    async fn test_rhai_property_access() {
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression(r#"property("myProp")"#).unwrap();
         let mut ex = exchange_with_body("test");
         ex.set_property("myProp".to_string(), Value::String("propVal".to_string()));
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::String("propVal".to_string()));
     }
 
-    #[test]
-    fn test_rhai_set_property_visible_within_script() {
+    #[tokio::test]
+    async fn test_rhai_set_property_visible_within_script() {
         let lang = RhaiLanguage::new();
         let expr = lang
             .create_expression(
@@ -519,42 +533,42 @@ mod tests {
             )
             .unwrap();
         let ex = exchange_with_body("test");
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::String("value".to_string()));
     }
 
-    #[test]
-    fn test_rhai_missing_header_returns_null() {
+    #[tokio::test]
+    async fn test_rhai_missing_header_returns_null() {
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression(r#"header("nonexistent")"#).unwrap();
         let ex = exchange_with_body("test");
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::Null);
     }
 
-    #[test]
-    fn test_rhai_syntax_error() {
+    #[tokio::test]
+    async fn test_rhai_syntax_error() {
         let lang = RhaiLanguage::new();
         let result = lang.create_expression("let x = ;");
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_rhai_runtime_error() {
-        let lang = RhaiLanguage::new();
+    #[tokio::test]
+    async fn test_rhai_runtime_error() {
         // Calling a nonexistent function will produce a runtime error
+        let lang = RhaiLanguage::new();
         let expr = lang.create_expression(r#"nonexistent_fn()"#).unwrap();
         let ex = exchange_with_body("test");
-        let result = expr.evaluate(&ex);
+        let result = expr.evaluate(&ex).await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_rhai_eval_error_contains_location_info() {
+    #[tokio::test]
+    async fn test_rhai_eval_error_contains_location_info() {
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression("nonexistent_fn()").unwrap();
         let ex = exchange_with_body("test");
-        let err = expr.evaluate(&ex).unwrap_err();
+        let err = expr.evaluate(&ex).await.unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("rhai evaluation error"),
@@ -562,15 +576,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_rhai_operations_limit_prevents_infinite_loop() {
+    #[tokio::test]
+    async fn test_rhai_operations_limit_prevents_infinite_loop() {
         let lang = RhaiLanguage::new();
         // This script would loop forever without the operations limit
         let expr = lang
             .create_expression("let x = 0; loop { x += 1; } x")
             .unwrap();
         let ex = exchange_with_body("test");
-        let result = expr.evaluate(&ex);
+        let result = expr.evaluate(&ex).await;
         assert!(result.is_err(), "should error due to operations limit");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -579,28 +593,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_rhai_empty_body() {
+    #[tokio::test]
+    async fn test_rhai_empty_body() {
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression("body").unwrap();
         let ex = Exchange::new(Message::default());
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::String("".to_string()));
     }
 
-    #[test]
-    fn test_rhai_numeric_header() {
+    #[tokio::test]
+    async fn test_rhai_numeric_header() {
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression(r#"header("count") + 1"#).unwrap();
         let mut msg = Message::default();
         msg.set_header("count", Value::Number(41.into()));
         let ex = Exchange::new(msg);
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::from(42));
     }
 
-    #[test]
-    fn test_rhai_json_array_header_is_native_array() {
+    #[tokio::test]
+    async fn test_rhai_json_array_header_is_native_array() {
         // json_to_dynamic should convert JSON arrays to native Rhai arrays,
         // not to their string representation.
         let lang = RhaiLanguage::new();
@@ -615,7 +629,7 @@ mod tests {
             ]),
         );
         let ex = Exchange::new(msg);
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(
             val,
             Value::from(3_i64),
@@ -623,8 +637,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_rhai_json_object_header_is_native_map() {
+    #[tokio::test]
+    async fn test_rhai_json_object_header_is_native_map() {
         // json_to_dynamic should convert JSON objects to native Rhai maps.
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression(r#"header("obj")["key"]"#).unwrap();
@@ -633,48 +647,48 @@ mod tests {
         let obj: Value = r#"{"key": "value"}"#.parse().unwrap();
         msg.set_header("obj", obj);
         let ex = Exchange::new(msg);
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::String("value".to_string()));
     }
 
-    #[test]
-    fn test_mutating_set_header_propagates_to_exchange() {
+    #[tokio::test]
+    async fn test_mutating_set_header_propagates_to_exchange() {
         let lang = RhaiLanguage::new();
         let expr = lang
             .create_mutating_expression(r#"headers["tenant"] = "acme""#)
             .unwrap();
         let mut ex = Exchange::new(Message::default());
-        expr.evaluate(&mut ex).unwrap();
+        expr.evaluate(&mut ex).await.unwrap();
         assert_eq!(
             ex.input.headers.get("tenant"),
             Some(&Value::String("acme".into()))
         );
     }
 
-    #[test]
-    fn test_mutating_set_body_propagates_to_exchange() {
+    #[tokio::test]
+    async fn test_mutating_set_body_propagates_to_exchange() {
         let lang = RhaiLanguage::new();
         let expr = lang
             .create_mutating_expression(r#"body = "modified""#)
             .unwrap();
         let mut ex = Exchange::new(Message::new("original"));
-        expr.evaluate(&mut ex).unwrap();
+        expr.evaluate(&mut ex).await.unwrap();
         assert_eq!(ex.input.body.as_text(), Some("modified"));
     }
 
-    #[test]
-    fn test_mutating_set_property_propagates_to_exchange() {
+    #[tokio::test]
+    async fn test_mutating_set_property_propagates_to_exchange() {
         let lang = RhaiLanguage::new();
         let expr = lang
             .create_mutating_expression(r#"properties["auth"] = "ok""#)
             .unwrap();
         let mut ex = Exchange::new(Message::default());
-        expr.evaluate(&mut ex).unwrap();
+        expr.evaluate(&mut ex).await.unwrap();
         assert_eq!(ex.properties.get("auth"), Some(&Value::String("ok".into())));
     }
 
-    #[test]
-    fn test_mutating_rollback_on_error() {
+    #[tokio::test]
+    async fn test_mutating_rollback_on_error() {
         let lang = RhaiLanguage::new();
         let expr = lang
             .create_mutating_expression(r#"headers["x"] = "modified"; throw "error""#)
@@ -683,7 +697,7 @@ mod tests {
         ex.input
             .headers
             .insert("x".to_string(), Value::String("original".into()));
-        let result = expr.evaluate(&mut ex);
+        let result = expr.evaluate(&mut ex).await;
         assert!(result.is_err());
         assert_eq!(
             ex.input.headers.get("x"),
@@ -691,20 +705,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_mutating_rollback_on_error_includes_body() {
+    #[tokio::test]
+    async fn test_mutating_rollback_on_error_includes_body() {
         let lang = RhaiLanguage::new();
         let expr = lang
             .create_mutating_expression(r#"body = "modified"; throw "error""#)
             .unwrap();
         let mut ex = Exchange::new(Message::new("original"));
-        let result = expr.evaluate(&mut ex);
+        let result = expr.evaluate(&mut ex).await;
         assert!(result.is_err());
         assert_eq!(ex.input.body.as_text(), Some("original"));
     }
 
-    #[test]
-    fn test_mutating_rollback_on_error_includes_property() {
+    #[tokio::test]
+    async fn test_mutating_rollback_on_error_includes_property() {
         let lang = RhaiLanguage::new();
         let expr = lang
             .create_mutating_expression(r#"properties["p"] = "modified"; throw "error""#)
@@ -712,7 +726,7 @@ mod tests {
         let mut ex = Exchange::new(Message::default());
         ex.properties
             .insert("p".to_string(), Value::String("original".into()));
-        let result = expr.evaluate(&mut ex);
+        let result = expr.evaluate(&mut ex).await;
         assert!(result.is_err());
         assert_eq!(
             ex.properties.get("p"),
@@ -720,8 +734,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_mutating_combined_read_write() {
+    #[tokio::test]
+    async fn test_mutating_combined_read_write() {
         let lang = RhaiLanguage::new();
         let expr = lang
             .create_mutating_expression(r#"headers["out"] = headers["in"] + "_processed""#)
@@ -730,7 +744,7 @@ mod tests {
         ex.input
             .headers
             .insert("in".to_string(), Value::String("value".into()));
-        expr.evaluate(&mut ex).unwrap();
+        expr.evaluate(&mut ex).await.unwrap();
         assert_eq!(
             ex.input.headers.get("out"),
             Some(&Value::String("value_processed".into()))

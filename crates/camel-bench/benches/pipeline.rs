@@ -34,23 +34,28 @@ fn build_pipeline() -> BoxProcessor {
         Some(noop()),
     ));
 
-    let splitter = BoxProcessor::new(SplitterService::new(
-        SplitterConfig::new(split_body(|body: &Body| match body {
-            Body::Text(text) => text
-                .split(',')
-                .map(|s| Body::Text(s.trim().to_string()))
-                .collect(),
-            _ => vec![],
-        }))
-        .aggregation(AggregationStrategy::CollectAll),
-        noop(),
-    ));
+    let splitter = BoxProcessor::new(
+        SplitterService::new(
+            SplitterConfig::new(split_body(|body: &Body| match body {
+                Body::Text(text) => text
+                    .split(',')
+                    .map(|s| Body::Text(s.trim().to_string()))
+                    .collect(),
+                _ => vec![],
+            }))
+            .aggregation(AggregationStrategy::CollectAll),
+            noop(),
+        )
+        .unwrap(),
+    );
 
     let log = BoxProcessor::new(LogProcessor::new(LogLevel::Info, "bench-log".to_string()));
 
     compose_pipeline(vec![filter, choice, splitter, log])
 }
 
+/// Benchmarks a 4-stage pipeline (filter → choice → splitter → log)
+/// to measure end-to-end latency of composed EIP patterns with headers.
 fn bench_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("integration/pipeline");
     let rt = tokio::runtime::Runtime::new().unwrap();

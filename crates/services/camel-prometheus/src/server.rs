@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tracing::info;
 
+use camel_api::CamelError;
 use camel_api::HealthChecker;
 
 use crate::PrometheusMetrics;
@@ -12,15 +14,15 @@ use crate::PrometheusMetrics;
 pub struct MetricsServer;
 
 impl MetricsServer {
-    pub async fn run(addr: SocketAddr, metrics: Arc<PrometheusMetrics>) {
-        Self::run_with_health_checker(addr, metrics, None).await;
+    pub async fn run(addr: SocketAddr, metrics: Arc<PrometheusMetrics>) -> Result<(), CamelError> {
+        Self::run_with_health_checker(addr, metrics, None).await
     }
 
     pub async fn run_with_health_checker(
         addr: SocketAddr,
         metrics: Arc<PrometheusMetrics>,
         checker: Option<HealthChecker>,
-    ) {
+    ) -> Result<(), CamelError> {
         let health = camel_health::health_router(checker, None, None);
         let app = Router::new()
             .route("/metrics", get(Self::metrics_handler))
@@ -29,21 +31,26 @@ impl MetricsServer {
 
         let listener = tokio::net::TcpListener::bind(addr)
             .await
-            .unwrap_or_else(|e| panic!("Failed to bind to {}: {}", addr, e));
+            .map_err(|e| CamelError::Io(format!("Failed to bind to {addr}: {e}")))?;
 
         info!("Prometheus metrics server listening on {}", addr);
-        axum::serve(listener, app).await.unwrap(); // allow-unwrap
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| CamelError::Io(format!("Prometheus server failed: {e}")))
     }
 
-    pub async fn run_with_listener(listener: TcpListener, metrics: Arc<PrometheusMetrics>) {
-        Self::run_with_listener_and_health_checker(listener, metrics, None).await;
+    pub async fn run_with_listener(
+        listener: TcpListener,
+        metrics: Arc<PrometheusMetrics>,
+    ) -> Result<(), CamelError> {
+        Self::run_with_listener_and_health_checker(listener, metrics, None).await
     }
 
     pub async fn run_with_listener_and_health_checker(
         listener: TcpListener,
         metrics: Arc<PrometheusMetrics>,
         checker: Option<HealthChecker>,
-    ) {
+    ) -> Result<(), CamelError> {
         let health = camel_health::health_router(checker, None, None);
         let app = Router::new()
             .route("/metrics", get(Self::metrics_handler))
@@ -54,7 +61,39 @@ impl MetricsServer {
             "Prometheus metrics server listening on {}",
             listener.local_addr().unwrap() // allow-unwrap
         );
-        axum::serve(listener, app).await.unwrap(); // allow-unwrap
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| CamelError::Io(format!("Prometheus server failed: {e}")))
+    }
+
+    pub async fn run_with_listener_and_health_checker_with_shutdown(
+        listener: TcpListener,
+        metrics: Arc<PrometheusMetrics>,
+        checker: Option<HealthChecker>,
+        shutdown: oneshot::Receiver<()>,
+    ) -> Result<(), CamelError> {
+        let health = camel_health::health_router(checker, None, None);
+        let app = Router::new()
+            .route("/metrics", get(Self::metrics_handler))
+            .with_state(metrics)
+            .merge(health);
+
+        info!(
+            "Prometheus metrics server listening on {}",
+            listener.local_addr().unwrap() // allow-unwrap
+        );
+
+        #[cfg(test)]
+        let shutdown_signal_count = test_graceful_shutdown_signal_count();
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown.await;
+                #[cfg(test)]
+                shutdown_signal_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .await
+            .map_err(|e| CamelError::Io(format!("Prometheus server failed: {e}")))
     }
 
     async fn metrics_handler(State(metrics): State<Arc<PrometheusMetrics>>) -> impl IntoResponse {
@@ -80,6 +119,24 @@ pub async fn metrics_handler(metrics: Arc<PrometheusMetrics>) -> MetricsResponse
         content_type: "text/plain; version=0.0.4".to_string(),
         body: output,
     }
+}
+
+#[cfg(test)]
+static GRACEFUL_SHUTDOWN_SIGNAL_COUNT: std::sync::OnceLock<
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub fn test_graceful_shutdown_signal_count() -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    std::sync::Arc::clone(
+        GRACEFUL_SHUTDOWN_SIGNAL_COUNT
+            .get_or_init(|| std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0))),
+    )
+}
+
+#[cfg(test)]
+pub fn test_reset_graceful_shutdown_observability() {
+    test_graceful_shutdown_signal_count().store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -167,5 +224,40 @@ mod tests {
         assert_eq!(not_found.status().as_u16(), 404);
 
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_signal_observed() {
+        let metrics = Arc::new(PrometheusMetrics::new());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let handle = tokio::spawn(
+            MetricsServer::run_with_listener_and_health_checker_with_shutdown(
+                listener,
+                metrics,
+                None,
+                shutdown_rx,
+            ),
+        );
+
+        sleep(Duration::from_millis(30)).await;
+        let _ = shutdown_tx.send(());
+
+        let join = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("server did not shutdown in time")
+            .expect("join should succeed");
+        assert!(join.is_ok(), "server run should return Ok, got: {join:?}");
+    }
+
+    #[tokio::test]
+    async fn test_run_returns_err_on_bind_failure() {
+        let metrics = Arc::new(PrometheusMetrics::new());
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = occupied.local_addr().unwrap();
+
+        let result = MetricsServer::run(addr, metrics).await;
+        assert!(result.is_err(), "expected bind failure, got {result:?}");
     }
 }

@@ -7,6 +7,8 @@ use thiserror::Error;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::CamelError;
+
 /// Node identity in the platform environment.
 /// In Kubernetes: pod name, namespace, labels from Downward API.
 /// In local/test: hostname or user-supplied string.
@@ -120,9 +122,9 @@ pub trait PlatformService: Send + Sync {
 ///   3. `HealthSource::readiness()` — fallback when no override active
 #[async_trait]
 pub trait ReadinessGate: Send + Sync {
-    async fn notify_ready(&self);
-    async fn notify_not_ready(&self, reason: &str);
-    async fn notify_starting(&self);
+    async fn notify_ready(&self) -> Result<(), CamelError>;
+    async fn notify_not_ready(&self, reason: &str) -> Result<(), CamelError>;
+    async fn notify_starting(&self) -> Result<(), CamelError>;
 }
 
 /// No-op leadership service.
@@ -210,9 +212,15 @@ pub struct NoopReadinessGate;
 
 #[async_trait]
 impl ReadinessGate for NoopReadinessGate {
-    async fn notify_ready(&self) {}
-    async fn notify_not_ready(&self, _reason: &str) {}
-    async fn notify_starting(&self) {}
+    async fn notify_ready(&self) -> Result<(), CamelError> {
+        Ok(())
+    }
+    async fn notify_not_ready(&self, _reason: &str) -> Result<(), CamelError> {
+        Ok(())
+    }
+    async fn notify_starting(&self) -> Result<(), CamelError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -294,9 +302,9 @@ mod tests {
     #[tokio::test]
     async fn test_noop_readiness_gate_all_methods() {
         let gate = NoopReadinessGate;
-        gate.notify_starting().await;
-        gate.notify_not_ready("test").await;
-        gate.notify_ready().await;
+        gate.notify_starting().await.unwrap();
+        gate.notify_not_ready("test").await.unwrap();
+        gate.notify_ready().await.unwrap();
     }
 
     #[test]

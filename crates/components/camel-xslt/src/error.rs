@@ -6,6 +6,8 @@ pub enum XsltError {
     TransformFailed(String),
     #[error("bridge error: {0}")]
     Bridge(String),
+    #[error("bridge transport error ({code:?}): {message}")]
+    BridgeTransport { code: tonic::Code, message: String },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -65,13 +65,18 @@ impl BodyWire {
         }
     }
 
-    pub fn to_patch_body(self) -> camel_api::function::PatchBody {
+    pub fn to_patch_body(self) -> Result<camel_api::function::PatchBody, camel_api::CamelError> {
         use camel_api::function::PatchBody;
         match self {
-            BodyWire::Empty => PatchBody::Empty,
-            BodyWire::Text(s) => PatchBody::Text(s),
-            BodyWire::Json(v) => PatchBody::Json(v),
-            BodyWire::Bytes(_) | BodyWire::Xml(_) => PatchBody::Empty,
+            BodyWire::Empty => Ok(PatchBody::Empty),
+            BodyWire::Text(s) => Ok(PatchBody::Text(s)),
+            BodyWire::Json(v) => Ok(PatchBody::Json(v)),
+            BodyWire::Bytes(_) => Err(camel_api::CamelError::ProcessorError(
+                "unsupported body type for function: Bytes".into(),
+            )),
+            BodyWire::Xml(_) => Err(camel_api::CamelError::ProcessorError(
+                "unsupported body type for function: Xml".into(),
+            )),
         }
     }
 }
@@ -116,13 +121,16 @@ pub struct PatchWire {
 }
 
 impl PatchWire {
-    pub fn to_exchange_patch(self) -> camel_api::function::ExchangePatch {
-        camel_api::function::ExchangePatch {
-            body: self.body.map(BodyWire::to_patch_body),
+    pub fn to_exchange_patch(
+        self,
+    ) -> Result<camel_api::function::ExchangePatch, camel_api::CamelError> {
+        let body = self.body.map(BodyWire::to_patch_body).transpose()?;
+        Ok(camel_api::function::ExchangePatch {
+            body,
             headers_set: self.headers_set,
             headers_removed: self.headers_removed,
             properties_set: self.properties_set,
-        }
+        })
     }
 }
 

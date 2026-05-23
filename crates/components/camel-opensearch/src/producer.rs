@@ -2,29 +2,63 @@ use camel_component_api::{Body, CamelError, Exchange};
 use opensearch::auth::Credentials;
 use opensearch::http::response::Response;
 use opensearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
+use opensearch::indices::IndicesDeleteParts;
 use opensearch::{
-    BulkParts, DeleteParts, GetParts, IndexParts, MgetParts, OpenSearch, SearchParts, UpdateParts,
+    BulkParts, DeleteParts, ExistsParts, GetParts, IndexParts, MgetParts, OpenSearch, SearchParts,
+    UpdateParts,
 };
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tokio::sync::{AcquireError, Mutex, OwnedSemaphorePermit, Semaphore};
 use tower::Service;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::config::{OpenSearchEndpointConfig, OpenSearchOperation};
+
+/// Classifies an HTTP status code as transient (retryable) or permanent.
+///
+/// - **5xx** → transient (server-side issue, may self-heal)
+/// - **4xx** → permanent (client-side error, retrying won't help)
+/// - Network-level failures (no status code) are also transient.
+fn is_transient(status: u16) -> bool {
+    status >= 500
+}
 
 /// OpenSearch producer that implements Tower `Service<Exchange>` for integration
 /// with rust-camel pipelines.
 ///
 /// Manages a shared `OpenSearch` client that is created lazily on first use
 /// and reused across multiple calls.
-#[derive(Clone)]
 pub struct OpenSearchProducer {
     config: OpenSearchEndpointConfig,
     /// Shared OpenSearch client — created lazily on first use
     client: Arc<Mutex<Option<OpenSearch>>>,
+    /// Semaphore bounding concurrent in-flight requests.
+    semaphore: Arc<Semaphore>,
+    /// Permit acquired in poll_ready and held until call completes.
+    pending_permit: Option<OwnedSemaphorePermit>,
+    /// Pinned permit acquisition future.
+    acquire_fut: Option<AcquirePermitFut>,
+}
+
+const DEFAULT_CONCURRENCY_LIMIT: usize = 128;
+type AcquirePermitFut =
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
+
+impl Clone for OpenSearchProducer {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            client: Arc::clone(&self.client),
+            semaphore: Arc::clone(&self.semaphore),
+            pending_permit: None,
+            acquire_fut: None,
+        }
+    }
 }
 
 impl OpenSearchProducer {
@@ -35,6 +69,9 @@ impl OpenSearchProducer {
         Self {
             config,
             client: Arc::new(Mutex::new(None)),
+            semaphore: Arc::new(Semaphore::new(DEFAULT_CONCURRENCY_LIMIT)),
+            pending_permit: None,
+            acquire_fut: None,
         }
     }
 
@@ -51,6 +88,7 @@ impl OpenSearchProducer {
         if let (Some(username), Some(password)) = (&config.username, &config.password) {
             builder = builder.auth(Credentials::Basic(username.clone(), password.clone()));
         }
+        // TODO(OS-018): AWS SigV4 signing deferred; requires AWS SDK/signing dependency.
         let transport = builder.build().map_err(|e| {
             error!(endpoint = %url, error = %e, "opensearch client init failed");
             CamelError::EndpointCreationFailed(format!("Failed to build transport: {}", e))
@@ -116,9 +154,14 @@ impl OpenSearchProducer {
                 .and_then(|e| e.get("reason"))
                 .and_then(|r| r.as_str())
                 .unwrap_or("unknown error");
+            let classification = if is_transient(status) {
+                "transient"
+            } else {
+                "permanent"
+            };
             return Err(CamelError::ProcessorError(format!(
-                "OpenSearch error ({}): {}",
-                status, reason
+                "OpenSearch error ({}): {} [{}]",
+                status, reason, classification
             )));
         }
         Ok(body)
@@ -128,6 +171,64 @@ impl OpenSearchProducer {
     fn build_response(mut exchange: Exchange, result: serde_json::Value) -> Exchange {
         exchange.input.body = Body::from(result);
         exchange
+    }
+
+    fn build_bulk_lines(
+        config: &OpenSearchEndpointConfig,
+        body: serde_json::Value,
+    ) -> Result<Vec<String>, CamelError> {
+        let lines: Vec<String> = match body {
+            serde_json::Value::Array(arr) => arr
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    CamelError::ProcessorError(format!("Failed to serialize bulk body: {}", e))
+                })?,
+            other => vec![serde_json::to_string(&other).map_err(|e| {
+                CamelError::ProcessorError(format!("Failed to serialize bulk body: {}", e))
+            })?],
+        };
+
+        if let Some(max_bulk_bytes) = config.max_bulk_bytes {
+            let total_bytes: usize = lines.iter().map(|line| line.len() + 1).sum();
+            if total_bytes > max_bulk_bytes {
+                return Err(CamelError::ProcessorError(format!(
+                    "bulk payload size {} exceeds max_bulk_bytes {}",
+                    total_bytes, max_bulk_bytes
+                )));
+            }
+        }
+
+        Ok(lines)
+    }
+
+    fn apply_search_pagination(
+        config: &OpenSearchEndpointConfig,
+        mut body: serde_json::Value,
+    ) -> serde_json::Value {
+        if let serde_json::Value::Object(ref mut map) = body {
+            if let Some(size) = config.size {
+                map.entry("size").or_insert_with(|| serde_json::json!(size));
+            }
+            if let Some(from) = config.from {
+                map.entry("from").or_insert_with(|| serde_json::json!(from));
+            }
+        }
+        body
+    }
+
+    async fn run_with_timeout<F, T>(
+        config: &OpenSearchEndpointConfig,
+        fut: F,
+    ) -> Result<T, CamelError>
+    where
+        F: Future<Output = Result<T, CamelError>>,
+    {
+        let timeout = Duration::from_millis(config.timeout_ms.unwrap_or(30_000));
+        tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| CamelError::ProcessorError("opensearch request timed out".to_string()))?
     }
 
     // --- Operation implementations ---
@@ -161,9 +262,9 @@ impl OpenSearchProducer {
             }
         }
         .map_err(|e| {
-            error!(index = %config.index_name, error = %e, "index operation failed");
+            warn!(index = %config.index_name, error = %e, "index operation failed");
             CamelError::ProcessorError(format!(
-                "Index request failed for index '{}': {}",
+                "[opensearch] index '{}' operation failed: {}",
                 config.index_name, e
             ))
         })?;
@@ -177,7 +278,11 @@ impl OpenSearchProducer {
         exchange: &Exchange,
     ) -> Result<serde_json::Value, CamelError> {
         debug!(index = %config.index_name, "searching");
-        let body = Self::extract_body(exchange)?;
+        // TODO(OS-017): scroll query support deferred; requires dedicated API surface.
+        // TODO(OS-018): search-after pagination not yet supported; requires passing
+        //   a `search_after` sort values array in the request body and iterating
+        //   until no hits are returned. See OpenSearch `search_after` documentation.
+        let body = Self::apply_search_pagination(config, Self::extract_body(exchange)?);
 
         let response = client
             .search(SearchParts::Index(&[&config.index_name]))
@@ -185,9 +290,9 @@ impl OpenSearchProducer {
             .send()
             .await
             .map_err(|e| {
-                error!(index = %config.index_name, error = %e, "search failed");
+                warn!(index = %config.index_name, error = %e, "search failed");
                 CamelError::ProcessorError(format!(
-                    "Search request failed for index '{}': {}",
+                    "[opensearch] search '{}' operation failed: {}",
                     config.index_name, e
                 ))
             })?;
@@ -216,9 +321,9 @@ impl OpenSearchProducer {
             .send()
             .await
             .map_err(|e| {
-                error!(index = %config.index_name, error = %e, "get failed");
+                warn!(index = %config.index_name, error = %e, "get failed");
                 CamelError::ProcessorError(format!(
-                    "Get request failed for index '{}', id '{}': {}",
+                    "[opensearch] get '{}' operation failed for id '{}': {}",
                     config.index_name, doc_id, e
                 ))
             })?;
@@ -247,9 +352,9 @@ impl OpenSearchProducer {
             .send()
             .await
             .map_err(|e| {
-                error!(index = %config.index_name, error = %e, "delete failed");
+                warn!(index = %config.index_name, error = %e, "delete failed");
                 CamelError::ProcessorError(format!(
-                    "Delete request failed for index '{}', id '{}': {}",
+                    "[opensearch] delete '{}' operation failed for id '{}': {}",
                     config.index_name, doc_id, e
                 ))
             })?;
@@ -281,9 +386,9 @@ impl OpenSearchProducer {
             .send()
             .await
             .map_err(|e| {
-                error!(index = %config.index_name, error = %e, "update failed");
+                warn!(index = %config.index_name, error = %e, "update failed");
                 CamelError::ProcessorError(format!(
-                    "Update request failed for index '{}', id '{}': {}",
+                    "[opensearch] update '{}' operation failed for id '{}': {}",
                     config.index_name, doc_id, e
                 ))
             })?;
@@ -297,24 +402,12 @@ impl OpenSearchProducer {
         exchange: &Exchange,
     ) -> Result<serde_json::Value, CamelError> {
         debug!(index = %config.index_name, "bulk operation");
+        // TODO(OS-017): Bulk API currently accepts a flat JSON array of action+doc
+        //   pairs. A structured BulkOperation enum (index/create/update/delete actions
+        //   with per-action metadata like `_id`, `_source`, routing) is not yet
+        //   implemented. See the OpenSearch Bulk API for the NDJSON format.
         let body = Self::extract_body(exchange)?;
-
-        // Convert JSON value to NDJSON lines (Vec<String>)
-        let lines: Vec<String> = match body {
-            serde_json::Value::Array(arr) => arr
-                .iter()
-                .map(serde_json::to_string)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    CamelError::ProcessorError(format!("Failed to serialize bulk body: {}", e))
-                })?,
-            other => {
-                // Single value — serialize as one NDJSON line
-                vec![serde_json::to_string(&other).map_err(|e| {
-                    CamelError::ProcessorError(format!("Failed to serialize bulk body: {}", e))
-                })?]
-            }
-        };
+        let lines = Self::build_bulk_lines(config, body)?;
 
         let response = client
             .bulk(BulkParts::Index(&config.index_name))
@@ -322,9 +415,9 @@ impl OpenSearchProducer {
             .send()
             .await
             .map_err(|e| {
-                error!(index = %config.index_name, error = %e, "bulk operation failed");
+                warn!(index = %config.index_name, error = %e, "bulk operation failed");
                 CamelError::ProcessorError(format!(
-                    "Bulk request failed for index '{}': {}",
+                    "[opensearch] bulk '{}' operation failed: {}",
                     config.index_name, e
                 ))
             })?;
@@ -346,14 +439,76 @@ impl OpenSearchProducer {
             .send()
             .await
             .map_err(|e| {
-                error!(index = %config.index_name, error = %e, "multiget failed");
+                warn!(index = %config.index_name, error = %e, "multiget failed");
                 CamelError::ProcessorError(format!(
-                    "MultiGet request failed for index '{}': {}",
+                    "[opensearch] multiget '{}' operation failed: {}",
                     config.index_name, e
                 ))
             })?;
 
         Self::read_response(response).await
+    }
+    async fn execute_exists(
+        client: &OpenSearch,
+        config: &OpenSearchEndpointConfig,
+        exchange: &Exchange,
+    ) -> Result<serde_json::Value, CamelError> {
+        debug!(index = %config.index_name, "checking document existence");
+        let doc_id = exchange
+            .input
+            .header("CamelOpenSearch.Id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                CamelError::ProcessorError(
+                    "Missing CamelOpenSearch.Id header for EXISTS operation".to_string(),
+                )
+            })?;
+
+        let response = client
+            .exists(ExistsParts::IndexId(&config.index_name, doc_id))
+            .send()
+            .await
+            .map_err(|e| {
+                warn!(index = %config.index_name, error = %e, "exists failed");
+                CamelError::ProcessorError(format!(
+                    "[opensearch] exists '{}' operation failed for id '{}': {}",
+                    config.index_name, doc_id, e
+                ))
+            })?;
+
+        Ok(serde_json::json!({
+            "exists": response.status_code().as_u16() == 200,
+            "status": response.status_code().as_u16()
+        }))
+    }
+
+    async fn execute_delete_index(
+        client: &OpenSearch,
+        config: &OpenSearchEndpointConfig,
+    ) -> Result<serde_json::Value, CamelError> {
+        debug!(index = %config.index_name, "deleting index");
+        let response = client
+            .indices()
+            .delete(IndicesDeleteParts::Index(&[&config.index_name]))
+            .send()
+            .await
+            .map_err(|e| {
+                warn!(index = %config.index_name, error = %e, "delete index failed");
+                CamelError::ProcessorError(format!(
+                    "[opensearch] delete_index '{}' operation failed: {}",
+                    config.index_name, e
+                ))
+            })?;
+        Self::read_response(response).await
+    }
+
+    async fn execute_ping(client: &OpenSearch) -> Result<serde_json::Value, CamelError> {
+        debug!("pinging opensearch");
+        let response = client.ping().send().await.map_err(|e| {
+            warn!(error = %e, "ping failed");
+            CamelError::ProcessorError(format!("[opensearch] ping operation failed: {}", e))
+        })?;
+        Ok(serde_json::json!({"ok": response.status_code().is_success()}))
     }
 }
 
@@ -362,16 +517,38 @@ impl Service<Exchange> for OpenSearchProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    fn poll_ready(
-        &mut self,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.pending_permit.is_some() {
+            return Poll::Ready(Ok(()));
+        }
+
+        let fut = self
+            .acquire_fut
+            .get_or_insert_with(|| Box::pin(Arc::clone(&self.semaphore).acquire_owned()));
+
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(Ok(permit)) => {
+                self.acquire_fut = None;
+                self.pending_permit = Some(permit);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::Stopped)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
+    /// Delivery semantics: at-least-once.
+    ///
+    /// If call returns `Ok`, request reached OpenSearch and response decoded.
+    /// If call returns `Err`, exchange failed and upstream error handler/retry policy
+    /// decides retries. Producer itself performs no internal retries.
     fn call(&mut self, req: Exchange) -> Self::Future {
         let client = self.client.clone();
         let config = self.config.clone();
+        let _permit = self
+            .pending_permit
+            .take()
+            .expect("call() after poll_ready()"); // allow-unwrap
 
         Box::pin(async move {
             let os_client = {
@@ -386,31 +563,47 @@ impl Service<Exchange> for OpenSearchProducer {
             let operation = Self::resolve_operation(&req, &config);
             debug!(operation = %operation, "opensearch call dispatched");
 
-            let result = match operation {
-                OpenSearchOperation::INDEX => {
-                    Self::execute_index(&os_client, &config, &req).await?
-                }
-                OpenSearchOperation::SEARCH => {
-                    Self::execute_search(&os_client, &config, &req).await?
-                }
-                OpenSearchOperation::GET => Self::execute_get(&os_client, &config, &req).await?,
-                OpenSearchOperation::DELETE => {
-                    Self::execute_delete(&os_client, &config, &req).await?
-                }
-                OpenSearchOperation::UPDATE => {
-                    Self::execute_update(&os_client, &config, &req).await?
-                }
-                OpenSearchOperation::BULK => Self::execute_bulk(&os_client, &config, &req).await?,
-                OpenSearchOperation::MULTIGET => {
-                    Self::execute_multiget(&os_client, &config, &req).await?
-                }
-                OpenSearchOperation::UNKNOWN(op) => {
-                    return Err(CamelError::ProcessorError(format!(
+            let result = Self::run_with_timeout(&config, async {
+                match operation {
+                    OpenSearchOperation::INDEX => {
+                        Self::execute_index(&os_client, &config, &req).await
+                    }
+                    OpenSearchOperation::SEARCH => {
+                        Self::execute_search(&os_client, &config, &req).await
+                    }
+                    OpenSearchOperation::GET => Self::execute_get(&os_client, &config, &req).await,
+                    OpenSearchOperation::DELETE => {
+                        Self::execute_delete(&os_client, &config, &req).await
+                    }
+                    OpenSearchOperation::EXISTS => {
+                        Self::execute_exists(&os_client, &config, &req).await
+                    }
+                    OpenSearchOperation::UPDATE => {
+                        Self::execute_update(&os_client, &config, &req).await
+                    }
+                    OpenSearchOperation::BULK => {
+                        Self::execute_bulk(&os_client, &config, &req).await
+                    }
+                    OpenSearchOperation::MULTIGET => {
+                        Self::execute_multiget(&os_client, &config, &req).await
+                    }
+                    OpenSearchOperation::DELETEINDEX => {
+                        Self::execute_delete_index(&os_client, &config).await
+                    }
+                    OpenSearchOperation::MULTISEARCH => {
+                        // TODO(OS-016): msearch not yet implemented in producer dispatch.
+                        Err(CamelError::ProcessorError(
+                            "MULTI_SEARCH operation not implemented yet".to_string(),
+                        ))
+                    }
+                    OpenSearchOperation::PING => Self::execute_ping(&os_client).await,
+                    OpenSearchOperation::UNKNOWN(op) => Err(CamelError::ProcessorError(format!(
                         "Unsupported operation: {}",
                         op
-                    )));
+                    ))),
                 }
-            };
+            })
+            .await?;
 
             Ok(Self::build_response(req, result))
         })
@@ -611,6 +804,27 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_opensearch_bulk_size_limit() {
+        let mut config =
+            OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
+        config.max_bulk_bytes = Some(100);
+
+        let payload = serde_json::json!([
+            {"index": {"_id": "1"}},
+            {"message": "this document is intentionally larger than one hundred bytes to trigger bulk limit"}
+        ]);
+
+        let err = OpenSearchProducer::build_bulk_lines(&config, payload)
+            .err()
+            .expect("bulk payload should exceed max_bulk_bytes");
+
+        assert!(
+            err.to_string().contains("max_bulk_bytes"),
+            "expected bulk size limit error, got: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn test_poll_ready_always_returns_ready() {
         let config =
@@ -628,5 +842,33 @@ mod tests {
 
         let response = OpenSearchProducer::build_response(exchange, result.clone());
         assert_eq!(response.input.body, Body::Json(result));
+    }
+
+    // ── OS-004: Transient vs permanent failure classification ─────────────────
+
+    #[test]
+    fn test_is_transient_classifies_5xx_as_transient() {
+        assert!(is_transient(500));
+        assert!(is_transient(502));
+        assert!(is_transient(503));
+        assert!(is_transient(599));
+    }
+
+    #[test]
+    fn test_is_transient_classifies_4xx_as_permanent() {
+        assert!(!is_transient(400));
+        assert!(!is_transient(401));
+        assert!(!is_transient(403));
+        assert!(!is_transient(404));
+        assert!(!is_transient(409));
+        assert!(!is_transient(422));
+    }
+
+    #[test]
+    fn test_is_transient_classifies_success_as_permanent() {
+        assert!(!is_transient(200));
+        assert!(!is_transient(201));
+        assert!(!is_transient(204));
+        assert!(!is_transient(301));
     }
 }

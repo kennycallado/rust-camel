@@ -202,40 +202,42 @@ pub trait StepAccumulator: Sized {
 
     /// Marshal the message body using the specified data format.
     ///
-    /// Supported formats: `"json"`, `"xml"`. Panics if the format name is unknown.
+    /// Supported formats: `"json"`, `"xml"`. Returns `Err(CamelError::Config)` if
+    /// the format name is unknown.
     /// Converts a structured body (e.g., `Body::Json`) to a wire-format body (e.g., `Body::Text`).
     ///
     /// # Example
     /// ```ignore
-    /// route.marshal("json").to("direct:next")
+    /// route.marshal("json")?.to("direct:next")
     /// ```
-    fn marshal(mut self, format: impl Into<String>) -> Self {
+    fn marshal(mut self, format: impl Into<String>) -> Result<Self, CamelError> {
         let name = format.into();
-        let df =
-            builtin_data_format(&name).unwrap_or_else(|| panic!("unknown data format: '{name}'"));
+        let df = builtin_data_format(&name)
+            .ok_or_else(|| CamelError::Config(format!("unknown data format: '{name}'")))?;
         let svc = MarshalService::new(IdentityProcessor, df);
         self.steps_mut()
             .push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
+        Ok(self)
     }
 
     /// Unmarshal the message body using the specified data format.
     ///
-    /// Supported formats: `"json"`, `"xml"`. Panics if the format name is unknown.
+    /// Supported formats: `"json"`, `"xml"`. Returns `Err(CamelError::Config)` if
+    /// the format name is unknown.
     /// Converts a wire-format body (e.g., `Body::Text`) to a structured body (e.g., `Body::Json`).
     ///
     /// # Example
     /// ```ignore
-    /// route.unmarshal("json").to("direct:next")
+    /// route.unmarshal("json")?.to("direct:next")
     /// ```
-    fn unmarshal(mut self, format: impl Into<String>) -> Self {
+    fn unmarshal(mut self, format: impl Into<String>) -> Result<Self, CamelError> {
         let name = format.into();
-        let df =
-            builtin_data_format(&name).unwrap_or_else(|| panic!("unknown data format: '{name}'"));
+        let df = builtin_data_format(&name)
+            .ok_or_else(|| CamelError::Config(format!("unknown data format: '{name}'")))?;
         let svc = UnmarshalService::new(IdentityProcessor, df);
         self.steps_mut()
             .push(BuilderStep::Processor(BoxProcessor::new(svc)));
-        self
+        Ok(self)
     }
 
     /// Validate the exchange body against a schema file.
@@ -295,6 +297,9 @@ pub trait StepAccumulator: Sized {
 ///     .to("log:info?showHeaders=true")
 ///     .build()?;
 /// ```
+// TODO(BUILDER-003): RouteBuilder does not support clone-and-reuse semantics.
+// Once built, the builder is consumed. Add `Clone` or a `fork()` method to allow
+// reusing a partially-built route as a template for multiple routes.
 pub struct RouteBuilder {
     from_uri: String,
     steps: Vec<BuilderStep>,
@@ -614,12 +619,12 @@ impl RouteBuilder {
     }
 
     /// Consume the builder and produce a [`RouteDefinition`].
+    // TODO(BUILDER-006): Validate duplicate route IDs. When a route with the same
+    // ID is already registered in the context, return `Err(CamelError::RouteError)`.
+    // Currently, duplicate IDs are silently accepted; detection should happen at
+    // `CamelContext::add_route_definition` time.
     pub fn build(self) -> Result<RouteDefinition, CamelError> {
-        if self.from_uri.is_empty() {
-            return Err(CamelError::RouteError(
-                "route must have a 'from' URI".to_string(),
-            ));
-        }
+        validate_uri(&self.from_uri)?;
         let route_id = self
             .route_id
             .filter(|s| !s.trim().is_empty())
@@ -702,11 +707,7 @@ impl RouteBuilder {
 
     /// Compile this builder route into canonical v1 spec.
     pub fn build_canonical(self) -> Result<CanonicalRouteSpec, CamelError> {
-        if self.from_uri.is_empty() {
-            return Err(CamelError::RouteError(
-                "route must have a 'from' URI".to_string(),
-            ));
-        }
+        validate_uri(&self.from_uri)?;
         let route_id = self
             .route_id
             .filter(|s| !s.trim().is_empty())
@@ -755,6 +756,8 @@ impl OnExceptionBuilder {
             retry.initial_delay = initial;
             retry.multiplier = multiplier;
             retry.max_delay = max;
+        } else {
+            tracing::warn!("backoff/jitter configuration has no effect when retry_count is 0");
         }
         self
     }
@@ -762,6 +765,8 @@ impl OnExceptionBuilder {
     pub fn with_jitter(mut self, jitter_factor: f64) -> Self {
         if let Some(ref mut retry) = self.policy.retry {
             retry.jitter_factor = jitter_factor.clamp(0.0, 1.0);
+        } else {
+            tracing::warn!("backoff/jitter configuration has no effect when retry_count is 0");
         }
         self
     }
@@ -777,6 +782,28 @@ impl OnExceptionBuilder {
         }
         self.parent
     }
+}
+
+/// Validate that a URI is non-empty and contains a scheme component.
+fn validate_uri(uri: &str) -> Result<(), CamelError> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return Err(CamelError::RouteError(
+            "route must have a 'from' URI".to_string(),
+        ));
+    }
+    if !trimmed.contains(':') {
+        return Err(CamelError::RouteError(
+            "URI must have a scheme (e.g. 'timer:tick')".to_string(),
+        ));
+    }
+    let scheme = trimmed.split(':').next().unwrap_or("");
+    if scheme.trim().is_empty() {
+        return Err(CamelError::RouteError(
+            "URI scheme must not be empty".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn canonicalize_steps(steps: Vec<BuilderStep>) -> Result<Vec<CanonicalStepSpec>, CamelError> {
@@ -1460,6 +1487,56 @@ mod tests {
     }
 
     #[test]
+    fn test_build_rejects_schemeless_uri() {
+        let result = RouteBuilder::from("no-scheme-here")
+            .route_id("test-route")
+            .build();
+        match result {
+            Err(err) => {
+                let err_msg = format!("{err}");
+                assert!(
+                    err_msg.contains("scheme"),
+                    "expected scheme-related error, got: {err_msg}"
+                );
+            }
+            Ok(_) => panic!("schemeless URI should fail"),
+        }
+    }
+
+    #[test]
+    fn test_build_rejects_empty_scheme_uri() {
+        let result = RouteBuilder::from(":missing-scheme")
+            .route_id("test-route")
+            .build();
+        match result {
+            Err(err) => {
+                let err_msg = format!("{err}");
+                assert!(
+                    err_msg.contains("scheme"),
+                    "expected scheme-related error, got: {err_msg}"
+                );
+            }
+            Ok(_) => panic!("empty-scheme URI should fail"),
+        }
+    }
+
+    #[test]
+    fn test_build_accepts_valid_uri() {
+        let result = RouteBuilder::from("timer:tick")
+            .route_id("test-route")
+            .build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_build_canonical_rejects_schemeless_uri() {
+        let result = RouteBuilder::from("no-scheme-here")
+            .route_id("test-route")
+            .build_canonical();
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_builder_to_adds_step() {
         let definition = RouteBuilder::from("timer:tick")
             .route_id("test-route")
@@ -2002,7 +2079,8 @@ mod tests {
             .aggregate(
                 AggregatorConfig::correlate_by("key")
                     .complete_when_size(2)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build()
             .unwrap();
@@ -2026,7 +2104,8 @@ mod tests {
             .aggregate(
                 AggregatorConfig::correlate_by("key")
                     .complete_when_size(1)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .end_split()
             .build()
@@ -2720,6 +2799,7 @@ mod tests {
         let definition = RouteBuilder::from("timer:tick")
             .route_id("test-route")
             .marshal("json")
+            .unwrap()
             .build()
             .unwrap();
         assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
@@ -2730,6 +2810,7 @@ mod tests {
         let definition = RouteBuilder::from("timer:tick")
             .route_id("test-route")
             .unmarshal("json")
+            .unwrap()
             .build()
             .unwrap();
         assert!(matches!(&definition.steps()[0], BuilderStep::Processor(_)));
@@ -2762,21 +2843,43 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "unknown data format: 'csv'")]
-    fn test_builder_marshal_panics_on_unknown_format() {
-        let _ = RouteBuilder::from("timer:tick")
+    fn test_builder_marshal_returns_err_for_unknown_format() {
+        let result = RouteBuilder::from("timer:tick")
             .route_id("test-route")
-            .marshal("csv")
-            .build();
+            .marshal("csv");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("marshal with unknown format should return Err"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown data format"),
+            "error should mention unknown format, got: {msg}"
+        );
+        assert!(
+            msg.contains("csv"),
+            "error should mention format name, got: {msg}"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "unknown data format: 'csv'")]
-    fn test_builder_unmarshal_panics_on_unknown_format() {
-        let _ = RouteBuilder::from("timer:tick")
+    fn test_builder_unmarshal_returns_err_for_unknown_format() {
+        let result = RouteBuilder::from("timer:tick")
             .route_id("test-route")
-            .unmarshal("csv")
-            .build();
+            .unmarshal("csv");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("unmarshal with unknown format should return Err"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown data format"),
+            "error should mention unknown format, got: {msg}"
+        );
+        assert!(
+            msg.contains("csv"),
+            "error should mention format name, got: {msg}"
+        );
     }
 
     #[test]
@@ -3097,7 +3200,8 @@ mod tests {
                 AggregatorConfig::correlate_by("key")
                     .complete_when_size(2)
                     .strategy(AggregationStrategy::Custom(Arc::new(|_, ex| ex)))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build_canonical()
             .unwrap_err();
@@ -3442,7 +3546,8 @@ mod tests {
             .aggregate(
                 AggregatorConfig::correlate_by("key")
                     .complete_on_size_or_timeout(10, Duration::from_secs(30))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build_canonical()
             .unwrap();
@@ -3462,7 +3567,8 @@ mod tests {
             .aggregate(
                 AggregatorConfig::correlate_by("key")
                     .complete_on_timeout(Duration::from_millis(500))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build_canonical()
             .unwrap();
@@ -3487,7 +3593,8 @@ mod tests {
                 AggregatorConfig::correlate_by("key")
                     .complete_when_size(1)
                     .discard_on_timeout(true)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build_canonical()
             .unwrap();
@@ -3509,7 +3616,8 @@ mod tests {
                 AggregatorConfig::correlate_by("key")
                     .complete_when_size(1)
                     .force_completion_on_stop(true)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build_canonical()
             .unwrap();
@@ -3534,7 +3642,8 @@ mod tests {
                     .complete_when_size(1)
                     .max_buckets(100)
                     .bucket_ttl(Duration::from_secs(60))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .build_canonical()
             .unwrap();
@@ -3636,7 +3745,8 @@ mod tests {
             .aggregate(
                 AggregatorConfig::correlate_by("frag-key")
                     .complete_when_size(3)
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .end_split()
             .build()
@@ -3894,5 +4004,55 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err}").contains("predicate completion"));
+    }
+
+    // ── BUILDER-004: Validation errors for missing required fields ────────────
+
+    #[test]
+    fn test_builder_validation_missing_from_uri() {
+        let result = RouteBuilder::from("")
+            .route_id("missing-uri-route")
+            .to("log:info")
+            .build();
+        assert!(result.is_err(), "empty from URI should fail validation");
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("'from'") || err.contains("URI"),
+            "error should mention from/URI, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_builder_validation_invalid_step_uri_scheme() {
+        let result = RouteBuilder::from("timer:tick")
+            .route_id("bad-step-route")
+            .to("not-a-valid-uri") // no scheme
+            .build();
+        // The builder itself accepts any URI string; validation happens at
+        // resolution time. Verify the build succeeds (step URI is deferred).
+        assert!(
+            result.is_ok(),
+            "builder should accept opaque step URIs; resolution happens later"
+        );
+    }
+
+    // ── BUILDER-006: Duplicate route IDs ──────────────────────────────────────
+
+    #[test]
+    fn test_builder_duplicate_route_ids_produce_identical_definitions() {
+        // The builder itself doesn't check for duplicates (that's context-level).
+        // Verify both builds succeed with the same ID — detection is TODO(BUILDER-006).
+        let route1 = RouteBuilder::from("direct:a")
+            .route_id("dup-route")
+            .to("mock:out")
+            .build();
+        let route2 = RouteBuilder::from("direct:b")
+            .route_id("dup-route")
+            .to("mock:out")
+            .build();
+
+        assert!(route1.is_ok());
+        assert!(route2.is_ok());
+        assert_eq!(route1.unwrap().route_id(), route2.unwrap().route_id());
     }
 }

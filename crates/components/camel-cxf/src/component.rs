@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use camel_component_api::{
     BoxProcessor, CamelError, Component, Consumer, Endpoint, ProducerContext,
 };
@@ -21,6 +22,7 @@ impl CxfComponent {
     }
 }
 
+#[async_trait]
 impl Component for CxfComponent {
     fn scheme(&self) -> &str {
         "cxf"
@@ -97,6 +99,9 @@ impl Endpoint for CxfEndpoint {
             profile.port_name.clone(),
             address,
             operation,
+            self.endpoint_config.timeout_ms,
+            self.endpoint_config.mtom_enabled,
+            self.endpoint_config.attachment_content_type.clone(),
         )))
     }
 }

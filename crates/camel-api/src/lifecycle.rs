@@ -15,6 +15,8 @@ pub enum ServiceStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HealthStatus {
     Healthy,
+    /// Service is operational but with reduced capability.
+    Degraded,
     Unhealthy,
 }
 

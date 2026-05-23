@@ -64,7 +64,13 @@ async fn bench_instantiation_cost() {
     // Warm up
     let exchange = make_exchange();
     runtime
-        .call_process(make_registry(), HashMap::new(), StateStore::new(), exchange)
+        .call_process(
+            make_registry(),
+            HashMap::new(),
+            StateStore::new(),
+            tokio::runtime::Handle::current(),
+            exchange,
+        )
         .await
         .unwrap();
 
@@ -74,7 +80,13 @@ async fn bench_instantiation_cost() {
     for _ in 0..iterations {
         let exchange = make_exchange();
         runtime
-            .call_process(make_registry(), HashMap::new(), StateStore::new(), exchange)
+            .call_process(
+                make_registry(),
+                HashMap::new(),
+                StateStore::new(),
+                tokio::runtime::Handle::current(),
+                exchange,
+            )
             .await
             .unwrap();
     }

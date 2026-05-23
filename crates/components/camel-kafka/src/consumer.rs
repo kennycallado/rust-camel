@@ -14,6 +14,7 @@ use rdkafka::message::Message as _;
 use rdkafka::message::OwnedMessage;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -109,18 +110,28 @@ impl Consumer for KafkaConsumer {
         }
 
         let mut result = Ok(());
-        if let Some(handle) = self.task_handle.take() {
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    error!("Consumer task error: {}", e);
-                    result = Err(e);
-                }
-                Err(e) => {
-                    error!("Failed to join consumer task: {}", e);
-                    result = Err(CamelError::ProcessorError(format!(
-                        "Consumer task panicked during shutdown: {e}"
-                    )));
+        if let Some(mut handle) = self.task_handle.take() {
+            match tokio::time::timeout(Duration::from_secs(10), &mut handle).await {
+                Ok(joined) => match joined {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        error!("Consumer task error: {}", e);
+                        result = Err(e);
+                    }
+                    Err(e) => {
+                        error!("Failed to join consumer task: {}", e);
+                        result = Err(CamelError::ProcessorError(format!(
+                            "Consumer task panicked during shutdown: {e}"
+                        )));
+                    }
+                },
+                Err(_) => {
+                    handle.abort();
+                    let _ = handle.await;
+                    warn!("kafka task did not stop in 10s; aborted");
+                    result = Err(CamelError::ProcessorError(
+                        "Kafka consumer shutdown timed out after 10s".into(),
+                    ));
                 }
             }
         }
@@ -175,9 +186,9 @@ fn set_core_headers(exchange: &mut Exchange, msg: &OwnedMessage, group_id: &str)
 /// Build an Exchange from an OwnedMessage.
 ///
 /// Sets headers: CamelKafkaTopic, CamelKafkaPartition, CamelKafkaOffset,
-/// CamelKafkaKey (UTF-8), CamelKafkaKeyBytes (base64 for binary keys),
+/// CamelKafkaKey (UTF-8),
 /// CamelKafkaTimestamp (if present), CamelKafkaGroupId
-pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
+pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Result<Exchange, CamelError> {
     let body = resolve_payload_body(msg);
     let mut exchange = Exchange::new(Message::new(body));
 
@@ -191,15 +202,9 @@ pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
                     .set_header("CamelKafkaKey", Value::String(s.to_string()));
             }
             Err(_) => {
-                // Binary key: preserve as base64 so it is not lost
-                let encoded = base64_encode(key_bytes);
-                exchange
-                    .input
-                    .set_header("CamelKafkaKeyBytes", Value::String(encoded));
-                warn!(
-                    topic = %msg.topic(),
-                    "Kafka message key is non-UTF-8 bytes; stored as base64 in CamelKafkaKeyBytes"
-                );
+                return Err(CamelError::ProcessorError(
+                    "non-UTF8 Kafka key not supported".into(),
+                ));
             }
         }
     }
@@ -227,44 +232,7 @@ pub fn build_exchange(msg: &OwnedMessage, group_id: &str) -> Exchange {
         camel_otel::extract_into_exchange(&mut exchange, &headers_map);
     }
 
-    exchange
-}
-
-/// Minimal base64 encoder (no external dependency).
-/// Uses the standard alphabet with RFC 4648 padding ('=').
-fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    let chunks = input.chunks_exact(3);
-    let remainder = chunks.remainder();
-
-    for chunk in chunks {
-        let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
-        out.push(ALPHABET[(n >> 18) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
-        out.push(ALPHABET[(n & 0x3F) as usize] as char);
-    }
-
-    match remainder {
-        [a] => {
-            let n = (*a as u32) << 16;
-            out.push(ALPHABET[(n >> 18) as usize] as char);
-            out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-            out.push('=');
-            out.push('=');
-        }
-        [a, b] => {
-            let n = ((*a as u32) << 16) | ((*b as u32) << 8);
-            out.push(ALPHABET[(n >> 18) as usize] as char);
-            out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-            out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
-            out.push('=');
-        }
-        _ => {}
-    }
-
-    out
+    Ok(exchange)
 }
 
 async fn run_consumer_loop(
@@ -291,9 +259,14 @@ async fn run_consumer_loop(
         .set("group.id", &config.group_id)
         .set("auto.offset.reset", &config.auto_offset_reset)
         .set("session.timeout.ms", config.session_timeout_ms.to_string())
+        .set(
+            "heartbeat.interval.ms",
+            config.heartbeat_interval_ms.to_string(),
+        )
         .set("enable.auto.commit", "false")
         .set("fetch.wait.max.ms", config.poll_timeout_ms.to_string())
-        .set("client.id", &config.client_id);
+        .set("client.id", &config.client_id)
+        .set("isolation.level", &config.isolation_level);
 
     client_cfg.set(
         "partition.assignment.strategy",
@@ -385,7 +358,7 @@ async fn run_consumer_loop(
 
                         // Must detach before await point (BorrowedMessage not 'static)
                         let owned = msg.detach();
-                        let mut exchange = build_exchange(&owned, &config.group_id);
+                        let mut exchange = build_exchange(&owned, &config.group_id)?;
 
                         if let Some(ref tx) = commit_tx {
                             // Manual commit mode: store handle in extensions, user is responsible for commit
@@ -403,6 +376,9 @@ async fn run_consumer_loop(
                             // Auto-commit mode: dispatch then commit (at-least-once semantics)
                             if let Err(e) = ctx.send(exchange).await {
                                 error!(error = %e, "Failed to send exchange to pipeline");
+                                // TODO(KAFKA-012): route failed messages to DLQ after max retries.
+                                // When dlq_topic is set, produce the message to dlq_topic with
+                                // header X-Camel-DLQ-Error containing the original error.
                             }
                             let mut tpl = rdkafka::TopicPartitionList::new();
                             if let Err(e) = tpl.add_partition_offset(
@@ -421,7 +397,14 @@ async fn run_consumer_loop(
         }
     }
 
-    // KAFKA-003: Graceful shutdown — unsubscribe before dropping
+    // KAFKA-003: Graceful shutdown — explicit close sequence before drop
+    info!(topic = %config.topic, "Closing Kafka consumer");
+    let empty_assignment = rdkafka::TopicPartitionList::new();
+    if let Err(e) = consumer.assign(&empty_assignment) {
+        warn!(error = %e, "Failed to clear consumer assignment during shutdown");
+    }
+
+    // Explicitly unsubscribe to leave group cleanly.
     info!(topic = %config.topic, "Unsubscribing Kafka consumer");
     consumer.unsubscribe();
 
@@ -533,6 +516,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_kafka_consumer_stop_closes() {
+        let config = make_resolved_config();
+        let mut consumer = KafkaConsumer::new(config);
+
+        let token = CancellationToken::new();
+        let token_for_task = token.clone();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let handle = tokio::spawn(async move {
+            token_for_task.cancelled().await;
+            let _ = closed_tx.send(());
+            Err(CamelError::ProcessorError(
+                "simulated close error from consumer task".into(),
+            ))
+        });
+
+        consumer.cancel_token = Some(token);
+        consumer.task_handle = Some(handle);
+
+        let stop_result = consumer.stop().await;
+        assert!(stop_result.is_err(), "stop() should propagate close error");
+        let msg = stop_result.unwrap_err().to_string();
+        assert!(
+            msg.contains("simulated close error"),
+            "stop() should log/propagate task close error: {msg}"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), closed_rx)
+            .await
+            .expect("stop() should wait for close signal")
+            .expect("close signal should arrive");
+    }
+
+    #[tokio::test]
     async fn test_consumer_stop_propagates_panic() {
         let config = make_resolved_config();
         let mut consumer = KafkaConsumer::new(config);
@@ -580,7 +597,7 @@ mod tests {
     #[test]
     fn test_build_exchange_empty_payload() {
         let msg = make_msg(None, None, "t", Timestamp::NotAvailable, 0, 0);
-        let ex = build_exchange(&msg, "g");
+        let ex = build_exchange(&msg, "g").expect("build exchange should succeed");
         assert!(matches!(ex.input.body, Body::Empty));
     }
 
@@ -595,7 +612,7 @@ mod tests {
             0,
             0,
         );
-        let ex = build_exchange(&msg, "g");
+        let ex = build_exchange(&msg, "g").expect("build exchange should succeed");
         assert!(
             matches!(&ex.input.body, Body::Bytes(b) if b.as_ref() == bad_utf8.as_slice()),
             "expected Body::Bytes with the original bytes"
@@ -612,7 +629,7 @@ mod tests {
             0,
             0,
         );
-        let ex = build_exchange(&msg, "g");
+        let ex = build_exchange(&msg, "g").expect("build exchange should succeed");
         assert!(
             matches!(&ex.input.body, Body::Text(s) if s == "hello"),
             "expected Body::Text(\"hello\")"
@@ -687,7 +704,7 @@ mod tests {
             0,
             0,
         );
-        let ex = build_exchange(&msg, "g");
+        let ex = build_exchange(&msg, "g").expect("build exchange should succeed");
         assert_eq!(
             ex.input.header("CamelKafkaKey"),
             Some(&Value::String("my-key".to_string()))
@@ -697,7 +714,7 @@ mod tests {
     #[test]
     fn test_build_exchange_without_key_no_header() {
         let msg = make_msg(None, None, "t", Timestamp::NotAvailable, 0, 0);
-        let ex = build_exchange(&msg, "g");
+        let ex = build_exchange(&msg, "g").expect("build exchange should succeed");
         assert!(
             ex.input.header("CamelKafkaKey").is_none(),
             "CamelKafkaKey header should be absent when message has no key"
@@ -705,20 +722,20 @@ mod tests {
     }
 
     #[test]
-    fn test_build_exchange_binary_key_no_header() {
+    fn test_build_exchange_binary_key_returns_error() {
         let binary_key = vec![0xff, 0xfe];
         let msg = make_msg(None, Some(binary_key), "t", Timestamp::NotAvailable, 0, 0);
-        let ex = build_exchange(&msg, "g");
+        let err = build_exchange(&msg, "g").expect_err("non-UTF8 keys must return Err");
         assert!(
-            ex.input.header("CamelKafkaKey").is_none(),
-            "CamelKafkaKey header should be absent for non-UTF-8 key bytes"
+            err.to_string().contains("non-UTF8 Kafka key not supported"),
+            "unexpected error: {err}"
         );
     }
 
     #[test]
     fn test_build_exchange_group_id_header() {
         let msg = make_msg(None, None, "t", Timestamp::NotAvailable, 0, 0);
-        let ex = build_exchange(&msg, "my-group");
+        let ex = build_exchange(&msg, "my-group").expect("build exchange should succeed");
         assert_eq!(
             ex.input.header("CamelKafkaGroupId"),
             Some(&Value::String("my-group".to_string()))
@@ -728,7 +745,7 @@ mod tests {
     #[test]
     fn test_build_exchange_sets_core_metadata_headers() {
         let msg = make_msg(None, None, "orders", Timestamp::NotAvailable, 7, 42);
-        let ex = build_exchange(&msg, "group-a");
+        let ex = build_exchange(&msg, "group-a").expect("build exchange should succeed");
 
         assert_eq!(
             ex.input.header("CamelKafkaTopic"),
@@ -747,7 +764,7 @@ mod tests {
     #[test]
     fn test_build_exchange_sets_timestamp_when_available() {
         let msg = make_msg(None, None, "t", Timestamp::CreateTime(123456), 0, 0);
-        let ex = build_exchange(&msg, "g");
+        let ex = build_exchange(&msg, "g").expect("build exchange should succeed");
         assert_eq!(
             ex.input.header("CamelKafkaTimestamp"),
             Some(&Value::Number(123456.into()))
@@ -762,39 +779,6 @@ mod tests {
         assert!(Arc::ptr_eq(&ready_a, &ready_b));
     }
 
-    // --- KAFKA-008: binary key preservation ---
-
-    #[test]
-    fn test_build_exchange_binary_key_preserved_as_base64() {
-        let binary_key = vec![0xff, 0xfe, 0x01, 0x02];
-        let msg = make_msg(
-            None,
-            Some(binary_key.clone()),
-            "t",
-            Timestamp::NotAvailable,
-            0,
-            0,
-        );
-        let ex = build_exchange(&msg, "g");
-
-        // CamelKafkaKey should NOT be set for binary keys
-        assert!(
-            ex.input.header("CamelKafkaKey").is_none(),
-            "CamelKafkaKey should be absent for non-UTF-8 key bytes"
-        );
-
-        // CamelKafkaKeyBytes should contain base64-encoded key
-        let key_bytes_header = ex.input.header("CamelKafkaKeyBytes");
-        assert!(
-            key_bytes_header.is_some(),
-            "CamelKafkaKeyBytes should be set for binary keys"
-        );
-        let encoded = key_bytes_header.unwrap().as_str().unwrap();
-        // Verify round-trip: decode base64 and compare
-        let decoded = base64_decode(encoded).expect("base64 should decode");
-        assert_eq!(decoded, binary_key, "decoded key should match original");
-    }
-
     #[test]
     fn test_build_exchange_utf8_key_still_works() {
         let msg = make_msg(
@@ -805,15 +789,28 @@ mod tests {
             0,
             0,
         );
-        let ex = build_exchange(&msg, "g");
+        let ex = build_exchange(&msg, "g").expect("build exchange should succeed");
         assert_eq!(
             ex.input.header("CamelKafkaKey"),
             Some(&Value::String("my-key".to_string()))
         );
-        // CamelKafkaKeyBytes should NOT be set for UTF-8 keys
+    }
+
+    #[test]
+    fn test_build_exchange_binary_key_rejected() {
+        let msg = make_msg(
+            None,
+            Some(vec![0xFF, 0xFE]),
+            "t",
+            Timestamp::NotAvailable,
+            0,
+            0,
+        );
+
+        let err = build_exchange(&msg, "g").expect_err("binary key should fail");
         assert!(
-            ex.input.header("CamelKafkaKeyBytes").is_none(),
-            "CamelKafkaKeyBytes should be absent for UTF-8 keys"
+            matches!(err, CamelError::ProcessorError(ref s) if s == "non-UTF8 Kafka key not supported"),
+            "unexpected error: {err}"
         );
     }
 
@@ -877,45 +874,6 @@ mod tests {
         drop(tx);
         // The reply will never come, but that's expected
         drop(reply_rx);
-    }
-
-    // --- base64 round-trip helper ---
-
-    fn base64_decode(input: &str) -> Option<Vec<u8>> {
-        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut decode_map = [255u8; 256];
-        for (i, &b) in alphabet.iter().enumerate() {
-            decode_map[b as usize] = i as u8;
-        }
-
-        let mut out = Vec::new();
-        for chunk in input.as_bytes().chunks_exact(4) {
-            let mut vals = [0u8; 4];
-            for (i, &b) in chunk.iter().enumerate() {
-                if b == b'=' {
-                    vals[i] = 0; // padding contributes zero bits
-                } else {
-                    let v = decode_map[b as usize];
-                    if v == 255 {
-                        return None;
-                    }
-                    vals[i] = v;
-                }
-            }
-            let n = ((vals[0] as u32) << 18)
-                | ((vals[1] as u32) << 12)
-                | ((vals[2] as u32) << 6)
-                | (vals[3] as u32);
-            out.push((n >> 16) as u8);
-            if chunk[2] != b'=' {
-                out.push(((n >> 8) & 0xFF) as u8);
-            }
-            if chunk[3] != b'=' {
-                out.push((n & 0xFF) as u8);
-            }
-        }
-
-        Some(out)
     }
 
     // ---------------------------------------------------------------------------

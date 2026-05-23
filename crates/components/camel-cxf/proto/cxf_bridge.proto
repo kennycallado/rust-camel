@@ -26,7 +26,7 @@ message SoapRequest {
   string operation = 4;
   bytes payload = 5; // XML body (unwrapped — bridge handles envelope)
   map<string, string> headers = 6;
-  int32 timeout_ms = 7; // per-request timeout (0 = use default 30s)
+  uint64 timeout_ms = 7; // per-request timeout (0 = use default 30s)
   string security_profile = 9;
 }
 

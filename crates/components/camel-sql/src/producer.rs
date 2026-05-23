@@ -38,6 +38,18 @@ impl SqlProducer {
 
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Relaxed);
+        // Close the pool asynchronously in the background with a timeout
+        if let Some(pool) = self.pool.get() {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                if tokio::time::timeout(Duration::from_secs(5), pool.close())
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("SQL producer pool did not close within 5s");
+                }
+            });
+        }
     }
 
     /// Resolves the query source based on priority:
@@ -61,6 +73,26 @@ impl SqlProducer {
 
         // Priority 3: Config query
         config.query.clone()
+    }
+
+    /// Health check: runs a simple `SELECT 1` query against the connection pool
+    /// to verify database connectivity.
+    ///
+    /// Returns `Ok(())` if the database is reachable, or an error with details
+    /// if the connection fails.
+    pub async fn check_connection(&self) -> Result<(), CamelError> {
+        let pool = self.pool.get().ok_or_else(|| {
+            CamelError::ProcessorError("SQL connection pool not initialized".into())
+        })?;
+
+        debug!("Running health check: SELECT 1");
+        sqlx::query("SELECT 1").execute(pool).await.map_err(|e| {
+            warn!(error = %e, "SQL health check failed");
+            CamelError::ProcessorError(format!("SQL health check failed: {}", e))
+        })?;
+
+        debug!("SQL health check passed");
+        Ok(())
     }
 }
 
@@ -95,6 +127,8 @@ impl Service<Exchange> for SqlProducer {
                 .get_or_try_init(|| async {
                     // Defensive: ensure config is resolved even if caller didn't use create_endpoint
                     config.resolve_defaults();
+                    // SQL-014: resolve file-based query asynchronously (not blocking)
+                    config.resolve_file_query().await?;
                     let db_url = enrich_db_url_with_ssl(&config.db_url, &config)?;
 
                     // Install all compiled-in sqlx drivers so AnyPool can resolve them.
@@ -141,9 +175,14 @@ impl Service<Exchange> for SqlProducer {
             // Resolve query string
             let query_str = Self::resolve_query_source(&exchange, &config);
 
+            // SQL-002: warn if Managed transaction mode requested
+            if config.transaction_mode == crate::config::TransactionMode::Managed {
+                warn!("transactionManager not yet implemented; using Auto mode");
+            }
+
             debug!(
-                "Executing SQL query (config query length: {})",
-                query_str.len()
+                query = %query_str,
+                "executing SQL query"
             );
 
             // Execute based on mode
@@ -226,11 +265,12 @@ async fn execute_select(
             query = bind_json_values(query, &prepared.bindings);
 
             let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
-                error!("Query execution failed: {}", e);
+                warn!(error = %e, "SQL query failed");
                 CamelError::ProcessorError(format!("Query execution failed: {}", e))
             })?;
 
             let count = rows.len();
+            debug!(rows = count, "SQL query completed");
             let json_rows: Vec<serde_json::Value> = rows
                 .iter()
                 .map(row_to_json)
@@ -252,11 +292,12 @@ async fn execute_select(
             query = bind_json_values(query, &prepared.bindings);
 
             let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
-                error!("Query execution failed: {}", e);
+                warn!(error = %e, "SQL query failed");
                 CamelError::ProcessorError(format!("Query execution failed: {}", e))
             })?;
 
             let count = rows.len();
+            debug!(rows = count, "SQL query completed");
             let json_rows: Vec<serde_json::Value> = rows
                 .iter()
                 .map(row_to_json)
@@ -321,7 +362,7 @@ async fn execute_modify(
     query = bind_json_values(query, &prepared.bindings);
 
     let result = query.execute(pool).await.map_err(|e| {
-        error!("Query execution failed: {}", e);
+        warn!(error = %e, "SQL query failed");
         CamelError::ProcessorError(format!("Query execution failed: {}", e))
     })?;
 
@@ -331,7 +372,7 @@ async fn execute_modify(
     if let Some(expected) = config.expected_update_count
         && rows_affected as i64 != expected
     {
-        error!("Expected {} rows affected, got {}", expected, rows_affected);
+        warn!(expected, actual = rows_affected, "Row count mismatch");
         return Err(CamelError::ProcessorError(format!(
             "Expected {} rows affected, got {}",
             expected, rows_affected
@@ -348,7 +389,7 @@ async fn execute_modify(
         exchange.input.body = Body::Json(json!({ "rowsAffected": rows_affected }));
     }
 
-    debug!("Modify query affected {} rows", rows_affected);
+    debug!(rows = rows_affected, "SQL modify query completed");
 
     Ok(())
 }
@@ -905,6 +946,50 @@ mod tests {
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let result = producer.poll_ready(&mut cx);
         assert!(matches!(result, Poll::Ready(Ok(()))));
+    }
+
+    // SQL-008: stop() closes the pool
+    #[tokio::test]
+    async fn test_sql_stop_closes_pool() {
+        let pool = sqlite_pool().await;
+
+        let config = {
+            let mut c = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").unwrap();
+            c.resolve_defaults();
+            c
+        };
+        let pool_cell = Arc::new(OnceCell::new());
+        pool_cell.set(pool.clone()).unwrap();
+
+        let producer = SqlProducer::new(config, pool_cell.clone());
+        assert!(!pool.is_closed(), "Pool should be open before stop");
+
+        producer.stop();
+
+        // Allow background close task to complete
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(
+            pool.is_closed(),
+            "Pool should be closed after producer.stop()"
+        );
+
+        // Subsequent poll_ready should fail
+        let mut producer2 = SqlProducer::new(
+            {
+                let mut c =
+                    SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").unwrap();
+                c.resolve_defaults();
+                c
+            },
+            pool_cell.clone(),
+        );
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let result = producer2.poll_ready(&mut cx);
+        assert!(
+            matches!(result, Poll::Ready(Err(_))),
+            "poll_ready should fail after pool closed"
+        );
     }
 
     // SQL-004: use_placeholder=false skips template parsing

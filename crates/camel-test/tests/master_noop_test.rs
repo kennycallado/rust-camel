@@ -17,7 +17,7 @@ use camel_master::MasterBundle;
 /// Two master routes with the same lock name should both start when using
 /// NoopPlatformService (the default). This verifies the fix for the bug where
 /// the old NoopLeaderElector's `AlreadyStarted` prevented the second route.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn two_master_routes_same_lock_both_start_with_noop() {
     let platform = Arc::new(NoopPlatformService::default());
     let mut ctx = CamelContext::builder()
@@ -53,7 +53,7 @@ async fn two_master_routes_same_lock_both_start_with_noop() {
 }
 
 /// Two master routes with different lock names should both start independently.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn two_master_routes_different_locks_both_start_with_noop() {
     let platform = Arc::new(NoopPlatformService::default());
     let mut ctx = CamelContext::builder()

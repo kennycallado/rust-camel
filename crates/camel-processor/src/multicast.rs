@@ -34,13 +34,9 @@ pub struct MulticastService {
 
 impl MulticastService {
     /// Create a new `MulticastService` from a list of endpoints and a [`MulticastConfig`].
-    pub fn new(endpoints: Vec<BoxProcessor>, config: MulticastConfig) -> Self {
-        if config.parallel
-            && let Some(limit) = config.parallel_limit
-        {
-            assert!(limit > 0, "parallel_limit must be > 0");
-        }
-        Self { endpoints, config }
+    pub fn new(endpoints: Vec<BoxProcessor>, config: MulticastConfig) -> Result<Self, CamelError> {
+        config.validate()?;
+        Ok(Self { endpoints, config })
     }
 }
 
@@ -258,10 +254,8 @@ mod tests {
     #[test]
     fn test_multicast_zero_parallel_limit_rejected() {
         let config = MulticastConfig::new().parallel(true).parallel_limit(0);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            MulticastService::new(vec![passthrough_processor()], config);
-        }));
-        assert!(result.is_err(), "zero parallel_limit should panic");
+        let result = MulticastService::new(vec![passthrough_processor()], config);
+        assert!(result.is_err(), "zero parallel_limit should return Err");
     }
 
     fn passthrough_processor() -> BoxProcessor {
@@ -279,7 +273,7 @@ mod tests {
         ];
 
         let config = MulticastConfig::new(); // LastWins by default
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -303,7 +297,7 @@ mod tests {
         ];
 
         let config = MulticastConfig::new().aggregation(MulticastStrategy::CollectAll);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -331,7 +325,7 @@ mod tests {
         ];
 
         let config = MulticastConfig::new().aggregation(MulticastStrategy::Original);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -364,7 +358,7 @@ mod tests {
         ];
 
         let config = MulticastConfig::new().aggregation(MulticastStrategy::Custom(joiner));
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -388,7 +382,7 @@ mod tests {
         ];
 
         let config = MulticastConfig::new().stop_on_exception(true);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -413,7 +407,7 @@ mod tests {
         let config = MulticastConfig::new()
             .stop_on_exception(false)
             .aggregation(MulticastStrategy::LastWins);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -465,7 +459,7 @@ mod tests {
 
         let endpoints = vec![endpoint0, endpoint1, endpoint2];
         let config = MulticastConfig::new().stop_on_exception(true);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc.ready().await.unwrap().call(make_exchange("x")).await;
         assert!(result.is_err(), "should fail at endpoint 1");
@@ -518,7 +512,7 @@ mod tests {
         let config = MulticastConfig::new()
             .stop_on_exception(false)
             .aggregation(MulticastStrategy::LastWins);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc.ready().await.unwrap().call(make_exchange("x")).await;
         assert!(result.is_ok(), "last endpoint should succeed");
@@ -538,7 +532,7 @@ mod tests {
         let endpoints: Vec<BoxProcessor> = vec![];
 
         let config = MulticastConfig::new();
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let mut ex = make_exchange("hello");
         ex.set_property("marker", Value::Bool(true));
@@ -570,7 +564,7 @@ mod tests {
         let endpoints = vec![recorder.clone(), recorder.clone(), recorder];
 
         let config = MulticastConfig::new().aggregation(MulticastStrategy::CollectAll);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -629,7 +623,7 @@ mod tests {
         let boxed: BoxProcessor = BoxProcessor::new(inner);
 
         let config = MulticastConfig::new();
-        let mut svc = MulticastService::new(vec![boxed], config);
+        let mut svc = MulticastService::new(vec![boxed], config).unwrap();
 
         // First poll should be Pending.
         let waker = futures::task::noop_waker();
@@ -663,7 +657,7 @@ mod tests {
         let config = MulticastConfig::new()
             .stop_on_exception(false)
             .aggregation(MulticastStrategy::CollectAll);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -688,7 +682,7 @@ mod tests {
         let config = MulticastConfig::new()
             .stop_on_exception(false)
             .aggregation(MulticastStrategy::LastWins);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -716,7 +710,7 @@ mod tests {
         let config = MulticastConfig::new()
             .stop_on_exception(false)
             .aggregation(MulticastStrategy::Custom(joiner));
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -740,7 +734,7 @@ mod tests {
         let config = MulticastConfig::new()
             .parallel(true)
             .aggregation(MulticastStrategy::CollectAll);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let result = svc
             .ready()
@@ -790,7 +784,7 @@ mod tests {
             .collect();
 
         let config = MulticastConfig::new().parallel(true).parallel_limit(2);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         let _ = svc.ready().await.unwrap().call(make_exchange("x")).await;
 
@@ -831,7 +825,7 @@ mod tests {
         })];
 
         let config = MulticastConfig::new().aggregation(MulticastStrategy::CollectAll);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
 
         svc.ready()
             .await
@@ -909,7 +903,7 @@ mod tests {
         ];
 
         let config = MulticastConfig::new().aggregation(MulticastStrategy::CollectAll);
-        let mut svc = MulticastService::new(endpoints, config);
+        let mut svc = MulticastService::new(endpoints, config).unwrap();
         let result = svc
             .ready()
             .await

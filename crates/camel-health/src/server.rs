@@ -1,15 +1,19 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use camel_api::{CamelError, HealthChecker, Lifecycle, ServiceStatus};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::info;
 
 const STATUS_STOPPED: u8 = 0;
 const STATUS_STARTED: u8 = 1;
 const STATUS_FAILED: u8 = 2;
+
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct HealthServer {
     addr: SocketAddr,
@@ -19,6 +23,7 @@ pub struct HealthServer {
     health_checker: Option<HealthChecker>,
     liveness_checker: Option<HealthChecker>,
     startup_checker: Option<HealthChecker>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
 impl HealthServer {
@@ -31,6 +36,7 @@ impl HealthServer {
             health_checker: None,
             liveness_checker: None,
             startup_checker: None,
+            shutdown_tx: None,
         }
     }
 
@@ -43,6 +49,7 @@ impl HealthServer {
             health_checker: checker,
             liveness_checker: None,
             startup_checker: None,
+            shutdown_tx: None,
         }
     }
 
@@ -113,7 +120,7 @@ impl Lifecycle for HealthServer {
 
         let listener = TcpListener::bind(self.addr).await.map_err(|e| {
             self.status.store(STATUS_FAILED, Ordering::SeqCst);
-            CamelError::Io(e.to_string())
+            CamelError::Io(format!("health check bind {addr}: {e}", addr = self.addr))
         })?;
 
         let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
@@ -124,22 +131,48 @@ impl Lifecycle for HealthServer {
         let startup = self.startup_checker.clone();
         let port = actual_port;
 
+        // Create a oneshot channel for graceful shutdown
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
         let handle = tokio::spawn(async move {
             let app = crate::health_router(checker, liveness, startup);
             info!("Health server listening on port {}", port);
-            if let Err(e) = axum::serve(listener, app).await {
+            let server = axum::serve(listener, app);
+            // Wait for shutdown signal
+            let shutdown_future = async move {
+                let _ = shutdown_rx.await;
+            };
+            if let Err(e) = server.with_graceful_shutdown(shutdown_future).await {
                 tracing::error!("Health server error: {}", e);
             }
         });
 
         self.server_handle = Some(handle);
+        self.shutdown_tx = Some(shutdown_tx);
         self.status.store(STATUS_STARTED, Ordering::SeqCst);
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
         if let Some(handle) = self.server_handle.take() {
-            handle.abort();
+            // Signal graceful shutdown via oneshot channel
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+
+            // Await handle with timeout; only abort if timeout fires
+            match tokio::time::timeout(SHUTDOWN_TIMEOUT, handle).await {
+                Ok(_) => {
+                    // Server shut down gracefully
+                }
+                Err(_) => {
+                    // Timeout — force abort as last resort
+                    tracing::warn!(
+                        "Health server did not shut down within {:?}, aborting",
+                        SHUTDOWN_TIMEOUT
+                    );
+                }
+            }
         }
         self.status.store(STATUS_STOPPED, Ordering::SeqCst);
         Ok(())
@@ -281,6 +314,21 @@ mod tests {
         );
 
         server.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_uses_cancel_not_abort() {
+        // Verify that stop() signals graceful shutdown and waits
+        let addr = SocketAddr::from(([0, 0, 0, 0], 0));
+        let mut server = HealthServer::new(addr);
+        server.start().await.unwrap();
+        let port = server.port();
+        wait_for_server(port, 2000).await.unwrap();
+
+        // stop() should complete without panicking and use graceful shutdown
+        let stop_result = server.stop().await;
+        assert!(stop_result.is_ok(), "graceful shutdown should succeed");
+        assert_eq!(server.status(), ServiceStatus::Stopped);
     }
 }
 

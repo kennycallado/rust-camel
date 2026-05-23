@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -7,14 +8,64 @@ use prost_reflect::DescriptorPool;
 use crate::compiler::compile_proto;
 use crate::{ProtoCompileError, hash_proto_content};
 
-#[derive(Default)]
+const DEFAULT_MAX_ENTRIES: usize = 1000;
+
 pub struct ProtoCache {
     pools: Mutex<HashMap<String, DescriptorPool>>,
+    order: Mutex<VecDeque<String>>,
+    max_entries: usize,
+}
+
+impl Default for ProtoCache {
+    fn default() -> Self {
+        Self {
+            pools: Mutex::new(HashMap::new()),
+            order: Mutex::new(VecDeque::new()),
+            max_entries: DEFAULT_MAX_ENTRIES,
+        }
+    }
 }
 
 impl ProtoCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a cache with a custom maximum number of entries.
+    ///
+    /// When the cache reaches capacity, the oldest entry is evicted (FIFO).
+    pub fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            pools: Mutex::new(HashMap::new()),
+            order: Mutex::new(VecDeque::with_capacity(max_entries)),
+            max_entries: max_entries.max(1),
+        }
+    }
+
+    fn insert_entry(&self, key: String, pool: DescriptorPool) {
+        let mut pools = self.pools.lock().expect("mutex poisoned"); // allow-unwrap
+        let mut order = self.order.lock().expect("mutex poisoned"); // allow-unwrap
+
+        // If key already exists, just update the pool (no eviction needed).
+        // We cannot use the entry API here because we need the key for the
+        // order queue below, and entry() takes ownership.
+        #[allow(clippy::map_entry)]
+        if pools.contains_key(&key) {
+            pools.insert(key, pool);
+            return;
+        }
+
+        // Evict oldest entries until we have room.
+        while pools.len() >= self.max_entries {
+            if let Some(old_key) = order.pop_front() {
+                pools.remove(&old_key);
+            } else {
+                break;
+            }
+        }
+
+        order.push_back(key.clone());
+        pools.insert(key, pool);
     }
 
     pub fn get_or_compile<P, I>(
@@ -50,9 +101,7 @@ impl ProtoCache {
         }
 
         let pool = compile_proto(proto_path, &include_paths)?;
-
-        let mut guard = self.pools.lock().expect("mutex poisoned"); // allow-unwrap
-        guard.insert(key, pool.clone());
+        self.insert_entry(key, pool.clone());
         Ok(pool)
     }
 

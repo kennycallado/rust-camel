@@ -1,14 +1,13 @@
 use async_trait::async_trait;
 use camel_xj::XjComponent;
-use camel_xslt::{
-    BridgeState, StylesheetId, XsltBridgeClient, XsltError, XsltTransformBackend,
-};
+use camel_xslt::{BridgeState, StylesheetId, XsltBridgeClient, XsltError, XsltTransformBackend};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tonic::transport::{Channel, Endpoint};
 
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct RecordedTransform {
     pub stylesheet_id: StylesheetId,
     pub document: Vec<u8>,

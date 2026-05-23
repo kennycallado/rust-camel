@@ -336,18 +336,22 @@ impl JmsBridgePool {
                     errors.push(format!("broker '{}': process stop failed: {e}", slot.name));
                 }
 
-                // Await the health monitor task and observe any panic.
+                // Await the health monitor task with timeout; abort if it doesn't stop.
                 let monitor_handle = {
                     let mut guard = slot.health_monitor_handle.lock().await;
                     guard.take()
                 };
-                if let Some(h) = monitor_handle
-                    && let Err(join_err) = h.await
+                if let Some(mut h) = monitor_handle
+                    && tokio::time::timeout(Duration::from_secs(5), &mut h)
+                        .await
+                        .is_err()
                 {
-                    errors.push(format!(
-                        "broker '{}': health monitor panicked: {join_err}",
+                    h.abort();
+                    let _ = h.await;
+                    warn!(
+                        "health monitor for '{}' did not stop in 5s; aborted",
                         slot.name
-                    ));
+                    );
                 }
             }
         }
@@ -545,7 +549,9 @@ impl JmsBridgePool {
             broker_url.to_string(),
             broker_type.clone(),
             credentials.as_ref().map(|(u, _)| u.clone()),
-            credentials.as_ref().map(|(_, p)| p.clone()),
+            credentials
+                .as_ref()
+                .map(|(_, p)| camel_bridge::process::Redacted::new(p.clone())),
             start_timeout_ms,
         );
 
@@ -841,9 +847,14 @@ fn redact_url(url: &str) -> String {
 }
 
 pub fn is_bridge_transport_error(err: &CamelError) -> bool {
-    // CamelError::ProcessorError wraps the message with "Processor error: ",
-    // so we check for containment of the shared constant prefix.
-    err.to_string().contains(BRIDGE_TRANSPORT_ERROR_PREFIX)
+    // Typed variant matching: only ProcessorError messages that start with
+    // the well-known transport prefix are classified as transport errors.
+    // This rejects Config errors, business errors, and other CamelError variants
+    // without relying on the Display wrapper formatting.
+    match err {
+        CamelError::ProcessorError(msg) => msg.starts_with(BRIDGE_TRANSPORT_ERROR_PREFIX),
+        _ => false,
+    }
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────

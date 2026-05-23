@@ -4,6 +4,7 @@ use crate::template::{ProfileLayout, TemplateContext, TemplateProvider};
 #[derive(clap::Args)]
 pub struct NewArgs {
     /// Project name and directory to create
+    #[arg(value_parser = validate_project_name)]
     pub name: String,
 
     /// Template to use (available: basic)
@@ -17,6 +18,49 @@ pub struct NewArgs {
     /// Profile layout: simple ([default] only) or env ([default], [development], [production])
     #[arg(long, value_name = "LAYOUT", default_value = "env")]
     pub profile_layout: ProfileLayout,
+}
+
+fn validate_project_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("project name must not be empty or whitespace".into());
+    }
+
+    let path = std::path::Path::new(trimmed);
+
+    // Reject relative paths containing separators (e.g. "my/project").
+    // Absolute paths are allowed so callers can specify a target directory.
+    if !path.is_absolute() && (trimmed.contains('/') || trimmed.contains('\\')) {
+        return Err(
+            "relative path separators ('/' or '\\') are not allowed; use an absolute path or a plain project name".into(),
+        );
+    }
+
+    // Reject '..' anywhere in path components.
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("project name must not contain '..'".into());
+    }
+
+    // Validate the final component (the actual project name).
+    let project_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "invalid project name: no valid final component".to_string())?;
+
+    if !project_name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(
+            "project name must contain only alphanumeric characters, hyphens, or underscores"
+                .into(),
+        );
+    }
+
+    Ok(trimmed.to_string())
 }
 
 fn resolve_template(name: &str) -> Result<Box<dyn TemplateProvider>, Box<dyn std::error::Error>> {
@@ -33,16 +77,6 @@ pub fn run_new(args: NewArgs) {
         force,
         profile_layout,
     } = args;
-
-    if name.trim().is_empty() {
-        eprintln!("Error: project name must not be empty or whitespace-only");
-        std::process::exit(1);
-    }
-
-    if name.contains("..") || name.contains('\\') {
-        eprintln!("Error: project name must not contain '..' or backslashes");
-        std::process::exit(1);
-    }
 
     let ctx = TemplateContext {
         project_name: name.clone(),
@@ -126,14 +160,40 @@ mod tests {
     }
 
     #[test]
-    fn test_run_new_empty_name_exits() {
-        let name = "";
-        assert!(name.trim().is_empty());
+    fn test_empty_name_rejected() {
+        assert!(validate_project_name("").is_err());
     }
 
     #[test]
-    fn test_run_new_whitespace_name_detected() {
-        let name = "   ";
-        assert!(name.trim().is_empty());
+    fn test_whitespace_name_rejected() {
+        assert!(validate_project_name("   ").is_err());
+    }
+
+    #[test]
+    fn test_valid_name_accepted() {
+        assert!(validate_project_name("my-project").is_ok());
+        assert!(validate_project_name("my_project_123").is_ok());
+    }
+
+    #[test]
+    fn test_name_with_special_chars_rejected() {
+        assert!(validate_project_name("my project").is_err());
+        assert!(validate_project_name("my/project").is_err());
+    }
+
+    #[test]
+    fn test_name_with_backslash_rejected() {
+        let result = validate_project_name("my\\project");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("path separators"),
+            "expected path separator error"
+        );
+    }
+
+    #[test]
+    fn test_dot_and_dotdot_rejected() {
+        assert!(validate_project_name(".").is_err());
+        assert!(validate_project_name("..").is_err());
     }
 }

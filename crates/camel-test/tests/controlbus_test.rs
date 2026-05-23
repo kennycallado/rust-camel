@@ -85,7 +85,7 @@ async fn resume_route(h: &CamelTestContext, route_id: &str) {
 // Test 1: Route with auto_startup(false) does not start on ctx.start()
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn autostartup_false_route_does_not_start() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -135,7 +135,7 @@ async fn autostartup_false_route_does_not_start() {
 // Test 2: ControlBus starts a lazy route
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn controlbus_starts_route() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -220,7 +220,7 @@ async fn controlbus_starts_route() {
 /// This is a simpler version of test_controlbus_starts_route that uses
 /// the direct API instead of going through a live route. This is more
 /// reliable for testing the core functionality.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn route_controller_starts_lazy_route() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -278,7 +278,7 @@ async fn route_controller_starts_lazy_route() {
 // Test 4: ControlBus stops a running route
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn controlbus_stops_route() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -338,7 +338,7 @@ async fn controlbus_stops_route() {
 // Test 5: Multiple routes with different startup orders
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn startup_order_respected() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -408,7 +408,7 @@ async fn startup_order_respected() {
 // Test 6: Mixed auto_startup routes
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn mixed_autostartup_routes() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -474,7 +474,7 @@ async fn mixed_autostartup_routes() {
 // ---------------------------------------------------------------------------
 
 /// Test that suspend_route changes route status to Suspended
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn suspend_changes_status_to_suspended() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -514,7 +514,7 @@ async fn suspend_changes_status_to_suspended() {
 }
 
 /// Test that resume_route changes status back to Started
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn resume_changes_status_to_started() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -570,7 +570,7 @@ async fn resume_changes_status_to_started() {
 /// This test currently PASSES because the implementation waits for tasks to finish,
 /// but it doesn't truly "drain" in a graceful manner - it cancels and waits.
 /// The test verifies that at minimum, messages are not lost.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn suspend_drains_inflight_messages() {
     // Timing constants
     const TIMER_PERIOD_MS: u64 = 50;
@@ -637,7 +637,7 @@ async fn suspend_drains_inflight_messages() {
 /// - Waiting for a settling period after suspend
 /// - Checking that messages definitively stop after settling
 /// - Verifying resume restarts message flow
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn suspend_blocks_new_intake_until_resume() {
     // Timing constants
     const TIMER_PERIOD_MS: u64 = 20; // Fast timer to ensure continuous flow

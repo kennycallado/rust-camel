@@ -1,10 +1,12 @@
 use std::{
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
 use camel_component_api::{Body, CamelError, Exchange, Value};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tonic::transport::Channel;
 use tower::Service;
 use tracing::debug;
@@ -14,17 +16,60 @@ use crate::config::{DestinationType, JmsEndpointConfig};
 use crate::headers::extract_send_headers;
 use crate::proto::{SendRequest, bridge_service_client::BridgeServiceClient};
 
-#[derive(Clone)]
+/// Default concurrency limit for JMS producer backpressure.
+const DEFAULT_CONCURRENCY_LIMIT: usize = 128;
+
+/// Pinned future for acquiring an owned semaphore permit.
+type AcquirePermitFut =
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
+
+// JMS-004 [resource-leak]: Exchange is NOT cloned. It is passed by value (moved)
+// through LazyJmsProducer::call → JmsProducer::call → async block → returned.
+// No clone site exists in this crate.
+
+// JmsProducer cannot derive Clone because `acquire_fut` holds a `dyn Future`.
+// We implement Clone manually, cloning the shared semaphore and resetting
+// transient poll-ready state (which is correct: a clone starts fresh).
 pub struct JmsProducer {
     channel: Channel,
     endpoint_config: JmsEndpointConfig,
+    /// Semaphore bounding concurrent in-flight sends.
+    semaphore: Arc<Semaphore>,
+    /// Held permit from a successful `poll_ready` acquisition.
+    pending_permit: Option<OwnedSemaphorePermit>,
+    /// Pinned acquire future, set when `poll_ready` is waiting.
+    acquire_fut: Option<AcquirePermitFut>,
+}
+
+impl Clone for JmsProducer {
+    fn clone(&self) -> Self {
+        Self {
+            channel: self.channel.clone(),
+            endpoint_config: self.endpoint_config.clone(),
+            semaphore: Arc::clone(&self.semaphore),
+            pending_permit: None,
+            acquire_fut: None,
+        }
+    }
 }
 
 impl JmsProducer {
     pub fn new(channel: Channel, endpoint_config: JmsEndpointConfig) -> Self {
+        Self::with_concurrency(channel, endpoint_config, DEFAULT_CONCURRENCY_LIMIT)
+    }
+
+    /// Create a producer with an explicit concurrency limit for backpressure.
+    pub fn with_concurrency(
+        channel: Channel,
+        endpoint_config: JmsEndpointConfig,
+        concurrency_limit: usize,
+    ) -> Self {
         Self {
             channel,
             endpoint_config,
+            semaphore: Arc::new(Semaphore::new(concurrency_limit)),
+            pending_permit: None,
+            acquire_fut: None,
         }
     }
 
@@ -77,18 +122,73 @@ impl Service<Exchange> for JmsProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // If we already hold a permit, we're ready.
+        if self.pending_permit.is_some() {
+            return Poll::Ready(Ok(()));
+        }
+        // Lazily initialise the acquire future.
+        let fut = self
+            .acquire_fut
+            .get_or_insert_with(|| Box::pin(Arc::clone(&self.semaphore).acquire_owned()));
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(Ok(permit)) => {
+                self.acquire_fut = None;
+                self.pending_permit = Some(permit);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::Stopped)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let channel = self.channel.clone();
         let destination = Self::destination(&self.endpoint_config);
+        // Consume the permit so the semaphore slot is held for the duration of the call.
+        let _permit = self.pending_permit.take();
+
+        // JMS-018: gate header extraction behind config flag
+        let map_headers = self.endpoint_config.map_jms_headers;
+
+        // JMS-013: QoS options
+        let time_to_live = self.endpoint_config.time_to_live;
+        let priority = self.endpoint_config.priority;
+        let persistent_delivery = self.endpoint_config.persistent_delivery;
 
         Box::pin(async move {
             let body = Self::body_to_bytes(&exchange.input.body)?;
-            let headers = extract_send_headers(&exchange);
+            let headers = if map_headers {
+                extract_send_headers(&exchange)
+            } else {
+                Default::default()
+            };
             let content_type = Self::content_type(&exchange);
+
+            // JMS-013: apply QoS headers when configured
+            // TODO(JMS-013): pass TTL, priority, and delivery mode to bridge SendRequest
+            // once the proto supports them. For now, set them as exchange metadata.
+            if let Some(ttl) = time_to_live {
+                exchange
+                    .input
+                    .set_header("JMSExpiration", Value::String(ttl.to_string()));
+            }
+            if let Some(p) = priority {
+                exchange
+                    .input
+                    .set_header("JMSPriority", Value::String(p.to_string()));
+            }
+            exchange.input.set_header(
+                "JMSDeliveryMode",
+                Value::String(
+                    if persistent_delivery {
+                        "PERSISTENT"
+                    } else {
+                        "NON_PERSISTENT"
+                    }
+                    .to_string(),
+                ),
+            );
 
             let mut client = BridgeServiceClient::new(channel);
             let request = SendRequest {
@@ -109,9 +209,11 @@ impl Service<Exchange> for JmsProducer {
                 .into_inner();
 
             debug!(message_id = %response.message_id, "JMS message sent");
-            exchange
-                .input
-                .set_header("JMSMessageID", Value::String(response.message_id));
+            if map_headers {
+                exchange
+                    .input
+                    .set_header("JMSMessageID", Value::String(response.message_id));
+            }
             Ok(exchange)
         })
     }
@@ -192,21 +294,13 @@ mod tests {
 
     #[test]
     fn destination_queue_format() {
-        let endpoint_config = JmsEndpointConfig {
-            destination_type: DestinationType::Queue,
-            destination_name: "orders".to_string(),
-            broker_name: None,
-        };
+        let endpoint_config = JmsEndpointConfig::from_uri("jms:queue:orders").unwrap();
         assert_eq!(JmsProducer::destination(&endpoint_config), "queue:orders");
     }
 
     #[test]
     fn destination_topic_format() {
-        let endpoint_config = JmsEndpointConfig {
-            destination_type: DestinationType::Topic,
-            destination_name: "events".to_string(),
-            broker_name: None,
-        };
+        let endpoint_config = JmsEndpointConfig::from_uri("jms:topic:events").unwrap();
         assert_eq!(JmsProducer::destination(&endpoint_config), "topic:events");
     }
 }

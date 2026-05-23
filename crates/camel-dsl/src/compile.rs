@@ -29,13 +29,13 @@ use camel_processor::{
 
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
-    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRoute,
-    DeclarativeStep, DelayStepDef, DynamicRouterStepDef, FunctionStepDef, LanguageExpressionDef,
-    LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef,
-    MulticastAggregationDef, MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef,
-    ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef,
-    SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
-    ValueSourceDef, WireTapStepDef,
+    DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
+    DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep, DelayStepDef,
+    DynamicRouterStepDef, FunctionStepDef, LanguageExpressionDef, LoadBalanceStepDef,
+    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
+    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
+    SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
+    ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WireTapStepDef,
 };
 
 pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinition, CamelError> {
@@ -49,6 +49,7 @@ pub fn compile_declarative_route_with_stream_cache_threshold(
     route: DeclarativeRoute,
     stream_cache_threshold: usize,
 ) -> Result<RouteDefinition, CamelError> {
+    validate_route(&route)?;
     let steps = compile_declarative_steps(route.steps, stream_cache_threshold)?;
 
     let mut definition = RouteDefinition::new(route.from, steps)
@@ -85,6 +86,7 @@ pub fn compile_declarative_route_with_stream_cache_threshold(
 pub fn compile_declarative_route_to_canonical(
     route: DeclarativeRoute,
 ) -> Result<CanonicalRouteSpec, CamelError> {
+    validate_route(&route)?;
     let circuit_breaker = route.circuit_breaker.map(|cb| CanonicalCircuitBreakerSpec {
         failure_threshold: cb.failure_threshold,
         open_duration_ms: cb.open_duration_ms,
@@ -294,7 +296,7 @@ fn compile_canonical_aggregate(config: CanonicalAggregateSpec) -> Result<Builder
         builder = builder.discard_on_timeout(discard);
     }
 
-    let mut agg_config = builder.build();
+    let mut agg_config = builder.build()?;
     if let Some(expr) = config.correlation_key {
         use camel_api::aggregator::CorrelationStrategy;
         agg_config.correlation = CorrelationStrategy::Expression {
@@ -1081,7 +1083,7 @@ fn compile_aggregate_step(def: AggregateStepDef) -> Result<BuilderStep, CamelErr
     }
 
     Ok(BuilderStep::Aggregate {
-        config: builder.build(),
+        config: builder.build()?,
     })
 }
 
@@ -1151,6 +1153,196 @@ fn compile_log_level(level: LogLevelDef) -> LogLevel {
     }
 }
 
+fn validate_route(route: &DeclarativeRoute) -> Result<(), CamelError> {
+    if route.from.trim().is_empty() {
+        return Err(CamelError::Config(
+            "route 'from' URI must not be empty".to_string(),
+        ));
+    }
+    for step in &route.steps {
+        validate_step(step)?;
+    }
+    if let Some(ref cb) = route.circuit_breaker {
+        if cb.failure_threshold == 0 {
+            return Err(CamelError::Config(
+                "circuit_breaker failure_threshold must be > 0".to_string(),
+            ));
+        }
+        if cb.open_duration_ms == 0 {
+            return Err(CamelError::Config(
+                "circuit_breaker open_duration_ms must be > 0".to_string(),
+            ));
+        }
+    }
+    if let Some(ref eh) = route.error_handler {
+        validate_error_handler(eh)?;
+    }
+    Ok(())
+}
+
+fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
+    match step {
+        DeclarativeStep::To(ToStepDef { uri }) => {
+            if uri.trim().is_empty() {
+                return Err(CamelError::Config(
+                    "step 'to' URI must not be empty".to_string(),
+                ));
+            }
+        }
+        DeclarativeStep::WireTap(WireTapStepDef { uri }) => {
+            if uri.trim().is_empty() {
+                return Err(CamelError::Config(
+                    "step 'wire_tap' URI must not be empty".to_string(),
+                ));
+            }
+        }
+        DeclarativeStep::SetHeader(SetHeaderStepDef { key, .. }) => {
+            if key.trim().is_empty() {
+                return Err(CamelError::Config(
+                    "set_header key must not be empty".to_string(),
+                ));
+            }
+        }
+        DeclarativeStep::SetProperty(SetPropertyStepDef { key, .. }) => {
+            if key.trim().is_empty() {
+                return Err(CamelError::Config(
+                    "set_property key must not be empty".to_string(),
+                ));
+            }
+        }
+        DeclarativeStep::Throttle(ThrottleStepDef {
+            max_requests,
+            period_ms,
+            steps,
+            ..
+        }) => {
+            if *max_requests == 0 {
+                return Err(CamelError::Config(
+                    "throttle max_requests must be > 0".to_string(),
+                ));
+            }
+            if *period_ms == 0 {
+                return Err(CamelError::Config(
+                    "throttle period_ms must be > 0".to_string(),
+                ));
+            }
+            for s in steps {
+                validate_step(s)?;
+            }
+        }
+        DeclarativeStep::Delay(DelayStepDef { delay_ms, .. }) => {
+            if *delay_ms == 0 {
+                return Err(CamelError::Config("delay delay_ms must be > 0".to_string()));
+            }
+        }
+        DeclarativeStep::Filter(def) => {
+            for s in &def.steps {
+                validate_step(s)?;
+            }
+        }
+        DeclarativeStep::Choice(ChoiceStepDef { whens, otherwise }) => {
+            for when in whens {
+                for s in &when.steps {
+                    validate_step(s)?;
+                }
+            }
+            if let Some(steps) = otherwise {
+                for s in steps {
+                    validate_step(s)?;
+                }
+            }
+        }
+        DeclarativeStep::Split(def) => {
+            for s in &def.steps {
+                validate_step(s)?;
+            }
+        }
+        DeclarativeStep::Multicast(def) => {
+            if def.timeout_ms.is_some_and(|t| t == 0) {
+                return Err(CamelError::Config(
+                    "multicast timeout_ms must be > 0".to_string(),
+                ));
+            }
+            for s in &def.steps {
+                validate_step(s)?;
+            }
+        }
+        DeclarativeStep::LoadBalance(def) => {
+            for s in &def.steps {
+                validate_step(s)?;
+            }
+        }
+        DeclarativeStep::Loop(def) => {
+            if def.count.is_some_and(|c| c == 0) {
+                return Err(CamelError::Config("loop count must be > 0".to_string()));
+            }
+            if def.count.is_some_and(|c| c > 0) && def.while_predicate.is_some() {
+                return Err(CamelError::Config(
+                    "loop cannot have both count and predicate".to_string(),
+                ));
+            }
+            for s in &def.steps {
+                validate_step(s)?;
+            }
+        }
+        DeclarativeStep::Aggregate(def) => {
+            if def.correlation_key.is_none() {
+                return Err(CamelError::Config(
+                    "aggregate requires a correlation_key".to_string(),
+                ));
+            }
+        }
+        // Steps without validation-relevant fields
+        DeclarativeStep::Log(_)
+        | DeclarativeStep::SetBody(_)
+        | DeclarativeStep::Script(_)
+        | DeclarativeStep::StreamCache(_)
+        | DeclarativeStep::Stop
+        | DeclarativeStep::ConvertBodyTo(_)
+        | DeclarativeStep::Bean(_)
+        | DeclarativeStep::Marshal(_)
+        | DeclarativeStep::Unmarshal(_)
+        | DeclarativeStep::Function(_)
+        | DeclarativeStep::DynamicRouter(_)
+        | DeclarativeStep::RoutingSlip(_)
+        | DeclarativeStep::RecipientList(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_error_handler(eh: &DeclarativeErrorHandler) -> Result<(), CamelError> {
+    if let Some(ref retry) = eh.retry {
+        validate_redelivery_policy(retry)?;
+    }
+    if let Some(ref exceptions) = eh.on_exceptions {
+        for clause in exceptions {
+            if let Some(ref retry) = clause.retry {
+                validate_redelivery_policy(retry)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_redelivery_policy(policy: &DeclarativeRedeliveryPolicy) -> Result<(), CamelError> {
+    if policy.max_attempts == 0 {
+        return Err(CamelError::Config(
+            "redelivery max_attempts must be > 0".to_string(),
+        ));
+    }
+    if policy.initial_delay_ms == 0 {
+        return Err(CamelError::Config(
+            "redelivery initial_delay_ms must be > 0".to_string(),
+        ));
+    }
+    if policy.max_delay_ms == 0 {
+        return Err(CamelError::Config(
+            "redelivery max_delay_ms must be > 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1161,9 +1353,9 @@ mod tests {
         DynamicRouterStepDef, FilterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
         LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
         MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, SetBodyStepDef,
-        SetHeaderStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
-        StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef,
-        WhenStepDef, WireTapStepDef,
+        SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef,
+        SplitStepDef, StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
+        ValueSourceDef, WhenStepDef, WireTapStepDef,
     };
     use serde_json::Value;
 
@@ -2583,5 +2775,261 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(step, BuilderStep::Aggregate { .. }));
+    }
+
+    // --- DSL-level validation tests (DSL-001, DSL-002, DSL-004) ---
+
+    fn make_basic_route(from: &str, steps: Vec<DeclarativeStep>) -> DeclarativeRoute {
+        DeclarativeRoute {
+            from: from.into(),
+            route_id: "test-route".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: None,
+            error_handler: None,
+            circuit_breaker: None,
+            unit_of_work: None,
+            steps,
+        }
+    }
+
+    fn assert_config_error(result: Result<RouteDefinition, CamelError>, needle: &str) {
+        let err = result.err().expect("expected Config error");
+        assert!(
+            matches!(err, CamelError::Config(ref s) if s.contains(needle)),
+            "expected Config error containing '{needle}', got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_empty_from_uri_rejected() {
+        let route = make_basic_route("", vec![]);
+        assert_config_error(compile_declarative_route(route), "'from'");
+    }
+
+    #[test]
+    fn test_whitespace_from_uri_rejected() {
+        let route = make_basic_route("   ", vec![]);
+        assert_config_error(compile_declarative_route(route), "'from'");
+    }
+
+    #[test]
+    fn test_empty_to_uri_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::To(ToStepDef::new(""))],
+        );
+        assert_config_error(compile_declarative_route(route), "'to'");
+    }
+
+    #[test]
+    fn test_whitespace_to_uri_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::To(ToStepDef::new("  "))],
+        );
+        assert_config_error(compile_declarative_route(route), "'to'");
+    }
+
+    #[test]
+    fn test_empty_wire_tap_uri_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::WireTap(WireTapStepDef {
+                uri: "  ".into(),
+            })],
+        );
+        assert_config_error(compile_declarative_route(route), "'wire_tap'");
+    }
+
+    #[test]
+    fn test_empty_set_header_key_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::SetHeader(SetHeaderStepDef::literal(
+                "", "value",
+            ))],
+        );
+        assert_config_error(compile_declarative_route(route), "set_header");
+    }
+
+    #[test]
+    fn test_whitespace_set_header_key_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::SetHeader(SetHeaderStepDef::literal(
+                "  ", "value",
+            ))],
+        );
+        assert_config_error(compile_declarative_route(route), "set_header");
+    }
+
+    #[test]
+    fn test_empty_set_property_key_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::SetProperty(SetPropertyStepDef::literal(
+                "", "value",
+            ))],
+        );
+        assert_config_error(compile_declarative_route(route), "set_property");
+    }
+
+    #[test]
+    fn test_zero_throttle_max_requests_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::Throttle(ThrottleStepDef {
+                max_requests: 0,
+                period_ms: 1000,
+                strategy: ThrottleStrategyDef::Reject,
+                steps: vec![],
+            })],
+        );
+        assert_config_error(compile_declarative_route(route), "max_requests");
+    }
+
+    #[test]
+    fn test_zero_throttle_period_ms_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::Throttle(ThrottleStepDef {
+                max_requests: 10,
+                period_ms: 0,
+                strategy: ThrottleStrategyDef::Reject,
+                steps: vec![],
+            })],
+        );
+        assert_config_error(compile_declarative_route(route), "period_ms");
+    }
+
+    #[test]
+    fn test_zero_delay_ms_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::Delay(DelayStepDef {
+                delay_ms: 0,
+                dynamic_header: None,
+            })],
+        );
+        assert_config_error(compile_declarative_route(route), "delay_ms");
+    }
+
+    #[test]
+    fn test_zero_loop_count_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::Loop(LoopStepDef {
+                count: Some(0),
+                while_predicate: None,
+                steps: vec![],
+            })],
+        );
+        assert_config_error(compile_declarative_route(route), "loop count");
+    }
+
+    #[test]
+    fn test_loop_rejects_count_and_predicate_together() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::Loop(LoopStepDef {
+                count: Some(2),
+                while_predicate: Some(make_predicate("${header.go} == true")),
+                steps: vec![],
+            })],
+        );
+        assert_config_error(
+            compile_declarative_route(route),
+            "loop cannot have both count and predicate",
+        );
+    }
+
+    #[test]
+    fn test_aggregate_requires_correlation_key() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::Aggregate(AggregateStepDef {
+                header: "orderId".to_string(),
+                correlation_key: None,
+                completion_size: Some(2),
+                completion_timeout_ms: None,
+                completion_predicate: None,
+                strategy: AggregateStrategyDef::CollectAll,
+                max_buckets: None,
+                bucket_ttl_ms: None,
+                force_completion_on_stop: None,
+                discard_on_timeout: None,
+            })],
+        );
+        assert_config_error(
+            compile_declarative_route(route),
+            "aggregate requires a correlation_key",
+        );
+    }
+
+    #[test]
+    fn test_zero_multicast_timeout_rejected() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![DeclarativeStep::Multicast(MulticastStepDef {
+                steps: vec![],
+                parallel: false,
+                parallel_limit: None,
+                stop_on_exception: false,
+                timeout_ms: Some(0),
+                aggregation: MulticastAggregationDef::LastWins,
+            })],
+        );
+        assert_config_error(compile_declarative_route(route), "multicast");
+    }
+
+    #[test]
+    fn test_zero_circuit_breaker_failure_threshold_rejected() {
+        let mut route = make_basic_route("direct:start", vec![]);
+        route.circuit_breaker = Some(DeclarativeCircuitBreaker {
+            failure_threshold: 0,
+            open_duration_ms: 5000,
+        });
+        assert_config_error(compile_declarative_route(route), "failure_threshold");
+    }
+
+    #[test]
+    fn test_zero_circuit_breaker_open_duration_rejected() {
+        let mut route = make_basic_route("direct:start", vec![]);
+        route.circuit_breaker = Some(DeclarativeCircuitBreaker {
+            failure_threshold: 3,
+            open_duration_ms: 0,
+        });
+        assert_config_error(compile_declarative_route(route), "open_duration_ms");
+    }
+
+    #[test]
+    fn test_zero_redelivery_max_attempts_rejected() {
+        let mut route = make_basic_route("direct:start", vec![]);
+        route.error_handler = Some(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: Some(DeclarativeRedeliveryPolicy {
+                max_attempts: 0,
+                initial_delay_ms: 100,
+                multiplier: 2.0,
+                max_delay_ms: 1000,
+                jitter_factor: 0.0,
+                handled_by: None,
+            }),
+            on_exceptions: None,
+        });
+        assert_config_error(compile_declarative_route(route), "max_attempts");
+    }
+
+    #[test]
+    fn test_valid_route_passes_validation() {
+        let route = make_basic_route(
+            "direct:start",
+            vec![
+                DeclarativeStep::SetHeader(SetHeaderStepDef::literal("X-Trace", "123")),
+                DeclarativeStep::To(ToStepDef::new("log:output")),
+            ],
+        );
+        assert!(compile_declarative_route(route).is_ok());
     }
 }

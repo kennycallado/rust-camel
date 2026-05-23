@@ -1,10 +1,12 @@
 pub mod bundle;
 pub mod config;
+use crate::config::parse_ok_status_code_range;
 pub use bundle::HttpBundle;
 pub use config::HttpConfig;
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
@@ -92,6 +94,28 @@ pub struct HttpEndpointConfig {
     pub allow_private_ips: bool,
     pub blocked_hosts: Vec<String>,
     pub max_body_size: usize,
+    pub read_timeout_ms: u64,
+    pub max_response_bytes: usize,
+    pub auth: HttpAuth,
+    pub user_agent: Option<String>,
+    pub cookie_handling: CookieHandling,
+    pub bridge_endpoint: bool,
+    pub connection_close: bool,
+    pub skip_request_headers: Vec<String>,
+    pub skip_response_headers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HttpAuth {
+    None,
+    Basic { username: String, password: String },
+    Bearer { token: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CookieHandling {
+    Disabled,
+    InMemory,
 }
 
 /// Camel options that should NOT be forwarded as HTTP query params
@@ -105,6 +129,18 @@ const HTTP_CAMEL_OPTIONS: &[&str] = &[
     "allowPrivateIps",
     "blockedHosts",
     "maxBodySize",
+    "readTimeout",
+    "maxResponseBytes",
+    "authMethod",
+    "authUsername",
+    "authPassword",
+    "authBearerToken",
+    "userAgent",
+    "cookieHandling",
+    "bridgeEndpoint",
+    "connectionClose",
+    "skipRequestHeaders",
+    "skipResponseHeaders",
 ];
 
 impl UriConfig for HttpEndpointConfig {
@@ -133,34 +169,33 @@ impl UriConfig for HttpEndpointConfig {
 
         let http_method = parts.params.get("httpMethod").cloned();
 
-        let throw_exception_on_failure = parts
-            .params
-            .get("throwExceptionOnFailure")
-            .map(|v| v != "false")
-            .unwrap_or(true);
+        let throw_exception_on_failure = match parts.params.get("throwExceptionOnFailure") {
+            Some(v) => parse_bool_param_http(v).map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for throwExceptionOnFailure: {e}"))
+            })?,
+            None => true,
+        };
 
         // Parse status code range from "start-end" format (e.g., "200-299")
-        let ok_status_code_range = parts
-            .params
-            .get("okStatusCodeRange")
-            .and_then(|v| {
-                let (start, end) = v.split_once('-')?;
-                Some((start.parse::<u16>().ok()?, end.parse::<u16>().ok()?))
-            })
-            .unwrap_or((200, 299));
+        let ok_status_code_range = match parts.params.get("okStatusCodeRange") {
+            Some(v) => parse_ok_status_code_range(v)?,
+            None => (200, 299),
+        };
 
-        let response_timeout = parts
-            .params
-            .get("responseTimeout")
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_millis);
+        let response_timeout = match parts.params.get("responseTimeout") {
+            Some(v) => Some(v.parse::<u64>().map(Duration::from_millis).map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for responseTimeout: {e}"))
+            })?),
+            None => None,
+        };
 
         // SSRF protection settings
-        let allow_private_ips = parts
-            .params
-            .get("allowPrivateIps")
-            .map(|v| v == "true")
-            .unwrap_or(false); // Default: block private IPs
+        let allow_private_ips = match parts.params.get("allowPrivateIps") {
+            Some(v) => parse_bool_param_http(v).map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for allowPrivateIps: {e}"))
+            })?,
+            None => false, // Default: block private IPs
+        };
 
         // Parse comma-separated blocked hosts
         let blocked_hosts = parts
@@ -169,11 +204,79 @@ impl UriConfig for HttpEndpointConfig {
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();
 
-        let max_body_size = parts
+        let max_body_size = match parts.params.get("maxBodySize") {
+            Some(v) => v.parse::<usize>().map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for maxBodySize: {e}"))
+            })?,
+            None => 10 * 1024 * 1024, // Default: 10MB
+        };
+
+        let read_timeout_ms = match parts.params.get("readTimeout") {
+            Some(v) => v.parse::<u64>().map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for readTimeout: {e}"))
+            })?,
+            None => 30_000, // Default: 30s
+        };
+
+        let max_response_bytes = match parts.params.get("maxResponseBytes") {
+            Some(v) => v.parse::<usize>().map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for maxResponseBytes: {e}"))
+            })?,
+            None => 10 * 1024 * 1024, // Default: 10MB
+        };
+
+        let auth = parse_auth_from_params(&parts.params)?;
+
+        let user_agent = parts.params.get("userAgent").cloned();
+
+        let cookie_handling = match parts.params.get("cookieHandling") {
+            Some(v) if v.eq_ignore_ascii_case("inmemory") => CookieHandling::InMemory,
+            Some(v) if v.eq_ignore_ascii_case("disabled") => CookieHandling::Disabled,
+            Some(v) => {
+                return Err(CamelError::InvalidUri(format!(
+                    "invalid value for cookieHandling: {v} (expected Disabled or InMemory)"
+                )));
+            }
+            None => CookieHandling::Disabled,
+        };
+
+        let bridge_endpoint = match parts.params.get("bridgeEndpoint") {
+            Some(v) => parse_bool_param_http(v).map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for bridgeEndpoint: {e}"))
+            })?,
+            None => false,
+        };
+
+        let connection_close = match parts.params.get("connectionClose") {
+            Some(v) => parse_bool_param_http(v).map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for connectionClose: {e}"))
+            })?,
+            None => false,
+        };
+
+        let skip_request_headers = parts
             .params
-            .get("maxBodySize")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(10 * 1024 * 1024); // Default: 10MB
+            .get("skipRequestHeaders")
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let skip_response_headers = parts
+            .params
+            .get("skipResponseHeaders")
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         // Collect remaining params (not Camel options) as query params
         let query_params: HashMap<String, String> = parts
@@ -192,7 +295,57 @@ impl UriConfig for HttpEndpointConfig {
             allow_private_ips,
             blocked_hosts,
             max_body_size,
+            read_timeout_ms,
+            max_response_bytes,
+            auth,
+            user_agent,
+            cookie_handling,
+            bridge_endpoint,
+            connection_close,
+            skip_request_headers,
+            skip_response_headers,
         })
+    }
+}
+
+fn parse_auth_from_params(params: &HashMap<String, String>) -> Result<HttpAuth, CamelError> {
+    let Some(method) = params.get("authMethod") else {
+        return Ok(HttpAuth::None);
+    };
+
+    if method.eq_ignore_ascii_case("none") {
+        return Ok(HttpAuth::None);
+    }
+
+    if method.eq_ignore_ascii_case("basic") {
+        let username = params.get("authUsername").cloned().ok_or_else(|| {
+            CamelError::InvalidUri("authUsername is required for authMethod=Basic".to_string())
+        })?;
+        let password = params.get("authPassword").cloned().ok_or_else(|| {
+            CamelError::InvalidUri("authPassword is required for authMethod=Basic".to_string())
+        })?;
+        return Ok(HttpAuth::Basic { username, password });
+    }
+
+    if method.eq_ignore_ascii_case("bearer") {
+        let token = params.get("authBearerToken").cloned().ok_or_else(|| {
+            CamelError::InvalidUri("authBearerToken is required for authMethod=Bearer".to_string())
+        })?;
+        return Ok(HttpAuth::Bearer { token });
+    }
+
+    Err(CamelError::InvalidUri(format!(
+        "invalid value for authMethod: {method} (expected None, Basic, or Bearer)"
+    )))
+}
+
+fn parse_bool_param_http(value: &str) -> Result<bool, CamelError> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(CamelError::InvalidUri(format!(
+            "invalid boolean value: '{value}'"
+        ))),
     }
 }
 
@@ -212,6 +365,18 @@ impl HttpEndpointConfig {
         if !parts.params.contains_key("maxBodySize") {
             endpoint.max_body_size = config.max_body_size;
         }
+        if !parts.params.contains_key("readTimeout") {
+            endpoint.read_timeout_ms = config.read_timeout_ms;
+        }
+        if !parts.params.contains_key("maxResponseBytes") {
+            endpoint.max_response_bytes = config.max_response_bytes;
+        }
+        if !parts.params.contains_key("okStatusCodeRange")
+            && let Some(range) = &config.ok_status_code_range
+        {
+            endpoint.ok_status_code_range = parse_ok_status_code_range(range)?;
+        }
+
         Ok(endpoint)
     }
 }
@@ -330,6 +495,7 @@ impl HttpServerConfig {
             server.max_request_body = config.max_request_body;
         }
         if !parts.params.contains_key("maxResponseBody") {
+            // Default max_response_body is 10MB via HttpConfig::default().max_body_size.
             server.max_response_body = config.max_body_size;
         }
         Ok(server)
@@ -477,6 +643,22 @@ impl ServerRegistry {
             .await?;
 
         Ok(Arc::clone(&handle.dispatch))
+    }
+
+    /// Reset the global registry — **test-only**.
+    ///
+    /// Clears all registered server handles so that tests can start from a clean
+    /// state. This is intentionally `#[cfg(test)]` because the registry is a
+    /// process-global singleton in production and resetting it would break
+    /// running servers.
+    #[cfg(test)]
+    pub fn reset() {
+        let instance = Self::global();
+        let mut guard = instance
+            .inner
+            .lock()
+            .expect("ServerRegistry lock poisoned during test reset");
+        guard.clear();
     }
 }
 
@@ -962,11 +1144,10 @@ impl Consumer for HttpConsumer {
 // ---------------------------------------------------------------------------
 
 pub struct HttpComponent {
-    client: reqwest::Client,
     config: HttpConfig,
 }
 
-fn build_client(config: &HttpConfig) -> reqwest::Client {
+fn build_client(config: &HttpConfig, cookie_handling: CookieHandling) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
         .pool_max_idle_per_host(config.pool_max_idle_per_host)
@@ -974,6 +1155,47 @@ fn build_client(config: &HttpConfig) -> reqwest::Client {
 
     if !config.follow_redirects {
         builder = builder.redirect(reqwest::redirect::Policy::none());
+    } else if let Some(max_redirects) = config.max_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::limited(max_redirects));
+    }
+
+    if let Some(proxy_url) = &config.proxy_url
+        && let Ok(proxy) = reqwest::Proxy::all(proxy_url)
+    {
+        builder = builder.proxy(proxy);
+    }
+
+    if matches!(cookie_handling, CookieHandling::InMemory) {
+        // TODO(HTTP-013): enable reqwest cookie jar once workspace reqwest features include cookie_store.
+    }
+
+    if let Some(tls) = &config.tls
+        && tls.enabled
+    {
+        if tls.insecure || !tls.verify_peer {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+
+        if let Some(ca_path) = &tls.ca_cert_path
+            && let Ok(ca_bytes) = std::fs::read(ca_path)
+        {
+            let cert = reqwest::Certificate::from_pem(&ca_bytes)
+                .or_else(|_| reqwest::Certificate::from_der(&ca_bytes));
+            if let Ok(ca_cert) = cert {
+                builder = builder.add_root_certificate(ca_cert);
+            }
+        }
+
+        if let (Some(cert_path), Some(key_path)) = (&tls.client_cert_path, &tls.client_key_path)
+            && let (Ok(cert_bytes), Ok(key_bytes)) =
+                (std::fs::read(cert_path), std::fs::read(key_path))
+        {
+            let mut identity_pem = cert_bytes;
+            identity_pem.extend_from_slice(&key_bytes);
+            if let Ok(identity) = reqwest::Identity::from_pem(&identity_pem) {
+                builder = builder.identity(identity);
+            }
+        }
     }
 
     builder
@@ -984,13 +1206,11 @@ fn build_client(config: &HttpConfig) -> reqwest::Client {
 impl HttpComponent {
     pub fn new() -> Self {
         let config = HttpConfig::default();
-        let client = build_client(&config);
-        Self { client, config }
+        Self { config }
     }
 
     pub fn with_config(config: HttpConfig) -> Self {
-        let client = build_client(&config);
-        Self { client, config }
+        Self { config }
     }
 
     pub fn with_optional_config(config: Option<HttpConfig>) -> Self {
@@ -1017,32 +1237,31 @@ impl Component for HttpComponent {
         uri: &str,
         _ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
+        self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
+        let client = build_client(&self.config, config.cookie_handling);
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,
             server_config,
-            client: self.client.clone(),
+            client,
         }))
     }
 }
 
 pub struct HttpsComponent {
-    client: reqwest::Client,
     config: HttpConfig,
 }
 
 impl HttpsComponent {
     pub fn new() -> Self {
         let config = HttpConfig::default();
-        let client = build_client(&config);
-        Self { client, config }
+        Self { config }
     }
 
     pub fn with_config(config: HttpConfig) -> Self {
-        let client = build_client(&config);
-        Self { client, config }
+        Self { config }
     }
 
     pub fn with_optional_config(config: Option<HttpConfig>) -> Self {
@@ -1069,13 +1288,15 @@ impl Component for HttpsComponent {
         uri: &str,
         _ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
+        self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
+        let client = build_client(&self.config, config.cookie_handling);
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,
             server_config,
-            client: self.client.clone(),
+            client,
         }))
     }
 }
@@ -1163,6 +1384,66 @@ fn validate_url_for_ssrf(url: &str, config: &HttpEndpointConfig) -> Result<(), C
     Ok(())
 }
 
+fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local() || ipv4.octets()[0] == 0
+        }
+        IpAddr::V6(ipv6) => {
+            let seg0 = ipv6.segments()[0];
+            ipv6.is_loopback()
+                // fc00::/7 (ULA)
+                || (seg0 & 0xfe00) == 0xfc00
+                // fe80::/10 (link-local)
+                || (seg0 & 0xffc0) == 0xfe80
+                // ::ffff:0:0/96 (IPv4-mapped): only block if the mapped IPv4 is private
+                || ipv6
+                    .to_ipv4_mapped()
+                    .map(|v4| {
+                        v4.is_private()
+                            || v4.is_loopback()
+                            || v4.is_link_local()
+                            || v4.octets()[0] == 0
+                    })
+                    .unwrap_or(false)
+        }
+    }
+}
+
+async fn validate_resolved_host_for_ssrf(
+    url: &str,
+    config: &HttpEndpointConfig,
+) -> Result<(), CamelError> {
+    if config.allow_private_ips {
+        return Ok(());
+    }
+
+    let parsed = url::Url::parse(url)
+        .map_err(|e| CamelError::ProcessorError(format!("Invalid URL: {}", e)))?;
+    let Some(host) = parsed.host_str() else {
+        return Ok(());
+    };
+    let Some(port) = parsed.port_or_known_default() else {
+        return Ok(());
+    };
+
+    let resolved = tokio::net::lookup_host((host, port)).await.map_err(|e| {
+        CamelError::ProcessorError(format!("Failed to resolve host '{}': {}", host, e))
+    })?;
+
+    for addr in resolved {
+        let ip = addr.ip();
+        if is_private_ip(&ip) {
+            return Err(CamelError::ProcessorError(format!(
+                "Target resolved to private IP: {}",
+                ip
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // HttpProducer
 // ---------------------------------------------------------------------------
@@ -1240,15 +1521,11 @@ impl HttpProducer {
             url.push('?');
             url.push_str(query);
         } else if !config.query_params.is_empty() {
-            // Forward non-Camel query params from config
-            url.push('?');
-            let query_string: String = config
-                .query_params
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join("&");
-            url.push_str(&query_string);
+            let mut parsed = url::Url::parse(&url).expect("base URL must be valid"); // allow-unwrap
+            for (k, v) in &config.query_params {
+                parsed.query_pairs_mut().append_pair(k, v);
+            }
+            url = parsed.to_string();
         }
 
         url
@@ -1278,6 +1555,7 @@ impl Service<Exchange> for HttpProducer {
 
             // SECURITY: Validate URL for SSRF
             validate_url_for_ssrf(&url, &config)?;
+            validate_resolved_host_for_ssrf(&url, &config).await?;
 
             debug!(
                 correlation_id = %exchange.correlation_id(),
@@ -1296,9 +1574,17 @@ impl Service<Exchange> for HttpProducer {
                 request = request.timeout(timeout);
             }
 
+            if let Some(user_agent) = &config.user_agent
+                && !config.bridge_endpoint
+            {
+                request = request.header("User-Agent", user_agent.clone());
+            }
+
             // Inject W3C TraceContext headers for distributed tracing (opt-in via "otel" feature)
             #[cfg(feature = "otel")]
-            {
+            let should_inject_otel = !config.bridge_endpoint;
+            #[cfg(feature = "otel")]
+            if should_inject_otel {
                 let mut otel_headers = HashMap::new();
                 camel_otel::inject_from_exchange(&exchange, &mut otel_headers);
                 for (k, v) in otel_headers {
@@ -1313,6 +1599,10 @@ impl Service<Exchange> for HttpProducer {
 
             for (key, value) in &exchange.input.headers {
                 if !key.starts_with("Camel")
+                    && !config
+                        .skip_request_headers
+                        .iter()
+                        .any(|h| h.eq_ignore_ascii_case(key))
                     && let Some(val_str) = value.as_str()
                     && let (Ok(name), Ok(val)) = (
                         reqwest::header::HeaderName::from_bytes(key.as_bytes()),
@@ -1320,6 +1610,22 @@ impl Service<Exchange> for HttpProducer {
                     )
                 {
                     request = request.header(name, val);
+                }
+            }
+
+            if !config.bridge_endpoint {
+                match &config.auth {
+                    HttpAuth::None => {}
+                    HttpAuth::Basic { username, password } => {
+                        request = request.basic_auth(username, Some(password));
+                    }
+                    HttpAuth::Bearer { token } => {
+                        request = request.bearer_auth(token);
+                    }
+                }
+
+                if config.connection_close {
+                    request = request.header("Connection", "close");
                 }
             }
 
@@ -1355,6 +1661,13 @@ impl Service<Exchange> for HttpProducer {
                 .to_string();
 
             for (key, value) in response.headers() {
+                if config
+                    .skip_response_headers
+                    .iter()
+                    .any(|h| h.eq_ignore_ascii_case(key.as_str()))
+                {
+                    continue;
+                }
                 if let Ok(val_str) = value.to_str() {
                     exchange.input.set_header(
                         title_case_header(key.as_str()),
@@ -1372,9 +1685,48 @@ impl Service<Exchange> for HttpProducer {
                 serde_json::Value::String(status_text.clone()),
             );
 
-            let response_body = response.bytes().await.map_err(|e| {
-                CamelError::ProcessorError(format!("Failed to read response body: {e}"))
-            })?;
+            // Read response body with timeout and size guard (HTTP-004, HTTP-005)
+            let read_timeout = Duration::from_millis(config.read_timeout_ms);
+            let response_body = tokio::time::timeout(read_timeout, async {
+                // Check Content-Length header before allocating
+                if let Some(content_len) = response.content_length()
+                    && content_len > config.max_response_bytes as u64
+                {
+                    return Err(CamelError::ProcessorError(format!(
+                        "Response body too large: {} bytes exceeds limit of {} bytes",
+                        content_len, config.max_response_bytes
+                    )));
+                }
+                // Use bytes_stream() for lazy streaming with size guard
+                use futures::TryStreamExt;
+                let mut stream = response.bytes_stream();
+                let mut total: usize = 0;
+                let mut collected = Vec::new();
+                while let Some(chunk) = stream.try_next().await.map_err(|e| {
+                    CamelError::ProcessorError(format!("Failed to read response body: {e}"))
+                })? {
+                    total += chunk.len();
+                    if total > config.max_response_bytes {
+                        return Err(CamelError::ProcessorError(format!(
+                            "Response body too large: {} bytes exceeds limit of {} bytes",
+                            total, config.max_response_bytes
+                        )));
+                    }
+                    collected.push(chunk);
+                }
+                let mut result = bytes::BytesMut::with_capacity(total);
+                for chunk in collected {
+                    result.extend_from_slice(&chunk);
+                }
+                Ok::<bytes::Bytes, CamelError>(result.freeze())
+            })
+            .await
+            .map_err(|_| {
+                CamelError::ProcessorError(format!(
+                    "Read timeout after {}ms",
+                    config.read_timeout_ms
+                ))
+            })??;
 
             if config.throw_exception_on_failure
                 && !HttpProducer::is_ok_status(status_code, config.ok_status_code_range)
@@ -1422,6 +1774,10 @@ mod tests {
         assert!(config.throw_exception_on_failure);
         assert_eq!(config.ok_status_code_range, (200, 299));
         assert!(config.response_timeout.is_none());
+        assert!(matches!(config.auth, HttpAuth::None));
+        assert!(matches!(config.cookie_handling, CookieHandling::Disabled));
+        assert!(!config.bridge_endpoint);
+        assert!(!config.connection_close);
     }
 
     #[test]
@@ -1455,6 +1811,40 @@ mod tests {
         assert_eq!(config.http_method, Some("PUT".to_string()));
         assert!(!config.throw_exception_on_failure);
         assert_eq!(config.response_timeout, Some(Duration::from_millis(10000)));
+    }
+
+    #[test]
+    fn test_http_endpoint_config_auth_and_headers_options() {
+        let config = HttpEndpointConfig::from_uri(
+            "http://localhost/api?authMethod=Basic&authUsername=u&authPassword=p&userAgent=camel-test&bridgeEndpoint=true&connectionClose=true&skipRequestHeaders=Authorization,X-Secret&skipResponseHeaders=Set-Cookie&cookieHandling=InMemory",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            config.auth,
+            HttpAuth::Basic { username, password } if username == "u" && password == "p"
+        ));
+        assert_eq!(config.user_agent.as_deref(), Some("camel-test"));
+        assert!(matches!(config.cookie_handling, CookieHandling::InMemory));
+        assert!(config.bridge_endpoint);
+        assert!(config.connection_close);
+        assert_eq!(
+            config.skip_request_headers,
+            vec!["authorization".to_string(), "x-secret".to_string()]
+        );
+        assert_eq!(config.skip_response_headers, vec!["set-cookie".to_string()]);
+    }
+
+    #[test]
+    fn test_http_endpoint_config_bearer_auth() {
+        let config = HttpEndpointConfig::from_uri(
+            "http://localhost/api?authMethod=Bearer&authBearerToken=t",
+        )
+        .unwrap();
+        assert!(matches!(
+            config.auth,
+            HttpAuth::Bearer { token } if token == "t"
+        ));
     }
 
     #[test]
@@ -2007,6 +2397,108 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_query_params_are_url_encoded_when_resolving_url() {
+        let config =
+            HttpEndpointConfig::from_uri("http://example.com/api?q=hello world&tag=a+b").unwrap();
+        let exchange = Exchange::new(Message::default());
+
+        let url = HttpProducer::resolve_url(&exchange, &config);
+
+        assert!(url.contains("q=hello+world"), "url was: {url}");
+        assert!(url.contains("tag=a%2Bb"), "url was: {url}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Timeout tests (HTTP-004)
+    // -----------------------------------------------------------------------
+
+    async fn start_slow_server(delay_ms: u64) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let handle = tokio::spawn(async move {
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let delay = delay_ms;
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut buf = vec![0u8; 4096];
+                        let _ = stream.read(&mut buf).await;
+                        // Send headers immediately (no Content-Length → chunked)
+                        let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
+                        let _ = stream.write_all(headers.as_bytes()).await;
+                        // Delay before sending body chunk
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        let body = r#"{"status":"slow"}"#;
+                        let chunk = format!("{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body);
+                        let _ = stream.write_all(chunk.as_bytes()).await;
+                    });
+                }
+            }
+        });
+
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_timeout() {
+        use tower::ServiceExt;
+
+        // Server delays 500ms, client timeout is 100ms → should timeout
+        let (url, _handle) = start_slow_server(500).await;
+        let ctx = test_producer_ctx();
+
+        let component = HttpComponent::with_config(
+            HttpConfig::default()
+                .with_read_timeout_ms(100)
+                .with_response_timeout_ms(30_000), // generous response timeout
+        );
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("{url}/slow?allowPrivateIps=true"), &endpoint_ctx)
+            .unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await;
+
+        assert!(result.is_err(), "Expected timeout error, got: {:?}", result);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Read timeout") || err.contains("timeout"),
+            "Error should mention timeout, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_producer_no_timeout_when_fast() {
+        use tower::ServiceExt;
+
+        let (url, _handle) = start_test_server().await;
+        let ctx = test_producer_ctx();
+
+        let component =
+            HttpComponent::with_config(HttpConfig::default().with_read_timeout_ms(5_000));
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api?allowPrivateIps=true"), &endpoint_ctx)
+            .unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let exchange = Exchange::new(Message::default());
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+    }
+
     // -----------------------------------------------------------------------
     // SSRF Protection tests
     // -----------------------------------------------------------------------
@@ -2225,6 +2717,17 @@ mod tests {
     // ServerRegistry tests
     // -----------------------------------------------------------------------
 
+    /// Serializes tests that mutate or depend on the global `ServerRegistry`.
+    ///
+    /// `ServerRegistry::global()` is a process-wide singleton that persists
+    /// across tests. `ServerRegistry::reset()` clears ALL entries; if it races
+    /// with another test that has a live server on a fixed port (e.g. 9991),
+    /// the registry entry is removed while the OS socket is still bound, so
+    /// the next `get_or_spawn` call on that port fails with "Address already
+    /// in use". Holding this mutex for the full body of each affected test
+    /// prevents the race without requiring `--test-threads=1`.
+    static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_server_registry_global_is_singleton() {
         let r1 = ServerRegistry::global();
@@ -2234,6 +2737,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_get_or_spawn_returns_same_dispatch() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -2269,6 +2773,7 @@ mod tests {
 
     #[test]
     fn test_server_registry_distinguishes_host_and_port() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(async {
             let registry = ServerRegistry::global();
@@ -2289,6 +2794,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shared_server_max_request_body_policy_is_deterministic() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
         let registry = ServerRegistry::global();
         // First registration: maxRequestBody = 1 MB
         let d1 = registry
@@ -2308,6 +2814,35 @@ mod tests {
             "Expected incompatible maxRequestBody error, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_server_registry_reset_clears_entries() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            // Register something on a unique port
+            let d1 = ServerRegistry::global()
+                .get_or_spawn("127.0.0.1", 9992, 1024 * 1024, 10 * 1024 * 1024, 1024)
+                .await;
+            assert!(d1.is_ok());
+
+            // Verify entry exists
+            let guard = ServerRegistry::global().inner.lock().expect("lock");
+            assert!(guard.contains_key(&("127.0.0.1".to_string(), 9992)));
+            drop(guard);
+
+            // Reset
+            ServerRegistry::reset();
+
+            // Verify cleared
+            let guard = ServerRegistry::global().inner.lock().expect("lock");
+            assert!(
+                guard.is_empty(),
+                "registry should be empty after reset, has {} entries",
+                guard.len()
+            );
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -3424,6 +3959,42 @@ mod tests {
         cfg.allow_private_ips = true;
         let allowed = validate_url_for_ssrf("http://127.0.0.1/api", &cfg);
         assert!(allowed.is_ok());
+    }
+
+    #[test]
+    fn test_is_private_ip_ranges() {
+        assert!(is_private_ip(&"10.0.0.1".parse().unwrap())); // allow-unwrap
+        assert!(is_private_ip(&"172.16.1.10".parse().unwrap())); // allow-unwrap
+        assert!(is_private_ip(&"192.168.1.1".parse().unwrap())); // allow-unwrap
+        assert!(is_private_ip(&"127.0.0.1".parse().unwrap())); // allow-unwrap
+        assert!(is_private_ip(&"169.254.1.1".parse().unwrap())); // allow-unwrap
+        assert!(is_private_ip(&"0.1.2.3".parse().unwrap())); // allow-unwrap
+
+        assert!(is_private_ip(&"::1".parse().unwrap())); // allow-unwrap
+        assert!(is_private_ip(&"fc00::1".parse().unwrap())); // allow-unwrap
+        assert!(is_private_ip(&"fd12::1".parse().unwrap())); // allow-unwrap
+        assert!(is_private_ip(&"fe80::1".parse().unwrap())); // allow-unwrap
+        // ::ffff:0:0/96 (IPv4-mapped): only private if the mapped IPv4 is private
+        assert!(is_private_ip(&"::ffff:10.0.0.1".parse().unwrap())); // allow-unwrap
+        assert!(is_private_ip(&"::ffff:192.168.1.1".parse().unwrap())); // allow-unwrap
+        assert!(is_private_ip(&"::ffff:127.0.0.1".parse().unwrap())); // allow-unwrap
+
+        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap())); // allow-unwrap
+        assert!(!is_private_ip(&"::ffff:8.8.8.8".parse().unwrap())); // allow-unwrap — public IPv4-mapped
+        assert!(!is_private_ip(&"2001:4860:4860::8888".parse().unwrap())); // allow-unwrap
+    }
+
+    #[tokio::test]
+    async fn test_validate_resolved_host_for_ssrf_blocks_resolved_private_ip() {
+        let mut cfg = HttpEndpointConfig::from_uri("http://example.com").unwrap(); // allow-unwrap
+        cfg.allow_private_ips = false;
+
+        let err = validate_resolved_host_for_ssrf("http://localhost", &cfg)
+            .await
+            .expect_err("localhost must resolve to loopback and be blocked");
+
+        let msg = err.to_string();
+        assert!(msg.contains("Target resolved to private IP"));
     }
 
     #[test]

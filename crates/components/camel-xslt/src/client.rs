@@ -4,16 +4,91 @@ use crate::proto::{
 };
 use async_trait::async_trait;
 use camel_bridge::{process::BridgeError, reconnect::BridgeReconnectHandler};
-use dashmap::DashMap;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::watch;
+use tonic::Code;
 use tonic::transport::Channel;
 use tracing::{error, warn};
 
 pub type StylesheetId = String;
+
+const DEFAULT_MAX_CACHE_ENTRIES: usize = 256;
+
+#[derive(Debug)]
+struct StylesheetCache {
+    inner: Mutex<StylesheetCacheInner>,
+}
+
+#[derive(Debug)]
+struct StylesheetCacheInner {
+    max_entries: usize,
+    stylesheets: HashMap<StylesheetId, Vec<u8>>,
+    insertion_order: VecDeque<StylesheetId>,
+}
+
+impl StylesheetCache {
+    fn new() -> Self {
+        Self::with_max_entries(DEFAULT_MAX_CACHE_ENTRIES)
+    }
+
+    fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            inner: Mutex::new(StylesheetCacheInner {
+                max_entries,
+                stylesheets: HashMap::new(),
+                insertion_order: VecDeque::new(),
+            }),
+        }
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        let inner = self.inner.lock().expect("stylesheet cache mutex poisoned"); // allow-unwrap
+        inner.stylesheets.contains_key(key)
+    }
+
+    fn insert(&self, key: impl Into<StylesheetId>, value: Vec<u8>) {
+        let key = key.into();
+        let mut inner = self.inner.lock().expect("stylesheet cache mutex poisoned"); // allow-unwrap
+
+        if let std::collections::hash_map::Entry::Occupied(mut entry) =
+            inner.stylesheets.entry(key.clone())
+        {
+            entry.insert(value);
+            return;
+        }
+
+        if inner.max_entries == 0 {
+            return;
+        }
+
+        if inner.stylesheets.len() >= inner.max_entries
+            && let Some(oldest_key) = inner.insertion_order.pop_front()
+        {
+            inner.stylesheets.remove(&oldest_key);
+        }
+
+        inner.insertion_order.push_back(key.clone());
+        inner.stylesheets.insert(key, value);
+    }
+
+    fn snapshot(&self) -> Vec<(StylesheetId, Vec<u8>)> {
+        let inner = self.inner.lock().expect("stylesheet cache mutex poisoned"); // allow-unwrap
+        inner
+            .stylesheets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    fn len(&self) -> usize {
+        let inner = self.inner.lock().expect("stylesheet cache mutex poisoned"); // allow-unwrap
+        inner.stylesheets.len()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum BridgeState {
@@ -67,7 +142,7 @@ impl XsltTransformBackend for GrpcXsltBackend {
                 stylesheet,
             })
             .await
-            .map_err(|e| XsltError::Bridge(e.to_string()))?
+            .map_err(map_transport_status)?
             .into_inner();
 
         Ok(response.error.map(|e| e.message))
@@ -93,7 +168,7 @@ impl XsltTransformBackend for GrpcXsltBackend {
         let response = client
             .transform(request)
             .await
-            .map_err(|e| XsltError::Bridge(e.to_string()))?
+            .map_err(map_transport_status)?
             .into_inner();
 
         Ok((response.result, response.error.map(|e| e.message)))
@@ -121,10 +196,20 @@ impl XsltTransformBackend for GrpcXsltBackend {
     }
 }
 
+fn map_transport_status(status: tonic::Status) -> XsltError {
+    let code = status.code();
+    let message = status.to_string();
+    if matches!(code, Code::Unavailable | Code::Unknown) || message.contains("transport") {
+        XsltError::BridgeTransport { code, message }
+    } else {
+        XsltError::Bridge(message)
+    }
+}
+
 pub struct XsltBridgeClient {
     state_rx: Arc<watch::Receiver<BridgeState>>,
     backend: Arc<dyn XsltTransformBackend>,
-    stylesheets: Arc<DashMap<StylesheetId, Vec<u8>>>,
+    stylesheets: Arc<StylesheetCache>,
 }
 
 impl std::fmt::Debug for XsltBridgeClient {
@@ -147,7 +232,7 @@ impl XsltBridgeClient {
         Self {
             state_rx,
             backend,
-            stylesheets: Arc::new(DashMap::new()),
+            stylesheets: Arc::new(StylesheetCache::new()),
         }
     }
 
@@ -223,11 +308,7 @@ impl BridgeReconnectHandler for XsltBridgeClient {
         })?;
 
         let backend = Arc::clone(&self.backend);
-        let stylesheets = self
-            .stylesheets
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect::<Vec<_>>();
+        let stylesheets = self.stylesheets.snapshot();
 
         handle.spawn(async move {
             if let Err(err) = backend.recompile_all(port, stylesheets).await {
@@ -236,5 +317,36 @@ impl BridgeReconnectHandler for XsltBridgeClient {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stylesheet_a() -> Vec<u8> {
+        b"a".to_vec()
+    }
+
+    fn stylesheet_b() -> Vec<u8> {
+        b"b".to_vec()
+    }
+
+    fn stylesheet_c() -> Vec<u8> {
+        b"c".to_vec()
+    }
+
+    fn stylesheet_d() -> Vec<u8> {
+        b"d".to_vec()
+    }
+
+    #[test]
+    fn test_xslt_cache_does_not_grow_beyond_max() {
+        let mut cache = StylesheetCache::with_max_entries(3);
+        cache.insert("a", stylesheet_a());
+        cache.insert("b", stylesheet_b());
+        cache.insert("c", stylesheet_c());
+        cache.insert("d", stylesheet_d()); // triggers eviction
+        assert!(cache.len() <= 3);
     }
 }

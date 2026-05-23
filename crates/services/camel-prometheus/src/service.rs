@@ -1,22 +1,27 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 use crate::PrometheusMetrics;
 use async_trait::async_trait;
 use camel_api::{CamelError, HealthChecker, Lifecycle, MetricsCollector, ServiceStatus};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tracing::{debug, info};
+use tokio::time::{Duration, timeout};
+use tracing::{debug, info, warn};
 
 pub struct PrometheusService {
     addr: SocketAddr,
     metrics: Arc<PrometheusMetrics>,
     server_handle: Option<JoinHandle<()>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
     /// The actual bound port (set after start(), 0 before)
     bound_port: Arc<AtomicU16>,
     /// Current service status (Stopped=0, Started=1, Failed=2)
     status: Arc<AtomicU8>,
     health_checker: Option<HealthChecker>,
+    /// Guard to prevent double-start
+    started: AtomicBool,
 }
 
 impl PrometheusService {
@@ -25,9 +30,11 @@ impl PrometheusService {
             addr,
             metrics: Arc::new(PrometheusMetrics::new()),
             server_handle: None,
+            shutdown_tx: None,
             bound_port: Arc::new(AtomicU16::new(0)),
             status: Arc::new(AtomicU8::new(0)),
             health_checker: None,
+            started: AtomicBool::new(false),
         }
     }
 
@@ -85,13 +92,25 @@ impl Lifecycle for PrometheusService {
     async fn start(&mut self) -> Result<(), CamelError> {
         use tokio::net::TcpListener;
 
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(CamelError::Config(
+                "PrometheusService already started".to_string(),
+            ));
+        }
+
         let listener = TcpListener::bind(self.addr).await.map_err(|e| {
             self.status.store(2, Ordering::SeqCst);
+            self.started.store(false, Ordering::SeqCst);
             CamelError::Io(e.to_string())
         })?;
 
         let actual_port = listener.local_addr().map(|addr| addr.port()).map_err(|e| {
             self.status.store(2, Ordering::SeqCst);
+            self.started.store(false, Ordering::SeqCst);
             CamelError::Io(e.to_string())
         })?;
 
@@ -99,16 +118,23 @@ impl Lifecycle for PrometheusService {
 
         let metrics = Arc::clone(&self.metrics);
         let health_checker = self.health_checker.clone();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
-            crate::MetricsServer::run_with_listener_and_health_checker(
-                listener,
-                metrics,
-                health_checker,
-            )
-            .await;
+            if let Err(err) =
+                crate::MetricsServer::run_with_listener_and_health_checker_with_shutdown(
+                    listener,
+                    metrics,
+                    health_checker,
+                    shutdown_rx,
+                )
+                .await
+            {
+                warn!("prometheus metrics server exited with error: {err}");
+            }
         });
 
+        self.shutdown_tx = Some(shutdown_tx);
         self.server_handle = Some(handle);
         self.status.store(1, Ordering::SeqCst);
         info!(port = %actual_port, "prometheus metrics service started");
@@ -116,10 +142,29 @@ impl Lifecycle for PrometheusService {
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+
         if let Some(handle) = self.server_handle.take() {
-            handle.abort();
+            let mut handle = handle;
+            match timeout(Duration::from_secs(5), &mut handle).await {
+                Ok(join_result) => {
+                    if let Err(e) = join_result {
+                        return Err(CamelError::Io(format!(
+                            "prometheus server task join failed: {e}"
+                        )));
+                    }
+                }
+                Err(_) => {
+                    debug!("prometheus server shutdown timed out; aborting task");
+                    handle.abort();
+                    let _ = handle.await;
+                }
+            }
         }
         self.status.store(0, Ordering::SeqCst);
+        self.started.store(false, Ordering::SeqCst);
         debug!("prometheus metrics service stopped");
         Ok(())
     }
@@ -151,6 +196,25 @@ mod tests {
 
         service.stop().await.unwrap();
         assert_eq!(service.status(), ServiceStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_stop_uses_graceful_shutdown_signal() {
+        use std::sync::atomic::Ordering as AtomicOrdering;
+
+        crate::server::test_reset_graceful_shutdown_observability();
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let mut service = PrometheusService::new(addr);
+        service.start().await.unwrap();
+
+        service.stop().await.unwrap();
+
+        let signal_count = crate::server::test_graceful_shutdown_signal_count();
+        assert!(
+            signal_count.load(AtomicOrdering::SeqCst) >= 1,
+            "expected at least one graceful shutdown signal"
+        );
     }
 
     #[tokio::test]
@@ -219,5 +283,39 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9091);
         let service = PrometheusService::new(addr);
         assert_eq!(service.name(), "prometheus");
+    }
+
+    #[tokio::test]
+    async fn test_double_start_returns_error() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let mut service = PrometheusService::new(addr);
+
+        service.start().await.unwrap();
+        assert_eq!(service.status(), ServiceStatus::Started);
+
+        let result = service.start().await;
+        assert!(result.is_err(), "second start() should return an error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already started"),
+            "error should mention 'already started', got: {err_msg}"
+        );
+
+        service.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_start_allowed_again_after_stop() {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let mut service = PrometheusService::new(addr);
+
+        service.start().await.unwrap();
+        service.stop().await.unwrap();
+
+        // After stop, start should succeed again
+        service.start().await.unwrap();
+        assert_eq!(service.status(), ServiceStatus::Started);
+
+        service.stop().await.unwrap();
     }
 }

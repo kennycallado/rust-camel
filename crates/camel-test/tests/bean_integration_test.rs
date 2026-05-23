@@ -114,7 +114,7 @@ fn create_test_controller_with_registry(
 // Integration Tests
 // ============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_bean_registration_and_lookup() {
     // Create bean registry
     let mut bean_registry = BeanRegistry::new();
@@ -133,7 +133,7 @@ async fn test_bean_registration_and_lookup() {
     assert!(bean_registry.get("unknownService").is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_simple_bean_route() {
     // Setup registries
     let mut bean_registry = BeanRegistry::new();
@@ -193,7 +193,7 @@ async fn test_simple_bean_route() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multi_step_bean_route() {
     // Setup registries
     let mut bean_registry = BeanRegistry::new();
@@ -256,7 +256,7 @@ async fn test_multi_step_bean_route() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_bean_with_validation() {
     // Setup registries
     let mut bean_registry = BeanRegistry::new();
@@ -335,7 +335,7 @@ async fn test_bean_with_validation() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_bean_route_with_other_steps() {
     // Setup registries
     let mut bean_registry = BeanRegistry::new();
@@ -403,7 +403,7 @@ async fn test_bean_route_with_other_steps() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_unknown_bean_error() {
     // Setup registries (no beans registered)
     let bean_registry = BeanRegistry::new();
@@ -436,7 +436,7 @@ async fn test_unknown_bean_error() {
     assert!(err.to_string().contains("Bean not found"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_bean_handler_methods_only() {
     // Verify that only methods marked with #[handler] are invokable
     let service = OrderService;
@@ -451,7 +451,7 @@ async fn test_bean_handler_methods_only() {
 // YAML Integration Test (demonstrating full stack)
 // ============================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_yaml_to_bean_execution() {
     // This test simulates the complete YAML → Bean flow
 

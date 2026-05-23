@@ -36,7 +36,7 @@ async fn get_connection_string(container: &ContainerAsync<Redis>) -> String {
 // String commands tests
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redis_string_commands() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -94,7 +94,7 @@ async fn redis_string_commands() {
 // List commands tests
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redis_list_commands() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -152,7 +152,7 @@ async fn redis_list_commands() {
 // Hash commands tests
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redis_hash_commands() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -211,7 +211,7 @@ async fn redis_hash_commands() {
 // Set commands tests
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redis_set_commands() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -269,7 +269,7 @@ async fn redis_set_commands() {
 // Pub/Sub producer test
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redis_pubsub_producer() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -327,7 +327,7 @@ async fn redis_pubsub_producer() {
 // Consumer queue mode test
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redis_consumer_queue_mode() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -395,7 +395,7 @@ async fn redis_consumer_queue_mode() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redis_consumer_blpop_reads_left_side_first() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -479,7 +479,7 @@ async fn redis_consumer_blpop_reads_left_side_first() {
     assert_eq!(second.as_deref(), Some("item-b"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redis_consumer_brpop_reads_right_side_first() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -567,7 +567,7 @@ async fn redis_consumer_brpop_reads_right_side_first() {
 // Consumer pub/sub mode test
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn redis_consumer_pubsub_mode() {
     let container = setup_redis_container().await;
     let conn_str = get_connection_string(&container).await;

@@ -65,6 +65,7 @@ pub mod fake {
         pub fail_on_register: usize,
         pub fail_on_health: bool,
         pub invoke_response: Option<ExchangePatch>,
+        pub invoke_delay: Option<std::time::Duration>,
     }
 
     #[derive(Debug, Clone)]
@@ -221,6 +222,9 @@ pub mod fake {
                 return Err(ProviderError::InvokeFailed("not registered".into()));
             }
             let cfg = self.config.lock().expect("config").clone(); // allow-unwrap
+            if let Some(delay) = cfg.invoke_delay {
+                tokio::time::sleep(delay).await;
+            }
             Ok(cfg.invoke_response.unwrap_or_default())
         }
     }

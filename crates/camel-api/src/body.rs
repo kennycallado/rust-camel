@@ -283,25 +283,22 @@ impl Body {
     /// - [`Body::Stream`] → streams chunk-by-chunk via [`StreamReader`];
     ///   if the stream was already consumed, the reader returns an [`io::Error`]
     ///   on the first read
-    pub fn into_async_read(self) -> BoxAsyncRead {
+    pub fn into_async_read(self) -> Result<BoxAsyncRead, CamelError> {
         match self {
-            Body::Empty => Box::pin(tokio::io::empty()),
-            Body::Bytes(b) => Box::pin(std::io::Cursor::new(b)),
-            Body::Text(s) => Box::pin(std::io::Cursor::new(s.into_bytes())),
-            Body::Json(v) => match serde_json::to_vec(&v) {
-                Ok(bytes) => Box::pin(std::io::Cursor::new(bytes)) as BoxAsyncRead,
-                Err(e) => {
-                    let err = io::Error::new(io::ErrorKind::InvalidData, e.to_string());
-                    let stream = futures::stream::iter(vec![Err::<Bytes, io::Error>(err)]);
-                    Box::pin(StreamReader::new(stream)) as BoxAsyncRead
-                }
-            },
-            Body::Xml(s) => Box::pin(std::io::Cursor::new(s.into_bytes())),
-            Body::Stream(s) => Box::pin(StreamAsyncRead {
+            Body::Empty => Ok(Box::pin(tokio::io::empty())),
+            Body::Bytes(b) => Ok(Box::pin(std::io::Cursor::new(b))),
+            Body::Text(s) => Ok(Box::pin(std::io::Cursor::new(s.into_bytes()))),
+            Body::Json(v) => {
+                let bytes = serde_json::to_vec(&v)
+                    .map_err(|e| CamelError::TypeConversionFailed(e.to_string()))?;
+                Ok(Box::pin(std::io::Cursor::new(bytes)) as BoxAsyncRead)
+            }
+            Body::Xml(s) => Ok(Box::pin(std::io::Cursor::new(s.into_bytes()))),
+            Body::Stream(s) => Ok(Box::pin(StreamAsyncRead {
                 arc: s.stream,
                 reader: None,
                 consumed: false,
-            }),
+            })),
         }
     }
 
@@ -620,7 +617,7 @@ mod tests {
     async fn test_into_async_read_empty() {
         use tokio::io::AsyncReadExt;
         let body = Body::Empty;
-        let mut reader = body.into_async_read();
+        let mut reader = body.into_async_read().unwrap();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert!(buf.is_empty());
@@ -630,7 +627,7 @@ mod tests {
     async fn test_into_async_read_bytes() {
         use tokio::io::AsyncReadExt;
         let body = Body::Bytes(Bytes::from("hello"));
-        let mut reader = body.into_async_read();
+        let mut reader = body.into_async_read().unwrap();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"hello");
@@ -640,7 +637,7 @@ mod tests {
     async fn test_into_async_read_text() {
         use tokio::io::AsyncReadExt;
         let body = Body::Text("world".to_string());
-        let mut reader = body.into_async_read();
+        let mut reader = body.into_async_read().unwrap();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"world");
@@ -650,7 +647,7 @@ mod tests {
     async fn test_into_async_read_json() {
         use tokio::io::AsyncReadExt;
         let body = Body::Json(serde_json::json!({"key": "val"}));
-        let mut reader = body.into_async_read();
+        let mut reader = body.into_async_read().unwrap();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -661,7 +658,7 @@ mod tests {
     async fn test_into_async_read_xml() {
         use tokio::io::AsyncReadExt;
         let body = Body::Xml("<root/>".to_string());
-        let mut reader = body.into_async_read();
+        let mut reader = body.into_async_read().unwrap();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"<root/>");
@@ -684,7 +681,7 @@ mod tests {
                 origin: None,
             },
         });
-        let mut reader = body.into_async_read();
+        let mut reader = body.into_async_read().unwrap();
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, b"foobarbaz");
@@ -704,7 +701,7 @@ mod tests {
                 origin: None,
             },
         });
-        let mut reader = body.into_async_read();
+        let mut reader = body.into_async_read().unwrap();
         let mut buf = Vec::new();
         let result = reader.read_to_end(&mut buf).await;
         assert!(result.is_err());

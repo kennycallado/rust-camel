@@ -13,8 +13,12 @@ categories.workspace = true
 
 [dependencies]
 camel-language-api.workspace = true
+async-trait.workspace = true
 jsonpath-rust = "1.0"
 serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

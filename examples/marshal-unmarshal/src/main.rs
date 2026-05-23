@@ -43,9 +43,9 @@ async fn main() -> Result<(), CamelError> {
             "Route 1: Starting with Text body containing JSON string",
             LogLevel::Info,
         )
-        .unmarshal("json")
+        .unmarshal("json")?
         .log("Route 1: Unmarshalled Text -> Json", LogLevel::Info)
-        .marshal("json")
+        .marshal("json")?
         .log(
             "Route 1: Marshalled Json -> Text (round-trip complete!)",
             LogLevel::Info,
@@ -69,7 +69,7 @@ async fn main() -> Result<(), CamelError> {
             "Route 2: Starting with Text body containing XML string",
             LogLevel::Info,
         )
-        .unmarshal("xml")
+        .unmarshal("xml")?
         .log(
             "Route 2: Unmarshalled Text -> Json (from XML)",
             LogLevel::Info,
@@ -93,7 +93,7 @@ async fn main() -> Result<(), CamelError> {
             "Route 3: Starting with invalid body (will fail unmarshal)",
             LogLevel::Info,
         )
-        .unmarshal("json") // This will fail!
+        .unmarshal("json")? // This will fail!
         .log(
             "Route 3: This log should NOT appear (unmarshal failed)",
             LogLevel::Info,

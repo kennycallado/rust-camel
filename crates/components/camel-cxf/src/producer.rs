@@ -1,9 +1,13 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-util"))]
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 
 use camel_component_api::{Body, CamelError, Exchange, Value};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tower::Service;
 use tracing::debug;
 
@@ -26,7 +30,9 @@ fn is_transport_error(status: &tonic::Status) -> bool {
     }
 }
 
-#[derive(Clone)]
+type AcquireFuture =
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
+
 pub struct CxfProducer {
     pool: Arc<CxfBridgePool>,
     profile_name: String,
@@ -35,9 +41,36 @@ pub struct CxfProducer {
     port_name: String,
     address: Option<String>,
     operation: String,
+    default_timeout_ms: Option<u64>,
+    mtom_enabled: bool,
+    attachment_content_type: Option<String>,
+    semaphore: Arc<Semaphore>,
+    pending_permit: Option<OwnedSemaphorePermit>,
+    acquire_fut: Option<AcquireFuture>,
+}
+
+impl Clone for CxfProducer {
+    fn clone(&self) -> Self {
+        Self {
+            pool: Arc::clone(&self.pool),
+            profile_name: self.profile_name.clone(),
+            wsdl_path: self.wsdl_path.clone(),
+            service_name: self.service_name.clone(),
+            port_name: self.port_name.clone(),
+            address: self.address.clone(),
+            operation: self.operation.clone(),
+            default_timeout_ms: self.default_timeout_ms,
+            mtom_enabled: self.mtom_enabled,
+            attachment_content_type: self.attachment_content_type.clone(),
+            semaphore: Arc::clone(&self.semaphore),
+            pending_permit: None,
+            acquire_fut: None,
+        }
+    }
 }
 
 impl CxfProducer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: Arc<CxfBridgePool>,
         profile_name: String,
@@ -46,6 +79,9 @@ impl CxfProducer {
         port_name: String,
         address: Option<String>,
         operation: String,
+        default_timeout_ms: Option<u64>,
+        mtom_enabled: bool,
+        attachment_content_type: Option<String>,
     ) -> Self {
         Self {
             pool,
@@ -55,6 +91,12 @@ impl CxfProducer {
             port_name,
             address,
             operation,
+            default_timeout_ms,
+            mtom_enabled,
+            attachment_content_type,
+            semaphore: Arc::new(Semaphore::new(1)),
+            pending_permit: None,
+            acquire_fut: None,
         }
     }
 
@@ -75,6 +117,7 @@ impl CxfProducer {
 
 #[cfg(any(test, feature = "test-util"))]
 impl CxfProducer {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_channel(
         channel: tonic::transport::Channel,
         profile_name: String,
@@ -83,6 +126,7 @@ impl CxfProducer {
         port_name: String,
         address: Option<String>,
         operation: String,
+        default_timeout_ms: Option<u64>,
     ) -> Self {
         use crate::config::CxfPoolConfig;
         use crate::pool::{BridgeSlot, BridgeState};
@@ -113,6 +157,7 @@ impl CxfProducer {
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
         });
         pool.slots.insert(key, slot);
+        pool.slot_count.fetch_add(1, Ordering::Relaxed);
 
         Self {
             pool,
@@ -122,6 +167,12 @@ impl CxfProducer {
             port_name,
             address,
             operation,
+            default_timeout_ms,
+            mtom_enabled: false,
+            attachment_content_type: None,
+            semaphore: Arc::new(Semaphore::new(1)),
+            pending_permit: None,
+            acquire_fut: None,
         }
     }
 }
@@ -132,6 +183,27 @@ impl Service<Exchange> for CxfProducer {
     type Future = Pin<Box<dyn std::future::Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Phase 1: backpressure via semaphore (Pattern B).
+        if self.pending_permit.is_none() {
+            let fut = self
+                .acquire_fut
+                .get_or_insert_with(|| Box::pin(Arc::clone(&self.semaphore).acquire_owned()));
+            match fut.as_mut().poll(cx) {
+                Poll::Ready(Ok(permit)) => {
+                    self.acquire_fut = None;
+                    self.pending_permit = Some(permit);
+                }
+                Poll::Ready(Err(_)) => {
+                    self.acquire_fut = None;
+                    return Poll::Ready(Err(CamelError::ProcessorError(
+                        "cxf producer semaphore closed".to_string(),
+                    )));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        // Phase 2: bridge state check.
         if let Some(slot) = self.pool.slots.get(&CxfBridgePool::slot_key()) {
             match &*slot.state_rx.borrow() {
                 BridgeState::Ready { .. } => return Poll::Ready(Ok(())),
@@ -168,6 +240,10 @@ impl Service<Exchange> for CxfProducer {
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
+        let _permit = self
+            .pending_permit
+            .take()
+            .expect("call() without poll_ready()"); // allow-unwrap
         let pool = Arc::clone(&self.pool);
         let profile_name = self.profile_name.clone();
         let wsdl_path = self.wsdl_path.clone();
@@ -175,8 +251,21 @@ impl Service<Exchange> for CxfProducer {
         let port_name = self.port_name.clone();
         let address = self.address.clone();
         let configured_operation = self.operation.clone();
+        let configured_timeout_ms = self.default_timeout_ms;
+        let mtom_enabled = self.mtom_enabled;
+        let attachment_content_type = self.attachment_content_type.clone();
+
+        let correlation_id = exchange.correlation_id().to_string();
 
         Box::pin(async move {
+            debug!(
+                address = %address.as_deref().unwrap_or(""),
+                operation = %configured_operation,
+                correlation_id = %correlation_id,
+                "CXF producer call started"
+            );
+            // Hold permit for the duration of the call to enforce backpressure.
+            let _ = &_permit;
             let channel = pool
                 .get_channel()
                 .await
@@ -193,7 +282,8 @@ impl Service<Exchange> for CxfProducer {
             let timeout_ms = exchange
                 .input
                 .header("CamelCxfTimeoutMs")
-                .and_then(|v| v.as_str().and_then(|s| s.parse::<i32>().ok()))
+                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                .or(configured_timeout_ms)
                 .unwrap_or(0);
 
             let mut headers: HashMap<String, String> = HashMap::new();
@@ -205,9 +295,22 @@ impl Service<Exchange> for CxfProducer {
                 headers.insert("soapAction".to_string(), soap_action);
             }
 
+            // CXF-014: MTOM scaffold — add multipart/related Content-Type when enabled.
+            // TODO(CXF-014): full MTOM multipart encoding not yet implemented
+            if mtom_enabled {
+                let ct = attachment_content_type
+                    .as_deref()
+                    .unwrap_or("multipart/related; type=\"application/xop+xml\"");
+                headers.insert("content-type".to_string(), ct.to_string());
+                headers
+                    .entry("soapAction".to_string())
+                    .or_insert_with(|| configured_operation.clone());
+            }
+
+            let endpoint_addr = address.unwrap_or_default();
             let request = SoapRequest {
                 wsdl_path,
-                address: address.unwrap_or_default(),
+                address: endpoint_addr.clone(),
                 service_name,
                 port_name,
                 operation: operation.clone(),
@@ -253,6 +356,7 @@ impl Service<Exchange> for CxfProducer {
                     CxfError::Fault {
                         code: response.fault_code,
                         message: response.fault_string,
+                        endpoint: endpoint_addr,
                     }
                     .to_string(),
                 ));
@@ -305,9 +409,13 @@ mod tests {
             "HelloPort".to_string(),
             Some("http://localhost:8080/service".to_string()),
             "sayHello".to_string(),
+            None,
+            false,
+            None,
         );
         assert_eq!(producer.operation, "sayHello");
         assert_eq!(producer.profile_name, "baleares");
+        assert!(!producer.mtom_enabled);
     }
 
     #[test]
@@ -321,6 +429,9 @@ mod tests {
             "Port".to_string(),
             None,
             "op".to_string(),
+            None,
+            false,
+            None,
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);
@@ -343,6 +454,9 @@ mod tests {
             "Port".to_string(),
             None,
             "op".to_string(),
+            None,
+            false,
+            None,
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);
@@ -374,6 +488,9 @@ mod tests {
             "Port".to_string(),
             None,
             "op".to_string(),
+            None,
+            false,
+            None,
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);
@@ -406,6 +523,9 @@ mod tests {
             "Port".to_string(),
             None,
             "op".to_string(),
+            None,
+            false,
+            None,
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);
@@ -440,6 +560,9 @@ mod tests {
             "Port".to_string(),
             None,
             "op".to_string(),
+            None,
+            false,
+            None,
         );
         let mut cx = Context::from_waker(futures::task::noop_waker_ref());
         let poll = producer.poll_ready(&mut cx);

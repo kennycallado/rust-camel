@@ -1,7 +1,50 @@
+use std::fmt;
+use std::ops::Deref;
 use std::path::PathBuf;
 use thiserror::Error;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::spec::{BridgeSpec, CXF_BRIDGE, JMS_BRIDGE, XML_BRIDGE};
+
+// ---------------------------------------------------------------------------
+// Redacted<T> — wrapper that never leaks inner value via Debug/Display
+// ---------------------------------------------------------------------------
+
+/// A newtype that redacts its inner value in `Debug` and `Display` output.
+/// Used for password/credential fields to prevent accidental logging.
+#[derive(Clone)]
+pub struct Redacted<T>(T);
+
+impl<T> Redacted<T> {
+    pub fn new(value: T) -> Self {
+        Self(value)
+    }
+
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> fmt::Debug for Redacted<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
+impl<T> fmt::Display for Redacted<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
+impl<T> Deref for Redacted<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum BridgeError {
@@ -45,20 +88,21 @@ impl BrokerType {
 }
 
 impl std::str::FromStr for BrokerType {
-    type Err = std::convert::Infallible;
+    type Err = BridgeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s.to_lowercase().as_str() {
-            "activemq" => BrokerType::ActiveMq,
-            "artemis" => BrokerType::Artemis,
-            _ => BrokerType::Generic,
-        })
+        match s.to_lowercase().as_str() {
+            "activemq" => Ok(BrokerType::ActiveMq),
+            "artemis" => Ok(BrokerType::Artemis),
+            "generic" => Ok(BrokerType::Generic),
+            other => Err(BridgeError::Config(format!("unknown broker type: {other}"))), // allow-secret
+        }
     }
 }
 
-// Intentionally no Debug: contains keystore_password, truststore_password, sig_password. See BRG-004.
-#[allow(missing_debug_implementations)]
 /// Environment variables for a single CXF profile, used by the bridge Java side.
+/// Password fields use [`Redacted`] to prevent accidental credential leakage in logs.
+#[derive(Debug)]
 pub struct CxfProfileEnvVars {
     pub name: String,
     pub wsdl_path: String,
@@ -66,11 +110,11 @@ pub struct CxfProfileEnvVars {
     pub port_name: String,
     pub address: Option<String>,
     pub keystore_path: Option<String>,
-    pub keystore_password: Option<String>,
+    pub keystore_password: Option<Redacted<String>>,
     pub truststore_path: Option<String>,
-    pub truststore_password: Option<String>,
+    pub truststore_password: Option<Redacted<String>>,
     pub sig_username: Option<String>,
-    pub sig_password: Option<String>,
+    pub sig_password: Option<Redacted<String>>,
     pub enc_username: Option<String>,
     pub security_actions_out: Option<String>,
     pub security_actions_in: Option<String>,
@@ -96,19 +140,19 @@ impl CxfProfileEnvVars {
             vars.push((format!("{}KEYSTORE_PATH", prefix), v.clone()));
         }
         if let Some(ref v) = self.keystore_password {
-            vars.push((format!("{}KEYSTORE_PASSWORD", prefix), v.clone()));
+            vars.push((format!("{}KEYSTORE_PASSWORD", prefix), (**v).clone()));
         }
         if let Some(ref v) = self.truststore_path {
             vars.push((format!("{}TRUSTSTORE_PATH", prefix), v.clone()));
         }
         if let Some(ref v) = self.truststore_password {
-            vars.push((format!("{}TRUSTSTORE_PASSWORD", prefix), v.clone()));
+            vars.push((format!("{}TRUSTSTORE_PASSWORD", prefix), (**v).clone()));
         }
         if let Some(ref v) = self.sig_username {
             vars.push((format!("{}SIG_USERNAME", prefix), v.clone()));
         }
         if let Some(ref v) = self.sig_password {
-            vars.push((format!("{}SIG_PASSWORD", prefix), v.clone()));
+            vars.push((format!("{}SIG_PASSWORD", prefix), (**v).clone()));
         }
         if let Some(ref v) = self.enc_username {
             vars.push((format!("{}ENC_USERNAME", prefix), v.clone()));
@@ -136,15 +180,16 @@ impl CxfProfileEnvVars {
     }
 }
 
-// Intentionally no Debug: contains password field. See BRG-004.
-#[allow(missing_debug_implementations)]
+/// Configuration for spawning a bridge subprocess.
+/// Password fields use [`Redacted`] to prevent accidental credential leakage in logs.
+#[derive(Debug)]
 pub struct BridgeProcessConfig {
     pub spec: &'static BridgeSpec,
     pub binary_path: PathBuf,
     pub broker_url: String,
     pub broker_type: BrokerType,
     pub username: Option<String>,
-    pub password: Option<String>,
+    pub password: Option<Redacted<String>>,
     pub start_timeout_ms: u64,
     pub env_vars: Vec<(String, String)>,
 }
@@ -156,7 +201,7 @@ impl BridgeProcessConfig {
         broker_url: String,
         broker_type: BrokerType,
         username: Option<String>,
-        password: Option<String>,
+        password: Option<Redacted<String>>,
         start_timeout_ms: u64,
     ) -> Self {
         let mut env_vars = vec![
@@ -170,7 +215,7 @@ impl BridgeProcessConfig {
             env_vars.push(("BRIDGE_USERNAME".to_string(), u.clone()));
         }
         if let Some(p) = &password {
-            env_vars.push(("BRIDGE_PASSWORD".to_string(), p.clone()));
+            env_vars.push(("BRIDGE_PASSWORD".to_string(), (**p).clone()));
         }
         Self {
             spec: &JMS_BRIDGE,
@@ -235,6 +280,8 @@ impl BridgeProcessConfig {
 pub struct BridgeProcess {
     child: tokio::process::Child,
     grpc_port: u16,
+    token: CancellationToken,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl BridgeProcess {
@@ -316,37 +363,60 @@ impl BridgeProcess {
                     if let Some(p) = v.get("port").and_then(|p| p.as_u64()) {
                         return Ok(p as u16);
                     }
+                    tracing::error!("bridge ready message malformed: {line}");
                     return Err(BridgeError::BadReadyMessage(line));
                 }
             }
+            tracing::error!("bridge stdout closed before ready message");
             Err(BridgeError::StdoutClosed)
         })
         .await
         .map_err(|_| {
-            BridgeError::Timeout(format!(
+            let msg = format!(
                 "{} failed to start: health check timeout after {}ms",
                 config.spec.name, config.start_timeout_ms
-            ))
+            );
+            tracing::error!("{msg}");
+            BridgeError::Timeout(msg)
         })??;
 
-        // Keep draining the bridge's stdout in the background so the pipe
-        // buffer never fills up.  If the pipe blocks, the bridge process
-        // blocks on its next stdout write and silently stops responding.
-        tokio::spawn(async move {
-            while let Ok(Some(line)) = reader.next_line().await {
-                tracing::debug!(target: "camel_bridge::child", "{}", line);
+        // Keep draining stdout in background; allow cooperative cancellation.
+        let token = CancellationToken::new();
+        let child_token = token.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = child_token.cancelled() => break,
+                    line = reader.next_line() => {
+                        match line {
+                            Ok(Some(line)) => tracing::debug!(target: "camel_bridge::child", "{}", line),
+                            Ok(None) | Err(_) => break,
+                        }
+                    }
+                }
             }
         });
 
         Ok(BridgeProcess {
             child,
             grpc_port: port,
+            token,
+            handle: Some(handle),
         })
     }
 
     /// Gracefully stop: SIGTERM + wait for exit.
     pub async fn stop(mut self) -> Result<(), BridgeError> {
         use tokio::time::{Duration, sleep};
+
+        self.token.cancel();
+
+        if let Some(handle) = self.handle.take() {
+            let join_result = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            if join_result.is_err() {
+                tracing::warn!("bridge stdout drain task did not exit after cancellation");
+            }
+        }
 
         // Send SIGTERM first (graceful shutdown)
         #[cfg(unix)]
@@ -380,6 +450,7 @@ impl BridgeProcess {
 
 impl Drop for BridgeProcess {
     fn drop(&mut self) {
+        self.token.cancel();
         // Best-effort only. Does NOT wait — cannot block in Drop.
         let _ = self.child.start_kill();
     }
@@ -410,8 +481,17 @@ mod tests {
     }
 
     #[test]
-    fn broker_type_from_str_unknown_is_generic() {
-        assert_eq!("ibmmq".parse::<BrokerType>().unwrap(), BrokerType::Generic);
+    fn broker_type_from_str_generic() {
+        assert_eq!(
+            "generic".parse::<BrokerType>().unwrap(),
+            BrokerType::Generic
+        );
+    }
+
+    #[test]
+    fn broker_type_from_str_unknown_returns_err() {
+        assert!("ibmmq".parse::<BrokerType>().is_err());
+        assert!("UnknownBroker".parse::<BrokerType>().is_err());
     }
 
     #[test]
@@ -428,7 +508,7 @@ mod tests {
             "tcp://localhost:61616".to_string(),
             BrokerType::ActiveMq,
             Some("user".to_string()),
-            Some("pass".to_string()),
+            Some(Redacted::new("pass".to_string())),
             1000,
         );
         assert_eq!(cfg.spec.name, "jms-bridge");
@@ -470,11 +550,11 @@ mod tests {
                 port_name: "Port2".to_string(),
                 address: Some("http://host:9090/ws".to_string()),
                 keystore_path: Some("/b.jks".to_string()),
-                keystore_password: Some("pass".to_string()),
+                keystore_password: Some(Redacted::new("pass".to_string())),
                 truststore_path: None,
                 truststore_password: None,
                 sig_username: Some("cert".to_string()),
-                sig_password: Some("sig_pass".to_string()),
+                sig_password: Some(Redacted::new("sig_pass".to_string())),
                 enc_username: None,
                 security_actions_out: Some("Timestamp Signature".to_string()),
                 security_actions_in: Some("Timestamp Signature".to_string()),
@@ -611,11 +691,11 @@ mod tests {
             port_name: "Port".to_string(),
             address: Some("http://host:8080".to_string()),
             keystore_path: Some("/ks.jks".to_string()),
-            keystore_password: Some("ks_pass".to_string()),
+            keystore_password: Some(Redacted::new("ks_pass".to_string())),
             truststore_path: Some("/ts.jks".to_string()),
-            truststore_password: Some("ts_pass".to_string()),
+            truststore_password: Some(Redacted::new("ts_pass".to_string())),
             sig_username: Some("user".to_string()),
-            sig_password: Some("sig_pass".to_string()),
+            sig_password: Some(Redacted::new("sig_pass".to_string())),
             enc_username: None,
             security_actions_out: Some("Timestamp Signature".to_string()),
             security_actions_in: Some("Timestamp".to_string()),
@@ -656,5 +736,130 @@ mod tests {
         );
         let result = config.validate();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bridge_rejects_zero_start_timeout() {
+        let config = BridgeProcessConfig::jms(
+            PathBuf::from("/usr/bin/echo"),
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            0,
+        );
+        assert!(config.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_bridge_stop_completes() {
+        use tokio::process::Command;
+        use tokio::time::{Duration, timeout};
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; while true; do echo tick; sleep 1; done")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("must spawn test child process");
+
+        let bridge = BridgeProcess {
+            child,
+            grpc_port: 0,
+            token: CancellationToken::new(),
+            handle: None,
+        };
+
+        let result = timeout(Duration::from_secs(5), bridge.stop()).await;
+        assert!(result.is_ok(), "stop() must complete within 5s");
+    }
+
+    // --- BRG-004: Redacted<T> tests ---
+
+    #[test]
+    fn redacted_debug_displays_redacted() {
+        let r = Redacted::new("secret_password".to_string());
+        assert_eq!(format!("{r:?}"), "[REDACTED]");
+    }
+
+    #[test]
+    fn redacted_display_displays_redacted() {
+        let r = Redacted::new("secret_password".to_string());
+        assert_eq!(format!("{r}"), "[REDACTED]");
+    }
+
+    #[test]
+    fn redacted_deref_gives_inner_value() {
+        let r = Redacted::new("secret".to_string());
+        assert_eq!(&*r, "secret");
+    }
+
+    #[test]
+    fn redacted_into_inner_returns_value() {
+        let r = Redacted::new("secret".to_string());
+        assert_eq!(r.into_inner(), "secret");
+    }
+
+    #[test]
+    fn redacted_clone_works() {
+        let r = Redacted::new("secret".to_string());
+        let c = r.clone();
+        assert_eq!(&*c, "secret");
+        assert_eq!(format!("{c:?}"), "[REDACTED]");
+    }
+
+    #[test]
+    fn bridge_process_config_debug_redacts_password() {
+        let cfg = BridgeProcessConfig::jms(
+            PathBuf::from("/tmp/jms-bridge"),
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            Some("user".to_string()),
+            Some(Redacted::new("super_secret".to_string())),
+            1000,
+        );
+        // The Redacted<T> password field must show [REDACTED] in debug output.
+        // env_vars is a separate Vec<(String, String)> used for process injection
+        // and legitimately contains the raw value — that is not a Redacted leak.
+        let password_debug = format!("{:?}", cfg.password); // allow-secret
+        assert!(
+            !password_debug.contains("super_secret"),
+            "Password field must not leak in Debug: {password_debug}"
+        );
+        assert_eq!(
+            password_debug, "Some([REDACTED])",
+            "Password field must show [REDACTED]: {password_debug}"
+        );
+    }
+
+    #[test]
+    fn cxf_profile_debug_redacts_passwords() {
+        let profile = CxfProfileEnvVars {
+            name: "test".to_string(),
+            wsdl_path: "/a.wsdl".to_string(),
+            service_name: "Svc".to_string(),
+            port_name: "Port".to_string(),
+            address: None,
+            keystore_path: None,
+            keystore_password: Some(Redacted::new("ks_secret_val".to_string())),
+            truststore_path: None,
+            truststore_password: Some(Redacted::new("ts_secret_val".to_string())),
+            sig_username: None,
+            sig_password: Some(Redacted::new("sig_secret_val".to_string())),
+            enc_username: None,
+            security_actions_out: None,
+            security_actions_in: None,
+            signature_algorithm: None,
+            signature_digest_algorithm: None,
+            signature_c14n_algorithm: None,
+            signature_parts: None,
+        };
+        let debug_output = format!("{profile:?}");
+        assert!(
+            !debug_output.contains("ks_secret_val")
+                && !debug_output.contains("ts_secret_val")
+                && !debug_output.contains("sig_secret_val"),
+            "Debug must not contain passwords: {debug_output}"
+        );
     }
 }

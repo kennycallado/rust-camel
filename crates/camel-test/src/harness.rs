@@ -350,4 +350,271 @@ mod tests {
         // Harness context remains accessible after lifecycle.
         let _guard = harness.ctx().lock().await;
     }
+
+    // ── TST-004: Route lifecycle (start/stop/restart) ─────────────────────────
+
+    #[tokio::test]
+    async fn tst004_route_lifecycle_start_stop_restart() {
+        let harness = CamelTestContext::builder()
+            .with_direct()
+            .with_mock()
+            .build()
+            .await;
+
+        let route = RouteBuilder::from("direct:lifecycle")
+            .route_id("lifecycle-route")
+            .to("mock:lifecycle-out")
+            .build()
+            .unwrap();
+
+        harness.add_route(route).await.unwrap();
+
+        // Start the context — routes transition to Started.
+        harness.start().await;
+
+        // Stop the context — routes transition to Stopped.
+        harness.stop().await;
+
+        // Restart via the underlying CamelContext to verify start-after-stop works.
+        {
+            let mut ctx = harness.ctx().lock().await;
+            ctx.start().await.expect("restart should succeed");
+            ctx.stop().await.expect("stop after restart should succeed");
+        }
+    }
+
+    // ── TST-005: Concurrent exchange processing ───────────────────────────────
+
+    #[tokio::test]
+    async fn tst005_concurrent_exchange_processing() {
+        use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, Message};
+        use camel_core::route::compose_pipeline;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use tower::ServiceExt;
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let processor: BoxProcessor = {
+            let c = Arc::clone(&counter);
+            BoxProcessor::from_fn(move |ex: Exchange| {
+                let c = Arc::clone(&c);
+                Box::pin(async move {
+                    c.fetch_add(1, Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                    Ok(ex)
+                })
+            })
+        };
+
+        let pipeline = compose_pipeline(vec![processor]);
+
+        let concurrency: u32 = 10;
+        let mut handles = Vec::with_capacity(concurrency as usize);
+        for i in 0..concurrency {
+            let p = pipeline.clone();
+            handles.push(tokio::spawn(async move {
+                let ex = Exchange::new(Message::new(format!("msg-{i}")));
+                p.oneshot(ex).await.unwrap()
+            }));
+        }
+
+        for h in handles {
+            let _ = h.await.unwrap();
+        }
+
+        assert_eq!(counter.load(Ordering::Relaxed), concurrency);
+    }
+
+    // ── TST-006: Error handler invocation ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn tst006_error_handler_invoked_on_failure() {
+        use camel_api::error_handler::ExceptionPolicy;
+        use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message};
+        use camel_processor::ErrorHandlerService;
+        use std::sync::Arc;
+        use tower::ServiceExt;
+
+        let error_received = Arc::new(std::sync::Mutex::new(false));
+        let error_received_clone = Arc::clone(&error_received);
+
+        // Handler processor that records it was called.
+        let handler: BoxProcessor = BoxProcessor::from_fn(move |ex: Exchange| {
+            let r = Arc::clone(&error_received_clone);
+            Box::pin(async move {
+                *r.lock().unwrap() = true;
+                Ok(ex)
+            })
+        });
+
+        // Inner processor that always fails.
+        let failing: BoxProcessor = BoxProcessor::from_fn(|_| {
+            Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
+        });
+
+        let policy = ExceptionPolicy::new(|_| true);
+        let svc = ErrorHandlerService::new(failing, Some(handler), vec![(policy, None)]);
+        let ex = Exchange::new(Message::new("test"));
+        let result = svc.oneshot(ex).await;
+
+        assert!(result.is_ok(), "error handler should absorb the error");
+        assert!(
+            result.unwrap().has_error(),
+            "exchange should have error set"
+        );
+        assert!(
+            *error_received.lock().unwrap(),
+            "error handler processor should have been invoked"
+        );
+    }
+
+    // ── TST-007: Dead letter channel ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tst007_dead_letter_channel_receives_failed_exchange() {
+        use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message};
+        use camel_processor::ErrorHandlerService;
+        use std::sync::Arc;
+        use tower::ServiceExt;
+
+        let dlc_received = Arc::new(std::sync::Mutex::new(Vec::<Exchange>::new()));
+        let dlc_received_clone = Arc::clone(&dlc_received);
+
+        // DLC processor that captures the exchange.
+        let dlc: BoxProcessor = BoxProcessor::from_fn(move |ex: Exchange| {
+            let r = Arc::clone(&dlc_received_clone);
+            Box::pin(async move {
+                r.lock().unwrap().push(ex.clone());
+                Ok(ex)
+            })
+        });
+
+        let failing: BoxProcessor = BoxProcessor::from_fn(|_| {
+            Box::pin(async { Err(CamelError::ProcessorError("fail".into())) })
+        });
+
+        let svc = ErrorHandlerService::new(failing, Some(dlc), vec![]);
+        let ex = Exchange::new(Message::new("dlc-test"));
+        let result = svc.oneshot(ex).await;
+
+        assert!(result.is_ok());
+        let exchanges = dlc_received.lock().unwrap();
+        assert_eq!(
+            exchanges.len(),
+            1,
+            "DLC should have received exactly one exchange"
+        );
+        assert!(exchanges[0].has_error());
+    }
+
+    // ── TST-008: Header propagation across processors ─────────────────────────
+
+    #[tokio::test]
+    async fn tst008_header_propagation_across_processors() {
+        use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, Message, Value};
+        use camel_core::route::compose_pipeline;
+        use tower::ServiceExt;
+
+        let step1: BoxProcessor = BoxProcessor::from_fn(|mut ex: Exchange| {
+            Box::pin(async move {
+                ex.input
+                    .set_header("trace-id", Value::String("abc-123".into()));
+                Ok(ex)
+            })
+        });
+
+        let step2: BoxProcessor = BoxProcessor::from_fn(|mut ex: Exchange| {
+            Box::pin(async move {
+                // Modify body but leave headers intact.
+                ex.input.body = Body::Text("processed".to_string());
+                Ok(ex)
+            })
+        });
+
+        let pipeline = compose_pipeline(vec![step1, step2]);
+        let ex = Exchange::new(Message::new("input"));
+        let result = pipeline.oneshot(ex).await.unwrap();
+
+        assert_eq!(
+            result.input.header("trace-id"),
+            Some(&Value::String("abc-123".into())),
+            "header should survive across processors"
+        );
+        assert_eq!(result.input.body.as_text(), Some("processed"));
+    }
+
+    // ── TST-009: Exchange body type conversion ────────────────────────────────
+
+    #[tokio::test]
+    async fn tst009_exchange_body_type_conversion() {
+        use camel_api::body::Body;
+        use camel_api::body_converter::{BodyType, convert};
+
+        // String → Bytes
+        let text_body = Body::Text("hello".to_string());
+        let bytes_body = convert(text_body, BodyType::Bytes).unwrap();
+        assert!(matches!(bytes_body, Body::Bytes(_)));
+        if let Body::Bytes(ref b) = bytes_body {
+            assert_eq!(b.as_ref(), b"hello");
+        }
+
+        // Bytes → String
+        let text_body_back = convert(bytes_body, BodyType::Text).unwrap();
+        assert!(matches!(text_body_back, Body::Text(_)));
+        assert_eq!(text_body_back.as_text(), Some("hello"));
+    }
+
+    // ── TST-010: Multicast EIP ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tst010_multicast_delivers_to_multiple_endpoints() {
+        use camel_api::multicast::{MulticastConfig, MulticastStrategy};
+        use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, Message};
+        use camel_processor::MulticastService;
+        use std::sync::Arc;
+        use tower::ServiceExt;
+
+        let received_a = Arc::new(std::sync::Mutex::new(Vec::<Exchange>::new()));
+        let received_b = Arc::new(std::sync::Mutex::new(Vec::<Exchange>::new()));
+
+        let endpoint_a: BoxProcessor = {
+            let r = Arc::clone(&received_a);
+            BoxProcessor::from_fn(move |ex: Exchange| {
+                let r = Arc::clone(&r);
+                Box::pin(async move {
+                    r.lock().unwrap().push(ex.clone());
+                    Ok(ex)
+                })
+            })
+        };
+
+        let endpoint_b: BoxProcessor = {
+            let r = Arc::clone(&received_b);
+            BoxProcessor::from_fn(move |ex: Exchange| {
+                let r = Arc::clone(&r);
+                Box::pin(async move {
+                    r.lock().unwrap().push(ex.clone());
+                    Ok(ex)
+                })
+            })
+        };
+
+        let config = MulticastConfig::new().aggregation(MulticastStrategy::LastWins);
+
+        let svc = MulticastService::new(vec![endpoint_a, endpoint_b], config)
+            .expect("multicast service creation should succeed");
+        let ex = Exchange::new(Message::new("multicast-test"));
+        let _result = svc.oneshot(ex).await.unwrap();
+
+        assert_eq!(
+            received_a.lock().unwrap().len(),
+            1,
+            "endpoint A should receive exactly one exchange"
+        );
+        assert_eq!(
+            received_b.lock().unwrap().len(),
+            1,
+            "endpoint B should receive exactly one exchange"
+        );
+    }
 }

@@ -18,6 +18,7 @@ camel-processor.workspace = true
 camel-component-api.workspace = true
 camel-endpoint.workspace = true
 tower.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

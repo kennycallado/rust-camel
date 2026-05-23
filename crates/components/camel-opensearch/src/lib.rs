@@ -1,5 +1,6 @@
 //! OpenSearch/Elasticsearch component for rust-camel — indexes, searches, and
 //! manages documents with support for CRUD, bulk, and multi-get operations.
+//! TODO(OS-022): component-level feature flags deferred; requires broader crate refactor.
 //!
 //! Main types: `OpenSearchBundle`, `OpenSearchComponent`, `OpenSearchConfig`,
 //! `OpenSearchProducer`. Main modules: `bundle`, `config`, `producer`.

@@ -260,6 +260,38 @@ fn tokenize(input: &str) -> Result<Vec<Token>, LanguageError> {
             continue;
         }
 
+        // Negative number literal: leading '-' followed by digits, not after a value token
+        // (Simple Language has no arithmetic, so '-' is always a sign, never subtraction)
+        if rest.starts_with('-') && text_buf.trim().is_empty() {
+            let after_minus = &rest[1..];
+            if after_minus
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+            {
+                let num_len = consume_number_len(after_minus);
+                if num_len > 0 {
+                    let raw_num = &rest[..1 + num_len]; // includes the '-'
+                    let num = raw_num
+                        .parse::<f64>()
+                        .map_err(|_| LanguageError::ParseError {
+                            expr: input.to_string(),
+                            reason: format!("invalid number literal: {raw_num}"),
+                        })?;
+                    if !num.is_finite() {
+                        return Err(LanguageError::ParseError {
+                            expr: input.to_string(),
+                            reason: format!("non-finite number literal: {raw_num}"),
+                        });
+                    }
+                    flush_text(&mut tokens, &mut text_buf);
+                    tokens.push(Token::NumberLit(num));
+                    i += 1 + num_len;
+                    continue;
+                }
+            }
+        }
+
         if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) && text_buf.trim().is_empty() {
             let num_len = consume_number_len(rest);
             if num_len > 0 {

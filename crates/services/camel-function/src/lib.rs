@@ -1,4 +1,8 @@
-//! Serverless function lifecycle management — WASM and container function runtime for rust-camel.
+//! camel-function — function registry and lifecycle management for Camel Rust.
+//!
+//! Allows registering named functions (WASM or container-based) that can be invoked
+//! from route definitions and expressions. Functions are pooled, health-checked, and
+//! hot-reloadable.
 //!
 //! Main types: `FunctionConfig`, `FunctionRuntimeService`, `RunnerHandle`, `ContainerProvider`.
 //! Main modules: `protocol`, `provider`.

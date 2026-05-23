@@ -12,7 +12,10 @@ use tracing::{debug, error, info, warn};
 use camel_component_api::{Body, CamelError, Exchange, Message};
 use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 
-use crate::config::{SqlEndpointConfig, enrich_db_url_with_ssl, redact_db_url};
+use crate::config::{
+    PollStrategy, ProcessingStrategy, SqlEndpointConfig, TransactionMode, enrich_db_url_with_ssl,
+    redact_db_url,
+};
 use crate::headers;
 use crate::query::{QueryTemplate, parse_query_template, resolve_params};
 use crate::utils::{bind_json_values, row_to_json};
@@ -46,11 +49,14 @@ impl SqlConsumer {
         let prepared = resolve_params(template, &empty_exchange, &self.config.in_separator)?;
 
         // Build and execute the query
+        debug!(query = %prepared.sql, "executing SQL consumer poll");
         let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
-        let rows: Vec<AnyRow> = query
-            .fetch_all(pool)
-            .await
-            .map_err(|e| CamelError::ProcessorError(format!("Query execution failed: {}", e)))?;
+        let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
+            warn!(error = %e, "SQL consumer poll query failed");
+            CamelError::ProcessorError(format!("Query execution failed: {}", e))
+        })?;
+
+        debug!(rows = rows.len(), "SQL consumer poll completed");
 
         // Check for empty result set
         if rows.is_empty() && !self.config.route_empty_result_set {
@@ -217,6 +223,19 @@ impl SqlConsumer {
 
         Ok(())
     }
+
+    async fn bridge_poll_error(
+        &self,
+        context: &ConsumerContext,
+        error: CamelError,
+    ) -> Result<(), CamelError> {
+        if !self.config.bridge_error_handler {
+            return Ok(());
+        }
+        let mut exchange = Exchange::new(Message::default());
+        exchange.set_error(error);
+        context.send_and_wait(exchange).await.map(|_| ())
+    }
 }
 
 #[async_trait]
@@ -235,6 +254,8 @@ impl Consumer for SqlConsumer {
             .get_or_try_init(|| async {
                 // Defensive: ensure config is resolved even if caller didn't use create_endpoint
                 self.config.resolve_defaults();
+                // SQL-014: resolve file-based query asynchronously (not blocking)
+                self.config.resolve_file_query().await?;
 
                 // Install all compiled-in sqlx drivers so AnyPool can resolve them.
                 // This is idempotent; safe to call multiple times.
@@ -278,6 +299,21 @@ impl Consumer for SqlConsumer {
             })
             .await?;
 
+        // SQL-002: warn if Managed transaction mode requested
+        if self.config.transaction_mode == TransactionMode::Managed {
+            warn!("transactionManager not yet implemented; using Auto mode");
+        }
+
+        // SQL-017/SQL-018: log processing and poll strategies
+        if self.config.processing_strategy == ProcessingStrategy::Scheduled {
+            debug!(
+                "Processing strategy: Scheduled (rows dispatched individually via send_and_wait)"
+            );
+        }
+        if self.config.poll_strategy == PollStrategy::Burst {
+            debug!("Poll strategy: Burst (rapid successive polls)");
+        }
+
         // Warn if no onConsume configured
         if self.config.on_consume.is_none() {
             warn!(
@@ -307,15 +343,31 @@ impl Consumer for SqlConsumer {
         }
 
         // Step 4: Polling loop
+        let mut poll_count: u32 = 0;
         loop {
+            // SQL-015: check repeat_count limit
+            if let Some(max_repeats) = self.config.repeat_count
+                && poll_count >= max_repeats
+            {
+                info!(
+                    repeat_count = max_repeats,
+                    "SQL consumer reached repeat_count limit, stopping"
+                );
+                break;
+            }
+
             tokio::select! {
                 _ = context.cancelled() => {
                     info!("SQL consumer stopped");
                     break;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(self.config.delay_ms)) => {
+                    poll_count += 1;
                     if let Err(e) = self.poll_database(pool, &context, &template).await {
                         error!(error = %e, "SQL consumer poll failed");
+                        if let Err(route_err) = self.bridge_poll_error(&context, e).await {
+                            error!(error = %route_err, "Failed to bridge SQL consumer error to route");
+                        }
                     }
                 }
             }
@@ -771,5 +823,29 @@ mod tests {
             failed_2, 1,
             "row 2 should be marked failed via per-row onConsumeFailed"
         );
+    }
+
+    #[tokio::test]
+    async fn bridge_error_handler_routes_poll_errors_to_exchange_error() {
+        let mut config = config();
+        config.bridge_error_handler = true;
+        let consumer = SqlConsumer::new(config, Arc::new(OnceCell::new()));
+
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(4);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                assert!(env.exchange.error.is_some(), "exchange must carry error");
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange));
+                }
+                break;
+            }
+        });
+
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+        consumer
+            .bridge_poll_error(&ctx, CamelError::ProcessorError("poll failed".into()))
+            .await
+            .expect("bridging should succeed");
     }
 }

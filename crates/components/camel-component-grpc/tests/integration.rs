@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use camel_component_api::{Body, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message};
 use camel_component_grpc::GrpcMode;
+use camel_component_grpc::config::GrpcConfig;
 use camel_component_grpc::consumer::GrpcConsumer;
 use camel_component_grpc::consumer::take_stream_observer;
 use camel_component_grpc::producer::GrpcProducer;
@@ -13,6 +14,25 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tower::Service;
+use tower::ServiceExt;
+
+fn default_grpc_config() -> GrpcConfig {
+    GrpcConfig {
+        proto_file: None,
+        service: None,
+        method: None,
+        reflection: false,
+        tls: false,
+        max_receive_message_length: 4 * 1024 * 1024,
+        deadline_ms: None,
+        metadata: None,
+        tls_config: None,
+        auth: camel_component_grpc::AuthConfig::None,
+        interceptors: camel_component_grpc::InterceptorConfig::default(),
+        consumer_strategy: camel_component_grpc::ConsumerStrategy::default(),
+        producer_strategy: camel_component_grpc::ProducerStrategy::default(),
+    }
+}
 
 mod helloworld {
     tonic::include_proto!("helloworld");
@@ -30,6 +50,8 @@ use streaming::*;
 
 struct GreeterImpl;
 
+struct SlowGreeterImpl;
+
 #[tonic::async_trait]
 impl Greeter for GreeterImpl {
     async fn say_hello(
@@ -37,6 +59,20 @@ impl Greeter for GreeterImpl {
         request: Request<HelloRequest>,
     ) -> Result<Response<HelloReply>, Status> {
         let name = request.into_inner().name;
+        Ok(Response::new(HelloReply {
+            message: format!("Hello {name}"),
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl Greeter for SlowGreeterImpl {
+    async fn say_hello(
+        &self,
+        request: Request<HelloRequest>,
+    ) -> Result<Response<HelloReply>, Status> {
+        let name = request.into_inner().name;
+        tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
         Ok(Response::new(HelloReply {
             message: format!("Hello {name}"),
         }))
@@ -136,13 +172,21 @@ async fn grpc_producer_roundtrip_json() {
         "helloworld.Greeter".to_string(),
         "SayHello".to_string(),
         GrpcMode::Unary,
+        None,
+        &default_grpc_config(),
     )
     .expect("producer");
 
     let exchange = Exchange::new(Message::new(Body::Json(
         serde_json::json!({"name": "World"}),
     )));
-    let out = producer.call(exchange).await.expect("call");
+    let out = producer
+        .ready()
+        .await
+        .expect("poll_ready")
+        .call(exchange)
+        .await
+        .expect("call");
     match out.input.body {
         Body::Json(v) => assert_eq!(v["message"], "Hello World"),
         other => panic!("expected json body, got {other:?}"),
@@ -216,6 +260,48 @@ async fn grpc_consumer_roundtrip_json() {
         pipeline_task.await.unwrap();
     })
     .await;
+}
+
+#[tokio::test]
+async fn test_grpc_deadline_enforced() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let incoming = TcpListenerStream::new(listener);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(GreeterServer::new(SlowGreeterImpl))
+            .serve_with_incoming(incoming)
+            .await
+            .expect("serve");
+    });
+
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+    let mut producer = GrpcProducer::new(
+        format!("http://127.0.0.1:{}", addr.port()),
+        proto_path,
+        "helloworld.Greeter".to_string(),
+        "SayHello".to_string(),
+        GrpcMode::Unary,
+        Some(100),
+        &default_grpc_config(),
+    )
+    .expect("producer");
+
+    let exchange = Exchange::new(Message::new(Body::Json(
+        serde_json::json!({"name": "World"}),
+    )));
+
+    let start = tokio::time::Instant::now();
+    let result = producer
+        .ready()
+        .await
+        .expect("poll_ready")
+        .call(exchange)
+        .await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "expected timeout error");
+    assert!(elapsed < std::time::Duration::from_millis(500));
 }
 
 #[tokio::test]
@@ -812,12 +898,20 @@ async fn grpc_producer_server_streaming() {
         "streaming.StreamService".to_string(),
         "ServerList".to_string(),
         GrpcMode::ServerStreaming,
+        None,
+        &default_grpc_config(),
     )
     .expect("producer");
 
     // Call with single JSON body (count=3)
     let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({"count": 3}))));
-    let out = producer.call(exchange).await.expect("call");
+    let out = producer
+        .ready()
+        .await
+        .expect("poll_ready")
+        .call(exchange)
+        .await
+        .expect("call");
 
     // Response should be JSON array of items
     // Note: prost-reflect omits default values (0 for int32) in JSON serialization
@@ -847,6 +941,8 @@ async fn grpc_producer_client_streaming() {
         "streaming.StreamService".to_string(),
         "ClientSum".to_string(),
         GrpcMode::ClientStreaming,
+        None,
+        &default_grpc_config(),
     )
     .expect("producer");
 
@@ -858,7 +954,13 @@ async fn grpc_producer_client_streaming() {
         {"value": 4},
         {"value": 5},
     ]))));
-    let out = producer.call(exchange).await.expect("call");
+    let out = producer
+        .ready()
+        .await
+        .expect("poll_ready")
+        .call(exchange)
+        .await
+        .expect("call");
 
     // Response should be single JSON object with total=15
     match out.input.body {
@@ -880,6 +982,8 @@ async fn grpc_producer_bidi_streaming() {
         "streaming.StreamService".to_string(),
         "BidiEcho".to_string(),
         GrpcMode::Bidi,
+        None,
+        &default_grpc_config(),
     )
     .expect("producer");
 
@@ -889,7 +993,13 @@ async fn grpc_producer_bidi_streaming() {
         {"message": "world"},
         {"message": "test"},
     ]))));
-    let out = producer.call(exchange).await.expect("call");
+    let out = producer
+        .ready()
+        .await
+        .expect("poll_ready")
+        .call(exchange)
+        .await
+        .expect("call");
 
     // Response should be JSON array of echoed messages with sequence numbers
     match out.input.body {

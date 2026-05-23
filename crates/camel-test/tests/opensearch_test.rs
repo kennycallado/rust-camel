@@ -142,7 +142,7 @@ async fn count_documents(url: &str, index: &str) -> u64 {
 // INDEX operation
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_index_operation() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -198,7 +198,7 @@ async fn opensearch_index_operation() {
 // SEARCH operation
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_search_operation() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -261,7 +261,7 @@ async fn opensearch_search_operation() {
 // GET + DELETE operations
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_get_and_delete() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -342,7 +342,7 @@ async fn opensearch_get_and_delete() {
 // BULK operation
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_bulk_operation() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -398,7 +398,7 @@ async fn opensearch_bulk_operation() {
 // UPDATE operation
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_update_operation() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -490,7 +490,7 @@ async fn opensearch_update_operation() {
 // MULTIGET operation
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_multiget_operation() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -555,7 +555,7 @@ async fn opensearch_multiget_operation() {
     endpoint.assert_exchange_count(1).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_header_operation_override_delete() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -632,7 +632,7 @@ async fn opensearch_header_operation_override_delete() {
     endpoint.assert_exchange_count(1).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_index_without_id() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -694,7 +694,7 @@ async fn opensearch_index_without_id() {
     endpoint.assert_exchange_count(1).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_invalid_operation_goes_to_error() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -705,11 +705,6 @@ async fn opensearch_invalid_operation_goes_to_error() {
         .with_mock()
         .with_component(OpenSearchComponent::new())
         .build()
-        .await;
-    h.ctx()
-        .lock()
-        .await
-        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
@@ -723,32 +718,21 @@ async fn opensearch_invalid_operation_goes_to_error() {
         .build()
         .unwrap();
 
-    h.add_route(route).await.unwrap();
-    h.start().await;
-
-    let error_ep = h.mock().get_endpoint("error").unwrap();
-    wait_until(
-        "invalid operation hits error",
-        Duration::from_secs(10),
-        Duration::from_millis(200),
-        || {
-            let ep = error_ep.clone();
-            async move { Ok(!ep.get_received_exchanges().await.is_empty()) }
-        },
-    )
-    .await
-    .unwrap();
-
-    h.stop().await;
-    error_ep.assert_exchange_count(1).await;
-    h.mock()
-        .get_endpoint("result")
-        .unwrap()
-        .assert_exchange_count(0)
-        .await;
+    // The component validates the operation at endpoint-creation time (startup),
+    // so add_route must fail — invalid config never reaches the dead-letter channel.
+    let result = h.add_route(route).await;
+    assert!(
+        result.is_err(),
+        "expected add_route to fail for unknown operation, but it succeeded"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("unknown OpenSearch operation"),
+        "expected error about unknown operation, got: {err_msg}"
+    );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_get_missing_id_goes_to_error() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -801,7 +785,7 @@ async fn opensearch_get_missing_id_goes_to_error() {
         .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_delete_missing_id_goes_to_error() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -854,7 +838,7 @@ async fn opensearch_delete_missing_id_goes_to_error() {
         .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_invalid_host_goes_to_error() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -901,7 +885,7 @@ async fn opensearch_invalid_host_goes_to_error() {
         .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_auth_username_password_in_uri() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;
@@ -952,7 +936,7 @@ async fn opensearch_auth_username_password_in_uri() {
     endpoint.assert_exchange_count(1).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn opensearch_tls_scheme_goes_to_error_without_tls_server() {
     let container = setup_opensearch_container().await;
     wait_for_opensearch(&container).await;

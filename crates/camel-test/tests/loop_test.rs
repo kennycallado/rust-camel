@@ -29,7 +29,7 @@ async fn send_to_direct(h: &CamelTestContext, endpoint_uri: &str, exchange: Exch
 }
 
 /// Count-mode loop via programmatic DSL.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn loop_count_integration() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -69,7 +69,7 @@ async fn loop_count_integration() {
 }
 
 /// Count-mode loop via YAML DSL.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn loop_count_yaml_integration() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -112,7 +112,7 @@ routes:
 }
 
 /// While-mode loop via programmatic DSL.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn loop_while_integration() {
     let h = CamelTestContext::builder()
         .with_direct()

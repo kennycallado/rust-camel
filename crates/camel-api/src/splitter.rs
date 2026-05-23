@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::body::Body;
+use crate::error::CamelError;
 use crate::exchange::Exchange;
 use crate::message::Message;
 
@@ -76,6 +77,19 @@ impl SplitterConfig {
     pub fn stop_on_exception(mut self, stop: bool) -> Self {
         self.stop_on_exception = stop;
         self
+    }
+
+    /// Validates the configuration.
+    ///
+    /// Returns `Err(CamelError::Config)` if `parallel_limit` is set to 0,
+    /// which would cause a `Semaphore::new(0)` panic at runtime.
+    pub fn validate(&self) -> Result<(), CamelError> {
+        if self.parallel && self.parallel_limit == Some(0) {
+            return Err(CamelError::Config(
+                "splitter parallel_limit must be > 0".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

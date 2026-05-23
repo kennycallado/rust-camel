@@ -4,6 +4,16 @@
 //! using the ControlBus EIP pattern. It provides operations like start, stop,
 //! suspend, resume, and restart for routes.
 //!
+//! TODO(CTRL-001): `SuspendRoute` and `ResumeRoute` commands are dispatched to
+//!   the runtime but route-level suspension/resumption semantics (pausing message
+//!   consumption without stopping the route) depend on runtime support that may
+//!   not be fully implemented in all components.
+//!
+//! TODO(CTRL-002): The `Status` action returns only the route lifecycle status
+//!   string. Full route statistics (total exchange count, failure count, mean
+//!   processing time, last exchange timestamp) are not yet populated. A future
+//!   `Stats` command should return a structured JSON body with these metrics.
+//!
 //! # URI Format
 //!
 //! `controlbus:route?routeId=my-route&action=start`

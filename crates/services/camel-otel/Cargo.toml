@@ -23,6 +23,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 camel-core.workspace = true

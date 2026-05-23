@@ -89,6 +89,8 @@ where
                     *state = CircuitState::HalfOpen;
                     drop(state);
                     self.inner.poll_ready(cx)
+                } else if self.config.fallback.is_some() {
+                    Poll::Ready(Ok(()))
                 } else {
                     Poll::Ready(Err(CamelError::CircuitOpen(
                         "circuit breaker is open".into(),
@@ -103,6 +105,23 @@ where
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
+        {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let CircuitState::Open { opened_at } = *st {
+                if opened_at.elapsed() < self.config.open_duration {
+                    if let Some(mut fallback) = self.config.fallback.clone() {
+                        return Box::pin(async move { fallback.call(exchange).await });
+                    }
+                    return Box::pin(async {
+                        Err(CamelError::CircuitOpen("circuit breaker is open".into()))
+                    });
+                }
+
+                tracing::info!("Circuit breaker transitioning from Open to HalfOpen");
+                *st = CircuitState::HalfOpen;
+            }
+        }
+
         // Clone inner service (Tower pattern) and state handle.
         let mut inner = self.inner.clone();
         let state = Arc::clone(&self.state);
@@ -196,6 +215,16 @@ mod tests {
                 } else {
                     Ok(ex)
                 }
+            })
+        })
+    }
+
+    fn tag_processor(tag: &'static str) -> BoxProcessor {
+        BoxProcessor::from_fn(move |_ex| {
+            Box::pin(async move {
+                let mut out = make_exchange();
+                out.input.body = tag.to_string().into();
+                Ok(out)
             })
         })
     }
@@ -342,5 +371,39 @@ mod tests {
             CircuitState::Closed { .. } => {} // expected
             _ => panic!("expected circuit to remain Closed"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_open_uses_fallback_when_configured() {
+        let fallback = tag_processor("fallback");
+        let config = CircuitBreakerConfig::new()
+            .failure_threshold(1)
+            .open_duration(Duration::from_secs(60))
+            .fallback(fallback);
+        let layer = CircuitBreakerLayer::new(config);
+        let mut svc = layer.layer(failing_processor());
+
+        let _ = svc.ready().await.unwrap().call(make_exchange()).await;
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange())
+            .await
+            .unwrap();
+        assert_eq!(result.input.body.as_text(), Some("fallback"));
+    }
+
+    #[tokio::test]
+    async fn test_open_without_fallback_returns_err() {
+        let config = CircuitBreakerConfig::new()
+            .failure_threshold(1)
+            .open_duration(Duration::from_secs(60));
+        let layer = CircuitBreakerLayer::new(config);
+        let mut svc = layer.layer(failing_processor());
+
+        let _ = svc.ready().await.unwrap().call(make_exchange()).await;
+        let result = svc.ready().await;
+        assert!(matches!(result, Err(CamelError::CircuitOpen(_))));
     }
 }

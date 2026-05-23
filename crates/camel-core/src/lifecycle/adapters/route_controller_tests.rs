@@ -303,7 +303,8 @@ fn resolve_steps_covers_declarative_and_eip_variants() {
         BuilderStep::Aggregate {
             config: camel_api::AggregatorConfig::correlate_by("id")
                 .complete_when_size(1)
-                .build(),
+                .build()
+                .unwrap(),
         },
         BuilderStep::Filter {
             predicate: Arc::new(|_| true),
@@ -793,22 +794,28 @@ fn resolve_steps_error_paths_unknown_scheme_and_language() {
     use camel_language_api::{Expression, Language, LanguageError, MutatingExpression, Predicate};
 
     struct ConstExpr;
+    #[async_trait::async_trait]
     impl Expression for ConstExpr {
-        fn evaluate(&self, _exchange: &camel_api::Exchange) -> Result<Value, LanguageError> {
+        async fn evaluate(&self, _exchange: &camel_api::Exchange) -> Result<Value, LanguageError> {
             Ok(Value::Null)
         }
     }
 
     struct ConstPred;
+    #[async_trait::async_trait]
     impl Predicate for ConstPred {
-        fn matches(&self, _exchange: &camel_api::Exchange) -> Result<bool, LanguageError> {
+        async fn matches(&self, _exchange: &camel_api::Exchange) -> Result<bool, LanguageError> {
             Ok(true)
         }
     }
 
     struct FailingMutatingExpr;
+    #[async_trait::async_trait]
     impl MutatingExpression for FailingMutatingExpr {
-        fn evaluate(&self, _exchange: &mut camel_api::Exchange) -> Result<Value, LanguageError> {
+        async fn evaluate(
+            &self,
+            _exchange: &mut camel_api::Exchange,
+        ) -> Result<Value, LanguageError> {
             Ok(Value::Null)
         }
     }

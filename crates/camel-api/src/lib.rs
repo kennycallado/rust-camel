@@ -1,3 +1,12 @@
+//! # rust-camel API
+//!
+//! Core Camel abstractions: exchanges, messages, body, errors, processors.
+//!
+//! Note: Component, Endpoint, Consumer, Producer traits are defined in
+//! `camel-component-api`. This crate focuses on data types and EIP abstractions.
+// TODO(API-006): Consider re-exporting Component, Endpoint, Consumer, Producer
+// from camel-component-api here for a unified API surface.
+
 pub mod aggregator;
 pub mod body;
 pub mod body_converter;

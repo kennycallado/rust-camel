@@ -43,6 +43,9 @@ pub struct EndpointPipelineService {
 }
 
 impl EndpointPipelineService {
+    // TODO(PROC-004): Add metrics instrumentation on endpoint dispatch — processed count,
+    // error count, and latency are not yet instrumented. Consider wiring a MetricsCollector
+    // here to track resolve() call counts, cache hit/miss rates, and resolution latency.
     pub fn new(resolver: EndpointResolver, config: EndpointPipelineConfig) -> Self {
         Self {
             resolver,

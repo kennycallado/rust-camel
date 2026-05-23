@@ -13,6 +13,7 @@ readme = "README.md"
 include = ["src/**/*", "wit/**/*", "README.md", "Cargo.toml"]
 
 [dependencies]
+camel-api.workspace = true
 
 [lints]
 workspace = true

@@ -134,7 +134,7 @@ async fn test_simple_language_via_context() {
     let mut msg = camel_api::message::Message::default();
     msg.set_header("x", camel_api::Value::String("hello".into()));
     let ex = camel_api::exchange::Exchange::new(msg);
-    assert!(pred.matches(&ex).unwrap());
+    assert!(pred.matches(&ex).await.unwrap());
 }
 
 #[tokio::test]
@@ -208,8 +208,9 @@ async fn test_add_route_definition_uses_runtime_registered_language() {
     use camel_language_api::{Expression, LanguageError, Predicate};
 
     struct DummyExpression;
+    #[async_trait::async_trait]
     impl Expression for DummyExpression {
-        fn evaluate(
+        async fn evaluate(
             &self,
             _exchange: &camel_api::Exchange,
         ) -> Result<camel_api::Value, LanguageError> {
@@ -218,8 +219,9 @@ async fn test_add_route_definition_uses_runtime_registered_language() {
     }
 
     struct DummyPredicate;
+    #[async_trait::async_trait]
     impl Predicate for DummyPredicate {
-        fn matches(&self, _exchange: &camel_api::Exchange) -> Result<bool, LanguageError> {
+        async fn matches(&self, _exchange: &camel_api::Exchange) -> Result<bool, LanguageError> {
             Ok(true)
         }
     }
@@ -306,6 +308,136 @@ async fn test_health_check_empty_context() {
 
     assert_eq!(report.status, HealthStatus::Healthy);
     assert!(report.services.is_empty());
+}
+
+#[tokio::test]
+async fn test_health_check_degraded_when_service_stopped() {
+    struct StoppedService;
+
+    #[async_trait]
+    impl Lifecycle for StoppedService {
+        fn name(&self) -> &str {
+            "stopped-svc"
+        }
+
+        async fn start(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        fn status(&self) -> ServiceStatus {
+            ServiceStatus::Stopped
+        }
+    }
+
+    let ctx = CamelContext::builder()
+        .build()
+        .await
+        .unwrap()
+        .with_lifecycle(StoppedService);
+
+    let report = ctx.health_check();
+    assert_eq!(
+        report.status,
+        HealthStatus::Degraded,
+        "a stopped service with no failures should produce Degraded"
+    );
+    assert_eq!(report.services.len(), 1);
+    assert_eq!(report.services[0].status, ServiceStatus::Stopped);
+}
+
+#[tokio::test]
+async fn test_health_check_unhealthy_when_service_failed() {
+    struct FailedService;
+
+    #[async_trait]
+    impl Lifecycle for FailedService {
+        fn name(&self) -> &str {
+            "failed-svc"
+        }
+
+        async fn start(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+
+        fn status(&self) -> ServiceStatus {
+            ServiceStatus::Failed
+        }
+    }
+
+    let ctx = CamelContext::builder()
+        .build()
+        .await
+        .unwrap()
+        .with_lifecycle(FailedService);
+
+    let report = ctx.health_check();
+    assert_eq!(
+        report.status,
+        HealthStatus::Unhealthy,
+        "a failed service should produce Unhealthy"
+    );
+    assert_eq!(report.services[0].status, ServiceStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_health_check_failed_overrides_stopped() {
+    struct StoppedService;
+
+    #[async_trait]
+    impl Lifecycle for StoppedService {
+        fn name(&self) -> &str {
+            "stopped-svc"
+        }
+        async fn start(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+        fn status(&self) -> ServiceStatus {
+            ServiceStatus::Stopped
+        }
+    }
+
+    struct FailedService;
+
+    #[async_trait]
+    impl Lifecycle for FailedService {
+        fn name(&self) -> &str {
+            "failed-svc"
+        }
+        async fn start(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+        fn status(&self) -> ServiceStatus {
+            ServiceStatus::Failed
+        }
+    }
+
+    let ctx = CamelContext::builder()
+        .build()
+        .await
+        .unwrap()
+        .with_lifecycle(StoppedService)
+        .with_lifecycle(FailedService);
+
+    let report = ctx.health_check();
+    assert_eq!(
+        report.status,
+        HealthStatus::Unhealthy,
+        "Failed should take priority over Stopped"
+    );
 }
 
 #[tokio::test]
@@ -997,9 +1129,9 @@ async fn context_metrics_defaults_to_noop() {
 async fn context_exposes_platform_ports() {
     let ctx = CamelContext::builder().build().await.unwrap();
     let readiness = ctx.readiness_gate();
-    readiness.notify_starting().await;
-    readiness.notify_not_ready("boot").await;
-    readiness.notify_ready().await;
+    readiness.notify_starting().await.unwrap();
+    readiness.notify_not_ready("boot").await.unwrap();
+    readiness.notify_ready().await.unwrap();
 
     let leadership = ctx.leadership();
     let handle = leadership.start("coverage-group").await.unwrap();

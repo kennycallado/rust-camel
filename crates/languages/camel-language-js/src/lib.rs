@@ -25,4 +25,4 @@ mod language;
 pub use engine::{JsEngine, JsEvalResult, JsExchange};
 pub use engines::BoaEngine;
 pub use error::JsLanguageError;
-pub use language::JsLanguage;
+pub use language::{JsLanguage, JsLanguageConfig};

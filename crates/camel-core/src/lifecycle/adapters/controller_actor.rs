@@ -1238,7 +1238,7 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
-        assert_eq!(exists_task.await.expect("join").expect("ok"), true);
+        assert!(exists_task.await.expect("join").expect("ok"));
 
         let hash_task = tokio::spawn({
             let h = handle.clone();

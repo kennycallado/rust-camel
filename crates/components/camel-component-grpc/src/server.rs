@@ -17,6 +17,7 @@ use tower::Service;
 use tracing::{debug, error};
 
 use crate::codec::RawBytesCodec;
+use crate::config::GrpcServerConfig;
 use crate::consumer::{GrpcReply, GrpcRequestEnvelope, GrpcStreamItem};
 use crate::mode::GrpcMode;
 
@@ -29,6 +30,8 @@ struct ServerHandle {
     dispatch: GrpcDispatchTable,
     #[allow(dead_code)]
     _task: tokio::task::JoinHandle<()>,
+    #[allow(dead_code)]
+    config: GrpcServerConfig,
 }
 
 pub(crate) struct GrpcServerRegistry {
@@ -47,6 +50,7 @@ impl GrpcServerRegistry {
         &'static self,
         host: &str,
         port: u16,
+        config: GrpcServerConfig,
     ) -> Result<GrpcDispatchTable, CamelError> {
         let host_owned = host.to_string();
 
@@ -70,10 +74,15 @@ impl GrpcServerRegistry {
                     ))
                 })?;
                 let dispatch: GrpcDispatchTable = Arc::new(RwLock::new(HashMap::new()));
-                let task = tokio::spawn(run_grpc_server(listener, Arc::clone(&dispatch)));
+                let task = tokio::spawn(run_grpc_server(
+                    listener,
+                    Arc::clone(&dispatch),
+                    config.clone(),
+                ));
                 Ok::<ServerHandle, CamelError>(ServerHandle {
                     dispatch,
                     _task: task,
+                    config,
                 })
             })
             .await?;
@@ -92,6 +101,7 @@ impl GrpcServerRegistry {
         listener: tokio::net::TcpListener,
         host: &str,
         port: u16,
+        config: GrpcServerConfig,
     ) -> Result<GrpcDispatchTable, CamelError> {
         let cell = {
             let mut guard = self.inner.lock().map_err(|_| {
@@ -107,10 +117,15 @@ impl GrpcServerRegistry {
         let handle = cell
             .get_or_try_init(|| async {
                 let dispatch: GrpcDispatchTable = Arc::new(RwLock::new(HashMap::new()));
-                let task = tokio::spawn(run_grpc_server(listener, Arc::clone(&dispatch)));
+                let task = tokio::spawn(run_grpc_server(
+                    listener,
+                    Arc::clone(&dispatch),
+                    config.clone(),
+                ));
                 Ok::<ServerHandle, CamelError>(ServerHandle {
                     dispatch,
                     _task: task,
+                    config,
                 })
             })
             .await?;
@@ -141,7 +156,11 @@ impl GrpcServerRegistry {
     }
 }
 
-async fn run_grpc_server(listener: tokio::net::TcpListener, dispatch: GrpcDispatchTable) {
+async fn run_grpc_server(
+    listener: tokio::net::TcpListener,
+    dispatch: GrpcDispatchTable,
+    config: GrpcServerConfig,
+) {
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(s) => s,
@@ -153,6 +172,7 @@ async fn run_grpc_server(listener: tokio::net::TcpListener, dispatch: GrpcDispat
 
         let io = TokioIo::new(stream);
         let dispatch = dispatch.clone();
+        let config = config.clone();
 
         tokio::spawn(async move {
             let service = service_fn(move |req| {
@@ -160,10 +180,18 @@ async fn run_grpc_server(listener: tokio::net::TcpListener, dispatch: GrpcDispat
                 handle_grpc_request(req, dispatch)
             });
 
-            if let Err(e) = http2::Builder::new(hyper_util::rt::TokioExecutor::new())
-                .serve_connection(io, service)
-                .await
-            {
+            let mut builder = http2::Builder::new(hyper_util::rt::TokioExecutor::new());
+
+            // Apply max_receive_message_len as max_frame_size on the http2 builder.
+            // NOTE: HTTP/2 frames are capped at 16 MB per spec; this limits individual
+            // frame sizes. For true message-level limits, a Tower layer would be needed.
+            if let Some(max_len) = config.max_receive_message_len {
+                // Clamp to HTTP/2 spec maximum (16 MB - 1 byte)
+                let frame_size = max_len.clamp(16_384, 16_777_215) as u32;
+                builder.max_frame_size(frame_size);
+            }
+
+            if let Err(e) = builder.serve_connection(io, service).await {
                 debug!(error = %e, "gRPC connection error");
             }
         });
@@ -775,7 +803,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let dispatch = GrpcServerRegistry::global()
-            .get_or_spawn_with_listener(listener, "127.0.0.1", port)
+            .get_or_spawn_with_listener(listener, "127.0.0.1", port, GrpcServerConfig::default())
             .await;
         assert!(dispatch.is_ok());
     }
@@ -786,7 +814,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let dispatch = GrpcServerRegistry::global()
-            .get_or_spawn_with_listener(listener, "127.0.0.1", port)
+            .get_or_spawn_with_listener(listener, "127.0.0.1", port, GrpcServerConfig::default())
             .await
             .unwrap();
 
@@ -1056,7 +1084,8 @@ mod tests {
         let handle = ServerHandle {
             dispatch,
             _task: task,
+            config: GrpcServerConfig::default(),
         };
-        assert!(!handle._task.is_finished() || true);
+        let _ = handle;
     }
 }

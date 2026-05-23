@@ -16,7 +16,7 @@ fn bench_multicast_endpoints(c: &mut Criterion) {
     for count in [1, 5, 10, 20] {
         let endpoints: Vec<BoxProcessor> = (0..count).map(|_| pass_through()).collect();
         let config = MulticastConfig::new().aggregation(MulticastStrategy::CollectAll);
-        let svc = MulticastService::new(endpoints, config);
+        let svc = MulticastService::new(endpoints, config).unwrap();
 
         group.bench_with_input(BenchmarkId::new("fanout", count), &count, |b, _| {
             b.to_async(&rt).iter(|| {

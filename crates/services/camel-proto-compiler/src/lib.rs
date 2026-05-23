@@ -99,6 +99,31 @@ mod tests {
     }
 
     #[test]
+    fn cache_does_not_grow_beyond_max() {
+        let cache = ProtoCache::with_max_entries(3);
+        let tmp = tempfile::tempdir().expect("tmp dir");
+
+        // Write 4 different proto files, each with a different package name.
+        for i in 0..4 {
+            let proto = tmp.path().join(format!("pkg{i}.proto"));
+            std::fs::write(
+                &proto,
+                format!(r#"syntax = "proto3"; package pkg{i}; message M {{ string name = 1; }}"#),
+            )
+            .expect("write proto");
+            cache
+                .get_or_compile(&proto, std::iter::once(tmp.path() as &Path))
+                .expect("compile should succeed");
+        }
+
+        assert!(
+            cache.len() <= 3,
+            "cache should respect max_entries, got {}",
+            cache.len()
+        );
+    }
+
+    #[test]
     fn cache_invalidation_on_content_change() {
         let cache = ProtoCache::new();
         let tmp = TempDir::new().expect("tmp dir");

@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::BoxProcessor;
+
 /// Configuration for the circuit breaker pattern.
 ///
 /// The circuit breaker monitors failures and temporarily stops sending
@@ -13,7 +15,7 @@ use std::time::Duration;
 ///   After `open_duration` elapses, the circuit transitions to half-open.
 /// - **Half-Open** — A single probe call is allowed through. If it succeeds
 ///   (`success_threshold` times), the circuit closes. If it fails, the circuit reopens.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CircuitBreakerConfig {
     /// Number of consecutive failures before opening the circuit.
     pub failure_threshold: u32,
@@ -25,6 +27,19 @@ pub struct CircuitBreakerConfig {
     pub success_threshold: u32,
     /// How long the circuit stays open before allowing a probe.
     pub open_duration: Duration,
+    /// Optional fallback processor invoked when circuit is open.
+    pub fallback: Option<BoxProcessor>,
+}
+
+impl std::fmt::Debug for CircuitBreakerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircuitBreakerConfig")
+            .field("failure_threshold", &self.failure_threshold)
+            .field("success_threshold", &self.success_threshold)
+            .field("open_duration", &self.open_duration)
+            .field("fallback", &self.fallback.as_ref().map(|_| "<processor>"))
+            .finish()
+    }
 }
 
 impl Default for CircuitBreakerConfig {
@@ -33,6 +48,7 @@ impl Default for CircuitBreakerConfig {
             failure_threshold: 5,
             success_threshold: 1,
             open_duration: Duration::from_secs(30),
+            fallback: None,
         }
     }
 }
@@ -51,6 +67,11 @@ impl CircuitBreakerConfig {
         self.open_duration = duration;
         self
     }
+
+    pub fn fallback(mut self, fallback: BoxProcessor) -> Self {
+        self.fallback = Some(fallback);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -63,6 +84,7 @@ mod tests {
         assert_eq!(config.failure_threshold, 5);
         assert_eq!(config.success_threshold, 1);
         assert_eq!(config.open_duration, Duration::from_secs(30));
+        assert!(config.fallback.is_none());
     }
 
     #[test]

@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use serde_json::Value;
 use tower::ServiceExt;
 use wasmtime::component::{HasSelf, Linker};
@@ -8,21 +6,14 @@ use crate::bindings::camel::plugin::host::Host;
 use crate::bindings::camel::plugin::types::WasmError;
 use crate::runtime::WasmHostState;
 
-static NESTING_DEPTH: AtomicU32 = AtomicU32::new(0);
-
-pub fn current_nesting_depth() -> u32 {
-    NESTING_DEPTH.load(Ordering::Relaxed)
-}
-
 impl Host for WasmHostState {
     fn camel_call(&mut self, uri: String, payload: String) -> Result<String, WasmError> {
-        let depth = NESTING_DEPTH.fetch_add(1, Ordering::Relaxed);
-        if depth > 0 {
-            NESTING_DEPTH.fetch_sub(1, Ordering::Relaxed);
+        if self.call_depth > 0 {
             return Err(WasmError::ProcessorError(
                 "recursive wasm calls not supported".to_string(),
             ));
         }
+        self.call_depth += 1;
 
         let registry = self.registry.clone();
         let async_work = async {
@@ -81,16 +72,10 @@ impl Host for WasmHostState {
             Ok(body_str)
         };
 
-        let result = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(async_work)),
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| WasmError::Io(format!("failed to create tokio runtime: {}", e)))?;
-                rt.block_on(async_work)
-            }
-        };
+        let handle = self.tokio_handle.clone();
+        let result = tokio::task::block_in_place(|| handle.block_on(async_work));
 
-        NESTING_DEPTH.fetch_sub(1, Ordering::Relaxed);
+        self.call_depth -= 1;
         result
     }
 
@@ -167,10 +152,17 @@ impl BeanHost for WasmHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::WasmHostState;
     use camel_core::Registry;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::OnceLock;
+
+    fn test_tokio_handle() -> tokio::runtime::Handle {
+        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RT.get_or_init(|| tokio::runtime::Runtime::new().expect("test runtime"))
+            .handle()
+            .clone()
+    }
 
     fn make_state(call_depth: u32) -> WasmHostState {
         WasmHostState {
@@ -183,6 +175,7 @@ mod tests {
             call_depth,
             limits: wasmtime::StoreLimits::default(),
             state_store: crate::state_store::StateStore::new(),
+            tokio_handle: test_tokio_handle(),
         }
     }
 

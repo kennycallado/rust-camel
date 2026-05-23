@@ -56,4 +56,4 @@ pub use splitter::SplitterService;
 pub use stop::StopService;
 pub use stream_cache::StreamCacheService;
 pub use throttler::ThrottlerService;
-pub use wire_tap::{WireTapLayer, WireTapService};
+pub use wire_tap::{WireTapConfig, WireTapLayer, WireTapService};

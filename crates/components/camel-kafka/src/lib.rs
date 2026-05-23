@@ -40,6 +40,7 @@ pub use producer::KafkaProducer;
 use camel_component_api::{BoxProcessor, CamelError};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 
+#[derive(Debug)]
 pub struct KafkaComponent {
     config: Option<KafkaConfig>,
 }
@@ -53,16 +54,22 @@ impl KafkaComponent {
 
     /// Create a KafkaComponent with global config defaults.
     /// These will be applied to endpoint configs before `resolve_defaults()`.
-    pub fn with_config(config: KafkaConfig) -> Self {
-        Self {
+    /// Returns an error if the config fails validation (empty brokers, out-of-range numerics).
+    pub fn with_config(config: KafkaConfig) -> Result<Self, CamelError> {
+        config.validate()?;
+        Ok(Self {
             config: Some(config),
-        }
+        })
     }
 
     /// Create a KafkaComponent with optional global config defaults.
     /// If `None`, behaves like `new()` (uses hardcoded defaults only).
-    pub fn with_optional_config(config: Option<KafkaConfig>) -> Self {
-        Self { config }
+    /// Returns an error if the provided config fails validation.
+    pub fn with_optional_config(config: Option<KafkaConfig>) -> Result<Self, CamelError> {
+        if let Some(ref cfg) = config {
+            cfg.validate()?;
+        }
+        Ok(Self { config })
     }
 }
 
@@ -96,9 +103,16 @@ impl Component for KafkaComponent {
     }
 }
 
-struct KafkaEndpoint {
+pub struct KafkaEndpoint {
     uri: String,
     config: ResolvedKafkaEndpointConfig,
+}
+
+impl KafkaEndpoint {
+    /// Returns the resolved configuration for this endpoint.
+    pub fn config(&self) -> &ResolvedKafkaEndpointConfig {
+        &self.config
+    }
 }
 
 impl Endpoint for KafkaEndpoint {
@@ -170,6 +184,34 @@ mod tests {
     }
 
     #[test]
+    fn test_component_with_config_rejects_empty_brokers() {
+        let bad_cfg = KafkaConfig::default().with_brokers("");
+        let result = KafkaComponent::with_config(bad_cfg);
+        assert!(
+            result.is_err(),
+            "empty brokers in global config should fail"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("brokers"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_component_with_optional_config_rejects_bad_config() {
+        let bad_cfg = KafkaConfig {
+            session_timeout_ms: 0,
+            ..KafkaConfig::default()
+        };
+        let result = KafkaComponent::with_optional_config(Some(bad_cfg));
+        assert!(result.is_err(), "bad numeric config should fail");
+    }
+
+    #[test]
+    fn test_component_with_optional_config_accepts_none() {
+        let result = KafkaComponent::with_optional_config(None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_component_rejects_empty_group_id() {
         let component = KafkaComponent::new();
         let ctx = NoOpComponentContext;
@@ -190,7 +232,7 @@ mod tests {
         let global = KafkaConfig::default()
             .with_brokers("broker-1:9092")
             .with_group_id("global-group");
-        let component = KafkaComponent::with_config(global);
+        let component = KafkaComponent::with_config(global).expect("valid config");
         let ctx = NoOpComponentContext;
 
         let endpoint = component
@@ -201,5 +243,67 @@ mod tests {
             .create_producer(&ProducerContext::default())
             .expect("producer should be created from endpoint");
         drop(producer);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KAFKA-013: Integration test skeletons (require live Kafka)
+// ---------------------------------------------------------------------------
+
+/// These tests are compilable but skipped by default.
+/// Run with: `cargo test -p camel-component-kafka -- --ignored`
+#[cfg(test)]
+mod integration_tests {
+    use crate::config::KafkaEndpointConfig;
+    use crate::producer::KafkaProducer;
+    use camel_component_api::{Body, Exchange, Message};
+    use tower::Service;
+    use tower::ServiceExt;
+
+    fn make_resolved_config(topic: &str) -> crate::config::ResolvedKafkaEndpointConfig {
+        KafkaEndpointConfig::from_uri(&format!(
+            "kafka:{topic}?brokers=localhost:9092&groupId=integration-test"
+        ))
+        .expect("config should parse")
+        .resolve()
+        .expect("config should resolve")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Kafka at localhost:9092"]
+    async fn producer_sends_message_to_kafka() {
+        let config = make_resolved_config("camel-integration-test");
+        let mut producer = KafkaProducer::new(config).expect("producer should create");
+
+        let exchange = Exchange::new(Message::new(Body::Text(
+            "hello from integration test".to_string(),
+        )));
+
+        let result = producer
+            .ready()
+            .await
+            .expect("poll_ready should succeed")
+            .call(exchange)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "producer should send successfully: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Kafka at localhost:9092"]
+    async fn producer_health_check_succeeds() {
+        let config = make_resolved_config("camel-health-check");
+        let producer = KafkaProducer::new(config).expect("producer should create");
+
+        let result = producer.check_connection().await;
+        assert!(
+            result.is_ok(),
+            "health check should succeed: {:?}",
+            result.err()
+        );
     }
 }

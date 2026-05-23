@@ -9,12 +9,37 @@ use tokio::sync::OnceCell;
 use tower::Service;
 use tracing::{debug, error, warn};
 
+/// Tower `Service` that applies an XSLT 3.0 transformation to each exchange.
+///
+/// # Body Contract
+///
+/// **Input:** The exchange body MUST contain well-formed XML (as `Body::Xml`,
+/// `Body::Bytes`, or any variant that materializes to valid UTF-8 / XML bytes).
+/// If `fail_on_null_body` is enabled in the endpoint configuration and the body
+/// is empty, the producer returns `CamelError::ProcessorError`.
+///
+/// **Output:** The exchange body is replaced with the transformation result as
+/// `Body::Bytes` containing the raw output (XML, HTML, or plain text depending
+/// on the stylesheet's `xsl:output` declaration). Exchange headers are preserved
+/// unchanged.
+///
+/// # TODO(XSLT-012): Output encoding validation
+/// The encoding declared in the XSLT stylesheet's `<xsl:output encoding="...">`
+/// is not validated against the runtime charset. The transformer always produces
+/// bytes according to the stylesheet's `encoding` attribute (defaulting to UTF-8),
+/// but this crate does not verify that the declared encoding matches the actual
+/// byte content. If a stylesheet declares `encoding="ISO-8859-1"` but the bridge
+/// produces UTF-8 bytes (or vice versa), the output may be misinterpreted by
+/// downstream consumers. A future enhancement should parse the `xsl:output`
+/// declaration and either enforce encoding consistency or annotate the exchange
+/// body with the effective charset.
 #[derive(Clone)]
 pub struct XsltProducer {
     stylesheet_bytes: Vec<u8>,
     compiled: Arc<OnceCell<StylesheetId>>,
     params: Vec<(String, String)>,
     output_method: Option<String>,
+    fail_on_null_body: bool,
     client: Arc<XsltBridgeClient>,
     runtime: Arc<XsltBridgeRuntime>,
 }
@@ -25,6 +50,7 @@ impl XsltProducer {
         compiled: Arc<OnceCell<StylesheetId>>,
         params: Vec<(String, String)>,
         output_method: Option<String>,
+        fail_on_null_body: bool,
         client: Arc<XsltBridgeClient>,
         runtime: Arc<XsltBridgeRuntime>,
     ) -> Self {
@@ -33,6 +59,7 @@ impl XsltProducer {
             compiled,
             params,
             output_method,
+            fail_on_null_body,
             client,
             runtime,
         }
@@ -100,6 +127,7 @@ impl Service<Exchange> for XsltProducer {
         let compiled = Arc::clone(&self.compiled);
         let params = self.params.clone();
         let output_method = self.output_method.clone();
+        let fail_on_null_body = self.fail_on_null_body;
         let client = Arc::clone(&self.client);
         let runtime = Arc::clone(&self.runtime);
 
@@ -127,6 +155,14 @@ impl Service<Exchange> for XsltProducer {
                     })?;
 
             let input_body = std::mem::take(&mut exchange.input.body);
+
+            if fail_on_null_body && input_body.is_empty() {
+                return Err(CamelError::ProcessorError(
+                    "XSLT producer received null/empty body but failOnNullBody is enabled"
+                        .to_string(),
+                ));
+            }
+
             let document = input_body
                 .materialize()
                 .await
@@ -182,6 +218,7 @@ mod tests {
             Arc::new(OnceCell::new()),
             vec![],
             None,
+            false,
             client,
             runtime,
         )

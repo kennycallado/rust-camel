@@ -13,7 +13,6 @@ use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
-use tonic::Code;
 
 pub struct XsltBridgeRuntime {
     config: XsltComponentConfig,
@@ -126,31 +125,30 @@ impl XsltBridgeRuntime {
         output_method: Option<String>,
     ) -> Result<Vec<u8>, XsltError> {
         self.ensure_bridge_started(client).await?;
-
-        match client
-            .transform(
-                &stylesheet_id.to_string(),
-                document.clone(),
-                params.clone(),
-                output_method.clone(),
-            )
-            .await
-        {
-            Ok(result) => Ok(result),
-            Err(err) if Self::is_transport_error(&err.to_string()) => {
-                self.restart_bridge(client).await?;
-                client
-                    .transform(&stylesheet_id.to_string(), document, params, output_method)
-                    .await
+        let max_retries = self.config.max_retries;
+        let mut attempt = 0;
+        loop {
+            match client
+                .transform(
+                    &stylesheet_id.to_string(),
+                    document.clone(),
+                    params.clone(),
+                    output_method.clone(),
+                )
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) if Self::is_transport_error(&err) && attempt < max_retries => {
+                    attempt += 1;
+                    self.restart_bridge(client).await?;
+                }
+                Err(err) => return Err(err),
             }
-            Err(err) => Err(err),
         }
     }
 
-    fn is_transport_error(msg: &str) -> bool {
-        msg.contains(&Code::Unavailable.to_string())
-            || msg.contains(&Code::Unknown.to_string())
-            || msg.contains("transport")
+    fn is_transport_error(err: &XsltError) -> bool {
+        matches!(err, XsltError::BridgeTransport { .. })
     }
 
     pub(crate) fn state_rx(&self) -> &Arc<watch::Receiver<BridgeState>> {
@@ -247,14 +245,7 @@ impl XsltComponent {
     }
 
     fn read_stylesheet(&self, stylesheet_uri: &str) -> Result<Vec<u8>, XsltError> {
-        let path = if stylesheet_uri.starts_with("file://") {
-            let url = url::Url::parse(stylesheet_uri)
-                .map_err(|e| XsltError::Bridge(format!("invalid stylesheet URI: {e}")))?;
-            url.to_file_path()
-                .map_err(|_| XsltError::Bridge("invalid file:// stylesheet URI".to_string()))?
-        } else {
-            PathBuf::from(stylesheet_uri)
-        };
+        let path = PathBuf::from(stylesheet_uri);
 
         Ok(std::fs::read(path)?)
     }
@@ -280,6 +271,7 @@ impl Component for XsltComponent {
             stylesheet_bytes,
             endpoint_config.params,
             endpoint_config.output_method,
+            endpoint_config.fail_on_null_body,
             Arc::clone(&self.client),
             Arc::clone(&self.runtime),
         )))

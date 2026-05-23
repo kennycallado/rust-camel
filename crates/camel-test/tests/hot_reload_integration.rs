@@ -46,7 +46,7 @@ routes:
     std::fs::write(path, content).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_resolve_watch_dirs_from_glob_patterns() {
     let dir = tempdir().unwrap();
     let pattern = format!("{}/*.yaml", dir.path().display());
@@ -55,7 +55,7 @@ async fn test_resolve_watch_dirs_from_glob_patterns() {
     assert_eq!(dirs[0], dir.path());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_watcher_swaps_pipeline_on_file_change() {
     let dir = tempdir().unwrap();
     let route_file = dir.path().join("route.yaml");
@@ -133,7 +133,7 @@ async fn test_watcher_swaps_pipeline_on_file_change() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_watcher_removes_route_on_file_deletion() {
     let dir = tempdir().unwrap();
     let route_file = dir.path().join("route.yaml");
@@ -224,7 +224,7 @@ async fn test_watcher_removes_route_on_file_deletion() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_watcher_restart_preserves_non_running_route_state() {
     let dir = tempdir().unwrap();
     let route_file = dir.path().join("route.yaml");
@@ -321,7 +321,7 @@ async fn test_watcher_restart_preserves_non_running_route_state() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_restart_with_from_uri_change_processes_exchanges_via_new_endpoint() {
     let dir = tempdir().unwrap();
     let route_file = dir.path().join("route.yaml");

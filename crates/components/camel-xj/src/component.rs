@@ -14,8 +14,10 @@ use camel_xslt::{BridgeState, XsltBridgeClient};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, watch};
 use tonic::Code;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct XjComponentConfig {
@@ -45,7 +47,7 @@ pub struct XjBridgeRuntime {
 }
 
 impl XjBridgeRuntime {
-    fn new(
+    pub(crate) fn new(
         config: XjComponentConfig,
         process: Arc<Mutex<Option<BridgeProcess>>>,
         state_tx: watch::Sender<BridgeState>,
@@ -122,33 +124,42 @@ impl XjBridgeRuntime {
         Ok(())
     }
 
-    pub(crate) async fn transform_with_retry(
+    pub(crate) async fn transform_with_retry_configured(
         &self,
         client: &XsltBridgeClient,
         stylesheet_id: &str,
         document: Vec<u8>,
         params: Vec<(String, String)>,
+        retry_count: u32,
+        retry_delay_ms: u64,
     ) -> Result<Vec<u8>, XjError> {
         self.ensure_bridge_started(client).await?;
 
-        match client
-            .transform(
-                &stylesheet_id.to_string(),
-                document.clone(),
-                params.clone(),
-                None,
-            )
-            .await
-        {
-            Ok(result) => Ok(result),
-            Err(err) if Self::is_transport_error(&err.to_string()) => {
-                self.restart_bridge(client).await?;
-                client
-                    .transform(&stylesheet_id.to_string(), document, params, None)
-                    .await
-                    .map_err(XjError::from)
+        let max_attempts = retry_count.saturating_add(1);
+        let mut attempt = 1u32;
+        let delay = Duration::from_millis(retry_delay_ms);
+        loop {
+            match client
+                .transform(
+                    &stylesheet_id.to_string(),
+                    document.clone(),
+                    params.clone(),
+                    None,
+                )
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    let mapped = XjError::from(err);
+                    if !Self::is_transient_error(&mapped) || attempt >= max_attempts {
+                        return Err(mapped);
+                    }
+                    warn!("xj: retry attempt {attempt}/{max_attempts} after: {mapped}");
+                    self.restart_bridge(client).await?;
+                    tokio::time::sleep(delay).await;
+                    attempt = attempt.saturating_add(1);
+                }
             }
-            Err(err) => Err(XjError::from(err)),
         }
     }
 
@@ -164,6 +175,43 @@ impl XjBridgeRuntime {
             && let Err(e) = p.stop().await
         {
             tracing::warn!("Failed to stop XJ bridge process: {}", e);
+        }
+    }
+
+    fn is_transient_error(err: &XjError) -> bool {
+        let msg = err.to_string().to_lowercase();
+        Self::is_transport_error(&msg)
+            || msg.contains("io")
+            || msg.contains("network")
+            || msg.contains("timed out")
+            || msg.contains("connection")
+    }
+
+    #[cfg(test)]
+    async fn retry_transient_for_test<F, Fut>(
+        retry_count: u32,
+        retry_delay_ms: u64,
+        mut op: F,
+    ) -> Result<Vec<u8>, XjError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, XjError>>,
+    {
+        let max_attempts = retry_count.saturating_add(1);
+        let mut attempt = 1u32;
+        let delay = Duration::from_millis(retry_delay_ms);
+
+        loop {
+            match op().await {
+                Ok(v) => return Ok(v),
+                Err(err) => {
+                    if !Self::is_transient_error(&err) || attempt >= max_attempts {
+                        return Err(err);
+                    }
+                    tokio::time::sleep(delay).await;
+                    attempt = attempt.saturating_add(1);
+                }
+            }
         }
     }
 
@@ -282,6 +330,16 @@ impl XjComponent {
         })
     }
 
+    /// Block on an async future from a synchronous context (`create_endpoint`).
+    ///
+    /// This method is intentionally synchronous because `Component::create_endpoint`
+    /// is a sync trait method. When called from within a tokio runtime (the common
+    /// case), it uses `block_in_place` to avoid starving other tasks. When called
+    /// from outside any runtime (e.g. tests), it creates a ephemeral single-threaded
+    /// runtime.
+    ///
+    /// TODO(XJ-014): Consider making `create_endpoint` async upstream so this
+    /// blocking shim can be removed entirely.
     fn block_on_result<F, T>(&self, fut: F) -> Result<T, CamelError>
     where
         F: Future<Output = Result<T, XjError>>,
@@ -333,6 +391,60 @@ impl Component for XjComponent {
             Arc::clone(&self.client),
             Arc::clone(&self.runtime),
             endpoint_config.direction,
+            endpoint_config.max_payload_bytes,
+            endpoint_config.retry_count,
+            endpoint_config.retry_delay_ms,
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn retry_succeeds_after_two_transient_failures() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = Arc::clone(&attempts);
+
+        let result = XjBridgeRuntime::retry_transient_for_test(3, 1, move || {
+            let attempts = Arc::clone(&attempts_clone);
+            async move {
+                let current = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if current <= 2 {
+                    Err(XjError::Xslt(camel_xslt::XsltError::Bridge(
+                        "transport unavailable".to_string(),
+                    )))
+                } else {
+                    Ok(b"ok".to_vec())
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), b"ok".to_vec());
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_returns_err_after_max_transient_failures() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = Arc::clone(&attempts);
+
+        let result = XjBridgeRuntime::retry_transient_for_test(2, 1, move || {
+            let attempts = Arc::clone(&attempts_clone);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(XjError::Xslt(camel_xslt::XsltError::Bridge(
+                    "network timeout".to_string(),
+                )))
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
 }

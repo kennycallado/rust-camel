@@ -18,10 +18,10 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
-    ctx.register_language("xpath", Box::new(XPathLanguage))
+    ctx.register_language("xpath", Box::new(XPathLanguage::new()))
         .expect("xpath not yet registered"); // allow-unwrap
 
-    let lang = XPathLanguage;
+    let lang = XPathLanguage::new();
 
     let title_expr = lang
         .create_expression("/catalog/book[1]/title")

@@ -371,7 +371,8 @@ async fn main() -> Result<(), CamelError> {
                 .complete_when_size(3)
                 .max_buckets(100)
                 .bucket_ttl(Duration::from_secs(60))
-                .build(),
+                .build()
+                .unwrap(), // allow-unwrap
         )
         .process(|exchange| async move {
             if exchange.property("CamelAggregatorPending").is_none() {
@@ -873,7 +874,7 @@ async fn main() -> Result<(), CamelError> {
             );
             Ok(exchange)
         })
-        .unmarshal("json")
+        .unmarshal("json")?
         .process(|exchange| async move {
             // Body is now Json type
             println!(
@@ -882,7 +883,7 @@ async fn main() -> Result<(), CamelError> {
             );
             Ok(exchange)
         })
-        .marshal("json")
+        .marshal("json")?
         .process(|exchange| async move {
             // Body is now Text again
             println!(

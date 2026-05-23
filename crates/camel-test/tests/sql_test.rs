@@ -82,7 +82,7 @@ async fn setup_test_table(pool: &AnyPool, table_name: &str) {
     .expect("Failed to create table");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn producer_select() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -153,7 +153,7 @@ async fn producer_select() {
     assert_eq!(row_count, Some(2));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn producer_insert() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -216,7 +216,7 @@ async fn producer_insert() {
     assert_eq!(count, 1, "Table should have 1 row");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn producer_update() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -283,7 +283,7 @@ async fn producer_update() {
     assert_eq!(value, 999, "Value should be updated to 999");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn producer_delete() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -349,7 +349,7 @@ async fn producer_delete() {
     assert_eq!(count, 1, "Table should have 1 row remaining");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn producer_select_one() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -411,7 +411,7 @@ async fn producer_select_one() {
     assert_eq!(json.get("value").and_then(|v| v.as_i64()), Some(700));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn producer_batch() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -475,7 +475,7 @@ async fn producer_batch() {
     assert_eq!(count, 3, "Table should have 3 rows");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn producer_noop() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -548,7 +548,7 @@ async fn producer_noop() {
     assert_eq!(value, 999, "Value should be updated even in noop mode");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn consumer_polling() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -615,7 +615,7 @@ async fn consumer_polling() {
     assert_eq!(body.get("value").and_then(|v| v.as_i64()), Some(900));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn consumer_on_consume() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -678,7 +678,7 @@ async fn consumer_on_consume() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn consumer_empty_result() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -730,7 +730,7 @@ async fn consumer_empty_result() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn consumer_on_consume_failed() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;
@@ -789,7 +789,7 @@ async fn consumer_on_consume_failed() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn consumer_empty_result_routed() {
     let container = setup_postgres_container().await;
     let conn_str = get_connection_string(&container).await;

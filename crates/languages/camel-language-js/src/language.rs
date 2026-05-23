@@ -32,13 +32,32 @@ use crate::{
 #[derive(Clone)]
 pub struct JsLanguage {
     engine: Arc<dyn JsEngine>,
+    config: JsLanguageConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct JsLanguageConfig {
+    pub execution_timeout_ms: u64,
+}
+
+impl Default for JsLanguageConfig {
+    fn default() -> Self {
+        Self {
+            execution_timeout_ms: 5_000,
+        }
+    }
 }
 
 impl JsLanguage {
     /// Create a new `JsLanguage` with the default [`BoaEngine`].
     pub fn new() -> Self {
+        Self::with_config(JsLanguageConfig::default())
+    }
+
+    pub fn with_config(config: JsLanguageConfig) -> Self {
         Self {
             engine: Arc::new(BoaEngine::new()),
+            config,
         }
     }
 
@@ -46,8 +65,13 @@ impl JsLanguage {
     ///
     /// Useful for testing or providing an alternative JS runtime.
     pub fn with_engine<E: JsEngine>(engine: E) -> Self {
+        Self::with_engine_and_config(engine, JsLanguageConfig::default())
+    }
+
+    pub fn with_engine_and_config<E: JsEngine>(engine: E, config: JsLanguageConfig) -> Self {
         Self {
             engine: Arc::new(engine),
+            config,
         }
     }
 }
@@ -68,6 +92,7 @@ impl Language for JsLanguage {
         Ok(Box::new(JsExpression::new(
             script.to_string(),
             Arc::clone(&self.engine),
+            self.config.execution_timeout_ms,
         )))
     }
 
@@ -76,6 +101,7 @@ impl Language for JsLanguage {
         Ok(Box::new(JsPredicate::new(
             script.to_string(),
             Arc::clone(&self.engine),
+            self.config.execution_timeout_ms,
         )))
     }
 
@@ -87,6 +113,7 @@ impl Language for JsLanguage {
         Ok(Box::new(JsMutatingExpression::new(
             script.to_string(),
             Arc::clone(&self.engine),
+            self.config.execution_timeout_ms,
         )))
     }
 }
@@ -97,7 +124,7 @@ mod tests {
     use camel_language_api::{Body, Exchange, Message};
     use serde_json::json;
 
-    fn make_exchange() -> Exchange {
+    async fn make_exchange() -> Exchange {
         let mut msg = Message::default();
         msg.headers.insert("env".to_string(), json!("prod"));
         msg.body = Body::Text("payload".to_string());
@@ -106,20 +133,20 @@ mod tests {
         ex
     }
 
-    #[test]
-    fn test_language_name() {
+    #[tokio::test]
+    async fn test_language_name() {
         assert_eq!(JsLanguage::new().name(), "js");
     }
 
-    #[test]
-    fn test_create_expression_valid() {
+    #[tokio::test]
+    async fn test_create_expression_valid() {
         let lang = JsLanguage::new();
         let result = lang.create_expression("1 + 1");
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_create_expression_invalid_syntax() {
+    #[tokio::test]
+    async fn test_create_expression_invalid_syntax() {
         let lang = JsLanguage::new();
         let result = lang.create_expression("let x = {{{");
         assert!(result.is_err());
@@ -127,14 +154,14 @@ mod tests {
         assert!(matches!(result, Err(LanguageError::ParseError { .. })));
     }
 
-    #[test]
-    fn test_create_predicate_valid() {
+    #[tokio::test]
+    async fn test_create_predicate_valid() {
         let lang = JsLanguage::new();
         assert!(lang.create_predicate("true").is_ok());
     }
 
-    #[test]
-    fn test_create_predicate_invalid() {
+    #[tokio::test]
+    async fn test_create_predicate_invalid() {
         let lang = JsLanguage::new();
         assert!(matches!(
             lang.create_predicate("let !!!"),
@@ -142,16 +169,16 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_create_mutating_expression_invalid_syntax() {
+    #[tokio::test]
+    async fn test_create_mutating_expression_invalid_syntax() {
         let lang = JsLanguage::new();
         let result = lang.create_mutating_expression("let !!!");
         assert!(result.is_err());
         assert!(matches!(result, Err(LanguageError::ParseError { .. })));
     }
 
-    #[test]
-    fn test_create_mutating_expression_valid() {
+    #[tokio::test]
+    async fn test_create_mutating_expression_valid() {
         let lang = JsLanguage::new();
         assert!(
             lang.create_mutating_expression("camel.headers.set('k','v')")
@@ -159,35 +186,35 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_expression_evaluate() {
+    #[tokio::test]
+    async fn test_expression_evaluate() {
         let lang = JsLanguage::new();
         let expr = lang.create_expression("camel.headers.get('env')").unwrap();
-        let ex = make_exchange();
-        let val = expr.evaluate(&ex).unwrap();
+        let ex = make_exchange().await;
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val.as_str().unwrap(), "prod");
     }
 
-    #[test]
-    fn test_predicate_matches() {
+    #[tokio::test]
+    async fn test_predicate_matches() {
         let lang = JsLanguage::new();
         let pred = lang
             .create_predicate("camel.headers.get('env') === 'prod'")
             .unwrap();
-        let ex = make_exchange();
-        assert!(pred.matches(&ex).unwrap());
+        let ex = make_exchange().await;
+        assert!(pred.matches(&ex).await.unwrap());
     }
 
-    #[test]
-    fn test_mutating_expression_propagates() {
+    #[tokio::test]
+    async fn test_mutating_expression_propagates() {
         let lang = JsLanguage::new();
         let expr = lang
             .create_mutating_expression(
                 "camel.headers.set('added', 'yes'); camel.body = 'new'; 'done'",
             )
             .unwrap();
-        let mut ex = make_exchange();
-        let result = expr.evaluate(&mut ex).unwrap();
+        let mut ex = make_exchange().await;
+        let result = expr.evaluate(&mut ex).await.unwrap();
         assert_eq!(result.as_str().unwrap(), "done");
         assert_eq!(
             ex.input.headers.get("added").unwrap().as_str().unwrap(),
@@ -196,21 +223,21 @@ mod tests {
         assert_eq!(ex.input.body.as_text().unwrap(), "new");
     }
 
-    #[test]
-    fn test_default_creates_js_language() {
+    #[tokio::test]
+    async fn test_default_creates_js_language() {
         let lang = JsLanguage::default();
         assert_eq!(lang.name(), "js");
     }
 
-    #[test]
-    fn test_clone_works() {
+    #[tokio::test]
+    async fn test_clone_works() {
         let lang = JsLanguage::new();
         let lang2 = lang.clone();
         assert_eq!(lang2.name(), "js");
         // Both clones should work independently
-        let ex = make_exchange();
+        let ex = make_exchange().await;
         let expr = lang2.create_expression("42").unwrap();
-        let val = expr.evaluate(&ex).unwrap();
+        let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val.as_i64().unwrap(), 42);
     }
 }

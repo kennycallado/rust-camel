@@ -1,6 +1,7 @@
 mod support;
 
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use camel_component_api::{Body, Exchange, Message, Value};
 use camel_component_cxf::{
@@ -10,6 +11,22 @@ use tonic::transport::Channel;
 use tower::Service;
 
 use crate::support::mock_bridge::spawn_mock_bridge;
+
+/// Helper: poll_ready + call in one step (required by Tower contract).
+async fn ready_call(
+    producer: &mut CxfProducer,
+    exchange: Exchange,
+) -> Result<Exchange, camel_component_api::CamelError> {
+    {
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        match producer.poll_ready(&mut cx) {
+            Poll::Ready(Ok(())) => {}
+            other => panic!("poll_ready unexpected: {other:?}"),
+        }
+    }
+    producer.call(exchange).await
+}
 
 async fn prepare_ready_slot(pool: &Arc<CxfBridgePool>, channel: Channel) {
     let key = CxfBridgePool::slot_key();
@@ -43,14 +60,16 @@ async fn test_producer_with_profile_invokes_successfully() {
         "HelloPort".to_string(),
         Some(format!("http://127.0.0.1:{port}")),
         "defaultOp".to_string(),
+        None,
+        false,
+        None,
     );
     let mut exchange = Exchange::new(Message::new(Body::Text("<ping/>".to_string())));
     exchange
         .input
         .set_header("CamelCxfOperation", Value::String("sayHello".to_string()));
 
-    let out = producer
-        .call(exchange)
+    let out = ready_call(&mut producer, exchange)
         .await
         .expect("invoke should succeed");
     assert_eq!(out.input.body, Body::Bytes(bytes::Bytes::from("<ping/>")));
@@ -91,10 +110,12 @@ async fn test_producer_handles_empty_security_profile() {
         "HelloPort".to_string(),
         Some(format!("http://127.0.0.1:{port}")),
         "emptySecurityOp".to_string(),
+        None,
+        false,
+        None,
     );
     let exchange = Exchange::new(Message::new(Body::Text("<empty/>".to_string())));
-    let out = producer
-        .call(exchange)
+    let out = ready_call(&mut producer, exchange)
         .await
         .expect("invoke should succeed");
 

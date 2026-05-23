@@ -1271,6 +1271,7 @@ routes:
             - to: "mock:split"
       - aggregate:
           header: "orderId"
+          correlation_key: "${header.orderId}"
           completion_size: 2
       - wire_tap: "mock:tap"
       - script:
@@ -1354,6 +1355,7 @@ routes:
             - to: "mock:split"
       - aggregate:
           header: "orderId"
+          correlation_key: "${header.orderId}"
           completion_size: 2
       - wire_tap: "mock:tap"
       - multicast:

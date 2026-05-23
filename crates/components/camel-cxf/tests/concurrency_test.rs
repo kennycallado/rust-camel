@@ -1,6 +1,7 @@
 mod support;
 
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use camel_component_api::{Body, Exchange, Message};
 use camel_component_cxf::config::CxfPoolConfig;
@@ -29,6 +30,7 @@ async fn make_producer() -> (CxfProducer, MockState) {
         "TestPort".to_string(),
         Some("http://localhost:8080/ws".to_string()),
         "defaultOperation".to_string(),
+        None,
     );
     (producer, state)
 }
@@ -73,6 +75,15 @@ async fn test_producer_20_serial_invocations_succeed() {
         let handle = tokio::spawn(async move {
             let exchange = Exchange::new(Message::new(Body::Text(format!("request-{i}"))));
             let mut guard = producer.lock().await;
+            // Poll readiness (required by Tower contract with backpressure).
+            {
+                let waker = futures::task::noop_waker();
+                let mut cx = Context::from_waker(&waker);
+                match guard.poll_ready(&mut cx) {
+                    Poll::Ready(Ok(())) => {}
+                    other => panic!("task {i}: poll_ready unexpected: {other:?}"),
+                }
+            }
             let out = guard.call(exchange).await.expect("call should succeed");
             // Verify response body is set
             assert!(

@@ -9,7 +9,7 @@ use camel_test::CamelTestContext;
 use tower::ServiceExt;
 
 fn ensure_jsonpath_registered(ctx: &mut camel_core::CamelContext) {
-    match ctx.register_language("jsonpath", Box::new(JsonPathLanguage)) {
+    match ctx.register_language("jsonpath", Box::new(JsonPathLanguage::new())) {
         Ok(()) | Err(LanguageRegistryError::AlreadyRegistered { .. }) => {}
     }
 }
@@ -36,7 +36,7 @@ async fn send_to_direct(h: &CamelTestContext, endpoint_uri: &str, exchange: Exch
         .expect("failed to send exchange to direct endpoint");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn jsonpath_filter_with_json_body() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -81,7 +81,7 @@ routes:
     assert_eq!(exchanges.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn jsonpath_set_header_from_body() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -130,7 +130,7 @@ routes:
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn jsonpath_set_body_extracts_field() {
     let h = CamelTestContext::builder()
         .with_direct()

@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use camel_component_api::CamelError;
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
+use tracing::warn;
 
 /// Redaction helper: returns `Some("***")` if the option is `Some`, otherwise `None`.
 fn redacted_opt(opt: &Option<String>) -> Option<&'static str> {
@@ -48,6 +49,114 @@ impl FromStr for SqlOutputType {
                 "Unknown output type: {}",
                 s
             ))),
+        }
+    }
+}
+
+/// Transaction mode for SQL operations.
+///
+/// - `Auto`: Each statement auto-commits (default, current behavior).
+/// - `Managed`: Explicit transaction boundaries (future; currently logs a warning
+///   and falls back to Auto).
+///
+// TODO(SQL-002): managed transaction mode — implement explicit transaction boundaries
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum TransactionMode {
+    /// Auto-commit each statement (default).
+    #[default]
+    Auto,
+    /// Managed transactions — not yet implemented.
+    Managed,
+}
+
+impl FromStr for TransactionMode {
+    type Err = CamelError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Auto" => Ok(TransactionMode::Auto),
+            "Managed" => Ok(TransactionMode::Managed),
+            _ => Err(CamelError::InvalidUri(format!(
+                "Unknown transaction mode: {}. Expected 'Auto' or 'Managed'",
+                s
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for TransactionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransactionMode::Auto => write!(f, "Auto"),
+            TransactionMode::Managed => write!(f, "Managed"),
+        }
+    }
+}
+
+/// Processing strategy for SQL consumers.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ProcessingStrategy {
+    /// Process rows directly in the polling task (default).
+    #[default]
+    Direct,
+    /// Schedule processing via a separate task (deferred execution).
+    Scheduled,
+}
+
+impl FromStr for ProcessingStrategy {
+    type Err = CamelError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Direct" => Ok(ProcessingStrategy::Direct),
+            "Scheduled" => Ok(ProcessingStrategy::Scheduled),
+            _ => Err(CamelError::InvalidUri(format!(
+                "Unknown processing strategy: {}. Expected 'Direct' or 'Scheduled'",
+                s
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for ProcessingStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProcessingStrategy::Direct => write!(f, "Direct"),
+            ProcessingStrategy::Scheduled => write!(f, "Scheduled"),
+        }
+    }
+}
+
+/// Poll strategy for SQL consumers.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum PollStrategy {
+    /// Poll sequentially with delay between polls (default).
+    #[default]
+    Sequential,
+    /// Poll in bursts — execute multiple queries in rapid succession.
+    Burst,
+}
+
+impl FromStr for PollStrategy {
+    type Err = CamelError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Sequential" => Ok(PollStrategy::Sequential),
+            "Burst" => Ok(PollStrategy::Burst),
+            _ => Err(CamelError::InvalidUri(format!(
+                "Unknown poll strategy: {}. Expected 'Sequential' or 'Burst'",
+                s
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for PollStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PollStrategy::Sequential => write!(f, "Sequential"),
+            PollStrategy::Burst => write!(f, "Burst"),
         }
     }
 }
@@ -157,10 +266,10 @@ impl SqlGlobalConfig {
 /// - `sql:file:/path/to/query.sql?db_url=...` - read SQL from file
 ///
 /// **Note on file-based queries (SQL-014):** When the query path starts with `file:`,
-/// the SQL is read synchronously via `std::fs::read_to_string` during endpoint creation.
-/// This is a blocking I/O call, but it occurs in the synchronous `from_uri` / `create_endpoint`
-/// path — not in the async hot path (producer `call()` or consumer `poll_database()`).
-/// The file content is cached in `config.query` after parsing, so no runtime file reads occur.
+/// the file is NOT read synchronously during `from_uri()`. Instead, the file path is
+/// stored in `source_path` and the query is resolved asynchronously via `resolve_file_query()`
+/// during async initialization (producer pool init or consumer start). This avoids
+/// blocking I/O in the synchronous URI parsing path.
 ///
 /// **Security note:** `Debug` implementation redacts the `db_url` (which may contain credentials)
 /// and `ssl_key` path. Use `redact_db_url()` for safe logging of database URLs.
@@ -195,6 +304,24 @@ pub struct SqlEndpointConfig {
     /// Separator for IN clause expansion. Default: ", ".
     pub in_separator: String,
 
+    // SQL-005: always populate statement even if body is null/empty
+    /// If true, always bind parameters even if the exchange body is null/empty
+    /// (uses empty defaults). Default: false.
+    pub always_populate_statement: bool,
+
+    // SQL-011: allow named parameters
+    /// If true, recognize `:name` style placeholders and map them from exchange
+    /// headers or body fields. Default: true.
+    pub allow_named_parameters: bool,
+
+    // SQL-016: fetch size hint
+    /// Fetch size hint for query results. None = driver default.
+    pub fetch_size: Option<u32>,
+
+    // SQL-002: transaction mode
+    /// Transaction mode for SQL operations. Default: Auto.
+    pub transaction_mode: TransactionMode,
+
     // Consumer (polling)
     /// Delay between polls in milliseconds. Default: 500.
     pub delay_ms: u64,
@@ -216,6 +343,21 @@ pub struct SqlEndpointConfig {
     pub expected_update_count: Option<i64>,
     /// Break batch on consume failure. Default: false.
     pub break_batch_on_consume_fail: bool,
+    /// Bridge poll errors into route error handling. Default: false.
+    pub bridge_error_handler: bool,
+
+    // SQL-015: repeat count for consumer polling
+    /// When set, the consumer only polls up to `repeat_count` times before stopping.
+    /// None = poll indefinitely (default).
+    pub repeat_count: Option<u32>,
+
+    // SQL-017: processing strategy
+    /// Processing strategy for consumer. Default: Direct.
+    pub processing_strategy: ProcessingStrategy,
+
+    // SQL-018: poll strategy
+    /// Poll strategy for consumer. Default: Sequential.
+    pub poll_strategy: PollStrategy,
 
     // Producer
     /// Enable batch mode. Default: false.
@@ -249,6 +391,10 @@ impl std::fmt::Debug for SqlEndpointConfig {
             .field("use_placeholder", &self.use_placeholder)
             .field("noop", &self.noop)
             .field("in_separator", &self.in_separator)
+            .field("always_populate_statement", &self.always_populate_statement)
+            .field("allow_named_parameters", &self.allow_named_parameters)
+            .field("fetch_size", &self.fetch_size)
+            .field("transaction_mode", &self.transaction_mode)
             .field("delay_ms", &self.delay_ms)
             .field("initial_delay_ms", &self.initial_delay_ms)
             .field("max_messages_per_poll", &self.max_messages_per_poll)
@@ -262,6 +408,10 @@ impl std::fmt::Debug for SqlEndpointConfig {
                 "break_batch_on_consume_fail",
                 &self.break_batch_on_consume_fail,
             )
+            .field("bridge_error_handler", &self.bridge_error_handler)
+            .field("repeat_count", &self.repeat_count)
+            .field("processing_strategy", &self.processing_strategy)
+            .field("poll_strategy", &self.poll_strategy)
             .field("batch", &self.batch)
             .field("use_message_body_for_sql", &self.use_message_body_for_sql)
             .field("ssl_mode", &self.ssl_mode)
@@ -305,6 +455,26 @@ impl SqlEndpointConfig {
     pub fn resolve_defaults(&mut self) {
         let defaults = SqlGlobalConfig::default();
         self.apply_defaults(&defaults);
+    }
+
+    /// Asynchronously read the SQL query from the file referenced by `source_path`.
+    ///
+    /// This is the async replacement for the blocking `std::fs::read_to_string` that
+    /// was previously called in `from_uri()`. Must be invoked during async init
+    /// (producer pool init or consumer start) — never in a synchronous context.
+    ///
+    /// After this call, `self.query` contains the file content (trimmed) and
+    /// `self.source_path` is cleared to prevent re-reading.
+    pub async fn resolve_file_query(&mut self) -> Result<(), CamelError> {
+        if let Some(file_path) = self.source_path.take() {
+            let contents = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
+                CamelError::Config(format!("Failed to read SQL file '{}': {}", file_path, e))
+            })?;
+            self.query = contents.trim().to_string();
+            // Keep source_path as Some so tests can still verify the original path
+            self.source_path = Some(file_path);
+        }
+        Ok(())
     }
 }
 
@@ -370,6 +540,13 @@ pub fn enrich_db_url_with_ssl(
     })?;
 
     let scheme = parsed.scheme();
+    if scheme.starts_with("sqlite") {
+        warn!(
+            "SSL options configured for SQLite database URL, but SQLite does not support SSL/TLS; ignoring sslMode/sslRootCert/sslCert/sslKey"
+        );
+        return Ok(db_url.to_string());
+    }
+
     if scheme != "postgres" && scheme != "postgresql" && scheme != "mysql" {
         return Ok(db_url.to_string());
     }
@@ -426,12 +603,12 @@ impl UriConfig for SqlEndpointConfig {
         let params = &parts.params;
 
         // Handle file: prefix for query
+        // SQL-014: defer file reading to async init path to avoid blocking I/O
+        // in the synchronous URI parsing path. Store the path; resolve_file_query()
+        // must be called during async initialization (producer pool init or consumer start).
         let (query, source_path) = if parts.path.starts_with("file:") {
             let file_path = parts.path.trim_start_matches("file:").to_string();
-            let contents = std::fs::read_to_string(&file_path).map_err(|e| {
-                CamelError::Config(format!("Failed to read SQL file '{}': {}", file_path, e))
-            })?;
-            (contents.trim().to_string(), Some(file_path))
+            (String::new(), Some(file_path))
         } else {
             (parts.path.clone(), None)
         };
@@ -463,6 +640,11 @@ impl UriConfig for SqlEndpointConfig {
                         "placeholder must be exactly one character, got '{}'",
                         v
                     )));
+                }
+                if !v.is_ascii() {
+                    return Err(CamelError::InvalidUri(
+                        "placeholder must be a single ASCII character".to_string(),
+                    ));
                 }
                 Ok(v.chars().next().unwrap()) // allow-unwrap
             })
@@ -505,6 +687,30 @@ impl UriConfig for SqlEndpointConfig {
             ));
         }
 
+        // SQL-005: alwaysPopulateStatement
+        let always_populate_statement = params
+            .get("alwaysPopulateStatement")
+            .map(|v| parse_bool_param("alwaysPopulateStatement", v))
+            .transpose()?
+            .unwrap_or(false);
+
+        // SQL-011: allowNamedParameters
+        let allow_named_parameters = params
+            .get("allowNamedParameters")
+            .map(|v| parse_bool_param("allowNamedParameters", v))
+            .transpose()?
+            .unwrap_or(true);
+
+        // SQL-016: fetchSize
+        let fetch_size = params.get("fetchSize").and_then(|v| v.parse().ok());
+
+        // SQL-002: transactionMode
+        let transaction_mode = params
+            .get("transactionMode")
+            .map(|s| s.parse())
+            .transpose()?
+            .unwrap_or_default();
+
         // Consumer parameters
         let delay_ms = params
             .get("delay")
@@ -538,6 +744,28 @@ impl UriConfig for SqlEndpointConfig {
             .map(|v| parse_bool_param("breakBatchOnConsumeFail", v))
             .transpose()?
             .unwrap_or(false);
+        let bridge_error_handler = params
+            .get("bridgeErrorHandler")
+            .map(|v| parse_bool_param("bridgeErrorHandler", v))
+            .transpose()?
+            .unwrap_or(false);
+
+        // SQL-015: repeatCount
+        let repeat_count = params.get("repeatCount").and_then(|v| v.parse().ok());
+
+        // SQL-017: processingStrategy
+        let processing_strategy = params
+            .get("processingStrategy")
+            .map(|s| s.parse())
+            .transpose()?
+            .unwrap_or_default();
+
+        // SQL-018: pollStrategy
+        let poll_strategy = params
+            .get("pollStrategy")
+            .map(|s| s.parse())
+            .transpose()?
+            .unwrap_or_default();
 
         // Producer parameters
         let batch = params
@@ -568,6 +796,10 @@ impl UriConfig for SqlEndpointConfig {
             use_placeholder,
             noop,
             in_separator,
+            always_populate_statement,
+            allow_named_parameters,
+            fetch_size,
+            transaction_mode,
             delay_ms,
             initial_delay_ms,
             max_messages_per_poll,
@@ -578,6 +810,10 @@ impl UriConfig for SqlEndpointConfig {
             use_iterator,
             expected_update_count,
             break_batch_on_consume_fail,
+            bridge_error_handler,
+            repeat_count,
+            processing_strategy,
+            poll_strategy,
             batch,
             use_message_body_for_sql,
             ssl_mode,
@@ -623,6 +859,14 @@ mod tests {
         assert!(c.ssl_root_cert.is_none());
         assert!(c.ssl_cert.is_none());
         assert!(c.ssl_key.is_none());
+        // SQL-005/SQL-011/SQL-016/SQL-002/SQL-015/SQL-017/SQL-018 defaults
+        assert!(!c.always_populate_statement);
+        assert!(c.allow_named_parameters);
+        assert!(c.fetch_size.is_none());
+        assert_eq!(c.transaction_mode, TransactionMode::Auto);
+        assert!(c.repeat_count.is_none());
+        assert_eq!(c.processing_strategy, ProcessingStrategy::Direct);
+        assert_eq!(c.poll_strategy, PollStrategy::Sequential);
     }
 
     #[test]
@@ -760,6 +1004,7 @@ mod tests {
         assert!(!c.use_iterator);
         assert_eq!(c.expected_update_count, Some(1));
         assert!(c.break_batch_on_consume_fail);
+        assert!(!c.bridge_error_handler);
     }
 
     #[test]
@@ -812,19 +1057,30 @@ mod tests {
         assert!("Invalid".parse::<SqlOutputType>().is_err());
     }
 
-    #[test]
-    fn config_file_not_found() {
-        let result = SqlEndpointConfig::from_uri(
+    // SQL-014: file-not-found is now detected during async resolve_file_query(), not from_uri
+    #[tokio::test]
+    async fn config_file_not_found() {
+        let mut config = SqlEndpointConfig::from_uri(
             "sql:file:/nonexistent/path/query.sql?db_url=postgres://localhost/test",
+        )
+        .expect("from_uri should defer file reading");
+        // from_uri no longer reads the file — source_path is set, query is empty
+        assert_eq!(
+            config.source_path,
+            Some("/nonexistent/path/query.sql".to_string())
         );
+        assert!(config.query.is_empty());
+
+        // Error occurs during async resolution
+        let result = config.resolve_file_query().await;
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        let msg = format!("{:?}", err);
+        let msg = format!("{:?}", result.unwrap_err());
         assert!(msg.contains("Failed to read SQL file") || msg.contains("nonexistent"));
     }
 
-    #[test]
-    fn config_file_query() {
+    // SQL-014: file query is now resolved asynchronously
+    #[tokio::test]
+    async fn config_file_query() {
         use std::io::Write;
         let unique_name = format!(
             "test_sql_query_{}.sql",
@@ -843,9 +1099,16 @@ mod tests {
             "sql:file:{}?db_url=postgres://localhost/test",
             tmp.display()
         );
-        let c = SqlEndpointConfig::from_uri(&uri).unwrap();
-        assert_eq!(c.query, "SELECT * FROM users");
+        let mut c = SqlEndpointConfig::from_uri(&uri).unwrap();
+        // query is empty until async resolution
+        assert!(c.query.is_empty());
         assert_eq!(c.source_path, Some(tmp.to_string_lossy().into_owned()));
+
+        // Resolve asynchronously
+        c.resolve_file_query()
+            .await
+            .expect("file query should resolve");
+        assert_eq!(c.query, "SELECT * FROM users");
         std::fs::remove_file(&tmp).ok();
     }
 
@@ -1223,13 +1486,14 @@ mod tests {
     #[test]
     fn boolean_params_case_insensitive() {
         let c = SqlEndpointConfig::from_uri(
-            "sql:select 1?db_url=postgres://localhost/test&usePlaceholder=TRUE&noop=FALSE&batch=True&useIterator=False",
+            "sql:select 1?db_url=postgres://localhost/test&usePlaceholder=TRUE&noop=FALSE&batch=True&useIterator=False&bridgeErrorHandler=TRUE",
         )
         .unwrap();
         assert!(c.use_placeholder);
         assert!(!c.noop);
         assert!(c.batch);
         assert!(!c.use_iterator);
+        assert!(c.bridge_error_handler);
     }
 
     // SQL-022: multi-char placeholder rejected
@@ -1241,6 +1505,14 @@ mod tests {
         assert!(result.is_err());
         let msg = format!("{:?}", result.unwrap_err());
         assert!(msg.contains("placeholder") && msg.contains("one character"));
+    }
+
+    #[test]
+    fn non_ascii_placeholder_rejected() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&placeholder=%C2%A2",
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1262,9 +1534,9 @@ mod tests {
         assert_eq!(c.placeholder, '#');
     }
 
-    // SQL-014: file-based SQL config test (verifies file content is cached, no async read)
-    #[test]
-    fn file_query_cached_in_config() {
+    // SQL-014: file-based SQL config test (verifies async resolution and caching)
+    #[tokio::test]
+    async fn file_query_cached_in_config() {
         use std::io::Write;
         let unique_name = format!(
             "test_sql_cached_{}.sql",
@@ -1283,12 +1555,164 @@ mod tests {
             "sql:file:{}?db_url=postgres://localhost/test",
             tmp.display()
         );
-        let c = SqlEndpointConfig::from_uri(&uri).unwrap();
-        // Query content is cached in config — no runtime file read needed
-        assert_eq!(c.query, "SELECT * FROM cached_test");
+        let mut c = SqlEndpointConfig::from_uri(&uri).unwrap();
+        // Query is empty before async resolution
+        assert!(c.query.is_empty());
         assert_eq!(c.source_path, Some(tmp.to_string_lossy().into_owned()));
+
+        // Resolve asynchronously — query is cached in config
+        c.resolve_file_query()
+            .await
+            .expect("resolve should succeed");
+        assert_eq!(c.query, "SELECT * FROM cached_test");
+
         // Delete the file — config still has the query
         std::fs::remove_file(&tmp).ok();
         assert_eq!(c.query, "SELECT * FROM cached_test");
+    }
+
+    // --- H-03 audit sweep tests ---
+
+    // SQL-005: alwaysPopulateStatement
+    #[test]
+    fn always_populate_statement_defaults_to_false() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert!(!c.always_populate_statement);
+    }
+
+    #[test]
+    fn always_populate_statement_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&alwaysPopulateStatement=true",
+        )
+        .unwrap();
+        assert!(c.always_populate_statement);
+    }
+
+    // SQL-011: allowNamedParameters
+    #[test]
+    fn allow_named_parameters_defaults_to_true() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert!(c.allow_named_parameters);
+    }
+
+    #[test]
+    fn allow_named_parameters_false_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&allowNamedParameters=false",
+        )
+        .unwrap();
+        assert!(!c.allow_named_parameters);
+    }
+
+    // SQL-016: fetchSize
+    #[test]
+    fn fetch_size_defaults_to_none() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert!(c.fetch_size.is_none());
+    }
+
+    #[test]
+    fn fetch_size_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&fetchSize=1000",
+        )
+        .unwrap();
+        assert_eq!(c.fetch_size, Some(1000));
+    }
+
+    // SQL-002: transactionMode
+    #[test]
+    fn transaction_mode_defaults_to_auto() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert_eq!(c.transaction_mode, TransactionMode::Auto);
+    }
+
+    #[test]
+    fn transaction_mode_managed_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&transactionMode=Managed",
+        )
+        .unwrap();
+        assert_eq!(c.transaction_mode, TransactionMode::Managed);
+    }
+
+    #[test]
+    fn transaction_mode_invalid_rejected() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&transactionMode=Invalid",
+        );
+        assert!(result.is_err());
+    }
+
+    // SQL-015: repeatCount
+    #[test]
+    fn repeat_count_defaults_to_none() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert!(c.repeat_count.is_none());
+    }
+
+    #[test]
+    fn repeat_count_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&repeatCount=10",
+        )
+        .unwrap();
+        assert_eq!(c.repeat_count, Some(10));
+    }
+
+    // SQL-017: processingStrategy
+    #[test]
+    fn processing_strategy_defaults_to_direct() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert_eq!(c.processing_strategy, ProcessingStrategy::Direct);
+    }
+
+    #[test]
+    fn processing_strategy_scheduled_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&processingStrategy=Scheduled",
+        )
+        .unwrap();
+        assert_eq!(c.processing_strategy, ProcessingStrategy::Scheduled);
+    }
+
+    #[test]
+    fn processing_strategy_invalid_rejected() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&processingStrategy=Invalid",
+        );
+        assert!(result.is_err());
+    }
+
+    // SQL-018: pollStrategy
+    #[test]
+    fn poll_strategy_defaults_to_sequential() {
+        let c =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
+        assert_eq!(c.poll_strategy, PollStrategy::Sequential);
+    }
+
+    #[test]
+    fn poll_strategy_burst_from_uri() {
+        let c = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&pollStrategy=Burst",
+        )
+        .unwrap();
+        assert_eq!(c.poll_strategy, PollStrategy::Burst);
+    }
+
+    #[test]
+    fn poll_strategy_invalid_rejected() {
+        let result = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&pollStrategy=Invalid",
+        );
+        assert!(result.is_err());
     }
 }

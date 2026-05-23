@@ -29,7 +29,7 @@ fn init_tracing() {
         .try_init();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn jms_producer_sends_to_activemq() {
     init_tracing();
 
@@ -75,7 +75,7 @@ async fn jms_producer_sends_to_activemq() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn jms_consumer_receives_from_activemq() {
     init_tracing();
 
@@ -127,7 +127,7 @@ async fn jms_consumer_receives_from_activemq() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn jms_consumer_receives_from_artemis() {
     init_tracing();
 
@@ -179,7 +179,7 @@ async fn jms_consumer_receives_from_artemis() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn jms_producer_sends_to_artemis() {
     init_tracing();
 
@@ -225,7 +225,7 @@ async fn jms_producer_sends_to_artemis() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn jms_headers_propagated() {
     init_tracing();
 
@@ -287,7 +287,7 @@ async fn jms_headers_propagated() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn jms_producer_sends_multiple_messages() {
     init_tracing();
 
@@ -355,7 +355,7 @@ async fn jms_producer_sends_multiple_messages() {
 /// This test runs two concurrent consumers and a producer that sends messages every second
 /// for 15 seconds (well past the ~7s crash window). If the bridge restarts mid-test,
 /// messages will be lost and the assertion will fail.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn jms_artemis_bridge_stable_under_mandatory_auth() {
     init_tracing();
 

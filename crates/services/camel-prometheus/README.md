@@ -15,13 +15,16 @@ Implements `MetricsCollector` trait to export rust-camel metrics in Prometheus f
 ### Simple API (Recommended)
 
 ```rust
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use camel_prometheus::PrometheusService;
 use camel_core::context::CamelContext;
 
 // Prometheus server starts/stops automatically with context
-let ctx = CamelContext::new()
-    .with_lifecycle(PrometheusService::new(9090))
-    .with_tracing();
+let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 9090);
+let mut ctx = CamelContext::builder()
+    .with_lifecycle(PrometheusService::new(addr))
+    .build()
+    .await?;
 
 ctx.start().await?;
 // Server running on http://0.0.0.0:9090/metrics
@@ -34,17 +37,15 @@ ctx.stop().await?;
 
 ```rust
 use camel_prometheus::{PrometheusMetrics, MetricsServer};
-use camel_core::context::CamelContext;
 use std::sync::Arc;
 use std::net::SocketAddr;
 
 let prometheus = Arc::new(PrometheusMetrics::new());
-let ctx = CamelContext::with_metrics(Arc::clone(&prometheus));
 
 // Start server manually
 let addr: SocketAddr = "0.0.0.0:9090".parse().unwrap();
 tokio::spawn(async move {
-    MetricsServer::run(addr, prometheus).await;
+    MetricsServer::run(addr, prometheus).await.unwrap();
 });
 ```
 

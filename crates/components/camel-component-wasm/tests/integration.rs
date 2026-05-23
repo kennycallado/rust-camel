@@ -19,6 +19,9 @@ use serde_json::json;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
+// TODO(WASM-010): Integration tests require a compiled WASM fixture not in repo.
+// Run: cargo build --target wasm32-wasip2 -p <fixture-crate> first.
+
 fn make_registry() -> Arc<Mutex<Registry>> {
     Arc::new(Mutex::new(Registry::new()))
 }
@@ -151,7 +154,7 @@ fn wasm_endpoint_creation_flow_uri_and_consumer_producer_behavior() {
 #[test]
 fn serde_bridge_round_trip_empty_exchange() {
     let exchange = Exchange::new(Message::default());
-    let wasm = exchange_to_wasm(&exchange);
+    let wasm = exchange_to_wasm(&exchange).expect("exchange_to_wasm should succeed");
     let mut out = Exchange::new(Message::new("seed"));
     wasm_to_exchange(wasm, &mut out);
     assert!(matches!(out.input.body, Body::Empty));
@@ -170,7 +173,7 @@ fn serde_bridge_round_trip_all_body_types() {
     ];
     for body in variants {
         let exchange = Exchange::new(Message::new(body));
-        let wasm = exchange_to_wasm(&exchange);
+        let wasm = exchange_to_wasm(&exchange).expect("exchange_to_wasm should succeed");
         let mut out = Exchange::new(Message::default());
         wasm_to_exchange(wasm, &mut out);
         match (&exchange.input.body, &out.input.body) {
@@ -205,7 +208,7 @@ fn serde_bridge_round_trip_complex_properties_and_headers() {
     ]);
     let original_correlation_id = exchange.correlation_id.clone();
 
-    let wasm = exchange_to_wasm(&exchange);
+    let wasm = exchange_to_wasm(&exchange).expect("exchange_to_wasm should succeed");
     let mut out = Exchange::new(Message::default());
     wasm_to_exchange(wasm, &mut out);
 
@@ -255,4 +258,14 @@ fn serde_bridge_json_fallback_to_text_on_invalid_json_string() {
     let mut out = Exchange::new(Message::default());
     wasm_to_exchange(wasm, &mut out);
     assert_eq!(out.input.body.as_text(), Some("{not-valid-json}"));
+}
+
+// TODO(WASM-010): requires compiled WASM fixture — see tests/fixtures/README.md
+#[tokio::test]
+#[ignore]
+async fn wasm_integration_with_compiled_fixture() {
+    // This test requires a compiled .wasm module placed in tests/fixtures/.
+    // Run: cargo build --target wasm32-wasip2 -p <fixture-crate>
+    // Then point the URI at the compiled artifact.
+    let _ = "placeholder: see tests/fixtures/README.md for setup instructions";
 }

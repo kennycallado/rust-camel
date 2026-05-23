@@ -22,6 +22,9 @@ pub struct WasmConfig {
 
     /// Maximum linear memory the guest can allocate, in bytes.
     pub max_memory_bytes: u64,
+
+    /// Maximum concurrent `call_process` executions per producer.
+    pub max_concurrent_calls: usize,
 }
 
 impl Default for WasmConfig {
@@ -29,6 +32,7 @@ impl Default for WasmConfig {
         Self {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             max_memory_bytes: DEFAULT_MAX_MEMORY_BYTES,
+            max_concurrent_calls: 4,
         }
     }
 }
@@ -64,6 +68,13 @@ impl WasmConfig {
                                 && bytes > 0
                             {
                                 config.max_memory_bytes = bytes;
+                            }
+                        }
+                        "max-concurrent-calls" => {
+                            if let Ok(max) = value.parse::<usize>()
+                                && max > 0
+                            {
+                                config.max_concurrent_calls = max;
                             }
                         }
                         _ => {} // ignore unknown params
@@ -102,6 +113,7 @@ mod tests {
         let config = WasmConfig::default();
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.max_memory_bytes, 50 * 1024 * 1024);
+        assert_eq!(config.max_concurrent_calls, 4);
     }
 
     #[test]
@@ -110,6 +122,7 @@ mod tests {
         assert_eq!(path, "plugins/test.wasm");
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.max_memory_bytes, 50 * 1024 * 1024);
+        assert_eq!(config.max_concurrent_calls, 4);
     }
 
     #[test]
@@ -118,6 +131,7 @@ mod tests {
         assert_eq!(path, "plugins/test.wasm");
         assert_eq!(config.timeout_secs, 10);
         assert_eq!(config.max_memory_bytes, 50 * 1024 * 1024);
+        assert_eq!(config.max_concurrent_calls, 4);
     }
 
     #[test]
@@ -126,6 +140,7 @@ mod tests {
         assert_eq!(path, "plugins/test.wasm");
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.max_memory_bytes, 10_485_760);
+        assert_eq!(config.max_concurrent_calls, 4);
     }
 
     #[test]
@@ -134,6 +149,14 @@ mod tests {
         assert_eq!(path, "plugins/test.wasm");
         assert_eq!(config.timeout_secs, 5);
         assert_eq!(config.max_memory_bytes, 1_048_576);
+        assert_eq!(config.max_concurrent_calls, 4);
+    }
+
+    #[test]
+    fn test_from_uri_with_max_concurrent_calls() {
+        let (path, config) = WasmConfig::from_uri("plugins/test.wasm?max-concurrent-calls=8");
+        assert_eq!(path, "plugins/test.wasm");
+        assert_eq!(config.max_concurrent_calls, 8);
     }
 
     #[test]
@@ -154,6 +177,7 @@ mod tests {
         let (_path, config) = WasmConfig::from_uri("plugins/test.wasm?timeout=0&max-memory=0");
         assert_eq!(config.timeout_secs, 30); // stays default
         assert_eq!(config.max_memory_bytes, 50 * 1024 * 1024); // stays default
+        assert_eq!(config.max_concurrent_calls, 4);
     }
 
     #[test]
@@ -161,6 +185,7 @@ mod tests {
         let config = WasmConfig {
             timeout_secs: 30,
             max_memory_bytes: 0,
+            max_concurrent_calls: 4,
         };
         assert_eq!(config.epoch_deadline(), 3000); // 30s * 100 ticks/s
     }
@@ -170,6 +195,7 @@ mod tests {
         let config = WasmConfig {
             timeout_secs: 5,
             max_memory_bytes: 0,
+            max_concurrent_calls: 4,
         };
         assert_eq!(config.epoch_deadline(), 500);
     }

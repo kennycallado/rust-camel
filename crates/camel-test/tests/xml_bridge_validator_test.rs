@@ -38,7 +38,7 @@ fn write_xsd() -> tempfile::NamedTempFile {
     xsd
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn xsd_validation_valid_document_passes() {
     init_tracing();
     // Ensures CAMEL_XML_BRIDGE_BINARY_PATH is set so ValidatorComponent finds
@@ -96,7 +96,7 @@ routes:
     endpoint.assert_exchange_count(1).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn xsd_validation_invalid_document_returns_error() {
     init_tracing();
     let _binary = require_xml_bridge_binary();

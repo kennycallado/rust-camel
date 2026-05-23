@@ -3,7 +3,7 @@ use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_test::CamelTestContext;
 use std::time::Duration;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracer_enabled_spans_emitted() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -30,7 +30,7 @@ async fn tracer_enabled_spans_emitted() {
     endpoint.assert_exchange_count(1).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracer_disabled_zero_overhead() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -56,7 +56,7 @@ async fn tracer_disabled_zero_overhead() {
     endpoint.assert_exchange_count(1).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tracer_file_output_invalid_path_returns_error() {
     use camel_config::config::{
         CamelConfig, ComponentsConfig, ObservabilityConfig, PlatformCamelConfig,

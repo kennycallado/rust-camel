@@ -452,7 +452,9 @@ impl FunctionProvider for ContainerProvider {
         let resp = self.client.invoke(&endpoint, id, ex, timeout).await?;
         if resp.ok {
             let patch = resp.patch.unwrap_or_default();
-            Ok(patch.to_exchange_patch())
+            Ok(patch
+                .to_exchange_patch()
+                .map_err(|e| ProviderError::InvokeFailed(e.to_string()))?)
         } else {
             let err = resp.error.unwrap_or_else(|| crate::protocol::ErrorWire {
                 kind: "unknown".into(),

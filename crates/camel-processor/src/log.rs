@@ -21,6 +21,10 @@ pub struct LogProcessor {
     message: String,
 }
 
+// TODO(PROC-004): Add metrics instrumentation — processed count, error count, latency histograms
+// are not yet instrumented on processors. Consider wiring MetricsCollector into LogProcessor and
+// incrementing a counter on each call, recording elapsed time, and tracking errors.
+
 impl LogProcessor {
     pub fn new(level: LogLevel, message: String) -> Self {
         Self {
@@ -42,12 +46,22 @@ impl Service<Exchange> for LogProcessor {
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let msg = self.message.clone();
+        let exchange_id = exchange.correlation_id.clone();
+        let body_preview = exchange
+            .input
+            .body
+            .as_text()
+            .unwrap_or("")
+            .chars()
+            .take(64)
+            .collect::<String>();
+        debug!(exchange_id = %exchange_id, body_preview = %body_preview, "LogProcessor processing exchange");
         match self.level {
-            LogLevel::Trace => trace!("{}", msg),
-            LogLevel::Debug => debug!("{}", msg),
-            LogLevel::Info => info!("{}", msg),
-            LogLevel::Warn => warn!("{}", msg),
-            LogLevel::Error => error!("{}", msg),
+            LogLevel::Trace => trace!(exchange_id = %exchange_id, "{}", msg),
+            LogLevel::Debug => debug!(exchange_id = %exchange_id, "{}", msg),
+            LogLevel::Info => info!(exchange_id = %exchange_id, "{}", msg),
+            LogLevel::Warn => warn!(exchange_id = %exchange_id, "{}", msg),
+            LogLevel::Error => error!(exchange_id = %exchange_id, "{}", msg),
         }
         self.inner.call(exchange)
     }
@@ -88,13 +102,14 @@ where
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
+        let exchange_id = exchange.correlation_id.clone();
         let msg = (self.expr)(&exchange);
         match self.level {
-            LogLevel::Trace => trace!("{}", msg),
-            LogLevel::Debug => debug!("{}", msg),
-            LogLevel::Info => info!("{}", msg),
-            LogLevel::Warn => warn!("{}", msg),
-            LogLevel::Error => error!("{}", msg),
+            LogLevel::Trace => trace!(exchange_id = %exchange_id, "{}", msg),
+            LogLevel::Debug => debug!(exchange_id = %exchange_id, "{}", msg),
+            LogLevel::Info => info!(exchange_id = %exchange_id, "{}", msg),
+            LogLevel::Warn => warn!(exchange_id = %exchange_id, "{}", msg),
+            LogLevel::Error => error!(exchange_id = %exchange_id, "{}", msg),
         }
         self.inner.call(exchange)
     }

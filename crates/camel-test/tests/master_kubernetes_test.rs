@@ -111,7 +111,7 @@ async fn wait_for_leader(client: &kube::Client, lease_name: &str, holder: &str, 
     .expect("timed out waiting for leadership");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn master_component_processes_after_kubernetes_leadership() {
     let (_container, client) = start_k3s().await;
 
@@ -173,7 +173,7 @@ async fn master_component_processes_after_kubernetes_leadership() {
     ctx.stop().await.expect("context should stop");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn master_route_uses_kubernetes_platform_from_config() {
     let (_container, client) = start_k3s().await;
 

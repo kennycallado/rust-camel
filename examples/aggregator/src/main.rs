@@ -54,7 +54,8 @@ async fn main() -> Result<(), CamelError> {
                 .complete_when_size(3)
                 .max_buckets(100)
                 .bucket_ttl(std::time::Duration::from_secs(60))
-                .build(),
+                .build()
+                .unwrap(), // allow-unwrap
         )
         // Pending exchanges (Body::Empty, CamelAggregatorPending=true) still flow
         // through the pipeline — log only completed batches.

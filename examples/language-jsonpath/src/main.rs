@@ -19,10 +19,10 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
-    ctx.register_language("jsonpath", Box::new(JsonPathLanguage))
+    ctx.register_language("jsonpath", Box::new(JsonPathLanguage::new()))
         .expect("jsonpath not yet registered"); // allow-unwrap
 
-    let lang = JsonPathLanguage;
+    let lang = JsonPathLanguage::new();
 
     let customer_expr = lang
         .create_expression("$.customer")

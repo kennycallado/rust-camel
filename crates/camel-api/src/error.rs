@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Core error type for the Camel framework.
@@ -12,6 +13,11 @@ pub enum CamelError {
 
     #[error("Processor error: {0}")]
     ProcessorError(String),
+
+    /// Like `ProcessorError` but preserves the source error chain
+    /// for downstream inspection (e.g. via `std::error::Error::source()`).
+    #[error("Processor error: {0}")]
+    ProcessorErrorWithSource(String, #[source] Arc<dyn std::error::Error + Send + Sync>),
 
     #[error("Type conversion failed: {0}")]
     TypeConversionFailed(String),
@@ -62,7 +68,7 @@ impl CamelError {
         match self {
             Self::ComponentNotFound(_) => "component",
             Self::EndpointCreationFailed(_) | Self::InvalidUri(_) => "endpoint",
-            Self::ProcessorError(_) => "processor",
+            Self::ProcessorError(_) | Self::ProcessorErrorWithSource(_, _) => "processor",
             Self::TypeConversionFailed(_) | Self::AlreadyConsumed => "type_conversion",
             Self::Io(_) => "io",
             Self::RouteError(_) => "route",
@@ -93,6 +99,10 @@ mod tests {
             CamelError::ComponentNotFound("x".to_string()),
             CamelError::EndpointCreationFailed("x".to_string()),
             CamelError::ProcessorError("x".to_string()),
+            CamelError::ProcessorErrorWithSource(
+                "x".to_string(),
+                Arc::new(std::io::Error::new(std::io::ErrorKind::Other, "inner")),
+            ),
             CamelError::TypeConversionFailed("x".to_string()),
             CamelError::InvalidUri("x".to_string()),
             CamelError::ChannelClosed,

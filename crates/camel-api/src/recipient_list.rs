@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::Exchange;
+use crate::error::CamelError;
 
 pub type RecipientListExpression = Arc<dyn Fn(&Exchange) -> String + Send + Sync>;
 
@@ -49,6 +50,19 @@ impl RecipientListConfig {
     pub fn strategy(mut self, strategy: crate::MulticastStrategy) -> Self {
         self.strategy = strategy;
         self
+    }
+
+    /// Validates the configuration.
+    ///
+    /// Returns `Err(CamelError::Config)` if `parallel_limit` is set to 0,
+    /// which would cause incorrect concurrency behavior at runtime.
+    pub fn validate(&self) -> Result<(), CamelError> {
+        if self.parallel && self.parallel_limit == Some(0) {
+            return Err(CamelError::Config(
+                "recipient_list parallel_limit must be > 0".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

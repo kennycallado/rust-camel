@@ -1,8 +1,18 @@
 use crate::ResolverFn;
 use crate::parser::{Expr, InterpolatedPart, LogicalOp, Op, PathSegment};
 use camel_language_api::{Body, Exchange, LanguageError, Value};
+use std::future::Future;
+use std::pin::Pin;
 
-pub fn evaluate(
+pub fn evaluate<'a>(
+    expr: &'a Expr,
+    exchange: &'a Exchange,
+    resolver: &'a Option<ResolverFn>,
+) -> Pin<Box<dyn Future<Output = Result<Value, LanguageError>> + Send + 'a>> {
+    Box::pin(async move { evaluate_impl(expr, exchange, resolver).await })
+}
+
+async fn evaluate_impl(
     expr: &Expr,
     exchange: &Exchange,
     resolver: &Option<ResolverFn>,
@@ -61,7 +71,7 @@ pub fn evaluate(
                 ))
             })?;
             let expr = lang.create_expression(expression)?;
-            expr.evaluate(exchange)
+            expr.evaluate(exchange).await
         }
 
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
@@ -72,8 +82,8 @@ pub fn evaluate(
         Expr::Null => Ok(Value::Null),
 
         Expr::BinOp { left, op, right } => {
-            let lv = evaluate(left, exchange, resolver)?;
-            let rv = evaluate(right, exchange, resolver)?;
+            let lv = evaluate(left, exchange, resolver).await?;
+            let rv = evaluate(right, exchange, resolver).await?;
             let result = apply_op(&lv, op, &rv)?;
             // Design note: BinOp always produces a Bool result. The Simple Language
             // only supports comparison/predicate expressions — arithmetic or
@@ -89,7 +99,7 @@ pub fn evaluate(
                 match part {
                     InterpolatedPart::Literal(text) => result.push_str(text),
                     InterpolatedPart::Expr(sub_expr) => {
-                        let val = evaluate(sub_expr, exchange, resolver)?;
+                        let val = evaluate(sub_expr, exchange, resolver).await?;
                         match val {
                             Value::Null => {} // missing value → empty string in interpolation
                             Value::String(s) => result.push_str(&s),
@@ -102,20 +112,20 @@ pub fn evaluate(
         }
 
         Expr::LogicalOp { left, op, right } => {
-            let lv = evaluate(left, exchange, resolver)?;
+            let lv = evaluate(left, exchange, resolver).await?;
             match op {
                 LogicalOp::And => {
                     if !is_truthy(&lv) {
                         return Ok(Value::Bool(false));
                     }
-                    let rv = evaluate(right, exchange, resolver)?;
+                    let rv = evaluate(right, exchange, resolver).await?;
                     Ok(Value::Bool(is_truthy(&rv)))
                 }
                 LogicalOp::Or => {
                     if is_truthy(&lv) {
                         return Ok(Value::Bool(true));
                     }
-                    let rv = evaluate(right, exchange, resolver)?;
+                    let rv = evaluate(right, exchange, resolver).await?;
                     Ok(Value::Bool(is_truthy(&rv)))
                 }
             }
@@ -134,10 +144,41 @@ fn is_truthy(v: &Value) -> bool {
     }
 }
 
+fn values_equal_with_coercion(left: &Value, right: &Value) -> bool {
+    // Fast path: same types or already equal
+    if left == right {
+        return true;
+    }
+    // String-to-number coercion: if one side is a string and the other is a number,
+    // attempt to parse the string as f64 and compare numerically.
+    match (left, right) {
+        (Value::String(s), Value::Number(_)) | (Value::Number(_), Value::String(s)) => {
+            s.parse::<f64>().is_ok_and(|_| {
+                let ln = to_f64_lossy(left);
+                let rn = to_f64_lossy(right);
+                ln == rn
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Like `to_f64` but without errors — returns `f64::NAN` for non-numeric values.
+/// Used internally by `values_equal_with_coercion` where errors are already handled.
+fn to_f64_lossy(v: &Value) -> f64 {
+    match v.as_f64() {
+        Some(n) => n,
+        None => match v.as_str() {
+            Some(s) => s.parse::<f64>().unwrap_or(f64::NAN),
+            None => f64::NAN,
+        },
+    }
+}
+
 fn apply_op(left: &Value, op: &Op, right: &Value) -> Result<bool, LanguageError> {
     match op {
-        Op::Eq => Ok(left == right),
-        Op::Ne => Ok(left != right),
+        Op::Eq => Ok(values_equal_with_coercion(left, right)),
+        Op::Ne => Ok(!values_equal_with_coercion(left, right)),
         Op::Contains => {
             if matches!(left, Value::Null) || matches!(right, Value::Null) {
                 return Ok(false);
@@ -168,8 +209,22 @@ fn apply_op(left: &Value, op: &Op, right: &Value) -> Result<bool, LanguageError>
 }
 
 fn to_f64(v: &Value) -> Result<f64, LanguageError> {
-    v.as_f64()
-        .ok_or_else(|| LanguageError::EvalError(format!("expected number, got {v}")))
+    match v.as_f64() {
+        Some(n) => Ok(n),
+        None => {
+            // Attempt string-to-number coercion for comparisons like "5" == 5
+            match v.as_str() {
+                Some(s) => s.parse::<f64>().map_err(|_| {
+                    LanguageError::EvalError(format!(
+                        "cannot coerce string \"{s}\" to number for comparison"
+                    ))
+                }),
+                None => Err(LanguageError::EvalError(format!(
+                    "expected number, got {v}"
+                ))),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -184,8 +239,9 @@ mod tests {
         out: Value,
     }
 
+    #[async_trait::async_trait]
     impl Expression for MockExpression {
-        fn evaluate(&self, _exchange: &Exchange) -> Result<Value, LanguageError> {
+        async fn evaluate(&self, _exchange: &Exchange) -> Result<Value, LanguageError> {
             Ok(self.out.clone())
         }
     }
@@ -220,23 +276,29 @@ mod tests {
         ex
     }
 
-    #[test]
-    fn evaluate_body_variants_and_header_property() {
+    #[tokio::test]
+    async fn evaluate_body_variants_and_header_property() {
         let mut msg = Message::new("txt");
         msg.set_header("k", Value::String("v".to_string()));
         let mut ex = Exchange::new(msg);
         ex.set_property("p".to_string(), Value::String("pv".to_string()));
 
         assert_eq!(
-            evaluate(&Expr::Header("k".to_string()), &ex, &None).unwrap(),
+            evaluate(&Expr::Header("k".to_string()), &ex, &None)
+                .await
+                .unwrap(),
             Value::String("v".to_string())
         );
         assert_eq!(
-            evaluate(&Expr::ExchangeProperty("p".to_string()), &ex, &None).unwrap(),
+            evaluate(&Expr::ExchangeProperty("p".to_string()), &ex, &None)
+                .await
+                .unwrap(),
             Value::String("pv".to_string())
         );
         assert_eq!(
-            evaluate(&Expr::Body, &exchange_with_body(Body::Empty), &None).unwrap(),
+            evaluate(&Expr::Body, &exchange_with_body(Body::Empty), &None)
+                .await
+                .unwrap(),
             Value::Null
         );
         assert_eq!(
@@ -245,6 +307,7 @@ mod tests {
                 &exchange_with_body(Body::from(b"abc".to_vec())),
                 &None
             )
+            .await
             .unwrap(),
             Value::String("abc".to_string())
         );
@@ -254,13 +317,14 @@ mod tests {
                 &exchange_with_body(Body::Json(json!({"a": 1}))),
                 &None
             )
+            .await
             .unwrap(),
             Value::String("{\"a\":1}".to_string())
         );
     }
 
-    #[test]
-    fn evaluate_body_field_success_and_missing() {
+    #[tokio::test]
+    async fn evaluate_body_field_success_and_missing() {
         let ex = exchange_with_body(Body::Json(json!({"users":[{"name":"Ana"}]})));
         let found = evaluate(
             &Expr::BodyField(vec![
@@ -271,6 +335,7 @@ mod tests {
             &ex,
             &None,
         )
+        .await
         .unwrap();
         assert_eq!(found, json!("Ana"));
 
@@ -279,12 +344,13 @@ mod tests {
             &ex,
             &None,
         )
+        .await
         .unwrap();
         assert_eq!(missing, Value::Null);
     }
 
-    #[test]
-    fn evaluate_delegate_and_delegate_errors() {
+    #[tokio::test]
+    async fn evaluate_delegate_and_delegate_errors() {
         let expr = Expr::LanguageDelegate {
             language: "mock".to_string(),
             expression: "x".to_string(),
@@ -298,17 +364,17 @@ mod tests {
             }
         }));
         assert_eq!(
-            evaluate(&expr, &ex, &resolver).unwrap(),
+            evaluate(&expr, &ex, &resolver).await.unwrap(),
             Value::String("mock:x".to_string())
         );
-        assert!(evaluate(&expr, &ex, &None).is_err());
+        assert!(evaluate(&expr, &ex, &None).await.is_err());
 
         let missing_resolver: Option<ResolverFn> = Some(Arc::new(|_| None));
-        assert!(evaluate(&expr, &ex, &missing_resolver).is_err());
+        assert!(evaluate(&expr, &ex, &missing_resolver).await.is_err());
     }
 
-    #[test]
-    fn evaluate_binop_and_contains_and_type_errors() {
+    #[tokio::test]
+    async fn evaluate_binop_and_contains_and_type_errors() {
         let ex = Exchange::default();
         assert_eq!(
             evaluate(
@@ -320,6 +386,7 @@ mod tests {
                 &ex,
                 &None,
             )
+            .await
             .unwrap(),
             Value::Bool(true)
         );
@@ -333,6 +400,7 @@ mod tests {
                 &ex,
                 &None,
             )
+            .await
             .unwrap(),
             Value::Bool(true)
         );
@@ -346,12 +414,13 @@ mod tests {
                 &ex,
                 &None,
             )
+            .await
             .is_err()
         );
     }
 
-    #[test]
-    fn evaluate_interpolated_and_logical_truthiness() {
+    #[tokio::test]
+    async fn evaluate_interpolated_and_logical_truthiness() {
         let mut msg = Message::new("hello");
         msg.set_header("id", Value::Number(7.into()));
         let ex = Exchange::new(msg);
@@ -368,6 +437,7 @@ mod tests {
             &ex,
             &None,
         )
+        .await
         .unwrap();
         assert_eq!(out, Value::String("id=7 body=hello miss=".to_string()));
 
@@ -384,6 +454,7 @@ mod tests {
             &ex,
             &None,
         )
+        .await
         .unwrap();
         assert_eq!(and_short, Value::Bool(false));
 
@@ -400,30 +471,31 @@ mod tests {
             &ex,
             &None,
         )
+        .await
         .unwrap();
         assert_eq!(or_short, Value::Bool(true));
     }
 
-    #[test]
-    fn evaluate_exception_message_with_error() {
+    #[tokio::test]
+    async fn evaluate_exception_message_with_error() {
         let mut ex = Exchange::default();
         ex.set_error(CamelError::RouteError("Unauthorized".to_string()));
-        let result = evaluate(&Expr::ExceptionMessage, &ex, &None).unwrap();
+        let result = evaluate(&Expr::ExceptionMessage, &ex, &None).await.unwrap();
         assert_eq!(
             result,
             Value::String("Route error: Unauthorized".to_string())
         );
     }
 
-    #[test]
-    fn evaluate_exception_message_without_error() {
+    #[tokio::test]
+    async fn evaluate_exception_message_without_error() {
         let ex = Exchange::default();
-        let result = evaluate(&Expr::ExceptionMessage, &ex, &None).unwrap();
+        let result = evaluate(&Expr::ExceptionMessage, &ex, &None).await.unwrap();
         assert_eq!(result, Value::Null);
     }
 
-    #[test]
-    fn evaluate_exception_message_interpolation() {
+    #[tokio::test]
+    async fn evaluate_exception_message_interpolation() {
         let mut ex = Exchange::default();
         ex.set_error(CamelError::RouteError("Unauthorized".to_string()));
         let result = evaluate(
@@ -434,6 +506,7 @@ mod tests {
             &ex,
             &None,
         )
+        .await
         .unwrap();
         assert_eq!(
             result,
@@ -441,8 +514,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn evaluate_exception_message_interpolation_no_error() {
+    #[tokio::test]
+    async fn evaluate_exception_message_interpolation_no_error() {
         let ex = Exchange::default();
         let result = evaluate(
             &Expr::Interpolated(vec![
@@ -452,6 +525,7 @@ mod tests {
             &ex,
             &None,
         )
+        .await
         .unwrap();
         assert_eq!(result, Value::String("Error: ".to_string()));
     }

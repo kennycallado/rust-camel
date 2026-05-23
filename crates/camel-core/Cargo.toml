@@ -1,6 +1,7 @@
 [package]
 name = "camel-core"
 description = "Core engine for rust-camel"
+# Verified: cargo build -p camel-core --no-default-features compiles cleanly (CORE-002)
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -34,8 +34,11 @@ impl Service<Exchange> for ScriptMutator {
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
-        let result = self.expression.evaluate(&mut exchange);
-        Box::pin(async move { result.map(|_| exchange).map_err(language_err_to_camel) })
+        let expression = self.expression.clone();
+        Box::pin(async move {
+            let result = expression.evaluate(&mut exchange).await;
+            result.map(|_| exchange).map_err(language_err_to_camel)
+        })
     }
 }
 
@@ -68,8 +71,9 @@ mod tests {
     struct NotSupportedMutatingExpression;
     struct UnknownVariableMutatingExpression;
 
+    #[async_trait::async_trait]
     impl MutatingExpression for TestMutatingExpression {
-        fn evaluate(&self, exchange: &mut Exchange) -> Result<Value, LanguageError> {
+        async fn evaluate(&self, exchange: &mut Exchange) -> Result<Value, LanguageError> {
             exchange
                 .input
                 .headers
@@ -78,8 +82,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl MutatingExpression for ParseErrorMutatingExpression {
-        fn evaluate(&self, _exchange: &mut Exchange) -> Result<Value, LanguageError> {
+        async fn evaluate(&self, _exchange: &mut Exchange) -> Result<Value, LanguageError> {
             Err(LanguageError::ParseError {
                 expr: "x".to_string(),
                 reason: "bad".to_string(),
@@ -87,8 +92,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl MutatingExpression for NotSupportedMutatingExpression {
-        fn evaluate(&self, _exchange: &mut Exchange) -> Result<Value, LanguageError> {
+        async fn evaluate(&self, _exchange: &mut Exchange) -> Result<Value, LanguageError> {
             Err(LanguageError::NotSupported {
                 feature: "f".to_string(),
                 language: "l".to_string(),
@@ -96,8 +102,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl MutatingExpression for UnknownVariableMutatingExpression {
-        fn evaluate(&self, _exchange: &mut Exchange) -> Result<Value, LanguageError> {
+        async fn evaluate(&self, _exchange: &mut Exchange) -> Result<Value, LanguageError> {
             Err(LanguageError::UnknownVariable("foo".to_string()))
         }
     }

@@ -1,6 +1,6 @@
 use camel_api::CamelError;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct MasterUriConfig {
     pub lock_name: String,
     pub delegate_uri: String,
@@ -24,10 +24,27 @@ impl MasterUriConfig {
     }
 }
 
+/// Configuration for the master/leader-election component.
+///
+/// Controls drain timeout for graceful delegate shutdown and the maximum number
+/// of delegate start retry attempts while leading.
 #[derive(Debug, Clone)]
 pub struct MasterComponentConfig {
+    /// Timeout in milliseconds for draining a delegate consumer on leadership loss.
     pub drain_timeout_ms: u64,
+    /// Maximum number of times to retry starting the delegate consumer after a failure.
+    /// `None` means unlimited retries.
     pub delegate_retry_max_attempts: Option<u32>,
+}
+
+impl MasterComponentConfig {
+    /// Create a new config with the given drain timeout and retry limit.
+    pub fn new(drain_timeout_ms: u64, delegate_retry_max_attempts: Option<u32>) -> Self {
+        Self {
+            drain_timeout_ms,
+            delegate_retry_max_attempts,
+        }
+    }
 }
 
 impl Default for MasterComponentConfig {

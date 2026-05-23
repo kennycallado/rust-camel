@@ -1,19 +1,54 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use tokio::sync::Semaphore;
 use tower::{Service, ServiceExt};
 
 use camel_api::{CamelError, Exchange};
 
+/// Configuration for [`WireTapService`].
+#[derive(Clone, Default)]
+pub struct WireTapConfig {
+    /// Maximum number of concurrent tap tasks. `None` means unlimited (backward-compatible).
+    pub max_concurrent: Option<usize>,
+}
+
+impl WireTapConfig {
+    /// Create a config with a bounded concurrency limit.
+    pub fn bounded(max_concurrent: usize) -> Self {
+        assert!(max_concurrent > 0, "max_concurrent must be > 0");
+        Self {
+            max_concurrent: Some(max_concurrent),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct WireTapService {
     tap_endpoint: camel_api::BoxProcessor,
+    semaphore: Option<Arc<Semaphore>>,
 }
 
 impl WireTapService {
+    /// Create a new `WireTapService` with default (unbounded) concurrency.
     pub fn new(tap_endpoint: camel_api::BoxProcessor) -> Self {
-        Self { tap_endpoint }
+        Self {
+            tap_endpoint,
+            semaphore: None,
+        }
+    }
+
+    /// Create a new `WireTapService` from a [`WireTapConfig`].
+    pub fn with_config(tap_endpoint: camel_api::BoxProcessor, config: WireTapConfig) -> Self {
+        let semaphore = config
+            .max_concurrent
+            .map(|limit| Arc::new(Semaphore::new(limit)));
+        Self {
+            tap_endpoint,
+            semaphore,
+        }
     }
 }
 
@@ -29,8 +64,21 @@ impl Service<Exchange> for WireTapService {
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let mut tap_endpoint = self.tap_endpoint.clone();
         let tap_exchange = exchange.clone();
+        let semaphore = self.semaphore.clone();
 
         tokio::spawn(async move {
+            // Acquire semaphore permit if concurrency is bounded.
+            let _permit = match &semaphore {
+                Some(sem) => match sem.acquire().await {
+                    Ok(p) => Some(p),
+                    Err(_) => {
+                        tracing::warn!("WireTap semaphore closed, dropping tap");
+                        return;
+                    }
+                },
+                None => None,
+            };
+
             if let Err(e) = tap_endpoint.ready().await {
                 tracing::warn!("WireTap endpoint poll_ready failed: {}", e);
                 return;
@@ -47,12 +95,24 @@ impl Service<Exchange> for WireTapService {
 /// A Tower layer that produces `WireTapService` instances.
 pub struct WireTapLayer {
     tap_endpoint: camel_api::BoxProcessor,
+    config: WireTapConfig,
 }
 
 impl WireTapLayer {
-    /// Create a new WireTapLayer with the given tap endpoint processor.
+    /// Create a new WireTapLayer with the given tap endpoint processor (unbounded).
     pub fn new(tap_endpoint: camel_api::BoxProcessor) -> Self {
-        Self { tap_endpoint }
+        Self {
+            tap_endpoint,
+            config: WireTapConfig::default(),
+        }
+    }
+
+    /// Create a new WireTapLayer with bounded concurrency.
+    pub fn bounded(tap_endpoint: camel_api::BoxProcessor, max_concurrent: usize) -> Self {
+        Self {
+            tap_endpoint,
+            config: WireTapConfig::bounded(max_concurrent),
+        }
     }
 }
 
@@ -60,7 +120,7 @@ impl<S> tower::Layer<S> for WireTapLayer {
     type Service = WireTapService;
 
     fn layer(&self, _inner: S) -> Self::Service {
-        WireTapService::new(self.tap_endpoint.clone())
+        WireTapService::with_config(self.tap_endpoint.clone(), self.config.clone())
     }
 }
 
@@ -148,5 +208,46 @@ mod tests {
         let result = svc.ready().await.unwrap().call(exchange).await.unwrap();
 
         assert_eq!(result.input.body.as_text(), Some("test"));
+    }
+
+    #[tokio::test]
+    async fn test_wiretap_bounded_concurrency() {
+        // WireTap with max_concurrent=2: sending 3 slow exchanges must not
+        // spawn more than 2 concurrent tap tasks at any point.
+        let concurrent = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+        let c = Arc::clone(&concurrent);
+        let mc = Arc::clone(&max_concurrent);
+        let tap_processor = BoxProcessor::from_fn(move |ex| {
+            let c = Arc::clone(&c);
+            let mc = Arc::clone(&mc);
+            Box::pin(async move {
+                let current = c.fetch_add(1, Ordering::SeqCst) + 1;
+                mc.fetch_max(current, Ordering::SeqCst);
+                // Hold the task open so multiple taps overlap.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                c.fetch_sub(1, Ordering::SeqCst);
+                Ok(ex)
+            })
+        });
+
+        let config = super::WireTapConfig::bounded(2);
+        let mut svc = super::WireTapService::with_config(tap_processor, config);
+
+        // Send 3 exchanges rapidly — at most 2 tap tasks should run concurrently.
+        for _ in 0..3 {
+            let ex = Exchange::new(Message::new("test"));
+            let _ = svc.ready().await.unwrap().call(ex).await.unwrap();
+        }
+
+        // Wait for all tap tasks to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let observed_max = max_concurrent.load(Ordering::SeqCst);
+        assert!(
+            observed_max <= 2,
+            "max concurrency was {observed_max}, expected <= 2"
+        );
     }
 }

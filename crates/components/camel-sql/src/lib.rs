@@ -12,7 +12,10 @@ use camel_component_api::UriConfig;
 use camel_component_api::{Component, Endpoint};
 
 pub use bundle::SqlBundle;
-pub use config::{SqlEndpointConfig, SqlGlobalConfig, SqlOutputType};
+pub use config::{
+    PollStrategy, ProcessingStrategy, SqlEndpointConfig, SqlGlobalConfig, SqlOutputType,
+    TransactionMode,
+};
 
 pub struct SqlComponent {
     config: Option<SqlGlobalConfig>,

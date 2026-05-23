@@ -21,7 +21,7 @@ fn fn_def(name: &str, route_id: Option<&str>) -> camel_api::function::FunctionDe
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_execute_swap_with_function_steps_replaces_function() {
     let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let function_service =
@@ -127,7 +127,7 @@ async fn test_execute_swap_with_function_steps_replaces_function() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_execute_add_with_function_step_registers_function() {
     let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let function_service =
@@ -194,7 +194,7 @@ async fn test_execute_add_with_function_step_registers_function() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_execute_remove_with_function_step_unregisters_function() {
     let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let function_service =
@@ -272,7 +272,7 @@ async fn test_execute_remove_with_function_step_unregisters_function() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_swap_registers_new_function_before_pipeline_swap() {
     let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let function_service =
@@ -352,7 +352,7 @@ async fn test_swap_registers_new_function_before_pipeline_swap() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_swap_rollback_on_pipeline_failure() {
     let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let function_service =
@@ -424,7 +424,7 @@ async fn test_swap_rollback_on_pipeline_failure() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_add_via_hot_reload_uses_generation_not_staging_zero() {
     let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let function_service =
@@ -489,7 +489,7 @@ async fn test_add_via_hot_reload_uses_generation_not_staging_zero() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_restart_registers_added_before_removing_old() {
     let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let function_service =
@@ -569,7 +569,7 @@ async fn test_restart_registers_added_before_removing_old() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_restart_with_function_change_full_lifecycle() {
     let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let function_service =
@@ -675,7 +675,7 @@ async fn test_restart_with_function_change_full_lifecycle() {
     ctx.stop().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_add_with_prepare_failure_never_inserts_route() {
     let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let function_service =

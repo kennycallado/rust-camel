@@ -22,7 +22,7 @@ fn ensure_rhai_registered(ctx: &mut camel_core::CamelContext) {
 // Test 0: Script error prevents downstream delivery (CRITICAL)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn script_error_prevents_downstream_delivery() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -68,7 +68,7 @@ async fn script_error_prevents_downstream_delivery() {
 // Test 1: Script sets a header
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn script_sets_header() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -115,7 +115,7 @@ async fn script_sets_header() {
 // Test 2: Script reads and transforms body
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn script_reads_and_transforms_body() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -161,7 +161,7 @@ async fn script_reads_and_transforms_body() {
 // Test 3: Script sets multiple headers
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn script_sets_multiple_headers() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -212,7 +212,7 @@ async fn script_sets_multiple_headers() {
 // Test 4: Script reads existing header
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn script_reads_existing_header() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -260,7 +260,7 @@ async fn script_reads_existing_header() {
 // Test 5: Script sets property
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn script_sets_property() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -306,7 +306,7 @@ async fn script_sets_property() {
 // Test 6: Unregistered language fails at route add (IMPORTANT #2)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn script_unregistered_language_fails_at_route_add() {
     let h = CamelTestContext::builder()
         .with_direct()
@@ -338,7 +338,7 @@ async fn script_unregistered_language_fails_at_route_add() {
 // Test 7: Empty body handled gracefully (IMPORTANT #3)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn script_empty_body_handled() {
     let h = CamelTestContext::builder()
         .with_direct()

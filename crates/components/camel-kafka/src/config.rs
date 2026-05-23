@@ -1,7 +1,6 @@
 use camel_component_api::CamelError;
 use camel_component_api::UriConfig;
 use rdkafka::config::ClientConfig;
-use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // Minimum / maximum bounds for numeric URI parameters
@@ -17,7 +16,7 @@ const MIN_REQUEST_TIMEOUT_MS: u32 = 1_000;
 const MAX_REQUEST_TIMEOUT_MS: u32 = 3_600_000; // 1 hour
 const MIN_COMMIT_TIMEOUT_MS: u32 = 100;
 const MAX_COMMIT_TIMEOUT_MS: u32 = 60_000; // 60 s
-const DEFAULT_COMMIT_TIMEOUT_MS: u32 = 500;
+const DEFAULT_COMMIT_TIMEOUT_MS: u32 = 10_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SecurityProtocol {
@@ -105,14 +104,16 @@ impl std::str::FromStr for SaslAuthType {
 ///
 /// This struct holds component-level defaults that can be set via YAML config
 /// and applied to endpoint configurations when specific values aren't provided.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct KafkaConfig {
     pub brokers: String,
     pub group_id: String,
     pub session_timeout_ms: u32,
+    pub heartbeat_interval_ms: u32,
     pub request_timeout_ms: u32,
     pub auto_offset_reset: String,
+    pub isolation_level: String,
     pub security_protocol: String,
 }
 
@@ -122,8 +123,10 @@ impl Default for KafkaConfig {
             brokers: "localhost:9092".to_string(),
             group_id: "camel".to_string(),
             session_timeout_ms: 45_000,
+            heartbeat_interval_ms: 10_000,
             request_timeout_ms: 30_000,
             auto_offset_reset: "latest".to_string(),
+            isolation_level: "read_uncommitted".to_string(),
             security_protocol: "plaintext".to_string(),
         }
     }
@@ -142,6 +145,10 @@ impl KafkaConfig {
         self.session_timeout_ms = v;
         self
     }
+    pub fn with_heartbeat_interval_ms(mut self, v: u32) -> Self {
+        self.heartbeat_interval_ms = v;
+        self
+    }
     pub fn with_request_timeout_ms(mut self, v: u32) -> Self {
         self.request_timeout_ms = v;
         self
@@ -150,9 +157,76 @@ impl KafkaConfig {
         self.auto_offset_reset = v.into();
         self
     }
+    pub fn with_isolation_level(mut self, v: impl Into<String>) -> Self {
+        self.isolation_level = v.into();
+        self
+    }
     pub fn with_security_protocol(mut self, v: impl Into<String>) -> Self {
         self.security_protocol = v.into();
         self
+    }
+
+    /// Validate the global config defaults.
+    ///
+    /// Ensures `brokers` is non-empty and numeric params are within bounds.
+    /// Called by `KafkaComponent::with_config` to reject bad defaults early.
+    pub fn validate(&self) -> Result<(), CamelError> {
+        if self.brokers.trim().is_empty() {
+            return Err(CamelError::Config(
+                "KafkaConfig.brokers must not be empty".into(),
+            ));
+        }
+        if !(MIN_SESSION_TIMEOUT_MS..=MAX_SESSION_TIMEOUT_MS).contains(&self.session_timeout_ms) {
+            return Err(CamelError::Config(format!(
+                "KafkaConfig.session_timeout_ms must be between {MIN_SESSION_TIMEOUT_MS} and {MAX_SESSION_TIMEOUT_MS}, got {}",
+                self.session_timeout_ms
+            )));
+        }
+        // heartbeat_interval_ms should be < session_timeout_ms and > 0
+        if self.heartbeat_interval_ms == 0 {
+            return Err(CamelError::Config(
+                "KafkaConfig.heartbeat_interval_ms must be > 0".into(),
+            ));
+        }
+        if self.heartbeat_interval_ms >= self.session_timeout_ms {
+            return Err(CamelError::Config(format!(
+                "KafkaConfig.heartbeat_interval_ms ({}) must be less than session_timeout_ms ({})",
+                self.heartbeat_interval_ms, self.session_timeout_ms
+            )));
+        }
+        if !(MIN_REQUEST_TIMEOUT_MS..=MAX_REQUEST_TIMEOUT_MS).contains(&self.request_timeout_ms) {
+            return Err(CamelError::Config(format!(
+                "KafkaConfig.request_timeout_ms must be between {MIN_REQUEST_TIMEOUT_MS} and {MAX_REQUEST_TIMEOUT_MS}, got {}",
+                self.request_timeout_ms
+            )));
+        }
+        self.security_protocol
+            .parse::<SecurityProtocol>()
+            .map_err(|_| {
+                CamelError::Config(format!(
+                    "KafkaConfig.security_protocol must be one of: PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL; got '{}'",
+                    self.security_protocol
+                ))
+            })?;
+        if !matches!(
+            self.auto_offset_reset.as_str(),
+            "earliest" | "latest" | "none"
+        ) {
+            return Err(CamelError::Config(format!(
+                "KafkaConfig.auto_offset_reset must be 'earliest', 'latest', or 'none', got '{}'",
+                self.auto_offset_reset
+            )));
+        }
+        if !matches!(
+            self.isolation_level.as_str(),
+            "read_uncommitted" | "read_committed"
+        ) {
+            return Err(CamelError::Config(format!(
+                "KafkaConfig.isolation_level must be 'read_uncommitted' or 'read_committed', got '{}'",
+                self.isolation_level
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -174,6 +248,8 @@ impl KafkaConfig {
 /// - `request_timeout_ms` - Request timeout in milliseconds
 /// - `auto_offset_reset` - Auto offset reset policy ("earliest", "latest", or "none")
 /// - `security_protocol` - Security protocol enum
+/// - `heartbeat_interval_ms` - Heartbeat interval in milliseconds
+/// - `isolation_level` - Isolation level ("read_uncommitted" or "read_committed")
 ///
 /// # Fields Without Global Defaults
 ///
@@ -191,6 +267,8 @@ impl KafkaConfig {
 /// - `ssl_truststore_location` - SSL truststore location
 /// - `ssl_truststore_password` - SSL truststore password
 /// - `allow_manual_commit` - Allow manual commit (default: false)
+/// - `dlq_topic` - Dead Letter Queue topic name (optional; when set, failed messages are routed here)
+/// - `dlq_max_retries` - Number of retries before routing to DLQ (default: 3)
 #[derive(Clone)]
 pub struct KafkaEndpointConfig {
     /// Kafka topic name (path component).
@@ -212,6 +290,10 @@ pub struct KafkaEndpointConfig {
     /// Session timeout in milliseconds. `None` if not set in URI.
     /// Filled by `apply_defaults()` from global config, then `resolve_defaults()`.
     pub session_timeout_ms: Option<u32>,
+
+    /// Heartbeat interval in milliseconds. `None` if not set in URI.
+    /// Filled by `apply_defaults()` from global config, then `resolve_defaults()`.
+    pub heartbeat_interval_ms: Option<u32>,
 
     /// Poll timeout in milliseconds. Default: 5000.
     pub poll_timeout_ms: u32,
@@ -261,8 +343,20 @@ pub struct KafkaEndpointConfig {
     /// Client identifier sent to the broker. Default: "camel-kafka".
     pub client_id: Option<String>,
 
-    /// Commit drain timeout in milliseconds (shutdown grace period). Default: 500.
+    /// Commit drain timeout in milliseconds (shutdown grace period). Default: 10000.
     pub commit_timeout_ms: u32,
+
+    /// Isolation level for consumer. `None` if not set in URI.
+    /// Must be "read_uncommitted" or "read_committed" when set.
+    /// Filled by `apply_defaults()` from global config, then `resolve_defaults()`.
+    pub isolation_level: Option<String>,
+
+    /// Dead Letter Queue topic. When set, messages that fail processing after
+    /// `dlq_max_retries` attempts are sent to this topic instead of being dropped.
+    pub dlq_topic: Option<String>,
+
+    /// Number of retries before routing to DLQ. Default: 3.
+    pub dlq_max_retries: u32,
 }
 
 impl KafkaEndpointConfig {
@@ -303,23 +397,42 @@ impl KafkaEndpointConfig {
 
         let auto_offset_reset = parts.params.get("autoOffsetReset").cloned();
 
-        let session_timeout_ms = parts
-            .params
-            .get("sessionTimeoutMs")
-            .and_then(|s| s.parse().ok());
+        let session_timeout_ms = match parts.params.get("sessionTimeoutMs") {
+            Some(raw) => Some(raw.parse::<u32>().map_err(|_| {
+                CamelError::InvalidUri(format!(
+                    "sessionTimeoutMs must be an unsigned integer, got '{raw}'"
+                ))
+            })?),
+            None => None,
+        };
+
+        let heartbeat_interval_ms = match parts.params.get("heartbeatIntervalMs") {
+            Some(raw) => Some(raw.parse::<u32>().map_err(|_| {
+                CamelError::InvalidUri(format!(
+                    "heartbeatIntervalMs must be an unsigned integer, got '{raw}'"
+                ))
+            })?),
+            None => None,
+        };
 
         // Fields without global defaults use hardcoded defaults
-        let poll_timeout_ms = parts
-            .params
-            .get("pollTimeoutMs")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5000);
+        let poll_timeout_ms = match parts.params.get("pollTimeoutMs") {
+            Some(raw) => raw.parse::<u32>().map_err(|_| {
+                CamelError::InvalidUri(format!(
+                    "pollTimeoutMs must be an unsigned integer, got '{raw}'"
+                ))
+            })?,
+            None => 5000,
+        };
 
-        let max_poll_records = parts
-            .params
-            .get("maxPollRecords")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(500);
+        let max_poll_records = match parts.params.get("maxPollRecords") {
+            Some(raw) => raw.parse::<u32>().map_err(|_| {
+                CamelError::InvalidUri(format!(
+                    "maxPollRecords must be an unsigned integer, got '{raw}'"
+                ))
+            })?,
+            None => 500,
+        };
 
         let acks = parts
             .params
@@ -327,10 +440,14 @@ impl KafkaEndpointConfig {
             .cloned()
             .unwrap_or_else(|| "all".to_string());
 
-        let request_timeout_ms = parts
-            .params
-            .get("requestTimeoutMs")
-            .and_then(|s| s.parse().ok());
+        let request_timeout_ms = match parts.params.get("requestTimeoutMs") {
+            Some(raw) => Some(raw.parse::<u32>().map_err(|_| {
+                CamelError::InvalidUri(format!(
+                    "requestTimeoutMs must be an unsigned integer, got '{raw}'"
+                ))
+            })?),
+            None => None,
+        };
 
         let security_protocol = parts
             .params
@@ -355,11 +472,14 @@ impl KafkaEndpointConfig {
         let ssl_truststore_location = parts.params.get("sslTruststoreLocation").cloned();
         let ssl_truststore_password = parts.params.get("sslTruststorePassword").cloned();
 
-        let allow_manual_commit = parts
-            .params
-            .get("allowManualCommit")
-            .map(|s| s.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let allow_manual_commit = match parts.params.get("allowManualCommit") {
+            Some(raw) => raw.parse::<bool>().map_err(|_| {
+                CamelError::InvalidUri(format!(
+                    "allowManualCommit must be a boolean ('true' or 'false'), got '{raw}'"
+                ))
+            })?,
+            None => false,
+        };
 
         let partition_assignment_strategy = parts
             .params
@@ -371,11 +491,27 @@ impl KafkaEndpointConfig {
 
         let client_id = parts.params.get("clientId").cloned();
 
-        let commit_timeout_ms = parts
-            .params
-            .get("commitTimeoutMs")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_COMMIT_TIMEOUT_MS);
+        let commit_timeout_ms = match parts.params.get("commitTimeoutMs") {
+            Some(raw) => raw.parse::<u32>().map_err(|_| {
+                CamelError::InvalidUri(format!(
+                    "commitTimeoutMs must be an unsigned integer, got '{raw}'"
+                ))
+            })?,
+            None => DEFAULT_COMMIT_TIMEOUT_MS,
+        };
+
+        let isolation_level = parts.params.get("isolationLevel").cloned();
+
+        let dlq_topic = parts.params.get("dlqTopic").cloned();
+
+        let dlq_max_retries = match parts.params.get("dlqMaxRetries") {
+            Some(raw) => raw.parse::<u32>().map_err(|_| {
+                CamelError::InvalidUri(format!(
+                    "dlqMaxRetries must be an unsigned integer, got '{raw}'"
+                ))
+            })?,
+            None => 3,
+        };
 
         let config = Self {
             topic,
@@ -383,6 +519,7 @@ impl KafkaEndpointConfig {
             group_id,
             auto_offset_reset,
             session_timeout_ms,
+            heartbeat_interval_ms,
             poll_timeout_ms,
             max_poll_records,
             acks,
@@ -399,6 +536,9 @@ impl KafkaEndpointConfig {
             partition_assignment_strategy,
             client_id,
             commit_timeout_ms,
+            isolation_level,
+            dlq_topic,
+            dlq_max_retries,
         };
 
         config.validate()
@@ -446,6 +586,20 @@ impl KafkaEndpointConfig {
                 "sessionTimeoutMs must be between {MIN_SESSION_TIMEOUT_MS} and {MAX_SESSION_TIMEOUT_MS}, got {v}"
             )));
         }
+        if let Some(v) = self.heartbeat_interval_ms {
+            if v == 0 {
+                return Err(CamelError::InvalidUri(
+                    "heartbeatIntervalMs must be > 0".to_string(),
+                ));
+            }
+            if let Some(st) = self.session_timeout_ms
+                && v >= st
+            {
+                return Err(CamelError::InvalidUri(format!(
+                    "heartbeatIntervalMs ({v}) must be less than sessionTimeoutMs ({st})"
+                )));
+            }
+        }
         if !(MIN_POLL_TIMEOUT_MS..=MAX_POLL_TIMEOUT_MS).contains(&self.poll_timeout_ms) {
             return Err(CamelError::InvalidUri(format!(
                 "pollTimeoutMs must be between {MIN_POLL_TIMEOUT_MS} and {MAX_POLL_TIMEOUT_MS}, got {}",
@@ -472,6 +626,16 @@ impl KafkaEndpointConfig {
             )));
         }
 
+        // Validate isolation_level only if set in URI
+        if let Some(ref il) = self.isolation_level
+            && !matches!(il.as_str(), "read_uncommitted" | "read_committed")
+        {
+            return Err(CamelError::InvalidUri(format!(
+                "isolationLevel must be 'read_uncommitted' or 'read_committed', got '{}'",
+                il
+            )));
+        }
+
         Ok(self)
     }
 
@@ -490,25 +654,20 @@ impl KafkaEndpointConfig {
         if self.session_timeout_ms.is_none() {
             self.session_timeout_ms = Some(defaults.session_timeout_ms);
         }
+        if self.heartbeat_interval_ms.is_none() {
+            self.heartbeat_interval_ms = Some(defaults.heartbeat_interval_ms);
+        }
         if self.request_timeout_ms.is_none() {
             self.request_timeout_ms = Some(defaults.request_timeout_ms);
         }
         if self.auto_offset_reset.is_none() {
             self.auto_offset_reset = Some(defaults.auto_offset_reset.clone());
         }
+        if self.isolation_level.is_none() {
+            self.isolation_level = Some(defaults.isolation_level.clone());
+        }
         if self.security_protocol.is_none() {
-            self.security_protocol = Some(
-                defaults
-                    .security_protocol
-                    .parse::<SecurityProtocol>()
-                    .unwrap_or_else(|e| {
-                        warn!(
-                            "Invalid security_protocol '{}' in config ({}); using Plaintext",
-                            defaults.security_protocol, e
-                        );
-                        SecurityProtocol::Plaintext
-                    }),
-            );
+            self.security_protocol = defaults.security_protocol.parse::<SecurityProtocol>().ok();
         }
     }
 
@@ -516,7 +675,7 @@ impl KafkaEndpointConfig {
     ///
     /// This should be called after `apply_defaults()` to ensure all fields
     /// that can have global defaults are guaranteed to be `Some`.
-    pub fn resolve_defaults(&mut self) {
+    pub fn resolve_defaults(&mut self) -> Result<(), CamelError> {
         let defaults = KafkaConfig::default();
         if self.brokers.is_none() {
             self.brokers = Some(defaults.brokers);
@@ -527,26 +686,29 @@ impl KafkaEndpointConfig {
         if self.session_timeout_ms.is_none() {
             self.session_timeout_ms = Some(defaults.session_timeout_ms);
         }
+        if self.heartbeat_interval_ms.is_none() {
+            self.heartbeat_interval_ms = Some(defaults.heartbeat_interval_ms);
+        }
         if self.request_timeout_ms.is_none() {
             self.request_timeout_ms = Some(defaults.request_timeout_ms);
         }
         if self.auto_offset_reset.is_none() {
             self.auto_offset_reset = Some(defaults.auto_offset_reset);
         }
+        if self.isolation_level.is_none() {
+            self.isolation_level = Some(defaults.isolation_level);
+        }
         if self.security_protocol.is_none() {
             self.security_protocol = Some(
                 defaults
                     .security_protocol
                     .parse::<SecurityProtocol>()
-                    .unwrap_or_else(|e| {
-                        warn!(
-                            "Invalid security_protocol '{}' in config ({}); using Plaintext",
-                            defaults.security_protocol, e
-                        );
-                        SecurityProtocol::Plaintext
-                    }),
+                    .map_err(|e| {
+                        CamelError::Config(format!("invalid default security protocol: {e}"))
+                    })?,
             );
         }
+        Ok(())
     }
 
     /// Resolve all `None` fields to defaults and validate, returning a
@@ -556,7 +718,7 @@ impl KafkaEndpointConfig {
     /// It rejects empty brokers, empty group_id, and out-of-range numeric values.
     pub fn resolve(self) -> Result<ResolvedKafkaEndpointConfig, CamelError> {
         let mut cfg = self;
-        cfg.resolve_defaults();
+        cfg.resolve_defaults()?;
 
         let brokers = cfg
             .brokers
@@ -598,6 +760,20 @@ impl KafkaEndpointConfig {
             )));
         }
 
+        let heartbeat_interval_ms = cfg
+            .heartbeat_interval_ms
+            .ok_or_else(|| CamelError::Config("heartbeat_interval_ms must be set".into()))?;
+        if heartbeat_interval_ms == 0 {
+            return Err(CamelError::Config(
+                "heartbeat_interval_ms must be > 0".into(),
+            ));
+        }
+        if heartbeat_interval_ms >= session_timeout_ms {
+            return Err(CamelError::Config(format!(
+                "heartbeat_interval_ms ({heartbeat_interval_ms}) must be less than session_timeout_ms ({session_timeout_ms})"
+            )));
+        }
+
         let request_timeout_ms = cfg
             .request_timeout_ms
             .ok_or_else(|| CamelError::Config("request_timeout_ms must be set".into()))?;
@@ -627,12 +803,26 @@ impl KafkaEndpointConfig {
             )));
         }
 
+        // Validate isolation_level after resolution
+        let isolation_level = cfg
+            .isolation_level
+            .ok_or_else(|| CamelError::Config("isolation_level must be set".into()))?;
+        if !matches!(
+            isolation_level.as_str(),
+            "read_uncommitted" | "read_committed"
+        ) {
+            return Err(CamelError::Config(format!(
+                "isolation_level must be 'read_uncommitted' or 'read_committed', got '{isolation_level}'"
+            )));
+        }
+
         Ok(ResolvedKafkaEndpointConfig {
             topic: cfg.topic,
             brokers,
             group_id,
             auto_offset_reset,
             session_timeout_ms,
+            heartbeat_interval_ms,
             poll_timeout_ms: cfg.poll_timeout_ms,
             max_poll_records: cfg.max_poll_records,
             acks: cfg.acks,
@@ -649,6 +839,9 @@ impl KafkaEndpointConfig {
             partition_assignment_strategy: cfg.partition_assignment_strategy,
             client_id: cfg.client_id.unwrap_or_else(|| "camel-kafka".to_string()),
             commit_timeout_ms: cfg.commit_timeout_ms,
+            isolation_level,
+            dlq_topic: cfg.dlq_topic,
+            dlq_max_retries: cfg.dlq_max_retries,
         })
     }
 }
@@ -669,6 +862,7 @@ pub struct ResolvedKafkaEndpointConfig {
     pub group_id: String,
     pub auto_offset_reset: String,
     pub session_timeout_ms: u32,
+    pub heartbeat_interval_ms: u32,
     pub poll_timeout_ms: u32,
     pub max_poll_records: u32,
     pub acks: String,
@@ -685,6 +879,9 @@ pub struct ResolvedKafkaEndpointConfig {
     pub partition_assignment_strategy: PartitionAssignmentStrategy,
     pub client_id: String,
     pub commit_timeout_ms: u32,
+    pub isolation_level: String,
+    pub dlq_topic: Option<String>,
+    pub dlq_max_retries: u32,
 }
 
 impl ResolvedKafkaEndpointConfig {
@@ -702,6 +899,7 @@ impl std::fmt::Debug for ResolvedKafkaEndpointConfig {
             .field("group_id", &self.group_id)
             .field("auto_offset_reset", &self.auto_offset_reset)
             .field("session_timeout_ms", &self.session_timeout_ms)
+            .field("heartbeat_interval_ms", &self.heartbeat_interval_ms)
             .field("poll_timeout_ms", &self.poll_timeout_ms)
             .field("max_poll_records", &self.max_poll_records)
             .field("acks", &self.acks)
@@ -733,6 +931,9 @@ impl std::fmt::Debug for ResolvedKafkaEndpointConfig {
             )
             .field("client_id", &self.client_id)
             .field("commit_timeout_ms", &self.commit_timeout_ms)
+            .field("isolation_level", &self.isolation_level)
+            .field("dlq_topic", &self.dlq_topic)
+            .field("dlq_max_retries", &self.dlq_max_retries)
             .finish()
     }
 }
@@ -745,6 +946,7 @@ impl std::fmt::Debug for KafkaEndpointConfig {
             .field("group_id", &self.group_id)
             .field("auto_offset_reset", &self.auto_offset_reset)
             .field("session_timeout_ms", &self.session_timeout_ms)
+            .field("heartbeat_interval_ms", &self.heartbeat_interval_ms)
             .field("poll_timeout_ms", &self.poll_timeout_ms)
             .field("max_poll_records", &self.max_poll_records)
             .field("acks", &self.acks)
@@ -776,6 +978,9 @@ impl std::fmt::Debug for KafkaEndpointConfig {
             )
             .field("client_id", &self.client_id)
             .field("commit_timeout_ms", &self.commit_timeout_ms)
+            .field("isolation_level", &self.isolation_level)
+            .field("dlq_topic", &self.dlq_topic)
+            .field("dlq_max_retries", &self.dlq_max_retries)
             .finish()
     }
 }
@@ -876,7 +1081,8 @@ mod tests {
         assert!(c.request_timeout_ms.is_none());
 
         // After resolve_defaults, all are filled
-        c.resolve_defaults();
+        c.resolve_defaults()
+            .expect("resolve_defaults should succeed");
         assert_eq!(c.brokers.as_deref(), Some("localhost:9092"));
         assert_eq!(c.group_id.as_deref(), Some("camel"));
         assert_eq!(c.auto_offset_reset.as_deref(), Some("latest"));
@@ -1258,6 +1464,7 @@ mod kafka_config_tests {
             group_id: None,
             auto_offset_reset: None,
             session_timeout_ms: None,
+            heartbeat_interval_ms: None,
             poll_timeout_ms: 5000,
             max_poll_records: 500,
             acks: "all".to_string(),
@@ -1274,6 +1481,9 @@ mod kafka_config_tests {
             partition_assignment_strategy: PartitionAssignmentStrategy::Range,
             client_id: None,
             commit_timeout_ms: DEFAULT_COMMIT_TIMEOUT_MS,
+            isolation_level: None,
+            dlq_topic: None,
+            dlq_max_retries: 3,
         };
 
         let defaults = KafkaConfig::default()
@@ -1367,7 +1577,8 @@ mod kafka_config_tests {
         assert!(ep.security_protocol.is_none());
 
         // resolve_defaults fills them from KafkaConfig::default()
-        ep.resolve_defaults();
+        ep.resolve_defaults()
+            .expect("resolve_defaults should fill defaults");
         assert_eq!(ep.brokers.as_deref(), Some("localhost:9092"));
         assert_eq!(ep.group_id.as_deref(), Some("camel"));
         assert_eq!(ep.session_timeout_ms, Some(45_000));
@@ -1520,8 +1731,8 @@ mod kafka_config_tests {
     fn test_resolved_config_debug_masks_passwords() {
         let cfg = KafkaEndpointConfig::from_uri(
             "kafka:orders?brokers=localhost:9092&groupId=test-group\
-             &securityProtocol=SASL_SSL&saslAuthType=PLAIN\
-             &saslUsername=user&saslPassword=secret123",
+              &securityProtocol=SASL_SSL&saslAuthType=PLAIN\
+              &saslUsername=user&saslPassword=secret123",
         )
         .unwrap();
         let resolved = cfg.resolve().unwrap();
@@ -1534,5 +1745,104 @@ mod kafka_config_tests {
             debug_str.contains("[REDACTED]"),
             "no redaction: {debug_str}"
         );
+    }
+
+    // --- KafkaConfig::validate() tests (KAFKA-011, KAFKA-017) ---
+
+    #[test]
+    fn test_kafka_config_rejects_empty_brokers() {
+        let mut cfg = KafkaConfig::default();
+        cfg.brokers = "".into();
+        assert!(cfg.validate().is_err());
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(msg.contains("brokers"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_kafka_config_rejects_whitespace_only_brokers() {
+        let mut cfg = KafkaConfig::default();
+        cfg.brokers = "   ".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_config_accepts_valid_brokers() {
+        let mut cfg = KafkaConfig::default();
+        cfg.brokers = "localhost:9092".into();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_kafka_config_rejects_zero_session_timeout() {
+        let mut cfg = KafkaConfig::default();
+        cfg.session_timeout_ms = 0;
+        assert!(cfg.validate().is_err());
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(msg.contains("session_timeout_ms"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_kafka_config_rejects_zero_request_timeout() {
+        let mut cfg = KafkaConfig::default();
+        cfg.request_timeout_ms = 0;
+        assert!(cfg.validate().is_err());
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(msg.contains("request_timeout_ms"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_kafka_config_accepts_valid_numeric_defaults() {
+        let cfg = KafkaConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_rejects_invalid_allow_manual_commit_bool() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?allowManualCommit=yes");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rejects_invalid_poll_timeout_numeric() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?pollTimeoutMs=abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rejects_invalid_max_poll_records_numeric() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?maxPollRecords=abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rejects_invalid_session_timeout_numeric() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?sessionTimeoutMs=abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rejects_invalid_request_timeout_numeric() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?requestTimeoutMs=abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rejects_invalid_commit_timeout_numeric() {
+        let result = KafkaEndpointConfig::from_uri("kafka:orders?commitTimeoutMs=abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_kafka_config_rejects_invalid_security_protocol_default() {
+        let mut cfg = KafkaConfig::default();
+        cfg.security_protocol = "BOGUS".to_string();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_kafka_config_rejects_invalid_auto_offset_reset_default() {
+        let mut cfg = KafkaConfig::default();
+        cfg.auto_offset_reset = "bad".to_string();
+        assert!(cfg.validate().is_err());
     }
 }

@@ -2,6 +2,12 @@
 //!
 //! This module provides parsing of Camel-style SQL templates with parameter
 //! placeholders and resolution of those parameters from an Exchange.
+//!
+//! TODO(SQL-006): Named parameters using `:name`-style syntax (e.g.
+//! `SELECT * FROM users WHERE name = :name`) are not yet supported in
+//! downstream SQL execution. The query template parser supports `:#name`
+//! (Camel-style `:#` prefix) and positional `#`, but the underlying database
+//! driver binding currently only supports positional `$1, $2, ...` params.
 
 use camel_component_api::{Body, CamelError, Exchange};
 
@@ -413,21 +419,21 @@ fn resolve_expression_param(
     }
 }
 
-/// Returns true if the SQL is a read-only query (SELECT, TABLE, SHOW, EXPLAIN).
-///
-/// **SQL-012:** `WITH` (CTEs) is treated as SELECT-like because the most common
-/// use case is read-only CTEs (`WITH cte AS (SELECT ...) SELECT * FROM cte`).
-/// **Limitation:** Writeable CTEs (`WITH ... UPDATE/INSERT/DELETE`) are also
-/// classified as SELECT and will route to `execute_select`. If you need to
-/// execute a writeable CTE, prefix it with a comment or use `execute_modify`
-/// directly. This trade-off favors the common read-only case.
+/// Returns true if SQL should run through select path.
 pub fn is_select_query(sql: &str) -> bool {
-    let upper = sql.trim().to_uppercase();
-    upper.starts_with("SELECT")
-        || upper.starts_with("TABLE")
-        || upper.starts_with("SHOW")
-        || upper.starts_with("EXPLAIN")
-        || upper.starts_with("WITH")
+    let trimmed = sql.trim_start().to_uppercase();
+    if trimmed.starts_with("WITH") {
+        return trimmed.contains("SELECT")
+            && !trimmed.contains("INSERT INTO")
+            && !trimmed.contains("UPDATE ")
+            && !trimmed.contains("DELETE FROM");
+    }
+
+    trimmed.starts_with("SELECT")
+        || trimmed.starts_with("VALUES")
+        || trimmed.starts_with("TABLE")
+        || trimmed.starts_with("SHOW")
+        || trimmed.starts_with("EXPLAIN")
 }
 
 const DEFAULT_IN_SEPARATOR: &str = ", ";
@@ -581,11 +587,12 @@ mod tests {
     fn is_select() {
         assert!(is_select_query("SELECT * FROM t"));
         assert!(is_select_query("  select * from t"));
-        // SQL-012: WITH CTEs are now treated as SELECT-like (read-only is the common case)
         assert!(is_select_query("WITH cte AS (SELECT 1) SELECT * FROM cte"));
-        // Note: writeable CTEs are also classified as SELECT — documented limitation
         assert!(is_select_query(
-            "WITH cte AS (UPDATE t SET x = 1 RETURNING *) SELECT * FROM cte"
+            "with results as (select 1) select * from results"
+        ));
+        assert!(!is_select_query(
+            "WITH cte AS (SELECT id FROM t) INSERT INTO other SELECT * FROM cte"
         ));
         assert!(is_select_query("TABLE users"));
         assert!(is_select_query("SHOW TABLES"));

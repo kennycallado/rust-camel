@@ -101,6 +101,7 @@ impl CxfProfileConfig {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(try_from = "CxfPoolConfigRaw")]
 pub struct CxfPoolConfig {
     #[serde(default)]
     pub profiles: Vec<CxfProfileConfig>,
@@ -122,6 +123,23 @@ pub struct CxfPoolConfig {
     pub bind_address: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CxfPoolConfigRaw {
+    #[serde(default)]
+    profiles: Vec<CxfProfileConfig>,
+    #[serde(default = "default_max_bridges")]
+    max_bridges: usize,
+    #[serde(default = "default_bridge_start_timeout_ms")]
+    bridge_start_timeout_ms: u64,
+    #[serde(default = "default_health_check_interval_ms")]
+    health_check_interval_ms: u64,
+    bridge_cache_dir: Option<PathBuf>,
+    #[serde(default = "default_bridge_version")]
+    version: String,
+    #[serde(default)]
+    bind_address: Option<String>,
+}
+
 fn default_bridge_version() -> String {
     BRIDGE_VERSION.to_string()
 }
@@ -140,6 +158,45 @@ impl Default for CxfPoolConfig {
     }
 }
 
+impl CxfPoolConfig {
+    pub fn validate(&self) -> Result<(), camel_component_api::CamelError> {
+        if self.max_bridges == 0 {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf.max_bridges must be greater than 0".into(),
+            ));
+        }
+        if self.bridge_start_timeout_ms == 0 {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf.bridge_start_timeout_ms must be greater than 0".into(),
+            ));
+        }
+        if self.health_check_interval_ms == 0 {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf.health_check_interval_ms must be greater than 0".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<CxfPoolConfigRaw> for CxfPoolConfig {
+    type Error = camel_component_api::CamelError;
+
+    fn try_from(raw: CxfPoolConfigRaw) -> Result<Self, Self::Error> {
+        let cfg = CxfPoolConfig {
+            profiles: raw.profiles,
+            max_bridges: raw.max_bridges,
+            bridge_start_timeout_ms: raw.bridge_start_timeout_ms,
+            health_check_interval_ms: raw.health_check_interval_ms,
+            bridge_cache_dir: raw.bridge_cache_dir,
+            version: raw.version,
+            bind_address: raw.bind_address,
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CxfEndpointConfig {
     pub address: String,
@@ -148,12 +205,50 @@ pub struct CxfEndpointConfig {
     pub port_name: String,
     pub operation: Option<String>,
     pub profile: Option<String>,
+    pub timeout_ms: Option<u64>,
+    /// When `true`, the producer sets `Content-Type: multipart/related` and
+    /// `SOAPAction` headers on outgoing requests.
+    ///
+    /// /// TODO(CXF-014): full MTOM multipart encoding not yet implemented
+    pub mtom_enabled: bool,
+    /// Optional override for the attachment Content-Type used when `mtom_enabled`
+    /// is `true`.
+    pub attachment_content_type: Option<String>,
 }
 
 impl CxfEndpointConfig {
+    pub fn validate(&self) -> Result<(), camel_component_api::CamelError> {
+        if self.address.trim().is_empty() {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf URI field 'address' must not be empty".into(),
+            ));
+        }
+        if self.wsdl_path.trim().is_empty() {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf URI field 'wsdl' must not be empty".into(),
+            ));
+        }
+        if self.service_name.trim().is_empty() {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf URI field 'service' must not be empty".into(),
+            ));
+        }
+        if self.port_name.trim().is_empty() {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf URI field 'port' must not be empty".into(),
+            ));
+        }
+        if matches!(self.timeout_ms, Some(0)) {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf URI field 'timeout_ms' must be greater than 0".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn from_uri(uri: &str) -> Result<Self, camel_component_api::CamelError> {
         let rest = uri.strip_prefix("cxf://").ok_or_else(|| {
-            camel_component_api::CamelError::ProcessorError("expected scheme 'cxf://'".to_string())
+            camel_component_api::CamelError::InvalidUri("expected scheme 'cxf://'".to_string())
         })?;
 
         let (path, query) = match rest.split_once('?') {
@@ -162,8 +257,8 @@ impl CxfEndpointConfig {
         };
 
         let address = if path.is_empty() {
-            return Err(camel_component_api::CamelError::ProcessorError(
-                "cxf URI must include an address after 'cxf://'".to_string(),
+            return Err(camel_component_api::CamelError::InvalidUri(
+                "cxf URI must include an address after 'cxf://'".into(),
             ));
         } else {
             path.to_string()
@@ -174,6 +269,10 @@ impl CxfEndpointConfig {
         let mut port_name = None;
         let mut operation = None;
         let mut profile = None;
+        let mut timeout_ms = None;
+        let mut mtom_enabled = None;
+        let mut attachment_content_type = None;
+        let mut unknown_params = Vec::new();
 
         if let Some(q) = query {
             for kv in q.split('&') {
@@ -184,36 +283,67 @@ impl CxfEndpointConfig {
                         "port" => port_name = Some(v.to_string()),
                         "operation" => operation = Some(v.to_string()),
                         "profile" => profile = Some(v.to_string()),
-                        _ => {}
+                        "timeout_ms" => {
+                            timeout_ms = Some(v.parse::<u64>().map_err(|_| {
+                                camel_component_api::CamelError::InvalidUri(
+                                    "cxf URI field 'timeout_ms' must be an unsigned integer"
+                                        .to_string(),
+                                )
+                            })?)
+                        }
+                        "mtom_enabled" => {
+                            mtom_enabled = Some(v.parse::<bool>().map_err(|_| {
+                                camel_component_api::CamelError::InvalidUri(
+                                    "cxf URI field 'mtom_enabled' must be 'true' or 'false'"
+                                        .to_string(),
+                                )
+                            })?)
+                        }
+                        "attachment_content_type" => {
+                            attachment_content_type = Some(v.to_string());
+                        }
+                        _ => unknown_params.push(k.to_string()),
                     }
                 }
             }
         }
 
+        if !unknown_params.is_empty() {
+            return Err(camel_component_api::CamelError::InvalidUri(format!(
+                "unknown cxf URI query parameter(s): {}",
+                unknown_params.join(", ")
+            )));
+        }
+
         let wsdl_path = wsdl_path.ok_or_else(|| {
-            camel_component_api::CamelError::ProcessorError(
+            camel_component_api::CamelError::InvalidUri(
                 "cxf URI requires 'wsdl' query parameter".to_string(),
             )
         })?;
         let service_name = service_name.ok_or_else(|| {
-            camel_component_api::CamelError::ProcessorError(
+            camel_component_api::CamelError::InvalidUri(
                 "cxf URI requires 'service' query parameter".to_string(),
             )
         })?;
         let port_name = port_name.ok_or_else(|| {
-            camel_component_api::CamelError::ProcessorError(
+            camel_component_api::CamelError::InvalidUri(
                 "cxf URI requires 'port' query parameter".to_string(),
             )
         })?;
 
-        Ok(CxfEndpointConfig {
+        let cfg = CxfEndpointConfig {
             address,
             wsdl_path,
             service_name,
             port_name,
             operation,
             profile,
-        })
+            timeout_ms,
+            mtom_enabled: mtom_enabled.unwrap_or(false),
+            attachment_content_type,
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
 }
 
@@ -238,6 +368,7 @@ mod tests {
         assert_eq!(cfg.service_name, "MyService".to_string());
         assert_eq!(cfg.port_name, "MyPort".to_string());
         assert_eq!(cfg.operation, Some("doSomething".to_string()));
+        assert_eq!(cfg.timeout_ms, None);
     }
 
     #[test]
@@ -273,6 +404,7 @@ mod tests {
     #[test]
     fn default_pool_config() {
         let cfg = CxfPoolConfig::default();
+        assert!(cfg.validate().is_ok());
         assert_eq!(cfg.max_bridges, 4);
         assert!(cfg.profiles.is_empty());
         assert_eq!(cfg.bridge_start_timeout_ms, 30_000);
@@ -295,6 +427,7 @@ mod tests {
             port_name = "MyPort"
         "#;
         let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+        assert!(cfg.validate().is_ok());
         assert_eq!(cfg.max_bridges, 8);
         assert_eq!(cfg.bridge_start_timeout_ms, 60_000);
         assert_eq!(cfg.health_check_interval_ms, 10_000);
@@ -309,6 +442,7 @@ mod tests {
     #[test]
     fn parse_pool_config_defaults() {
         let cfg: CxfPoolConfig = toml::from_str("").expect("empty toml");
+        assert!(cfg.validate().is_ok());
         assert_eq!(cfg.max_bridges, 4);
         assert_eq!(cfg.bridge_start_timeout_ms, 30_000);
         assert_eq!(cfg.health_check_interval_ms, 5_000);
@@ -386,6 +520,7 @@ mod tests {
             port_name = "HelloPort"
         "#;
         let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+        assert!(cfg.validate().is_ok());
         assert_eq!(cfg.max_bridges, 2);
         assert_eq!(cfg.profiles.len(), 1);
         assert_eq!(cfg.profiles[0].name, "test");
@@ -447,12 +582,76 @@ mod tests {
         assert_eq!(cfg.service_name, "MySvc".to_string());
         assert_eq!(cfg.port_name, "MyPort".to_string());
         assert_eq!(cfg.operation, Some("doWork".to_string()));
+        assert_eq!(cfg.timeout_ms, None);
     }
 
     #[test]
     fn endpoint_config_from_uri_minimal() {
         let err = CxfEndpointConfig::from_uri("cxf://http://example.com/ws").unwrap_err();
         assert!(err.to_string().contains("requires 'wsdl'"));
+    }
+
+    #[test]
+    fn test_rejects_zero_timeout() {
+        let mut cfg = CxfEndpointConfig {
+            address: "http://example.com/ws".to_string(),
+            wsdl_path: "file.wsdl".to_string(),
+            service_name: "svc".to_string(),
+            port_name: "port".to_string(),
+            operation: None,
+            profile: None,
+            timeout_ms: None,
+            mtom_enabled: false,
+            attachment_content_type: None,
+        };
+        cfg.timeout_ms = Some(0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_json_negative_timeout_fails_deserialization() {
+        #[derive(serde::Deserialize)]
+        struct TimeoutWrapper {
+            timeout_ms: u64,
+        }
+
+        let result = serde_json::from_str::<TimeoutWrapper>(r#"{"timeout_ms": -1}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rejects_empty_required_field() {
+        let mut cfg = CxfEndpointConfig {
+            address: "http://example.com/ws".to_string(),
+            wsdl_path: "file.wsdl".to_string(),
+            service_name: "svc".to_string(),
+            port_name: "port".to_string(),
+            operation: None,
+            profile: None,
+            timeout_ms: None,
+            mtom_enabled: false,
+            attachment_content_type: None,
+        };
+        cfg.address = "".into();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn endpoint_config_rejects_unknown_query_param() {
+        let err = CxfEndpointConfig::from_uri(
+            "cxf://http://example.com/ws?wsdl=file.wsdl&service=Svc&port=Port&bogus=1",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown cxf URI query parameter"));
+    }
+
+    #[test]
+    fn endpoint_config_parses_timeout_ms() {
+        let cfg = CxfEndpointConfig::from_uri(
+            "cxf://http://example.com/ws?wsdl=file.wsdl&service=Svc&port=Port&timeout_ms=5000",
+        )
+        .unwrap();
+        assert_eq!(cfg.timeout_ms, Some(5000));
     }
 
     #[test]
@@ -466,5 +665,42 @@ mod tests {
             security: Default::default(),
         };
         assert_eq!(profile.env_prefix(), "CXF_PROFILE_BALEARES_");
+    }
+
+    #[test]
+    fn pool_config_validate_rejects_zero_max_bridges() {
+        let err = toml::from_str::<CxfPoolConfig>("max_bridges = 0").unwrap_err();
+        assert!(err.to_string().contains("max_bridges"));
+    }
+
+    #[test]
+    fn pool_config_validate_rejects_zero_bridge_start_timeout() {
+        let err = toml::from_str::<CxfPoolConfig>("bridge_start_timeout_ms = 0").unwrap_err();
+        assert!(err.to_string().contains("bridge_start_timeout_ms"));
+    }
+
+    #[test]
+    fn pool_config_validate_rejects_zero_health_check_interval() {
+        let err = toml::from_str::<CxfPoolConfig>("health_check_interval_ms = 0").unwrap_err();
+        assert!(err.to_string().contains("health_check_interval_ms"));
+    }
+
+    #[test]
+    fn endpoint_config_mtom_disabled_by_default() {
+        let cfg = CxfEndpointConfig::from_uri(
+            "cxf://http://example.com/ws?wsdl=file.wsdl&service=Svc&port=Port",
+        )
+        .unwrap();
+        assert!(!cfg.mtom_enabled);
+        assert!(cfg.attachment_content_type.is_none());
+    }
+
+    #[test]
+    fn endpoint_config_parses_mtom_enabled() {
+        let cfg = CxfEndpointConfig::from_uri(
+            "cxf://http://example.com/ws?wsdl=file.wsdl&service=Svc&port=Port&mtom_enabled=true",
+        )
+        .unwrap();
+        assert!(cfg.mtom_enabled);
     }
 }

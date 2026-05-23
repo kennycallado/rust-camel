@@ -13,8 +13,12 @@ categories.workspace = true
 
 [dependencies]
 camel-language-api.workspace = true
+async-trait.workspace = true
 rhai.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

@@ -1,4 +1,5 @@
 use crate::PropertiesResolver;
+use camel_api::CamelError;
 use camel_core::TracerConfig;
 use config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ pub struct CamelConfig {
 
     /// Enable file-watcher hot-reload. Defaults to false.
     /// Can be overridden per profile in Camel.toml or via `--watch` / `--no-watch` CLI flags.
+    // TODO(CONFIG-004): hot-reload watch plumbing not fully implemented yet.
     #[serde(default)]
     pub watch: bool,
 
@@ -32,6 +34,8 @@ pub struct CamelConfig {
     pub drain_timeout_ms: u64,
 
     #[serde(default = "default_watch_debounce_ms")]
+    // TODO(CONFIG-004): Hot-reload via file watcher not yet implemented.
+    // watch_debounce_ms is parsed but currently unused.
     pub watch_debounce_ms: u64,
 
     #[serde(default)]
@@ -51,6 +55,67 @@ pub struct CamelConfig {
 
     #[serde(default)]
     pub beans: HashMap<String, BeanConfig>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct CamelConfigBuilder {
+    pub routes: Option<Vec<String>>,
+    pub watch: Option<bool>,
+    pub log_level: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub drain_timeout_ms: Option<u64>,
+    pub watch_debounce_ms: Option<u64>,
+}
+
+impl CamelConfigBuilder {
+    pub fn routes(mut self, v: Vec<String>) -> Self {
+        self.routes = Some(v);
+        self
+    }
+
+    pub fn watch(mut self, v: bool) -> Self {
+        self.watch = Some(v);
+        self
+    }
+
+    pub fn log_level(mut self, v: impl Into<String>) -> Self {
+        self.log_level = Some(v.into());
+        self
+    }
+
+    pub fn timeout_ms(mut self, v: u64) -> Self {
+        self.timeout_ms = Some(v);
+        self
+    }
+
+    pub fn drain_timeout_ms(mut self, v: u64) -> Self {
+        self.drain_timeout_ms = Some(v);
+        self
+    }
+
+    pub fn watch_debounce_ms(mut self, v: u64) -> Self {
+        self.watch_debounce_ms = Some(v);
+        self
+    }
+
+    pub fn build(self) -> CamelConfig {
+        let defaults = CamelConfig::default();
+        CamelConfig {
+            routes: self.routes.unwrap_or(defaults.routes),
+            watch: self.watch.unwrap_or(defaults.watch),
+            runtime_journal: defaults.runtime_journal,
+            log_level: self.log_level.unwrap_or(defaults.log_level),
+            timeout_ms: self.timeout_ms.unwrap_or(defaults.timeout_ms),
+            drain_timeout_ms: self.drain_timeout_ms.unwrap_or(defaults.drain_timeout_ms),
+            watch_debounce_ms: self.watch_debounce_ms.unwrap_or(defaults.watch_debounce_ms),
+            components: defaults.components,
+            observability: defaults.observability,
+            supervision: defaults.supervision,
+            platform: defaults.platform,
+            stream_caching: defaults.stream_caching,
+            beans: defaults.beans,
+        }
+    }
 }
 
 impl Default for CamelConfig {
@@ -460,36 +525,163 @@ fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
 }
 
 impl CamelConfig {
-    fn resolve_bean_placeholders(&mut self) {
+    fn resolve_placeholders(&mut self) {
         let resolver = PropertiesResolver::new();
+
+        for route in &mut self.routes {
+            if let Ok(resolved) = resolver.resolve(route) {
+                *route = resolved;
+            } else {
+                tracing::warn!(route = %route, "Failed to resolve placeholder in routes entry; keeping original");
+            }
+        }
+
+        if let Ok(resolved) = resolver.resolve(&self.log_level) {
+            self.log_level = resolved;
+        } else {
+            tracing::warn!(log_level = %self.log_level, "Failed to resolve placeholder in log_level; keeping original");
+        }
+
+        if let Some(otel) = self.observability.otel.as_mut() {
+            resolve_string_in_place(&resolver, &mut otel.endpoint, "observability.otel.endpoint");
+            resolve_string_in_place(
+                &resolver,
+                &mut otel.service_name,
+                "observability.otel.service_name",
+            );
+            resolve_string_in_place(
+                &resolver,
+                &mut otel.log_level,
+                "observability.otel.log_level",
+            );
+            for (k, v) in &mut otel.resource_attrs {
+                let field = format!("observability.otel.resource_attrs.{k}");
+                resolve_string_in_place(&resolver, v, &field);
+            }
+        }
+
+        if let Some(prom) = self.observability.prometheus.as_mut() {
+            resolve_string_in_place(&resolver, &mut prom.host, "observability.prometheus.host");
+        }
+
+        if let Some(health) = self.observability.health.as_mut() {
+            resolve_string_in_place(&resolver, &mut health.host, "observability.health.host");
+        }
+
+        if let PlatformCamelConfig::Kubernetes(k8s) = &mut self.platform {
+            if let Some(namespace) = k8s.namespace.as_mut() {
+                resolve_string_in_place(&resolver, namespace, "platform.namespace");
+            }
+            resolve_string_in_place(
+                &resolver,
+                &mut k8s.lease_name_prefix,
+                "platform.lease_name_prefix",
+            );
+        }
+
+        for (component_name, value) in &mut self.components.raw {
+            resolve_toml_value_placeholders(
+                &resolver,
+                value,
+                &format!("components.{component_name}"),
+            );
+        }
+
         for bean in self.beans.values_mut() {
+            resolve_string_in_place(&resolver, &mut bean.plugin, "beans.*.plugin");
             let resolved: HashMap<String, String> = bean
                 .config
                 .drain()
                 .map(|(k, v)| match resolver.resolve(&v) {
                     Ok(resolved) => (k, resolved),
-                    Err(_) => (k, v),
+                    Err(err) => {
+                        tracing::warn!(key = %k, value = %v, error = %err, "Failed to resolve bean config placeholder; keeping original");
+                        (k, v)
+                    }
                 })
                 .collect();
             bean.config = resolved;
         }
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), CamelError> {
         if self.timeout_ms == 0 {
-            return Err("timeout_ms must be > 0".to_string());
+            return Err(CamelError::Config("timeout_ms must be > 0".to_string()));
         }
         if self.drain_timeout_ms == 0 {
-            return Err("drain_timeout_ms must be > 0".to_string());
+            return Err(CamelError::Config(
+                "drain_timeout_ms must be > 0".to_string(),
+            ));
         }
-        if let Some(ref journal) = self.runtime_journal
-            && journal.path.as_os_str().is_empty()
-        {
-            return Err("runtime_journal.path must not be empty".to_string());
+        if self.watch_debounce_ms == 0 {
+            return Err(CamelError::Config(
+                "watch_debounce_ms must be > 0".to_string(),
+            ));
+        }
+        if let Some(ref journal) = self.runtime_journal {
+            if journal.path.as_os_str().is_empty() {
+                return Err(CamelError::Config(
+                    "runtime_journal.path must not be empty".to_string(),
+                ));
+            }
+            if journal.compaction_threshold_events == 0 {
+                return Err(CamelError::Config(
+                    "runtime_journal.compaction_threshold_events must be > 0".to_string(),
+                ));
+            }
         }
         for (name, bean) in &self.beans {
             if bean.plugin.trim().is_empty() {
-                return Err(format!("bean '{}' must have a non-empty plugin", name));
+                return Err(CamelError::Config(format!(
+                    "bean '{}' must have a non-empty plugin",
+                    name
+                )));
+            }
+        }
+        if let Some(ref sup) = self.supervision {
+            if sup.initial_delay_ms == 0 {
+                return Err(CamelError::Config(
+                    "supervision.initial_delay_ms must be > 0".to_string(),
+                ));
+            }
+            if sup.max_delay_ms == 0 {
+                return Err(CamelError::Config(
+                    "supervision.max_delay_ms must be > 0".to_string(),
+                ));
+            }
+            if sup.backoff_multiplier < 1.0 {
+                return Err(CamelError::Config(
+                    "supervision.backoff_multiplier must be >= 1.0".to_string(),
+                ));
+            }
+        }
+        if let Some(ref otel) = self.observability.otel
+            && otel.metrics_interval_ms == 0
+        {
+            return Err(CamelError::Config(
+                "observability.otel.metrics_interval_ms must be > 0".to_string(),
+            ));
+        }
+        if let PlatformCamelConfig::Kubernetes(ref k8s) = self.platform {
+            if k8s.lease_duration_secs == 0 {
+                return Err(CamelError::Config(
+                    "platform.lease_duration_secs must be > 0".to_string(),
+                ));
+            }
+            if k8s.renew_deadline_secs == 0 {
+                return Err(CamelError::Config(
+                    "platform.renew_deadline_secs must be > 0".to_string(),
+                ));
+            }
+            if k8s.retry_period_secs == 0 {
+                return Err(CamelError::Config(
+                    "platform.retry_period_secs must be > 0".to_string(),
+                ));
+            }
+            if k8s.jitter_factor < 0.0 || k8s.jitter_factor > 1.0 {
+                return Err(CamelError::Config(
+                    "platform.jitter_factor must be between 0.0 and 1.0".to_string(),
+                ));
             }
         }
         Ok(())
@@ -504,119 +696,24 @@ impl CamelConfig {
     }
 
     pub fn from_file_with_profile(path: &str, profile: Option<&str>) -> Result<Self, ConfigError> {
-        // Get profile from parameter or environment variable
-        let env_profile = env::var("CAMEL_PROFILE").ok();
-        let profile = profile.or(env_profile.as_deref());
-
-        // Read the TOML file as a generic value for deep merging
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::Message(format!("Failed to read config file: {}", e)))?;
-        let mut config_value: toml::Value = toml::from_str(&content)
-            .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
-
-        // If a profile is specified, merge it with default
-        if let Some(p) = profile {
-            // Extract default config as base
-            let default_value = config_value.get("default").cloned();
-
-            // Extract profile config
-            let profile_value = config_value.get(p).cloned();
-
-            if let (Some(mut base), Some(overlay)) = (default_value, profile_value) {
-                // Deep merge profile onto default
-                merge_toml_values(&mut base, &overlay);
-
-                // Replace the entire config with the merged result
-                config_value = base;
-            } else if let Some(profile_val) = config_value.get(p).cloned() {
-                // No default, just use profile
-                config_value = profile_val;
-            } else {
-                return Err(ConfigError::Message(format!("Unknown profile: {}", p)));
-            }
-        } else {
-            // No profile specified, use default section if it exists
-            if let Some(default_val) = config_value.get("default").cloned() {
-                config_value = default_val;
-            }
-        }
-
-        // Deserialize the merged config
-        let merged_toml = toml::to_string(&config_value).map_err(|e| {
-            ConfigError::Message(format!("Failed to serialize merged config: {}", e))
-        })?;
-
-        let config = Config::builder()
-            .add_source(config::File::from_str(
-                &merged_toml,
-                config::FileFormat::Toml,
-            ))
-            .build()?;
-
-        let mut config: Self = config.try_deserialize()?;
-        config.resolve_bean_placeholders();
-        config.validate().map_err(ConfigError::Message)?;
-        Ok(config)
+        Self::load_from_file_inner(path, profile, false)
     }
 
     pub fn from_file_with_profile_and_env(
         path: &str,
         profile: Option<&str>,
     ) -> Result<Self, ConfigError> {
-        // Get profile from parameter or environment variable
-        let env_profile = env::var("CAMEL_PROFILE").ok();
-        let profile = profile.or(env_profile.as_deref());
+        Self::load_from_file_inner(path, profile, true)
+    }
 
-        // Read the TOML file as a generic value for deep merging
+    fn load_from_file_inner(
+        path: &str,
+        profile: Option<&str>,
+        merge_env: bool,
+    ) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| ConfigError::Message(format!("Failed to read config file: {}", e)))?;
-        let mut config_value: toml::Value = toml::from_str(&content)
-            .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
-
-        // If a profile is specified, merge it with default
-        if let Some(p) = profile {
-            // Extract default config as base
-            let default_value = config_value.get("default").cloned();
-
-            // Extract profile config
-            let profile_value = config_value.get(p).cloned();
-
-            if let (Some(mut base), Some(overlay)) = (default_value, profile_value) {
-                // Deep merge profile onto default
-                merge_toml_values(&mut base, &overlay);
-
-                // Replace the entire config with the merged result
-                config_value = base;
-            } else if let Some(profile_val) = config_value.get(p).cloned() {
-                // No default, just use profile
-                config_value = profile_val;
-            } else {
-                return Err(ConfigError::Message(format!("Unknown profile: {}", p)));
-            }
-        } else {
-            // No profile specified, use default section if it exists
-            if let Some(default_val) = config_value.get("default").cloned() {
-                config_value = default_val;
-            }
-        }
-
-        // Deserialize the merged config and apply environment variables
-        let merged_toml = toml::to_string(&config_value).map_err(|e| {
-            ConfigError::Message(format!("Failed to serialize merged config: {}", e))
-        })?;
-
-        let config = Config::builder()
-            .add_source(config::File::from_str(
-                &merged_toml,
-                config::FileFormat::Toml,
-            ))
-            .add_source(config::Environment::with_prefix("CAMEL").try_parsing(true))
-            .build()?;
-
-        let mut config: Self = config.try_deserialize()?;
-        config.resolve_bean_placeholders();
-        config.validate().map_err(ConfigError::Message)?;
-        Ok(config)
+        Self::build_from_toml_str_inner(&content, profile, merge_env)
     }
 
     pub fn from_env_or_default() -> Result<Self, ConfigError> {
@@ -624,6 +721,123 @@ impl CamelConfig {
 
         Self::from_file(&path)
     }
+
+    /// Async version of [`Self::from_file`] — uses `tokio::fs` to avoid blocking the executor.
+    pub async fn from_file_async(path: &str) -> Result<Self, ConfigError> {
+        Self::from_file_async_with_profile(path, None).await
+    }
+
+    /// Async version of [`Self::from_file_with_profile`] — uses `tokio::fs`.
+    pub async fn from_file_async_with_profile(
+        path: &str,
+        profile: Option<&str>,
+    ) -> Result<Self, ConfigError> {
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| ConfigError::Message(format!("Failed to read config file: {}", e)))?;
+        Self::build_from_toml_str_inner(&content, profile, false)
+    }
+
+    /// Async version of [`Self::from_file_with_env`] — uses `tokio::fs`.
+    pub async fn from_file_async_with_env(path: &str) -> Result<Self, ConfigError> {
+        Self::from_file_async_with_profile_and_env(path, None).await
+    }
+
+    /// Async version of [`Self::from_file_with_profile_and_env`] — uses `tokio::fs`.
+    pub async fn from_file_async_with_profile_and_env(
+        path: &str,
+        profile: Option<&str>,
+    ) -> Result<Self, ConfigError> {
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| ConfigError::Message(format!("Failed to read config file: {}", e)))?;
+        Self::build_from_toml_str_inner(&content, profile, true)
+    }
+
+    fn build_from_toml_str_inner(
+        content: &str,
+        profile: Option<&str>,
+        merge_env: bool,
+    ) -> Result<Self, ConfigError> {
+        let env_profile = env::var("CAMEL_PROFILE").ok();
+        let profile = profile.or(env_profile.as_deref());
+
+        let mut config_value: toml::Value = toml::from_str(content)
+            .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
+
+        apply_profile(&mut config_value, profile)?;
+
+        let merged_toml = toml::to_string(&config_value).map_err(|e| {
+            ConfigError::Message(format!("Failed to serialize merged config: {}", e))
+        })?;
+
+        let mut builder = Config::builder().add_source(config::File::from_str(
+            &merged_toml,
+            config::FileFormat::Toml,
+        ));
+        if merge_env {
+            builder =
+                builder.add_source(config::Environment::with_prefix("CAMEL").try_parsing(true));
+        }
+        let config = builder.build()?;
+
+        let mut config: Self = config.try_deserialize()?;
+        config.resolve_placeholders();
+        config
+            .validate()
+            .map_err(|e| ConfigError::Message(e.to_string()))?;
+        Ok(config)
+    }
+}
+
+fn resolve_string_in_place(resolver: &PropertiesResolver, value: &mut String, field: &str) {
+    match resolver.resolve(value) {
+        Ok(resolved) => *value = resolved,
+        Err(err) => {
+            tracing::warn!(field = field, value = %value, error = %err, "Failed to resolve placeholder; keeping original");
+        }
+    }
+}
+
+fn resolve_toml_value_placeholders(
+    resolver: &PropertiesResolver,
+    value: &mut toml::Value,
+    path: &str,
+) {
+    match value {
+        toml::Value::String(s) => resolve_string_in_place(resolver, s, path),
+        toml::Value::Array(arr) => {
+            for (idx, item) in arr.iter_mut().enumerate() {
+                resolve_toml_value_placeholders(resolver, item, &format!("{path}[{idx}]"));
+            }
+        }
+        toml::Value::Table(table) => {
+            for (k, v) in table.iter_mut() {
+                resolve_toml_value_placeholders(resolver, v, &format!("{path}.{k}"));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Apply profile-based TOML section merging in-place.
+fn apply_profile(config_value: &mut toml::Value, profile: Option<&str>) -> Result<(), ConfigError> {
+    if let Some(p) = profile {
+        let default_value = config_value.get("default").cloned();
+        let profile_value = config_value.get(p).cloned();
+
+        if let (Some(mut base), Some(overlay)) = (default_value, profile_value) {
+            merge_toml_values(&mut base, &overlay);
+            *config_value = base;
+        } else if let Some(profile_val) = config_value.get(p).cloned() {
+            *config_value = profile_val;
+        } else {
+            return Err(ConfigError::Message(format!("Unknown profile: {}", p)));
+        }
+    } else if let Some(default_val) = config_value.get("default").cloned() {
+        *config_value = default_val;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1005,6 +1219,57 @@ timeout_ms = 1000
             std::env::remove_var("CAMEL_TIMEOUT_MS");
         }
     }
+
+    #[test]
+    fn test_from_file_resolves_placeholders_in_components_and_beans() {
+        let file = write_temp_config(
+            r#"
+[default]
+routes = ["{{env:RUST_CAMEL_TEST_ROUTE:routes/default.yaml}}"]
+
+[default.components.http]
+base_url = "{{env:RUST_CAMEL_TEST_BASE_URL:http://localhost:8080}}"
+
+[default.beans.auth]
+plugin = "{{env:RUST_CAMEL_TEST_PLUGIN:test-auth}}"
+
+[default.beans.auth.config]
+token = "{{env:RUST_CAMEL_TEST_TOKEN:abc123}}"
+"#,
+        );
+
+        let cfg =
+            CamelConfig::from_file(file.path().to_str().unwrap()).expect("config should load");
+
+        assert_eq!(cfg.routes, vec!["routes/default.yaml"]);
+        let http = cfg.components.raw.get("http").expect("http config");
+        assert_eq!(
+            http.get("base_url").and_then(|v| v.as_str()),
+            Some("http://localhost:8080")
+        );
+        let bean = cfg.beans.get("auth").expect("bean auth");
+        assert_eq!(bean.plugin, "test-auth");
+        assert_eq!(bean.config.get("token").map(String::as_str), Some("abc123"));
+    }
+
+    #[test]
+    fn test_from_file_unresolved_placeholder_keeps_original_string() {
+        let file = write_temp_config(
+            r#"
+[default]
+[default.components.redis]
+url = "redis://{{MISSING_PLACEHOLDER}}"
+"#,
+        );
+
+        let cfg =
+            CamelConfig::from_file(file.path().to_str().unwrap()).expect("config should load");
+        let redis = cfg.components.raw.get("redis").expect("redis config");
+        assert_eq!(
+            redis.get("url").and_then(|v| v.as_str()),
+            Some("redis://{{MISSING_PLACEHOLDER}}")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1248,5 +1513,322 @@ mod config_validation_tests {
     fn test_config_valid_defaults_pass() {
         let config = CamelConfig::default();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_zero_watch_debounce_rejected() {
+        let config = CamelConfig {
+            watch_debounce_ms: 0,
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_zero_journal_compaction_threshold_rejected() {
+        let config = CamelConfig {
+            runtime_journal: Some(JournalConfig {
+                path: std::path::PathBuf::from("/tmp/test.db"),
+                durability: JournalDurability::default(),
+                compaction_threshold_events: 0,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_zero_supervision_initial_delay_rejected() {
+        let config = CamelConfig {
+            supervision: Some(SupervisionCamelConfig {
+                max_attempts: Some(5),
+                initial_delay_ms: 0,
+                backoff_multiplier: 2.0,
+                max_delay_ms: 60000,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_zero_supervision_max_delay_rejected() {
+        let config = CamelConfig {
+            supervision: Some(SupervisionCamelConfig {
+                max_attempts: Some(5),
+                initial_delay_ms: 1000,
+                backoff_multiplier: 2.0,
+                max_delay_ms: 0,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_supervision_backoff_below_one_rejected() {
+        let config = CamelConfig {
+            supervision: Some(SupervisionCamelConfig {
+                max_attempts: Some(5),
+                initial_delay_ms: 1000,
+                backoff_multiplier: 0.5,
+                max_delay_ms: 60000,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_zero_otel_metrics_interval_rejected() {
+        let mut otel = OtelCamelConfig::default();
+        otel.metrics_interval_ms = 0;
+        let config = CamelConfig {
+            observability: ObservabilityConfig {
+                otel: Some(otel),
+                ..Default::default()
+            },
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_kubernetes_zero_lease_duration_rejected() {
+        let config = CamelConfig {
+            platform: PlatformCamelConfig::Kubernetes(KubernetesPlatformCamelConfig {
+                namespace: None,
+                lease_name_prefix: "camel-".to_string(),
+                lease_duration_secs: 0,
+                renew_deadline_secs: 10,
+                retry_period_secs: 2,
+                jitter_factor: 0.2,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_kubernetes_zero_renew_deadline_rejected() {
+        let config = CamelConfig {
+            platform: PlatformCamelConfig::Kubernetes(KubernetesPlatformCamelConfig {
+                namespace: None,
+                lease_name_prefix: "camel-".to_string(),
+                lease_duration_secs: 15,
+                renew_deadline_secs: 0,
+                retry_period_secs: 2,
+                jitter_factor: 0.2,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_kubernetes_zero_retry_period_rejected() {
+        let config = CamelConfig {
+            platform: PlatformCamelConfig::Kubernetes(KubernetesPlatformCamelConfig {
+                namespace: None,
+                lease_name_prefix: "camel-".to_string(),
+                lease_duration_secs: 15,
+                renew_deadline_secs: 10,
+                retry_period_secs: 0,
+                jitter_factor: 0.2,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_kubernetes_jitter_out_of_range_rejected() {
+        let config = CamelConfig {
+            platform: PlatformCamelConfig::Kubernetes(KubernetesPlatformCamelConfig {
+                namespace: None,
+                lease_name_prefix: "camel-".to_string(),
+                lease_duration_secs: 15,
+                renew_deadline_secs: 10,
+                retry_period_secs: 2,
+                jitter_factor: 1.5,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_kubernetes_negative_jitter_rejected() {
+        let config = CamelConfig {
+            platform: PlatformCamelConfig::Kubernetes(KubernetesPlatformCamelConfig {
+                namespace: None,
+                lease_name_prefix: "camel-".to_string(),
+                lease_duration_secs: 15,
+                renew_deadline_secs: 10,
+                retry_period_secs: 2,
+                jitter_factor: -0.1,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_valid_kubernetes_passes() {
+        let config = CamelConfig {
+            platform: PlatformCamelConfig::Kubernetes(KubernetesPlatformCamelConfig {
+                namespace: Some("default".to_string()),
+                lease_name_prefix: "camel-".to_string(),
+                lease_duration_secs: 15,
+                renew_deadline_secs: 10,
+                retry_period_secs: 2,
+                jitter_factor: 0.2,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_valid_supervision_passes() {
+        let config = CamelConfig {
+            supervision: Some(SupervisionCamelConfig {
+                max_attempts: Some(5),
+                initial_delay_ms: 1000,
+                backoff_multiplier: 2.0,
+                max_delay_ms: 60000,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_valid_journal_passes() {
+        let config = CamelConfig {
+            runtime_journal: Some(JournalConfig {
+                path: std::path::PathBuf::from("/tmp/test.db"),
+                durability: JournalDurability::default(),
+                compaction_threshold_events: 10_000,
+            }),
+            ..CamelConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod config_builder_tests {
+    use super::*;
+
+    #[test]
+    fn test_config_builder_sets_application_name() {
+        let cfg = CamelConfigBuilder::default().log_level("debug").build();
+        assert_eq!(cfg.log_level, "debug");
+    }
+
+    #[test]
+    fn test_config_builder_default() {
+        let built = CamelConfigBuilder::default().build();
+        let default_cfg = CamelConfig::default();
+        assert_eq!(built.routes, default_cfg.routes);
+        assert_eq!(built.watch, default_cfg.watch);
+        assert_eq!(built.log_level, default_cfg.log_level);
+        assert_eq!(built.timeout_ms, default_cfg.timeout_ms);
+        assert_eq!(built.drain_timeout_ms, default_cfg.drain_timeout_ms);
+        assert_eq!(built.watch_debounce_ms, default_cfg.watch_debounce_ms);
+    }
+}
+
+#[cfg(test)]
+mod async_io_tests {
+    use super::*;
+    use std::io::Write;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_from_file_async_completes_without_blocking_executor() {
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        write!(
+            f,
+            r#"
+[default]
+watch = true
+timeout_ms = 42
+"#
+        )
+        .expect("write config");
+
+        let path = f.path().to_str().unwrap().to_string();
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            CamelConfig::from_file_async(&path),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "from_file_async should not block the executor"
+        );
+        let config = result.unwrap().expect("config should parse");
+        assert!(config.watch);
+        assert_eq!(config.timeout_ms, 42);
+    }
+
+    #[tokio::test]
+    async fn test_from_file_async_with_profile_completes() {
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        write!(
+            f,
+            r#"
+[default]
+watch = false
+timeout_ms = 1000
+
+[prod]
+watch = true
+timeout_ms = 99
+"#
+        )
+        .expect("write config");
+
+        let path = f.path().to_str().unwrap().to_string();
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            CamelConfig::from_file_async_with_profile(&path, Some("prod")),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "from_file_async_with_profile should not block"
+        );
+        let config = result.unwrap().expect("config should parse");
+        assert!(config.watch);
+        assert_eq!(config.timeout_ms, 99);
+    }
+
+    #[tokio::test]
+    async fn test_from_file_async_with_env_completes() {
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        write!(
+            f,
+            r#"
+[default]
+timeout_ms = 1000
+"#
+        )
+        .expect("write config");
+
+        let path = f.path().to_str().unwrap().to_string();
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            CamelConfig::from_file_async_with_env(&path),
+        )
+        .await;
+
+        assert!(result.is_ok(), "from_file_async_with_env should not block");
+        let config = result.unwrap().expect("config should parse");
+        assert_eq!(config.timeout_ms, 1000);
     }
 }

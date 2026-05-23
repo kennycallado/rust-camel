@@ -48,11 +48,14 @@ async fn test_mutating_expression_error_propagated() {
     assert!(result.is_err(), "ScriptMutator should propagate error");
 }
 
-#[test]
-fn test_js_language_aliases() {
+#[tokio::test]
+async fn test_js_language_aliases() {
     let lang = JsLanguage::new();
     assert_eq!(lang.name(), "js");
     let expr = lang.create_expression("1 + 1").unwrap();
-    let val = expr.evaluate(&Exchange::new(Message::default())).unwrap();
+    let val = expr
+        .evaluate(&Exchange::new(Message::default()))
+        .await
+        .unwrap();
     assert_eq!(val, serde_json::json!(2));
 }

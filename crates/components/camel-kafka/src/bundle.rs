@@ -17,11 +17,19 @@ impl ComponentBundle for KafkaBundle {
         let config: KafkaConfig = value
             .try_into()
             .map_err(|e: toml::de::Error| CamelError::Config(e.to_string()))?;
+        config.validate()?;
         Ok(Self { config })
     }
 
     fn register_all(self, ctx: &mut dyn ComponentRegistrar) {
-        ctx.register_component_dyn(Arc::new(KafkaComponent::with_config(self.config)));
+        // Config already validated in from_toml, so with_config is infallible here.
+        // However, with_config returns Result; unwrap is safe because we validated above.
+        match KafkaComponent::with_config(self.config) {
+            Ok(component) => ctx.register_component_dyn(Arc::new(component)),
+            Err(e) => {
+                tracing::error!("KafkaComponent::with_config failed despite validation: {e}");
+            }
+        }
     }
 }
 

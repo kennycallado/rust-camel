@@ -173,7 +173,9 @@ fn js_to_value_inner(
             return Ok(Value::Object(map));
         }
     }
-    unreachable!("unhandled JsValue type")
+    Err(JsLanguageError::TypeConversion {
+        message: format!("unhandled JsValue type: {value:?}"),
+    })
 }
 
 #[cfg(test)]

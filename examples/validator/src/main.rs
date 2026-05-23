@@ -58,7 +58,7 @@ async fn main() -> Result<(), CamelError> {
     let route_json = RouteBuilder::from("timer:json-valid?period=3000&repeatCount=2")
         .route_id("json-valid")
         .set_body(r#"{"id": "S42", "status": "shipped"}"#)
-        .unmarshal("json")
+        .unmarshal("json")?
         .log("Route 2: Validating JSON shipment", LogLevel::Info)
         .validate(&json_schema)
         .log("Route 2: JSON is valid!", LogLevel::Info)

@@ -76,6 +76,28 @@ impl OtelConfig {
         self.metrics_interval_ms = ms;
         self
     }
+
+    /// Validate the configuration, returning an error if any field is invalid.
+    pub fn validate(&self) -> Result<(), camel_api::CamelError> {
+        // service_name must be non-empty
+        if self.service_name.trim().is_empty() {
+            return Err(camel_api::CamelError::Config(
+                "service_name must not be empty".to_string(),
+            ));
+        }
+
+        // endpoint must be a valid URL
+        if self.endpoint.trim().is_empty() {
+            return Err(camel_api::CamelError::Config(
+                "endpoint must not be empty".to_string(),
+            ));
+        }
+        url::Url::parse(self.endpoint.trim()).map_err(|e| {
+            camel_api::CamelError::Config(format!("endpoint is not a valid URL: {}", e))
+        })?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -124,5 +146,35 @@ mod tests {
         let mut cfg = cfg;
         cfg.logs_enabled = false;
         assert!(!cfg.logs_enabled);
+    }
+
+    #[test]
+    fn test_otel_rejects_malformed_endpoint() {
+        let cfg = OtelConfig {
+            endpoint: "not-a-url".into(),
+            service_name: "myservice".into(),
+            ..OtelConfig::new("http://localhost:4317", "myservice")
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_otel_rejects_empty_service_name() {
+        let cfg = OtelConfig {
+            endpoint: "http://localhost:4317".into(),
+            service_name: "".into(),
+            ..OtelConfig::new("http://localhost:4317", "myservice")
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_otel_accepts_valid_config() {
+        let cfg = OtelConfig {
+            endpoint: "http://localhost:4317".into(),
+            service_name: "myservice".into(),
+            ..OtelConfig::new("http://localhost:4317", "myservice")
+        };
+        assert!(cfg.validate().is_ok());
     }
 }

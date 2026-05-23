@@ -1,3 +1,13 @@
+//! camel-dataformat-protobuf — Protobuf DataFormat for Apache Camel Rust.
+//!
+//! Provides marshal/unmarshal support for Protocol Buffers using dynamic message
+//! descriptors compiled at runtime via `prost-reflect`. JSON ↔ binary protobuf
+//! round-tripping is supported out of the box.
+//!
+//! TODO(PROTO-005): Schema registry integration (e.g. Confluent Schema Registry)
+//! is not yet implemented. When available, this will allow automatic schema
+//! lookup/registration by subject and version during marshal/unmarshal.
+
 use std::path::Path;
 
 use bytes::BytesMut;
@@ -7,6 +17,29 @@ use camel_api::error::CamelError;
 use camel_proto_compiler::{ProtoCache, compile_proto};
 use prost::Message;
 use prost_reflect::{DynamicMessage, MessageDescriptor};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProtobufConfig {
+    /// Optional content type format, e.g. `application/protobuf` or `application/json`.
+    /// When unset, binary protobuf is assumed.
+    pub content_type_format: Option<String>,
+    /// Optional fully-qualified class/type name used for deserialization.
+    pub instance_class: Option<String>,
+}
+
+impl ProtobufConfig {
+    pub fn validate(&self) -> Result<(), CamelError> {
+        if let Some(instance_class) = &self.instance_class
+            && instance_class.trim().is_empty()
+        {
+            return Err(CamelError::TypeConversionFailed(
+                "instance_class must be non-empty when set".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
 
 pub struct ProtobufDataFormat {
     descriptor: MessageDescriptor,
@@ -19,9 +52,7 @@ impl ProtobufDataFormat {
                 CamelError::TypeConversionFailed(format!("failed to compile proto: {e}"))
             })?;
         let descriptor = pool.get_message_by_name(message_name).ok_or_else(|| {
-            CamelError::TypeConversionFailed(format!(
-                "message descriptor not found: {message_name}"
-            ))
+            CamelError::Config(format!("message descriptor not found: {message_name}"))
         })?;
         Ok(Self { descriptor })
     }
@@ -37,9 +68,7 @@ impl ProtobufDataFormat {
                 CamelError::TypeConversionFailed(format!("failed to compile proto: {e}"))
             })?;
         let descriptor = pool.get_message_by_name(message_name).ok_or_else(|| {
-            CamelError::TypeConversionFailed(format!(
-                "message descriptor not found: {message_name}"
-            ))
+            CamelError::Config(format!("message descriptor not found: {message_name}"))
         })?;
         Ok(Self { descriptor })
     }
@@ -93,7 +122,15 @@ impl DataFormat for ProtobufDataFormat {
                 })?;
                 self.marshal(Body::Json(val))
             }
-            Body::Bytes(bytes) => Ok(Body::Bytes(bytes)),
+            Body::Bytes(bytes) => {
+                DynamicMessage::decode(self.descriptor.clone(), bytes.as_ref()).map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "protobuf marshal: invalid bytes for type {}: {e}",
+                        self.descriptor.full_name()
+                    ))
+                })?;
+                Ok(Body::Bytes(bytes))
+            }
             Body::Empty => Err(CamelError::TypeConversionFailed(
                 "protobuf marshal does not support empty body".to_string(),
             )),
@@ -143,9 +180,10 @@ mod tests {
     use bytes::Bytes;
     use camel_api::body::Body;
     use camel_api::data_format::DataFormat;
+    use camel_api::error::CamelError;
     use serde_json::json;
 
-    use super::ProtobufDataFormat;
+    use super::{ProtobufConfig, ProtobufDataFormat};
 
     fn test_proto_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -220,8 +258,29 @@ mod tests {
     fn test_marshal_bytes_passthrough() {
         let df = data_format();
         let body = Body::Bytes(Bytes::from_static(b"raw"));
-        let out = df.marshal(body).expect("marshal should pass through bytes");
-        assert_eq!(out, Body::Bytes(Bytes::from_static(b"raw")));
+        let err = df
+            .marshal(body)
+            .expect_err("invalid bytes should be rejected");
+        assert!(
+            err.to_string()
+                .contains("protobuf marshal: invalid bytes for type")
+        );
+    }
+
+    #[test]
+    fn test_marshal_valid_bytes_accepted() {
+        let df = data_format();
+        let bytes = match df
+            .marshal(Body::Json(json!({ "name": "Alice" })))
+            .expect("marshal should succeed")
+        {
+            Body::Bytes(b) => b,
+            other => panic!("expected bytes, got {other:?}"),
+        };
+        let out = df
+            .marshal(Body::Bytes(bytes.clone()))
+            .expect("valid protobuf bytes should be accepted");
+        assert_eq!(out, Body::Bytes(bytes));
     }
 
     #[test]
@@ -255,6 +314,59 @@ mod tests {
         let err = ProtobufDataFormat::new(test_proto_path(), "helloworld.DoesNotExist")
             .err()
             .expect("unknown message should fail");
-        assert!(format!("{err}").contains("message descriptor not found"));
+        assert!(matches!(err, CamelError::Config(_)));
+    }
+
+    #[test]
+    fn test_empty_instance_class_rejected() {
+        let config = ProtobufConfig {
+            instance_class: Some("".into()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_valid_instance_class_accepted() {
+        let config = ProtobufConfig {
+            instance_class: Some("com.example.MyMessage".into()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_no_instance_class_valid() {
+        let config = ProtobufConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    /// PROTO-003: Encode/decode roundtrip — marshal JSON to bytes, then unmarshal
+    /// those bytes back to JSON and verify the values match the original input.
+    #[test]
+    fn test_encode_decode_roundtrip() {
+        let df = data_format();
+        let original = json!({ "name": "RoundtripCharlie" });
+
+        // Encode: JSON → binary protobuf bytes
+        let encoded = match df
+            .marshal(Body::Json(original.clone()))
+            .expect("marshal should succeed")
+        {
+            Body::Bytes(b) => b,
+            other => panic!("expected bytes after marshal, got {other:?}"),
+        };
+        assert!(!encoded.is_empty(), "encoded bytes should not be empty");
+
+        // Decode: binary protobuf bytes → JSON
+        let decoded = match df
+            .unmarshal(Body::Bytes(encoded))
+            .expect("unmarshal should succeed")
+        {
+            Body::Json(v) => v,
+            other => panic!("expected json after unmarshal, got {other:?}"),
+        };
+
+        assert_eq!(decoded, original, "roundtrip should preserve field values");
     }
 }

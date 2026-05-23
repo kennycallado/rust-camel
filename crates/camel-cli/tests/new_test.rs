@@ -208,8 +208,10 @@ fn rejects_path_traversal_in_name() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("'..'"),
-        "expected error about path traversal, got: {stderr}"
+        stderr.contains("'..'")
+            || stderr.contains("alphanumeric")
+            || stderr.contains("invalid value"),
+        "expected error about path traversal or invalid name, got: {stderr}"
     );
 }
 

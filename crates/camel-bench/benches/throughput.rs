@@ -27,6 +27,8 @@ fn build_throughput_pipeline() -> BoxProcessor {
     compose_pipeline(vec![filter, choice, log])
 }
 
+/// Benchmarks sustained throughput of a simple pipeline (filter → choice → log)
+/// at two message counts (100, 1000) to measure messages-per-second.
 fn bench_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("integration/throughput");
     let rt = tokio::runtime::Runtime::new().unwrap();

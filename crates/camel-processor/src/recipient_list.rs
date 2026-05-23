@@ -22,15 +22,16 @@ impl RecipientListService {
     pub fn new(
         config: RecipientListConfig,
         endpoint_resolver: camel_api::EndpointResolver,
-    ) -> Self {
+    ) -> Result<Self, CamelError> {
+        config.validate()?;
         let pipeline_config = EndpointPipelineConfig {
             cache_size: EndpointPipelineConfig::from_signed(1000),
             ignore_invalid_endpoints: false,
         };
-        Self {
+        Ok(Self {
             config,
             pipeline: EndpointPipelineService::new(endpoint_resolver, pipeline_config),
-        }
+        })
     }
 }
 
@@ -208,7 +209,7 @@ mod tests {
 
         let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| "mock:a".to_string()));
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
         let result = svc.ready().await.unwrap().call(ex).await;
 
@@ -237,7 +238,7 @@ mod tests {
             "mock:a,mock:b,mock:c".to_string()
         }));
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
         let result = svc.ready().await.unwrap().call(ex).await;
 
@@ -249,7 +250,7 @@ mod tests {
     async fn recipient_list_empty_expression() {
         let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| String::new()));
 
-        let mut svc = RecipientListService::new(config, mock_resolver());
+        let mut svc = RecipientListService::new(config, mock_resolver()).unwrap();
         let ex = Exchange::new(Message::new("test"));
         let result = svc.ready().await.unwrap().call(ex).await;
 
@@ -261,7 +262,7 @@ mod tests {
         let config =
             RecipientListConfig::new(Arc::new(|_ex: &Exchange| "invalid:endpoint".to_string()));
 
-        let mut svc = RecipientListService::new(config, mock_resolver());
+        let mut svc = RecipientListService::new(config, mock_resolver()).unwrap();
         let ex = Exchange::new(Message::new("test"));
         let result = svc.ready().await.unwrap().call(ex).await;
 
@@ -292,7 +293,7 @@ mod tests {
         }))
         .delimiter("|");
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
         svc.ready().await.unwrap().call(ex).await.unwrap();
 
@@ -310,7 +311,7 @@ mod tests {
             "mock:a,mock:b".to_string()
         }));
 
-        let mut svc = RecipientListService::new(config, mock_resolver());
+        let mut svc = RecipientListService::new(config, mock_resolver()).unwrap();
         let ex = Exchange::new(Message::new("test"));
         svc.ready().await.unwrap().call(ex).await.unwrap();
 
@@ -342,7 +343,7 @@ mod tests {
             " ,mock:a, ,mock:b,, ".to_string()
         }));
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
         let result = svc.ready().await.unwrap().call(ex).await;
         assert!(result.is_ok());
@@ -372,7 +373,7 @@ mod tests {
             "mock:mutate,mock:verify".to_string()
         }));
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("original"));
         let result = svc.ready().await.unwrap().call(ex).await;
 
@@ -411,7 +412,7 @@ mod tests {
         }))
         .parallel(true);
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
         svc.ready().await.unwrap().call(ex).await.unwrap();
 
@@ -456,7 +457,7 @@ mod tests {
         .parallel(true)
         .stop_on_exception(true);
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
         let result = svc.ready().await.unwrap().call(ex).await;
         assert!(matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "boom"));
@@ -483,7 +484,7 @@ mod tests {
             }
         });
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
         let start = Instant::now();
         svc.ready().await.unwrap().call(ex).await.unwrap();
@@ -521,7 +522,7 @@ mod tests {
         }))
         .strategy(MulticastStrategy::CollectAll);
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("seed"));
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
 
@@ -555,7 +556,7 @@ mod tests {
         }))
         .strategy(MulticastStrategy::Original);
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("original"));
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
 
@@ -591,7 +592,7 @@ mod tests {
         }))
         .strategy(MulticastStrategy::LastWins);
 
-        let mut svc = RecipientListService::new(config, resolver);
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("seed"));
         let result = svc.ready().await.unwrap().call(ex).await.unwrap();
 

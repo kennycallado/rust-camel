@@ -15,9 +15,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use tokio::task::JoinHandle;
 use wasmtime::Engine;
 
 /// Background thread that increments the wasmtime engine epoch at a fixed interval.
@@ -33,7 +33,7 @@ pub struct EpochTicker {
 }
 
 impl EpochTicker {
-    /// Start the epoch ticker thread.
+    /// Start epoch ticker task.
     ///
     /// The thread will call `engine.increment_epoch()` every `interval` until
     /// the `EpochTicker` is dropped.
@@ -45,17 +45,14 @@ impl EpochTicker {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_flag = Arc::clone(&shutdown);
 
-        let handle = thread::Builder::new()
-            .name("wasm-epoch-ticker".to_string())
-            .spawn(move || {
-                while !shutdown_flag.load(Ordering::Acquire) {
-                    thread::sleep(interval);
-                    if !shutdown_flag.load(Ordering::Acquire) {
-                        engine.increment_epoch();
-                    }
+        let handle = tokio::task::spawn(async move {
+            while !shutdown_flag.load(Ordering::Acquire) {
+                tokio::time::sleep(interval).await;
+                if !shutdown_flag.load(Ordering::Acquire) {
+                    engine.increment_epoch();
                 }
-            })
-            .expect("failed to spawn wasm-epoch-ticker thread"); // allow-unwrap
+            }
+        });
 
         Self {
             handle: Some(handle),
@@ -73,9 +70,7 @@ impl Drop for EpochTicker {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
-            // The thread will exit within one interval (10ms).
-            // Don't block forever if the thread is stuck.
-            let _ = handle.join();
+            handle.abort();
         }
     }
 }
@@ -91,8 +86,8 @@ mod tests {
         Engine::new(&config).expect("failed to create test engine")
     }
 
-    #[test]
-    fn test_epoch_ticker_starts_and_stops() {
+    #[tokio::test]
+    async fn test_epoch_ticker_starts_and_stops() {
         let engine = create_test_engine();
         let ticker = EpochTicker::start(engine, Duration::from_millis(10));
         assert!(ticker.is_running());
@@ -100,15 +95,15 @@ mod tests {
         // After drop, the thread should have stopped
     }
 
-    #[test]
-    fn test_epoch_ticker_increments_epoch() {
+    #[tokio::test]
+    async fn test_epoch_ticker_increments_epoch() {
         let engine = create_test_engine();
         let ticker = EpochTicker::start(engine.clone(), Duration::from_millis(5));
 
         // Wait for at least 2 ticks — if ticker works, no panic occurs.
         // `current_epoch()` is pub(crate) in wasmtime 31, so we verify
         // liveness indirectly by confirming the thread stays alive.
-        std::thread::sleep(Duration::from_millis(20));
+        tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(
             ticker.is_running(),
             "ticker should still be running after 20ms"
@@ -117,8 +112,8 @@ mod tests {
         drop(ticker);
     }
 
-    #[test]
-    fn test_epoch_ticker_stops_cleanly() {
+    #[tokio::test]
+    async fn test_epoch_ticker_stops_cleanly() {
         let engine = create_test_engine();
         let ticker = EpochTicker::start(engine, Duration::from_millis(10));
         assert!(ticker.is_running());
@@ -132,8 +127,8 @@ mod tests {
         drop(ticker2);
     }
 
-    #[test]
-    fn test_multiple_tickers_on_different_engines() {
+    #[tokio::test]
+    async fn test_multiple_tickers_on_different_engines() {
         let engine1 = create_test_engine();
         let engine2 = create_test_engine();
 
@@ -146,5 +141,30 @@ mod tests {
         drop(ticker1);
         assert!(ticker2.is_running());
         drop(ticker2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_epoch_ticker_does_not_block_tokio_runtime() {
+        use std::sync::atomic::AtomicUsize;
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_task = Arc::clone(&counter);
+
+        let progress_task = tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
+            while start.elapsed() < Duration::from_millis(100) {
+                counter_task.fetch_add(1, Ordering::Relaxed);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+
+        let engine = create_test_engine();
+        let ticker = EpochTicker::start(engine, Duration::from_millis(1));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        progress_task.await.expect("progress task should finish");
+        drop(ticker);
+
+        assert!(counter.load(Ordering::Relaxed) >= 10);
     }
 }

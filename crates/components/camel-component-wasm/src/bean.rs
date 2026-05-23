@@ -68,8 +68,12 @@ impl WasmBean {
             crate::epoch::EpochTicker::start(engine.clone(), wasm_config.epoch_interval());
 
         let state_store = crate::state_store::StateStore::new();
-        let host_state =
-            WasmRuntime::create_host_state(registry.clone(), HashMap::new(), state_store.clone());
+        let host_state = WasmRuntime::create_host_state(
+            registry.clone(),
+            HashMap::new(),
+            state_store.clone(),
+            tokio::runtime::Handle::current(),
+        );
         let mut store = Store::new(&engine, host_state);
         store.limiter(|state| &mut state.limits);
         store.set_epoch_deadline(wasm_config.epoch_deadline());
@@ -150,6 +154,7 @@ impl BeanProcessor for WasmBean {
             self.registry.clone(),
             exchange.properties.clone(),
             self.state_store.clone(),
+            tokio::runtime::Handle::current(),
         );
         let mut store = Store::new(&self.engine, host_state);
         store.limiter(|state| &mut state.limits);
@@ -159,7 +164,7 @@ impl BeanProcessor for WasmBean {
             .await
             .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
 
-        let wasm_exchange = serde_bridge::exchange_to_wasm(exchange);
+        let wasm_exchange = serde_bridge::exchange_to_wasm(exchange)?;
         let bean_exchange = wasm_exchange.into();
 
         let result = plugin
@@ -189,6 +194,14 @@ impl BeanProcessor for WasmBean {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+
+    fn test_tokio_handle() -> tokio::runtime::Handle {
+        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RT.get_or_init(|| tokio::runtime::Runtime::new().expect("test runtime"))
+            .handle()
+            .clone()
+    }
 
     #[test]
     fn test_wasm_bean_host_state_creation() {
@@ -197,6 +210,7 @@ mod tests {
             registry,
             HashMap::new(),
             crate::state_store::StateStore::new(),
+            test_tokio_handle(),
         );
         assert!(host_state.properties.is_empty());
     }

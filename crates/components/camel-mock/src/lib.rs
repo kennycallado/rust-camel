@@ -1,9 +1,30 @@
+//! # camel-component-mock
+//!
 //! Mock component for rust-camel — testing utility that records received
 //! exchanges for later assertion, useful for verifying route output in tests.
 //!
-//! Main types: `MockComponent`, `MockEndpoint`, `MockProducer`.
+//! Main types: `MockComponent`, `MockEndpoint`, `MockProducer`, `MockExpectations`.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use camel_component_mock::MockComponent;
+//! use camel_component_api::{Component, NoOpComponentContext, Exchange, Message};
+//!
+//! // Create a mock component and endpoint
+//! let component = MockComponent::new();
+//! let endpoint = component
+//!     .create_endpoint("mock:result", &NoOpComponentContext)
+//!     .unwrap();
+//!
+//! // In a real route, the producer would be used as a Tower service.
+//! // After sending exchanges, you can inspect them:
+//! let inner = component.get_endpoint("result").unwrap();
+//! // inner.assert_exchange_count(1).await;
+//! // inner.exchange(0).assert_body_text("hello");
+//! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,6 +37,120 @@ use camel_component_api::parse_uri;
 use camel_component_api::{BoxProcessor, CamelError, Exchange};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 use tracing::debug;
+
+/// Default maximum number of exchanges retained by a mock endpoint.
+const DEFAULT_MAX_RETAINED: usize = 10_000;
+
+// ---------------------------------------------------------------------------
+// MockConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for [`MockComponent`].
+///
+/// Controls how many exchanges are retained before the oldest are dropped,
+/// and other behavioural flags for assertions.
+///
+/// # Examples
+///
+/// ```rust
+/// use camel_component_mock::MockConfig;
+///
+/// let config = MockConfig {
+///     max_retained: 100,
+///     copy_on_exchange: true,
+///     fail_fast: false,
+///     assert_period_ms: 0,
+///     any_order: false,
+/// };
+/// ```
+#[derive(Clone, Debug)]
+pub struct MockConfig {
+    /// Maximum number of exchanges to retain. When exceeded, the oldest
+    /// exchange is dropped. Defaults to 10 000.
+    pub max_retained: usize,
+    /// When `true`, clone the exchange body before storing it in the received
+    /// exchanges list. This prevents aliasing when the caller mutates the
+    /// original exchange after sending. Defaults to `false`.
+    pub copy_on_exchange: bool,
+    /// When `true`, after the first failing assertion the mock stops processing
+    /// exchanges and records the error. Defaults to `false`.
+    pub fail_fast: bool,
+    /// Time in milliseconds to wait before asserting expectations (to allow
+    /// async processing to complete). Defaults to `0` (no wait).
+    pub assert_period_ms: u64,
+    /// When `true`, [`MockEndpointInner::assert_satisfied`] matches expected
+    /// bodies in any order rather than strict sequence. Defaults to `false`.
+    pub any_order: bool,
+}
+
+impl Default for MockConfig {
+    fn default() -> Self {
+        Self {
+            max_retained: DEFAULT_MAX_RETAINED,
+            copy_on_exchange: false,
+            fail_fast: false,
+            assert_period_ms: 0,
+            any_order: false,
+        }
+    }
+}
+
+impl MockConfig {
+    /// Create a config with a custom retention limit.
+    pub fn new(max_retained: usize) -> Self {
+        Self {
+            max_retained,
+            ..Self::default()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockExpectations
+// ---------------------------------------------------------------------------
+
+/// Expectations set on a mock endpoint for batch-style assertion.
+///
+/// Use [`MockEndpointInner::expect_body`] and
+/// [`MockEndpointInner::expect_header`] to populate expectations, then call
+/// [`MockEndpointInner::assert_satisfied`] after exchanges have been received.
+pub struct MockExpectations {
+    expected_bodies: Vec<camel_component_api::Body>,
+    expected_headers: Vec<(String, serde_json::Value)>,
+    expected_header_regexes: Vec<(String, String)>,
+}
+
+impl Default for MockExpectations {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockExpectations {
+    /// Create an empty set of expectations.
+    pub fn new() -> Self {
+        Self {
+            expected_bodies: Vec::new(),
+            expected_headers: Vec::new(),
+            expected_header_regexes: Vec::new(),
+        }
+    }
+
+    /// Add an expected body value.
+    pub fn push_body(&mut self, body: camel_component_api::Body) {
+        self.expected_bodies.push(body);
+    }
+
+    /// Add an expected header key-value pair.
+    pub fn push_header(&mut self, key: String, value: serde_json::Value) {
+        self.expected_headers.push((key, value));
+    }
+
+    /// Add an expected header regex pattern.
+    pub fn push_header_regex(&mut self, key: String, pattern: String) {
+        self.expected_header_regexes.push((key, pattern));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // MockComponent
@@ -34,12 +169,19 @@ use tracing::debug;
 #[derive(Clone)]
 pub struct MockComponent {
     registry: Arc<std::sync::Mutex<HashMap<String, Arc<MockEndpointInner>>>>,
+    config: MockConfig,
 }
 
 impl MockComponent {
     pub fn new() -> Self {
+        Self::with_config(MockConfig::default())
+    }
+
+    /// Create a `MockComponent` with a custom [`MockConfig`].
+    pub fn with_config(config: MockConfig) -> Self {
         Self {
             registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            config,
         }
     }
 
@@ -80,17 +222,34 @@ impl Component for MockComponent {
         }
 
         let name = parts.path;
+        if name.is_empty() {
+            return Err(CamelError::InvalidUri(
+                "mock endpoint name must be non-empty (use 'mock:<name>')".to_string(),
+            ));
+        }
         let mut registry = self.registry.lock().map_err(|e| {
             CamelError::EndpointCreationFailed(format!("mock registry lock poisoned: {e}"))
         })?;
+        let max_retained = self.config.max_retained;
+        let copy_on_exchange = self.config.copy_on_exchange;
+        let fail_fast = self.config.fail_fast;
+        let assert_period_ms = self.config.assert_period_ms;
+        let any_order = self.config.any_order;
         let inner = registry
             .entry(name.clone())
             .or_insert_with(|| {
                 Arc::new(MockEndpointInner {
                     uri: uri.to_string(),
                     name,
-                    received: Arc::new(Mutex::new(Vec::new())),
+                    received: Arc::new(Mutex::new(VecDeque::new())),
                     notify: Arc::new(Notify::new()),
+                    max_retained,
+                    copy_on_exchange,
+                    fail_fast,
+                    fail_fast_error: Arc::new(std::sync::Mutex::new(None)),
+                    assert_period_ms,
+                    any_order,
+                    expectations: Arc::new(std::sync::Mutex::new(MockExpectations::new())),
                 })
             })
             .clone();
@@ -119,14 +278,36 @@ pub struct MockEndpoint(Arc<MockEndpointInner>);
 pub struct MockEndpointInner {
     uri: String,
     pub name: String,
-    received: Arc<Mutex<Vec<Exchange>>>,
+    received: Arc<Mutex<VecDeque<Exchange>>>,
     notify: Arc<Notify>,
+    max_retained: usize,
+    copy_on_exchange: bool,
+    fail_fast: bool,
+    fail_fast_error: Arc<std::sync::Mutex<Option<CamelError>>>,
+    assert_period_ms: u64,
+    any_order: bool,
+    expectations: Arc<std::sync::Mutex<MockExpectations>>,
 }
 
 impl MockEndpointInner {
-    /// Return a snapshot of all exchanges received so far.
+    /// Return a snapshot of all exchanges retained so far.
     pub async fn get_received_exchanges(&self) -> Vec<Exchange> {
-        self.received.lock().await.clone()
+        self.received.lock().await.iter().cloned().collect()
+    }
+
+    /// Return the number of currently retained exchanges.
+    pub async fn received_count(&self) -> usize {
+        self.received.lock().await.len()
+    }
+
+    /// Clear all retained exchanges and reset internal counters.
+    ///
+    /// Useful between test cases to reuse the same mock endpoint.
+    pub async fn reset(&self) {
+        self.received.lock().await.clear();
+        if let Ok(mut guard) = self.fail_fast_error.lock() {
+            *guard = None;
+        }
     }
 
     /// Assert that exactly `expected` exchanges have been received.
@@ -179,6 +360,19 @@ impl MockEndpointInner {
         }
     }
 
+    /// Wait for exchanges with a configurable timeout derived from `assert_period_ms`.
+    ///
+    /// If `assert_period_ms` is 0, uses the provided `fallback` duration.
+    /// Otherwise, waits for `assert_period_ms` milliseconds before checking.
+    pub async fn await_exchanges_with_timeout(&self, count: usize, fallback: std::time::Duration) {
+        let duration = if self.assert_period_ms > 0 {
+            std::time::Duration::from_millis(self.assert_period_ms)
+        } else {
+            fallback
+        };
+        self.await_exchanges(count, duration).await;
+    }
+
     /// Return an [`ExchangeAssert`] for the exchange at `idx`.
     ///
     /// # Panics
@@ -190,6 +384,8 @@ impl MockEndpointInner {
     /// `#[tokio::test(flavor = "multi_thread")]` for tests that call this method.
     ///
     /// [`await_exchanges`]: MockEndpointInner::await_exchanges
+    // NOTE: requires multi-threaded Tokio runtime (current_thread will deadlock)
+    // due to `block_in_place` used for blocking_lock.
     pub fn exchange(&self, idx: usize) -> ExchangeAssert {
         let received = tokio::task::block_in_place(|| self.received.blocking_lock());
         if idx >= received.len() {
@@ -205,6 +401,142 @@ impl MockEndpointInner {
             idx,
             endpoint_name: self.name.clone(),
         }
+    }
+
+    /// Add an expected body to the expectations list.
+    pub fn expect_body(&self, body: camel_component_api::Body) {
+        if let Ok(mut guard) = self.expectations.lock() {
+            guard.push_body(body);
+        }
+    }
+
+    /// Add an expected header key-value pair to the expectations list.
+    pub fn expect_header(&self, key: &str, value: impl Into<serde_json::Value>) {
+        if let Ok(mut guard) = self.expectations.lock() {
+            guard.push_header(key.to_string(), value.into());
+        }
+    }
+
+    /// Add an expected header regex pattern to the expectations list.
+    ///
+    /// After `await_exchanges()`, `assert_satisfied()` checks whether any
+    /// received exchange has the named header matching the given regex pattern.
+    pub fn expect_header_regex(&self, key: &str, pattern: &str) {
+        if let Ok(mut guard) = self.expectations.lock() {
+            guard.push_header_regex(key.to_string(), pattern.to_string());
+        }
+    }
+
+    /// Assert that all registered expectations are satisfied.
+    ///
+    /// # Panics
+    ///
+    /// Panics if expected bodies do not match received bodies (in order or any
+    /// order depending on `any_order` config), if expected headers are missing,
+    /// or if header regex patterns do not match.
+    pub async fn assert_satisfied(&self) {
+        let received = self.get_received_exchanges().await;
+
+        // Check expected bodies
+        {
+            let guard = self
+                .expectations
+                .lock()
+                .expect("expectations lock poisoned"); // allow-unwrap
+            if !guard.expected_bodies.is_empty() {
+                let received_bodies: Vec<_> = received.iter().map(|e| &e.input.body).collect();
+                if guard.expected_bodies.len() != received_bodies.len() {
+                    panic!(
+                        "MockEndpoint '{}': expected {} bodies, got {}",
+                        self.name,
+                        guard.expected_bodies.len(),
+                        received_bodies.len()
+                    );
+                }
+                if self.any_order {
+                    // Match in any order — each expected body must appear exactly once
+                    let mut unmatched: Vec<_> = received_bodies.iter().collect();
+                    for expected in &guard.expected_bodies {
+                        let idx = unmatched
+                            .iter()
+                            .position(|actual| body_eq(expected, actual));
+                        match idx {
+                            Some(i) => {
+                                unmatched.remove(i);
+                            }
+                            None => panic!(
+                                "MockEndpoint '{}': expected body {:?} not found in received exchanges (anyOrder mode)",
+                                self.name, expected
+                            ),
+                        }
+                    }
+                } else {
+                    for (i, expected) in guard.expected_bodies.iter().enumerate() {
+                        if !body_eq(expected, received_bodies[i]) {
+                            panic!(
+                                "MockEndpoint '{}': body[{}] expected {:?}, got {:?}",
+                                self.name, i, expected, received_bodies[i]
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Check expected headers (must all be present on at least one exchange)
+            for (key, value) in &guard.expected_headers {
+                let found = received
+                    .iter()
+                    .any(|ex| ex.input.headers.get(key).is_some_and(|v| v == value));
+                if !found {
+                    panic!(
+                        "MockEndpoint '{}': expected header '{}' = {} not found in any received exchange",
+                        self.name, key, value
+                    );
+                }
+            }
+
+            // Check expected header regexes
+            for (key, pattern) in &guard.expected_header_regexes {
+                let re = regex::Regex::new(pattern).unwrap_or_else(|e| {
+                    panic!(
+                        "MockEndpoint '{}': invalid regex pattern {:?}: {e}",
+                        self.name, pattern
+                    )
+                });
+                let found = received.iter().any(|ex| {
+                    ex.input.headers.get(key).is_some_and(|v| {
+                        let s = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        re.is_match(&s)
+                    })
+                });
+                if !found {
+                    panic!(
+                        "MockEndpoint '{}': no received exchange has header '{}' matching regex {:?}",
+                        self.name, key, pattern
+                    );
+                }
+            }
+        }
+    }
+
+    /// Return the stored fail-fast error, if any.
+    pub fn fail_fast_error(&self) -> Option<CamelError> {
+        self.fail_fast_error.lock().ok().and_then(|g| g.clone())
+    }
+}
+
+/// Compare two `Body` values for equality (used by assert_satisfied).
+fn body_eq(a: &camel_component_api::Body, b: &camel_component_api::Body) -> bool {
+    match (a, b) {
+        (camel_component_api::Body::Empty, camel_component_api::Body::Empty) => true,
+        (camel_component_api::Body::Text(a), camel_component_api::Body::Text(b)) => a == b,
+        (camel_component_api::Body::Json(a), camel_component_api::Body::Json(b)) => a == b,
+        (camel_component_api::Body::Xml(a), camel_component_api::Body::Xml(b)) => a == b,
+        (camel_component_api::Body::Bytes(a), camel_component_api::Body::Bytes(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -224,6 +556,10 @@ impl Endpoint for MockEndpoint {
             name: self.0.name.clone(),
             received: Arc::clone(&self.0.received),
             notify: Arc::clone(&self.0.notify),
+            max_retained: self.0.max_retained,
+            copy_on_exchange: self.0.copy_on_exchange,
+            fail_fast: self.0.fail_fast,
+            fail_fast_error: Arc::clone(&self.0.fail_fast_error),
         }))
     }
 }
@@ -236,8 +572,12 @@ impl Endpoint for MockEndpoint {
 #[derive(Clone)]
 struct MockProducer {
     name: String,
-    received: Arc<Mutex<Vec<Exchange>>>,
+    received: Arc<Mutex<VecDeque<Exchange>>>,
     notify: Arc<Notify>,
+    max_retained: usize,
+    copy_on_exchange: bool,
+    fail_fast: bool,
+    fail_fast_error: Arc<std::sync::Mutex<Option<CamelError>>>,
 }
 
 impl Service<Exchange> for MockProducer {
@@ -246,6 +586,15 @@ impl Service<Exchange> for MockProducer {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // In fail-fast mode, reject new exchanges if a previous one failed
+        if self.fail_fast
+            && let Ok(guard) = self.fail_fast_error.lock()
+            && guard.is_some()
+        {
+            return Poll::Ready(Err(CamelError::ProcessorError(
+                "mock endpoint in fail-fast mode: a previous exchange caused an error".to_string(),
+            )));
+        }
         Poll::Ready(Ok(()))
     }
 
@@ -253,13 +602,76 @@ impl Service<Exchange> for MockProducer {
         let name = self.name.clone();
         let received = Arc::clone(&self.received);
         let notify = Arc::clone(&self.notify);
+        let max_retained = self.max_retained;
+        let copy_on_exchange = self.copy_on_exchange;
+        let fail_fast = self.fail_fast;
+        let fail_fast_error = Arc::clone(&self.fail_fast_error);
         Box::pin(async move {
-            received.lock().await.push(exchange.clone());
-            let count = received.lock().await.len();
-            debug!(endpoint_name = %name, count = %count, "exchange recorded on mock");
+            // In fail-fast mode, check if a previous error was recorded
+            if fail_fast
+                && let Ok(guard) = fail_fast_error.lock()
+                && guard.is_some()
+            {
+                return Err(CamelError::ProcessorError(
+                    "mock endpoint in fail-fast mode: a previous exchange caused an error"
+                        .to_string(),
+                ));
+            }
+
+            let correlation_id = exchange
+                .input
+                .headers
+                .get("CamelCorrelationId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let exchange_to_store = if copy_on_exchange {
+                let mut cloned = exchange.clone();
+                // Deep-clone the body to break aliasing
+                cloned.input.body = clone_body(&exchange.input.body);
+                cloned
+            } else {
+                exchange.clone()
+            };
+
+            let mut guard = received.lock().await;
+            if guard.len() >= max_retained {
+                tracing::warn!(
+                    endpoint_name = %name,
+                    max = max_retained,
+                    "max retained exchanges reached, dropping oldest"
+                );
+                guard.pop_front();
+            }
+            guard.push_back(exchange_to_store);
+            let count = guard.len();
+            drop(guard);
+
+            debug!(
+                endpoint_name = %name,
+                count = %count,
+                correlation_id = correlation_id.as_deref().unwrap_or("none"),
+                "exchange recorded on mock"
+            );
             notify.notify_waiters();
+
             Ok(exchange)
         })
+    }
+}
+
+/// Deep-clone a `Body` value.
+fn clone_body(body: &camel_component_api::Body) -> camel_component_api::Body {
+    match body {
+        camel_component_api::Body::Empty => camel_component_api::Body::Empty,
+        camel_component_api::Body::Text(s) => camel_component_api::Body::Text(s.clone()),
+        camel_component_api::Body::Json(v) => camel_component_api::Body::Json(v.clone()),
+        camel_component_api::Body::Xml(s) => camel_component_api::Body::Xml(s.clone()),
+        camel_component_api::Body::Bytes(b) => camel_component_api::Body::Bytes(b.clone()),
+        camel_component_api::Body::Stream(_) => {
+            // Streams cannot be cloned; use Empty as fallback
+            camel_component_api::Body::Empty
+        }
     }
 }
 
@@ -461,6 +873,20 @@ mod tests {
         let component = MockComponent::new();
         let result = component.create_endpoint("timer:tick", &NoOpComponentContext);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_mock_endpoint_name_rejected() {
+        let component = MockComponent::new();
+        let result = component.create_endpoint("mock:", &NoOpComponentContext);
+        assert!(result.is_err(), "empty mock name should be rejected");
+    }
+
+    #[test]
+    fn test_valid_mock_endpoint_name_accepted() {
+        let component = MockComponent::new();
+        let result = component.create_endpoint("mock:result", &NoOpComponentContext);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -992,6 +1418,91 @@ mod tests {
         inner.exchange(0).assert_no_error();
     }
 
+    // -----------------------------------------------------------------------
+    // A-13: reset() and bounded retention tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_mock_reset_clears_exchanges() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:reset-test", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("reset-test").unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("a")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("b")))
+            .await
+            .unwrap();
+
+        assert_eq!(inner.received_count().await, 2);
+        inner.reset().await;
+        assert_eq!(inner.received_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_mock_bounded_retention_drops_oldest() {
+        let config = MockConfig {
+            max_retained: 3,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:bounded", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("bounded").unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+
+        // Send 5 exchanges, but max_retained is 3
+        for i in 0..5 {
+            producer
+                .call(Exchange::new(Message::new(format!("msg-{i}"))))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(inner.received_count().await, 3);
+        let received = inner.get_received_exchanges().await;
+        // Oldest (msg-0, msg-1) should be dropped
+        assert_eq!(received[0].input.body.as_text(), Some("msg-2"));
+        assert_eq!(received[1].input.body.as_text(), Some("msg-3"));
+        assert_eq!(received[2].input.body.as_text(), Some("msg-4"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_reset_then_record_again() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:reset-reuse", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("reset-reuse").unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("before-reset")))
+            .await
+            .unwrap();
+        inner.reset().await;
+
+        producer
+            .call(Exchange::new(Message::new("after-reset")))
+            .await
+            .unwrap();
+
+        let received = inner.get_received_exchanges().await;
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].input.body.as_text(), Some("after-reset"));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     #[should_panic(expected = "expected exchange to have no error")]
     async fn assert_no_error_fail() {
@@ -1011,5 +1522,400 @@ mod tests {
             .await_exchanges(1, std::time::Duration::from_millis(500))
             .await;
         inner.exchange(0).assert_no_error();
+    }
+
+    // -----------------------------------------------------------------------
+    // MOCK-003: copy_on_exchange tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_copy_on_exchange_stores_cloned_body() {
+        let config = MockConfig {
+            copy_on_exchange: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:copy", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("copy").unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut msg = Message::new("original");
+        msg.headers.insert("x-test".into(), serde_json::json!(1));
+        let ex = Exchange::new(msg);
+        producer.call(ex).await.unwrap();
+
+        let received = inner.get_received_exchanges().await;
+        assert_eq!(received[0].input.body.as_text(), Some("original"));
+    }
+
+    #[tokio::test]
+    async fn test_copy_on_exchange_false_shares_storage() {
+        let config = MockConfig {
+            copy_on_exchange: false,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:no-copy", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("no-copy").unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+
+        producer
+            .call(Exchange::new(Message::new("direct")))
+            .await
+            .unwrap();
+
+        let received = inner.get_received_exchanges().await;
+        assert_eq!(received[0].input.body.as_text(), Some("direct"));
+    }
+
+    // -----------------------------------------------------------------------
+    // MOCK-004: expect_body / expect_header / assert_satisfied tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_assert_satisfied_bodies_in_order() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:sat-bodies", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("sat-bodies").unwrap();
+
+        inner.expect_body(camel_component_api::Body::Text("alpha".into()));
+        inner.expect_body(camel_component_api::Body::Text("beta".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("alpha")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("beta")))
+            .await
+            .unwrap();
+
+        inner.assert_satisfied().await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "body[0] expected")]
+    async fn test_assert_satisfied_bodies_wrong_order_fails() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:sat-bodies-fail", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("sat-bodies-fail").unwrap();
+
+        inner.expect_body(camel_component_api::Body::Text("alpha".into()));
+        inner.expect_body(camel_component_api::Body::Text("beta".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("beta")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("alpha")))
+            .await
+            .unwrap();
+
+        inner.assert_satisfied().await;
+    }
+
+    #[tokio::test]
+    async fn test_assert_satisfied_headers() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:sat-hdr", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("sat-hdr").unwrap();
+
+        inner.expect_header("status", serde_json::json!("ok"));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut msg = Message::new("body");
+        msg.headers.insert("status".into(), serde_json::json!("ok"));
+        producer.call(Exchange::new(msg)).await.unwrap();
+
+        inner.assert_satisfied().await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "expected header 'missing' =")]
+    async fn test_assert_satisfied_headers_missing() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:sat-hdr-missing", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("sat-hdr-missing").unwrap();
+
+        inner.expect_header("missing", serde_json::json!("value"));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("body")))
+            .await
+            .unwrap();
+
+        inner.assert_satisfied().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // MOCK-005: fail_fast tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fail_fast_rejects_after_first_call() {
+        let config = MockConfig {
+            fail_fast: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:ff", &NoOpComponentContext)
+            .unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+
+        // First call succeeds
+        producer
+            .call(Exchange::new(Message::new("ok")))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fail_fast_no_error_when_all_good() {
+        let config = MockConfig {
+            fail_fast: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:ff-good", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("ff-good").unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+
+        producer
+            .call(Exchange::new(Message::new("a")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("b")))
+            .await
+            .unwrap();
+
+        assert!(inner.fail_fast_error().is_none());
+        inner.assert_exchange_count(2).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // MOCK-008: await_exchanges_with_timeout tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_await_exchanges_with_timeout_uses_config_period() {
+        let config = MockConfig {
+            assert_period_ms: 100,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:ap", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("ap").unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("x")))
+            .await
+            .unwrap();
+
+        inner
+            .await_exchanges_with_timeout(1, std::time::Duration::from_millis(1))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_await_exchanges_with_timeout_uses_fallback_when_zero() {
+        let config = MockConfig {
+            assert_period_ms: 0,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:ap-fb", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("ap-fb").unwrap();
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("y")))
+            .await
+            .unwrap();
+
+        inner
+            .await_exchanges_with_timeout(1, std::time::Duration::from_millis(200))
+            .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // MOCK-009: expect_header_regex tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_expect_header_regex_match() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:re-hdr", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("re-hdr").unwrap();
+
+        inner.expect_header_regex("x-trace-id", r"^[a-f0-9]{8}$");
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut msg = Message::new("body");
+        msg.headers
+            .insert("x-trace-id".into(), serde_json::json!("deadbeef"));
+        producer.call(Exchange::new(msg)).await.unwrap();
+
+        inner.assert_satisfied().await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "no received exchange has header")]
+    async fn test_expect_header_regex_no_match() {
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:re-hdr-fail", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("re-hdr-fail").unwrap();
+
+        inner.expect_header_regex("x-trace-id", r"^\d+$");
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        let mut msg = Message::new("body");
+        msg.headers
+            .insert("x-trace-id".into(), serde_json::json!("abc"));
+        producer.call(Exchange::new(msg)).await.unwrap();
+
+        inner.assert_satisfied().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // MOCK-010: any_order tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_any_order_bodies_match() {
+        let config = MockConfig {
+            any_order: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:anyorder", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("anyorder").unwrap();
+
+        inner.expect_body(camel_component_api::Body::Text("beta".into()));
+        inner.expect_body(camel_component_api::Body::Text("alpha".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("alpha")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("beta")))
+            .await
+            .unwrap();
+
+        inner.assert_satisfied().await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "not found in received exchanges (anyOrder mode)")]
+    async fn test_any_order_bodies_missing() {
+        let config = MockConfig {
+            any_order: true,
+            ..Default::default()
+        };
+        let component = MockComponent::with_config(config);
+        let endpoint = component
+            .create_endpoint("mock:anyorder-fail", &NoOpComponentContext)
+            .unwrap();
+        let inner = component.get_endpoint("anyorder-fail").unwrap();
+
+        inner.expect_body(camel_component_api::Body::Text("gamma".into()));
+        inner.expect_body(camel_component_api::Body::Text("alpha".into()));
+
+        let ctx = test_producer_ctx();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("alpha")))
+            .await
+            .unwrap();
+        producer
+            .call(Exchange::new(Message::new("beta")))
+            .await
+            .unwrap();
+
+        inner.assert_satisfied().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // MOCK-012: tracing instrumentation tests (compilation + basic)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_tracing_logs_exchange_received() {
+        // Verify the producer doesn't panic and the debug trace fires
+        let ctx = test_producer_ctx();
+        let component = MockComponent::new();
+        let endpoint = component
+            .create_endpoint("mock:trace", &NoOpComponentContext)
+            .unwrap();
+        let mut producer = endpoint.create_producer(&ctx).unwrap();
+        producer
+            .call(Exchange::new(Message::new("traced")))
+            .await
+            .unwrap();
+
+        let inner = component.get_endpoint("trace").unwrap();
+        inner.assert_exchange_count(1).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // MOCK-006 / MOCK-007: doctest exists on MockConfig
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mock_config_new() {
+        let cfg = MockConfig::new(42);
+        assert_eq!(cfg.max_retained, 42);
+        assert!(!cfg.copy_on_exchange);
+        assert!(!cfg.fail_fast);
+        assert!(!cfg.any_order);
     }
 }

@@ -9,7 +9,7 @@ readme = "README.md"
 [dependencies]
 camel-api = { workspace = true }
 camel-component-api = { workspace = true }
-camel-bridge = { workspace = true }
+camel-bridge = { workspace = true } # TODO(XJ-002): consider making bridge dep optional via feature flag
 camel-xslt = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 thiserror = { workspace = true }
@@ -21,6 +21,7 @@ tonic = { workspace = true }
 [dev-dependencies]
 tonic = { workspace = true }
 async-trait = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

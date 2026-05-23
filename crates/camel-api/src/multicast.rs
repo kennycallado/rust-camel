@@ -1,3 +1,4 @@
+use crate::error::CamelError;
 use crate::exchange::Exchange;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +57,19 @@ impl MulticastConfig {
     pub fn aggregation(mut self, strategy: MulticastStrategy) -> Self {
         self.aggregation = strategy;
         self
+    }
+
+    /// Validates the configuration.
+    ///
+    /// Returns `Err(CamelError::Config)` if `parallel_limit` is set to 0,
+    /// which would cause a `Semaphore::new(0)` panic at runtime.
+    pub fn validate(&self) -> Result<(), CamelError> {
+        if self.parallel && self.parallel_limit == Some(0) {
+            return Err(CamelError::Config(
+                "multicast parallel_limit must be > 0".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

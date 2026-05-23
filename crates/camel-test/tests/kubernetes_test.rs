@@ -110,7 +110,7 @@ fn test_config() -> KubernetesPlatformConfig {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_single_instance_becomes_leader() -> Result<(), Box<dyn std::error::Error>> {
     let (_container, client) = start_k3s().await;
 
@@ -130,7 +130,7 @@ async fn test_single_instance_becomes_leader() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_duplicate_lock_reuses_cached_loop() -> Result<(), Box<dyn std::error::Error>> {
     let (_container, client) = start_k3s().await;
 
@@ -153,7 +153,7 @@ async fn test_duplicate_lock_reuses_cached_loop() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_step_down_releases_leadership() -> Result<(), Box<dyn std::error::Error>> {
     let (_container, client) = start_k3s().await;
 
@@ -173,7 +173,7 @@ async fn test_step_down_releases_leadership() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_two_instances_only_one_leads() -> Result<(), Box<dyn std::error::Error>> {
     let (_container, client) = start_k3s().await;
 

@@ -3,8 +3,16 @@ use std::env;
 use std::sync::RwLock;
 
 pub struct PropertiesResolver {
+    // TODO(CONFIG-015): Property value caching not implemented.
+    // Values are re-read from source on every access.
+    // TODO(CONFIG-017): Multi-source property chaining partially implemented.
+    // Currently: file + env vars. Missing: explicit priority ordering,
+    // per-source encryption, dynamic re-evaluation.
     properties: RwLock<HashMap<String, String>>,
 }
+
+// TODO(CONFIG-016): Property value encoding/decoding not supported.
+// All values are treated as UTF-8 strings.
 
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum ResolveError {
@@ -28,7 +36,7 @@ impl PropertiesResolver {
     pub fn set(&self, key: &str, value: &str) {
         self.properties
             .write()
-            .unwrap() // allow-unwrap
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key.to_string(), value.to_string());
     }
 
@@ -40,7 +48,10 @@ impl PropertiesResolver {
             }
             return env::var(env_key).ok();
         }
-        let props = self.properties.read().unwrap(); // allow-unwrap
+        let props = self
+            .properties
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         props.get(key).cloned()
     }
 

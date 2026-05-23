@@ -243,7 +243,7 @@ mod tests {
         // open→half_open: prev=1, to=2, delta=+1 → gauge=2
         // half_open→closed: prev=2, to=0, delta=-2 → gauge=0
         let route = "test-route";
-        let map = metrics.cb_states.lock().unwrap();
+        let map = metrics.cb_states.lock().unwrap_or_else(|e| e.into_inner());
 
         // Initial state: no entry
         assert!(!map.contains_key(route));
@@ -251,31 +251,62 @@ mod tests {
 
         // closed→open: delta should be +1 (0→1)
         metrics.record_circuit_breaker_change(route, "closed", "open");
-        let map = metrics.cb_states.lock().unwrap();
+        let map = metrics.cb_states.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(*map.get(route).unwrap(), 1);
         drop(map);
 
         // open→half_open: delta should be +1 (1→2)
         metrics.record_circuit_breaker_change(route, "open", "half_open");
-        let map = metrics.cb_states.lock().unwrap();
+        let map = metrics.cb_states.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(*map.get(route).unwrap(), 2);
         drop(map);
 
         // half_open→closed: delta should be -2 (2→0)
         metrics.record_circuit_breaker_change(route, "half_open", "closed");
-        let map = metrics.cb_states.lock().unwrap();
+        let map = metrics.cb_states.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(*map.get(route).unwrap(), 0);
         drop(map);
 
         // Test alternate spellings
         metrics.record_circuit_breaker_change(route, "closed", "halfopen");
-        let map = metrics.cb_states.lock().unwrap();
+        let map = metrics.cb_states.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(*map.get(route).unwrap(), 2);
         drop(map);
 
         // Test unknown state (should not panic and should not change state)
         metrics.record_circuit_breaker_change(route, "closed", "unknown");
-        let map = metrics.cb_states.lock().unwrap();
+        let map = metrics.cb_states.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(*map.get(route).unwrap(), 2); // unchanged
+    }
+
+    #[test]
+    fn test_metrics_under_contention_no_panic() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let metrics = Arc::new(OtelMetrics::new("test-contention"));
+        let mut handles = Vec::new();
+
+        for i in 0..4 {
+            let m = Arc::clone(&metrics);
+            handles.push(thread::spawn(move || {
+                let route = format!("route-{i}");
+                for j in 0..100 {
+                    m.increment_exchanges(&route);
+                    m.increment_errors(&route, "timeout");
+                    m.record_exchange_duration(&route, Duration::from_millis(j));
+                    m.set_queue_depth(&route, j as usize);
+                    m.record_circuit_breaker_change(
+                        &route,
+                        if j % 2 == 0 { "closed" } else { "open" },
+                        if j % 2 == 0 { "open" } else { "closed" },
+                    );
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread should not panic under contention");
+        }
     }
 }

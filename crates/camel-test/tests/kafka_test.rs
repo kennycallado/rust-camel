@@ -84,7 +84,7 @@ async fn wait_for_kafka_ready(brokers: &str) {
 // Producer test — timer → kafka, assert no errors
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn kafka_producer_sends_without_error() {
     let (_container, brokers) = start_kafka().await;
 
@@ -137,7 +137,7 @@ async fn kafka_producer_sends_without_error() {
 // Consumer test — produce a message, consumer receives it via mock
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn kafka_consumer_receives_message() {
     let (_container, brokers) = start_kafka().await;
 
@@ -197,7 +197,7 @@ async fn kafka_consumer_receives_message() {
 // Headers test — received exchange has Kafka metadata headers
 // ===========================================================================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn kafka_consumer_sets_headers() {
     let (_container, brokers) = start_kafka().await;
 
@@ -270,7 +270,7 @@ async fn kafka_consumer_sets_headers() {
     // when allowManualCommit=true is configured.
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn kafka_consumer_cooperative_sticky_strategy() {
     let (_container, brokers) = start_kafka().await;
 

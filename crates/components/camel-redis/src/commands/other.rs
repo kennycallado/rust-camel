@@ -57,6 +57,14 @@ pub async fn dispatch(
                 .await
                 .map_err(|e| CamelError::ProcessorError(format!("Redis PING failed: {}", e)))?;
 
+            // REDIS-013: Validate PING response is exactly "PONG"
+            if response != "PONG" {
+                return Err(CamelError::ProcessorError(format!(
+                    "Unexpected PING response: expected 'PONG', got '{}'",
+                    response
+                )));
+            }
+
             serde_json::Value::String(response)
         }
         RedisCommand::Echo => {

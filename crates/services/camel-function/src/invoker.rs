@@ -254,6 +254,7 @@ impl FunctionInvoker for DefaultFunctionInvoker {
         id: &FunctionId,
         exchange: &Exchange,
     ) -> Result<ExchangePatch, FunctionInvocationError> {
+        tracing::debug!(function_id = %id, "invoking registered function");
         let key = self
             .pool
             .function_to_key
@@ -289,10 +290,17 @@ impl FunctionInvoker for DefaultFunctionInvoker {
                 .copied()
                 .unwrap_or(self.config.default_timeout_ms),
         );
-        self.provider
-            .invoke(&handle, id, exchange, timeout)
-            .await
-            .map_err(|e| FunctionInvocationError::Transport(e.to_string()))
+        let timeout_ms = timeout.as_millis() as u64;
+        tokio::time::timeout(
+            timeout,
+            self.provider.invoke(&handle, id, exchange, timeout),
+        )
+        .await
+        .map_err(|_| FunctionInvocationError::Timeout {
+            function_id: id.clone(),
+            timeout_ms,
+        })?
+        .map_err(|e| FunctionInvocationError::Transport(e.to_string()))
     }
 
     async fn prepare_reload(

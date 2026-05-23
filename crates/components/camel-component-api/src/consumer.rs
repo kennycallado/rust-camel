@@ -107,6 +107,20 @@ pub trait Consumer: Send + Sync {
     /// Stop consuming messages.
     async fn stop(&mut self) -> Result<(), CamelError>;
 
+    /// Temporarily suspend consuming messages without fully stopping.
+    ///
+    /// Default: no-op, returns `Ok(())`.
+    async fn suspend(&self) -> Result<(), CamelError> {
+        Ok(())
+    }
+
+    /// Resume consuming after a previous suspension.
+    ///
+    /// Default: no-op, returns `Ok(())`.
+    async fn resume(&self) -> Result<(), CamelError> {
+        Ok(())
+    }
+
     /// Declares this consumer's natural concurrency model.
     ///
     /// The runtime uses this to decide whether to process exchanges
@@ -180,5 +194,24 @@ mod tests {
             consumer.concurrency_model(),
             ConcurrencyModel::Concurrent { max: Some(16) }
         );
+    }
+
+    #[tokio::test]
+    async fn test_consumer_default_suspend_resume() {
+        struct DummyConsumer;
+
+        #[async_trait::async_trait]
+        impl super::Consumer for DummyConsumer {
+            async fn start(&mut self, _ctx: super::ConsumerContext) -> Result<(), CamelError> {
+                Ok(())
+            }
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                Ok(())
+            }
+        }
+
+        let consumer = DummyConsumer;
+        assert!(consumer.suspend().await.is_ok());
+        assert!(consumer.resume().await.is_ok());
     }
 }

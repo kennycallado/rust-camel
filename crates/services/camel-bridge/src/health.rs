@@ -1,6 +1,6 @@
 use std::time::Duration;
 use tonic::transport::Channel;
-use tracing::debug;
+use tracing::warn;
 
 use crate::process::BridgeError;
 
@@ -26,10 +26,10 @@ where
         let probe = tokio::time::timeout(PROBE_TIMEOUT, check(channel.clone())).await;
         match probe {
             Ok(Ok(true)) => return Ok(()),
-            Ok(Ok(false)) => debug!("bridge health check: not ready yet"),
-            Ok(Err(e)) => debug!("bridge health check error: {e}"),
+            Ok(Ok(false)) => warn!("bridge health check: not ready yet"),
+            Ok(Err(e)) => warn!("bridge health check error: {e}"),
             Err(_) => {
-                debug!("bridge health check probe timed out after {PROBE_TIMEOUT:?}, retrying")
+                warn!("bridge health check probe timed out after {PROBE_TIMEOUT:?}, retrying")
             }
         }
         if tokio::time::Instant::now() >= deadline {

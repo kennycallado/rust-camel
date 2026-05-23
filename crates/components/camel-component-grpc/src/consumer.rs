@@ -13,7 +13,9 @@ use prost::Message as _;
 use prost_reflect::{DynamicMessage, MessageDescriptor};
 use tokio::sync::mpsc;
 use tonic::Status;
+use tracing::{debug, info};
 
+use crate::config::GrpcServerConfig;
 use crate::mode::GrpcMode;
 use crate::server::GrpcDispatchTable;
 use crate::server::GrpcServerRegistry;
@@ -311,7 +313,12 @@ impl GrpcConsumer {
         listener: tokio::net::TcpListener,
     ) -> Result<(), CamelError> {
         let dispatch = GrpcServerRegistry::global()
-            .get_or_spawn_with_listener(listener, &self.host, self.port)
+            .get_or_spawn_with_listener(
+                listener,
+                &self.host,
+                self.port,
+                GrpcServerConfig::default(),
+            )
             .await?;
         self.start_inner(ctx, dispatch).await
     }
@@ -341,6 +348,14 @@ impl GrpcConsumer {
         let port = self.port;
         let sender = ctx.sender();
 
+        info!(
+            path = %path,
+            host = %host,
+            port = port,
+            mode = ?mode,
+            "grpc consumer started, waiting for requests"
+        );
+
         // NOTE: Long-running bidi streams hold a semaphore permit for their duration.
         // If this becomes an issue, consider separate concurrency limits for streaming vs unary.
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(64));
@@ -350,21 +365,39 @@ impl GrpcConsumer {
             tokio::select! {
                 biased;
                 _ = ctx.cancelled() => {
+                    info!(
+                        path = %path,
+                        "grpc consumer cancelled, shutting down"
+                    );
                     break;
                 }
                 envelope = env_rx.recv() => {
                     let Some(envelope) = envelope else { break };
 
                     let sem = semaphore.clone();
-                    let permit = sem.acquire_owned().await.expect("semaphore closed"); // allow-unwrap
+                    let permit = sem.acquire_owned().await.map_err(|_| CamelError::ChannelClosed)?;
                     let req_desc = req_desc.clone();
                     let resp_desc = resp_desc.clone();
                     let sender = sender.clone();
+                    let correlation_id = next_observer_id();
+                    let path_for_log = path.clone();
+
+                    debug!(
+                        path = %path_for_log,
+                        correlation_id = %correlation_id,
+                        "grpc consumer received request"
+                    );
 
                     join_set.spawn(async move {
                         let _permit = permit;
                         match envelope {
                             GrpcRequestEnvelope::Unary { metadata, body, reply_tx } => {
+                                debug!(
+                                    path = %path_for_log,
+                                    correlation_id = %correlation_id,
+                                    size = body.len(),
+                                    "grpc consumer processing unary request"
+                                );
                                 let result = process_unary_request(
                                     body, metadata, req_desc, resp_desc, sender,
                                 ).await;
@@ -375,16 +408,32 @@ impl GrpcConsumer {
                                 let _ = reply_tx.send(reply);
                             }
                             GrpcRequestEnvelope::ServerStreaming { metadata, body, reply_tx } => {
+                                debug!(
+                                    path = %path_for_log,
+                                    correlation_id = %correlation_id,
+                                    size = body.len(),
+                                    "grpc consumer processing server streaming request"
+                                );
                                 process_server_streaming_request(
                                     body, metadata, req_desc, resp_desc, sender, reply_tx,
                                 ).await;
                             }
                             GrpcRequestEnvelope::ClientStreaming { metadata, body_rx, reply_tx } => {
+                                debug!(
+                                    path = %path_for_log,
+                                    correlation_id = %correlation_id,
+                                    "grpc consumer processing client streaming request"
+                                );
                                 process_client_streaming_request(
                                     body_rx, metadata, req_desc, resp_desc, sender, reply_tx,
                                 ).await;
                             }
                             GrpcRequestEnvelope::Bidi { metadata, body_rx, reply_tx } => {
+                                debug!(
+                                    path = %path_for_log,
+                                    correlation_id = %correlation_id,
+                                    "grpc consumer processing bidi streaming request"
+                                );
                                 process_bidi_request(
                                     body_rx, metadata, req_desc, resp_desc, sender, reply_tx,
                                 ).await;
@@ -401,6 +450,11 @@ impl GrpcConsumer {
             .unregister(&host, port, &path)
             .await;
 
+        info!(
+            path = %path,
+            "grpc consumer stopped"
+        );
+
         Ok(())
     }
 }
@@ -408,13 +462,28 @@ impl GrpcConsumer {
 #[async_trait]
 impl Consumer for GrpcConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        info!(
+            host = %self.host,
+            port = self.port,
+            service = %self.service_name,
+            method = %self.method_name,
+            mode = ?self.mode,
+            "grpc consumer starting"
+        );
         let dispatch = GrpcServerRegistry::global()
-            .get_or_spawn(&self.host, self.port)
+            .get_or_spawn(&self.host, self.port, GrpcServerConfig::default())
             .await?;
         self.start_inner(ctx, dispatch).await
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
+        info!(
+            host = %self.host,
+            port = self.port,
+            service = %self.service_name,
+            method = %self.method_name,
+            "grpc consumer stopping"
+        );
         GrpcServerRegistry::global()
             .unregister(&self.host, self.port, &self.path)
             .await;

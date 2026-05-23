@@ -214,3 +214,50 @@ async fn concurrent_register_spawns_single_runner_per_runtime() {
             .unwrap();
     }
 }
+
+#[tokio::test]
+async fn start_validates_config_zero_timeout_rejected() {
+    let provider = Arc::new(FakeProvider::new(FakeProviderConfig::default()));
+    let cfg = FunctionConfig {
+        default_timeout_ms: 0,
+        ..Default::default()
+    };
+    let mut service = FunctionRuntimeService::with_fake_provider(cfg, provider);
+    let err = service.start().await.unwrap_err();
+    assert!(err.to_string().contains("default_timeout_ms"));
+}
+
+#[tokio::test]
+async fn invoke_timeout_returns_timeout_error() {
+    let provider = Arc::new(FakeProvider::new(FakeProviderConfig {
+        invoke_delay: Some(std::time::Duration::from_secs(10)),
+        ..Default::default()
+    }));
+    let mut service = FunctionRuntimeService::with_fake_provider(
+        FunctionConfig::default(),
+        Arc::clone(&provider),
+    );
+    service.start().await.unwrap();
+    let inv = service.invoker();
+    let d = FunctionDefinition {
+        id: FunctionId::compute("fake", "slow", 100),
+        runtime: "fake".into(),
+        source: "slow".into(),
+        timeout_ms: 100,
+        route_id: Some("r1".into()),
+        step_index: Some(0),
+    };
+    inv.register(d.clone(), Some("r1")).await.unwrap();
+
+    let err = inv
+        .invoke(&d.id, &Exchange::new(Message::new("x")))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            camel_api::function::FunctionInvocationError::Timeout { .. }
+        ),
+        "expected Timeout error, got: {err}"
+    );
+}

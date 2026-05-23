@@ -4,7 +4,7 @@
 //! Main modules: `bundle`, `config`.
 
 pub mod bundle;
-mod config;
+pub mod config;
 
 pub use bundle::MasterBundle;
 
@@ -82,6 +82,9 @@ struct MasterEndpoint {
     lock_name: String,
     delegate_uri: String,
     delegate_component: Arc<dyn Component>,
+    // TODO(MST-001): MetricsCollector is wired through from ComponentContext but never called.
+    // Should emit metrics on leader acquisition (increment_exchanges), leader loss
+    // (increment_errors), and delegate start/stop events (record_circuit_breaker_change).
     metrics: Arc<dyn MetricsCollector>,
     platform_service: Arc<dyn PlatformService>,
     drain_timeout: Duration,
@@ -150,11 +153,13 @@ struct MasterConsumer {
     lock_name: String,
     delegate_uri: String,
     delegate_component: Arc<dyn Component>,
+    // TODO(MST-001): MetricsCollector is stored here but never used for emission.
+    // Wire into reconcile_event to record leadership transitions and delegate lifecycle.
     metrics: Arc<dyn MetricsCollector>,
     platform_service: Arc<dyn PlatformService>,
     drain_timeout: Duration,
     delegate_retry_max_attempts: Option<u32>,
-    leadership_task: Option<JoinHandle<()>>,
+    leadership_task: Option<JoinHandle<Result<(), CamelError>>>,
     stop_token: Option<CancellationToken>,
 }
 
@@ -186,11 +191,14 @@ enum DelegateState {
     Inactive,
     Active {
         run_token: CancellationToken,
-        handle: JoinHandle<()>,
+        handle: JoinHandle<Result<(), CamelError>>,
     },
 }
 
-async fn stop_delegate(state: &mut DelegateState, drain_timeout: Duration) {
+async fn stop_delegate(
+    state: &mut DelegateState,
+    drain_timeout: Duration,
+) -> Result<(), CamelError> {
     if let DelegateState::Active {
         run_token,
         mut handle,
@@ -198,12 +206,21 @@ async fn stop_delegate(state: &mut DelegateState, drain_timeout: Duration) {
     {
         run_token.cancel();
         match timeout(drain_timeout, &mut handle).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(err))) => {
+                return Err(err);
+            }
             Ok(Err(e)) if e.is_panic() => {
                 error!(error = %e, "master delegate task panicked");
+                return Err(CamelError::ProcessorError(format!(
+                    "master delegate task panicked: {e}"
+                )));
             }
             Ok(Err(e)) => {
                 warn!(error = %e, "master delegate task cancelled");
+                return Err(CamelError::ProcessorError(format!(
+                    "master delegate task cancelled: {e}"
+                )));
             }
             Err(_) => {
                 warn!("master delegate shutdown timed out, aborting");
@@ -211,6 +228,7 @@ async fn stop_delegate(state: &mut DelegateState, drain_timeout: Duration) {
             }
         }
     }
+    Ok(())
 }
 
 struct ReconcileContext<'a> {
@@ -228,11 +246,13 @@ async fn reconcile_event(
     event: camel_api::LeadershipEvent,
     state: &mut DelegateState,
     ctx: &ReconcileContext<'_>,
-) {
+) -> Result<(), CamelError> {
     match event {
         camel_api::LeadershipEvent::StartedLeading => {
             info!(lock = %ctx.lock_name, "master leadership acquired");
-            stop_delegate(state, ctx.drain_timeout).await;
+            // TODO(MST-001): emit metrics here — MetricsCollector is wired but never called
+            tracing::info!(lock = %ctx.lock_name, "metrics emission placeholder: leadership acquired");
+            stop_delegate(state, ctx.drain_timeout).await?;
 
             let delegate_ctx = MasterDelegateContext {
                 delegate_component: Arc::clone(ctx.delegate_component),
@@ -247,7 +267,7 @@ async fn reconcile_event(
                 Ok(endpoint) => endpoint,
                 Err(err) => {
                     warn!(lock = %ctx.lock_name, "failed to create delegate endpoint: {err}");
-                    return;
+                    return Ok(());
                 }
             };
 
@@ -255,24 +275,28 @@ async fn reconcile_event(
                 Ok(consumer) => consumer,
                 Err(err) => {
                     warn!(lock = %ctx.lock_name, "failed to create delegate consumer: {err}");
-                    return;
+                    return Ok(());
                 }
             };
 
             let run_token = ctx.parent_cancel.child_token();
             let delegate_ctx = ConsumerContext::new(ctx.sender.clone(), run_token.clone());
             let handle = tokio::spawn(async move {
-                let _ = consumer.start(delegate_ctx).await;
-                let _ = consumer.stop().await;
+                consumer.start(delegate_ctx).await?;
+                consumer.stop().await?;
+                Ok::<(), CamelError>(())
             });
 
             *state = DelegateState::Active { run_token, handle };
         }
         camel_api::LeadershipEvent::StoppedLeading => {
             info!(lock = %ctx.lock_name, "master leadership lost");
-            stop_delegate(state, ctx.drain_timeout).await;
+            // TODO(MST-001): emit metrics here — MetricsCollector is wired but never called
+            tracing::info!(lock = %ctx.lock_name, "metrics emission placeholder: leadership lost");
+            stop_delegate(state, ctx.drain_timeout).await?;
         }
     }
+    Ok(())
 }
 
 #[async_trait]
@@ -329,7 +353,10 @@ impl Consumer for MasterConsumer {
                 if is_leading {
                     delegate_attempts = 0;
                 }
-                reconcile_event(initial_event, &mut state, &rctx).await;
+                if let Err(err) = reconcile_event(initial_event, &mut state, &rctx).await {
+                    error!(lock = %lock_name, "master delegate error: {err}");
+                    return Err(err);
+                }
             }
 
             loop {
@@ -351,10 +378,20 @@ impl Consumer for MasterConsumer {
                             if !was_leading && is_leading {
                                 delegate_attempts = 0;
                             }
-                            reconcile_event(event, &mut state, &rctx).await;
+                            if let Err(err) = reconcile_event(event, &mut state, &rctx).await {
+                                error!(lock = %lock_name, "master delegate error: {err}");
+                                return Err(err);
+                            }
                         }
                     }
                     _ = retry_tick.tick() => {
+                        if matches!(&state, DelegateState::Active { handle, .. } if handle.is_finished())
+                            && let Err(err) = stop_delegate(&mut state, drain_timeout).await
+                        {
+                            error!(lock = %lock_name, "master delegate task failed: {err}");
+                            return Err(err);
+                        }
+
                         if is_leading && matches!(state, DelegateState::Inactive) {
                             if let Some(max) = delegate_retry_max_attempts {
                                 delegate_attempts = delegate_attempts.saturating_add(1);
@@ -367,19 +404,23 @@ impl Consumer for MasterConsumer {
                                     break;
                                 }
                             }
-                            reconcile_event(
+                            if let Err(err) = reconcile_event(
                                 camel_api::LeadershipEvent::StartedLeading,
                                 &mut state,
                                 &rctx,
                             )
-                            .await;
+                            .await {
+                                error!(lock = %lock_name, "master delegate retry error: {err}");
+                                return Err(err);
+                            }
                         }
                     }
                 }
             }
 
-            stop_delegate(&mut state, drain_timeout).await;
+            stop_delegate(&mut state, drain_timeout).await?;
             let _ = timeout(drain_timeout, leadership_handle.step_down()).await;
+            Ok::<(), CamelError>(())
         });
 
         self.stop_token = Some(stop_token);
@@ -393,9 +434,31 @@ impl Consumer for MasterConsumer {
             token.cancel();
         }
 
-        if let Some(task) = self.leadership_task.take() {
-            match timeout(self.drain_timeout, task).await {
-                Ok(Ok(())) => {}
+        if let Some(handle) = self.leadership_task.take() {
+            if handle.is_finished() {
+                match timeout(self.drain_timeout, handle).await {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(err))) => return Err(err),
+                    Ok(Err(e)) => {
+                        return Err(CamelError::ProcessorError(format!(
+                            "leadership task join failed: {e}"
+                        )));
+                    }
+                    Err(_) => {
+                        return Err(CamelError::ProcessorError(
+                            "leadership task join timed out".to_string(),
+                        ));
+                    }
+                }
+                return Ok(());
+            }
+
+            // Abort first so the task is guaranteed to stop; then await with
+            // a timeout as a safety-net in case abort takes a moment to land.
+            handle.abort();
+            match timeout(self.drain_timeout, handle).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(err))) => return Err(err),
                 Ok(Err(e)) if e.is_panic() => {
                     error!(lock = %self.lock_name, error = %e, "leadership task panicked");
                 }
@@ -403,7 +466,7 @@ impl Consumer for MasterConsumer {
                     warn!(lock = %self.lock_name, error = %e, "leadership task cancelled");
                 }
                 Err(_) => {
-                    warn!("master leadership loop shutdown timed out");
+                    warn!("master leadership loop shutdown timed out after abort");
                 }
             }
         }
@@ -424,6 +487,7 @@ mod tests {
         PlatformService, ReadinessGate,
     };
     use camel_component_api::NoOpComponentContext;
+    use std::time::Instant;
     use tokio::sync::{oneshot, watch};
     use tokio::time::{sleep, timeout};
     use tokio_util::sync::CancellationToken;
@@ -1024,5 +1088,191 @@ mod tests {
 
         cancel.cancel();
         master.stop().await.unwrap();
+    }
+
+    /// Regression test for MST-002: stop() must abort the leadership JoinHandle
+    /// instead of just dropping it when the task is slow to drain.
+    /// Without the fix, stop() blocks for the full drain_timeout (~500 ms)
+    /// because the leadership task is stuck in stop_delegate awaiting a
+    /// slow delegate. With abort-first, stop() returns almost instantly.
+    #[tokio::test]
+    async fn stop_completes_quickly_when_leadership_task_is_slow() {
+        // Delegate consumer that ignores its cancellation token and blocks.
+        struct SlowStoppingConsumer;
+
+        #[async_trait]
+        impl Consumer for SlowStoppingConsumer {
+            async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+                ctx.send(Exchange::new(Message::new("slow-start")))
+                    .await
+                    .ok();
+                // Ignore cancellation — sleep far beyond the drain timeout.
+                sleep(Duration::from_secs(60)).await;
+                Ok(())
+            }
+
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                Ok(())
+            }
+        }
+
+        struct SlowStoppingComponent;
+
+        impl Component for SlowStoppingComponent {
+            fn scheme(&self) -> &str {
+                "slow"
+            }
+
+            fn create_endpoint(
+                &self,
+                _uri: &str,
+                _ctx: &dyn ComponentContext,
+            ) -> Result<Box<dyn Endpoint>, CamelError> {
+                Ok(Box::new(SlowStoppingEndpoint))
+            }
+        }
+
+        struct SlowStoppingEndpoint;
+
+        impl Endpoint for SlowStoppingEndpoint {
+            fn uri(&self) -> &str {
+                "slow:delegate"
+            }
+
+            fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+                Ok(Box::new(SlowStoppingConsumer))
+            }
+
+            fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+                Err(CamelError::EndpointCreationFailed("not used".into()))
+            }
+        }
+
+        let leadership = Arc::new(FakeLeadershipService::new(Some(
+            LeadershipEvent::StartedLeading,
+        )));
+        let platform_service = Arc::new(FakePlatformService::new(leadership));
+
+        let mut master = MasterConsumer::new(
+            "lock-slow".into(),
+            "slow:delegate".into(),
+            Arc::new(SlowStoppingComponent),
+            Arc::new(NoOpMetrics),
+            platform_service,
+            Duration::from_millis(500), // drain_timeout
+            Some(30),
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel.clone());
+
+        master.start(ctx).await.unwrap();
+
+        // Wait for the delegate to actually start.
+        let msg = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.exchange.input.body.as_text(), Some("slow-start"));
+
+        // stop() must complete quickly because the leadership task is aborted,
+        // not just timed-out and leaked.
+        let start = Instant::now();
+        master.stop().await.unwrap();
+        let elapsed = start.elapsed();
+
+        // With abort-first: ~0 ms. Without the fix: ~drain_timeout (500 ms).
+        // Assert < 250 ms to reliably distinguish the two behaviours.
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "stop() took {:?}, expected < 250 ms (abort should be near-instant)",
+            elapsed,
+        );
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn stop_propagates_delegate_start_error() {
+        struct FailingStartConsumer;
+
+        #[async_trait]
+        impl Consumer for FailingStartConsumer {
+            async fn start(&mut self, _ctx: ConsumerContext) -> Result<(), CamelError> {
+                Err(CamelError::ProcessorError(
+                    "delegate start failed".to_string(),
+                ))
+            }
+
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                Ok(())
+            }
+        }
+
+        struct FailingStartComponent;
+
+        impl Component for FailingStartComponent {
+            fn scheme(&self) -> &str {
+                "failstart"
+            }
+
+            fn create_endpoint(
+                &self,
+                _uri: &str,
+                _ctx: &dyn ComponentContext,
+            ) -> Result<Box<dyn Endpoint>, CamelError> {
+                Ok(Box::new(FailingStartEndpoint))
+            }
+        }
+
+        struct FailingStartEndpoint;
+
+        impl Endpoint for FailingStartEndpoint {
+            fn uri(&self) -> &str {
+                "failstart:delegate"
+            }
+
+            fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+                Ok(Box::new(FailingStartConsumer))
+            }
+
+            fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+                Err(CamelError::EndpointCreationFailed("not used".into()))
+            }
+        }
+
+        let leadership = Arc::new(FakeLeadershipService::new(Some(
+            LeadershipEvent::StartedLeading,
+        )));
+        let platform_service = Arc::new(FakePlatformService::new(leadership));
+
+        let mut master = MasterConsumer::new(
+            "lock-error".into(),
+            "failstart:delegate".into(),
+            Arc::new(FailingStartComponent),
+            Arc::new(NoOpMetrics),
+            platform_service,
+            Duration::from_millis(500),
+            Some(30),
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel.clone());
+
+        master.start(ctx).await.unwrap();
+        sleep(Duration::from_millis(250)).await;
+        assert!(
+            master
+                .leadership_task
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished),
+            "leadership task should finish after delegate error"
+        );
+        let err = master.stop().await.expect_err("expected delegate error");
+        assert!(err.to_string().contains("delegate start failed"));
+
+        cancel.cancel();
     }
 }

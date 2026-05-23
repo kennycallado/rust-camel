@@ -96,5 +96,8 @@ use syn::{DeriveInput, parse_macro_input};
 #[proc_macro_derive(UriConfig, attributes(uri_scheme, uri_param, uri_config))]
 pub fn derive_uri_config(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    uri_config::impl_uri_config(&input).into()
+    match uri_config::impl_uri_config(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
 }

@@ -17,6 +17,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use dashmap::DashMap;
 use futures::StreamExt;
 use regex::Regex;
 use tokio::fs;
@@ -35,6 +37,75 @@ use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, Produc
 use camel_component_api::{UriConfig, parse_uri};
 use camel_language_api::Language;
 use camel_language_simple::SimpleLanguage;
+
+// ---------------------------------------------------------------------------
+// ModificationDetectingStream — detects file changes during stream consumption
+// ---------------------------------------------------------------------------
+
+/// Wrapper stream that checks file metadata after the inner stream ends.
+/// If the file's size or modification time changed between open and stream end,
+/// the wrapper yields an error as its final item.
+struct ModificationDetectingStream<S> {
+    inner: S,
+    file_path: PathBuf,
+    initial_size: u64,
+    initial_mtime: Option<std::time::SystemTime>,
+    checked: bool,
+}
+
+impl<S> ModificationDetectingStream<S> {
+    fn new(
+        inner: S,
+        file_path: PathBuf,
+        initial_size: u64,
+        initial_mtime: Option<std::time::SystemTime>,
+    ) -> Self {
+        Self {
+            inner,
+            file_path,
+            initial_size,
+            initial_mtime,
+            checked: false,
+        }
+    }
+}
+
+impl<S> futures::Stream for ModificationDetectingStream<S>
+where
+    S: futures::Stream<Item = Result<Bytes, CamelError>> + Unpin,
+{
+    type Item = Result<Bytes, CamelError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // Poll inner stream
+        let inner_poll = std::pin::Pin::new(&mut self.inner).poll_next(cx);
+
+        match inner_poll {
+            std::task::Poll::Ready(None) => {
+                // Inner stream ended — check metadata once
+                if !self.checked {
+                    self.checked = true;
+                    if let Ok(current_meta) = std::fs::metadata(&self.file_path) {
+                        let current_size = current_meta.len();
+                        let current_mtime = current_meta.modified().ok();
+
+                        if current_size != self.initial_size || current_mtime != self.initial_mtime
+                        {
+                            return std::task::Poll::Ready(Some(Err(CamelError::ProcessorError(
+                                format!("file modified during read: {}", self.file_path.display()),
+                            ))));
+                        }
+                    }
+                }
+                std::task::Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // TempFileGuard — RAII cleanup for temp files (panic-safe)
@@ -86,6 +157,8 @@ pub enum FileExistStrategy {
     Append,
     /// Fail if file exists.
     Fail,
+    /// Skip write if file already exists.
+    Ignore,
 }
 
 impl FromStr for FileExistStrategy {
@@ -96,7 +169,55 @@ impl FromStr for FileExistStrategy {
             "Override" | "override" => Ok(FileExistStrategy::Override),
             "Append" | "append" => Ok(FileExistStrategy::Append),
             "Fail" | "fail" => Ok(FileExistStrategy::Fail),
-            _ => Ok(FileExistStrategy::Override), // Default for unknown values
+            "Ignore" | "ignore" => Ok(FileExistStrategy::Ignore),
+            other => Err(format!("unknown FileExistStrategy: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadLockStrategy {
+    #[default]
+    None,
+    InProcess,
+    Rename,
+}
+
+impl FromStr for ReadLockStrategy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "None" | "none" => Ok(Self::None),
+            "InProcess" | "inProcess" | "inprocess" => Ok(Self::InProcess),
+            "Rename" | "rename" => Ok(Self::Rename),
+            other => Err(format!("unknown ReadLockStrategy: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IdempotentKey {
+    #[default]
+    None,
+    FileName,
+    FilePath,
+    FileSize,
+    /// Lightweight fingerprint using file path + last-modified timestamp (not a cryptographic hash).
+    Digest,
+}
+
+impl FromStr for IdempotentKey {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "None" | "none" => Ok(Self::None),
+            "FileName" | "fileName" | "filename" => Ok(Self::FileName),
+            "FilePath" | "filePath" | "filepath" => Ok(Self::FilePath),
+            "FileSize" | "fileSize" | "filesize" => Ok(Self::FileSize),
+            "Digest" | "digest" => Ok(Self::Digest),
+            other => Err(format!("unknown IdempotentKey: {other}")),
         }
     }
 }
@@ -176,16 +297,14 @@ impl FileGlobalConfig {
 /// | `Override` (default) | Atomic write via temp file + rename |
 /// | `Append` | Appends to existing file; non-atomic by nature |
 /// | `Fail` | Returns error if file already exists |
-#[derive(Debug, Clone, UriConfig)]
-#[uri_scheme = "file"]
-#[uri_config(skip_impl, crate = "camel_component_api")]
+/// | `Ignore` | Skip write if file already exists |
+#[derive(Debug, Clone)]
 pub struct FileConfig {
     /// Directory path to read from or write to.
     pub directory: String,
 
     /// Polling delay in milliseconds (companion field for `delay`).
     #[allow(dead_code)]
-    #[uri_param(name = "delay", default = "500")]
     delay_ms: u64,
 
     /// Polling delay as Duration.
@@ -193,56 +312,59 @@ pub struct FileConfig {
 
     /// Initial delay in milliseconds (companion field for `initial_delay`).
     #[allow(dead_code)]
-    #[uri_param(name = "initialDelay", default = "1000")]
     initial_delay_ms: u64,
 
     /// Initial delay as Duration.
     pub initial_delay: Duration,
 
     /// If true, don't delete or move files after processing.
-    #[uri_param(default = "false")]
     pub noop: bool,
 
     /// If true, delete files after processing.
-    #[uri_param(default = "false")]
     pub delete: bool,
 
     /// Directory to move processed files to (only if not noop/delete).
     /// Default is ".camel" when not specified and noop/delete are false.
-    #[uri_param(name = "move")]
     move_to: Option<String>,
 
     /// Fixed filename for producer (optional).
-    #[uri_param(name = "fileName")]
     pub file_name: Option<String>,
 
     /// Regex pattern for including files (consumer).
-    #[uri_param]
     pub include: Option<String>,
 
     /// Regex pattern for excluding files (consumer).
-    #[uri_param]
     pub exclude: Option<String>,
 
     /// Whether to scan directories recursively.
-    #[uri_param(default = "false")]
     pub recursive: bool,
 
     /// Strategy for handling existing files when writing.
-    #[uri_param(name = "fileExist", default = "Override")]
     pub file_exist: FileExistStrategy,
 
+    /// Read lock strategy for concurrent consumers.
+    pub read_lock_strategy: ReadLockStrategy,
+
+    /// In-memory idempotent key selector for consumer.
+    pub idempotent_key: IdempotentKey,
+
+    /// Done marker filename pattern created after successful write.
+    pub done_file_name: Option<String>,
+
+    /// Charset for string body encoding (UTF-8, ISO-8859-1).
+    pub charset: Option<String>,
+
     /// Prefix for temporary files during atomic writes.
-    #[uri_param(name = "tempPrefix")]
     pub temp_prefix: Option<String>,
 
     /// Whether to automatically create directories.
-    #[uri_param(name = "autoCreate", default = "true")]
     pub auto_create: bool,
+
+    /// If true, verify the starting directory exists at startup.
+    pub starting_directory_must_exist: bool,
 
     /// Read timeout in milliseconds (companion field for `read_timeout`).
     #[allow(dead_code)]
-    #[uri_param(name = "readTimeout", default = "30000")]
     read_timeout_ms: u64,
 
     /// Read timeout as Duration.
@@ -250,7 +372,6 @@ pub struct FileConfig {
 
     /// Write timeout in milliseconds (companion field for `write_timeout`).
     #[allow(dead_code)]
-    #[uri_param(name = "writeTimeout", default = "30000")]
     write_timeout_ms: u64,
 
     /// Write timeout as Duration.
@@ -268,10 +389,157 @@ impl UriConfig for FileConfig {
     }
 
     fn from_components(parts: camel_component_api::UriComponents) -> Result<Self, CamelError> {
-        Self::parse_uri_components(parts)?.validate()
+        if parts.scheme != Self::scheme() {
+            return Err(CamelError::InvalidUri(format!(
+                "unsupported scheme '{}', expected '{}'",
+                parts.scheme,
+                Self::scheme()
+            )));
+        }
+
+        fn parse_bool_param(
+            params: &std::collections::HashMap<String, String>,
+            key: &str,
+            default: bool,
+        ) -> Result<bool, CamelError> {
+            match params.get(key) {
+                Some(v) => match v.to_lowercase().as_str() {
+                    "true" | "1" | "yes" => Ok(true),
+                    "false" | "0" | "no" => Ok(false),
+                    _ => Err(CamelError::InvalidUri(format!(
+                        "invalid value for {key}: invalid boolean value: '{v}'"
+                    ))),
+                },
+                None => Ok(default),
+            }
+        }
+
+        fn parse_u64_param(
+            params: &std::collections::HashMap<String, String>,
+            key: &str,
+            default: u64,
+        ) -> Result<u64, CamelError> {
+            match params.get(key) {
+                Some(v) => v
+                    .parse::<u64>()
+                    .map_err(|e| CamelError::InvalidUri(format!("invalid value for {key}: {e}"))),
+                None => Ok(default),
+            }
+        }
+
+        fn parse_enum_param<T: FromStr>(
+            params: &std::collections::HashMap<String, String>,
+            key: &str,
+            default: &str,
+        ) -> Result<T, CamelError>
+        where
+            T::Err: std::fmt::Display,
+        {
+            let raw = params.get(key).map(String::as_str).unwrap_or(default);
+            raw.parse::<T>().map_err(|e| {
+                CamelError::InvalidUri(format!("invalid value for parameter '{key}': {e}"))
+            })
+        }
+
+        let params = &parts.params;
+        let delay_ms = parse_u64_param(params, "delay", 500)?;
+        let initial_delay_ms = parse_u64_param(params, "initialDelay", 1000)?;
+        let read_timeout_ms = parse_u64_param(params, "readTimeout", 30_000)?;
+        let write_timeout_ms = parse_u64_param(params, "writeTimeout", 30_000)?;
+
+        let cfg = Self {
+            directory: parts.path,
+            delay_ms,
+            delay: Duration::from_millis(delay_ms),
+            initial_delay_ms,
+            initial_delay: Duration::from_millis(initial_delay_ms),
+            noop: parse_bool_param(params, "noop", false)?,
+            delete: parse_bool_param(params, "delete", false)?,
+            move_to: params.get("move").cloned(),
+            file_name: params.get("fileName").cloned(),
+            include: params.get("include").cloned(),
+            exclude: params.get("exclude").cloned(),
+            recursive: parse_bool_param(params, "recursive", false)?,
+            file_exist: parse_enum_param(params, "fileExist", "Override")?,
+            read_lock_strategy: parse_enum_param(params, "readLock", "None")?,
+            idempotent_key: parse_enum_param(params, "idempotentKey", "None")?,
+            done_file_name: params.get("doneFileName").cloned(),
+            charset: params.get("charset").cloned(),
+            temp_prefix: params.get("tempPrefix").cloned(),
+            auto_create: parse_bool_param(params, "autoCreate", true)?,
+            starting_directory_must_exist: parse_bool_param(
+                params,
+                "startingDirectoryMustExist",
+                false,
+            )?,
+            read_timeout_ms,
+            read_timeout: Duration::from_millis(read_timeout_ms),
+            write_timeout_ms,
+            write_timeout: Duration::from_millis(write_timeout_ms),
+        };
+
+        cfg.validate()
     }
 
     fn validate(self) -> Result<Self, CamelError> {
+        // Reject path traversal in move_to
+        if let Some(ref move_to) = self.move_to
+            && path_contains_traversal(move_to)
+        {
+            return Err(CamelError::Config(format!(
+                "move_to contains path traversal component: {move_to}"
+            )));
+        }
+
+        if let Some(ref move_to) = self.move_to
+            && std::path::Path::new(move_to).is_absolute()
+        {
+            return Err(CamelError::InvalidUri(format!(
+                "move_to must be relative path within base directory: {move_to}"
+            )));
+        }
+
+        // Reject path traversal in temp_prefix
+        if let Some(ref temp_prefix) = self.temp_prefix
+            && path_contains_traversal(temp_prefix)
+        {
+            return Err(CamelError::Config(format!(
+                "temp_prefix contains path traversal component: {temp_prefix}"
+            )));
+        }
+
+        if let Some(ref temp_prefix) = self.temp_prefix
+            && !is_valid_temp_prefix(temp_prefix)
+        {
+            return Err(CamelError::Config(
+                "temp_prefix must be plain filename prefix (no path separators, absolute paths, or null bytes)".into(),
+            ));
+        }
+
+        // Reject empty file_name
+        if let Some(ref file_name) = self.file_name {
+            if file_name.is_empty() {
+                return Err(CamelError::Config("file_name must not be empty".into()));
+            }
+            // Reject null bytes in file_name
+            if file_name.contains('\0') {
+                return Err(CamelError::Config(
+                    "file_name must not contain null bytes".into(),
+                ));
+            }
+        }
+
+        // If starting_directory_must_exist, verify directory exists
+        if self.starting_directory_must_exist {
+            let dir_path = std::path::Path::new(&self.directory);
+            if !dir_path.exists() {
+                return Err(CamelError::Config(format!(
+                    "starting directory does not exist: {}",
+                    self.directory
+                )));
+            }
+        }
+
         // Apply conditional logic for move_to:
         // - If noop or delete is true, move_to should be None
         // - Otherwise, if move_to is None, default to ".camel"
@@ -356,6 +624,8 @@ impl Component for FileComponent {
         Ok(Box::new(FileEndpoint {
             uri: uri.to_string(),
             config,
+            in_process_locks: std::sync::Arc::new(DashMap::new()),
+            idempotent_repo: std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         }))
     }
 }
@@ -367,6 +637,8 @@ impl Component for FileComponent {
 struct FileEndpoint {
     uri: String,
     config: FileConfig,
+    in_process_locks: std::sync::Arc<DashMap<PathBuf, ()>>,
+    idempotent_repo: std::sync::Arc<tokio::sync::Mutex<HashSet<String>>>,
 }
 
 impl Endpoint for FileEndpoint {
@@ -378,6 +650,8 @@ impl Endpoint for FileEndpoint {
         Ok(Box::new(FileConsumer {
             config: self.config.clone(),
             seen: HashSet::new(),
+            in_process_locks: self.in_process_locks.clone(),
+            idempotent_repo: self.idempotent_repo.clone(),
         }))
     }
 
@@ -395,6 +669,8 @@ impl Endpoint for FileEndpoint {
 struct FileConsumer {
     config: FileConfig,
     seen: HashSet<PathBuf>,
+    in_process_locks: std::sync::Arc<DashMap<PathBuf, ()>>,
+    idempotent_repo: std::sync::Arc<tokio::sync::Mutex<HashSet<String>>>,
 }
 
 #[async_trait]
@@ -440,6 +716,8 @@ impl Consumer for FileConsumer {
                         &include_re,
                         &exclude_re,
                         &mut self.seen,
+                        &self.in_process_locks,
+                        &self.idempotent_repo,
                     ).await {
                         warn!(directory = config.directory, error = %e, "Error polling directory");
                     }
@@ -461,6 +739,8 @@ async fn poll_directory(
     include_re: &Option<Regex>,
     exclude_re: &Option<Regex>,
     seen: &mut HashSet<PathBuf>,
+    in_process_locks: &std::sync::Arc<DashMap<PathBuf, ()>>,
+    idempotent_repo: &std::sync::Arc<tokio::sync::Mutex<HashSet<String>>>,
 ) -> Result<(), CamelError> {
     let base_path = std::path::Path::new(&config.directory);
 
@@ -502,8 +782,30 @@ async fn poll_directory(
             continue;
         }
 
+        let lock = match config.read_lock_strategy {
+            ReadLockStrategy::None => FileReadLock::None(file_path.clone()),
+            ReadLockStrategy::InProcess => {
+                if in_process_locks.insert(file_path.clone(), ()).is_some() {
+                    continue;
+                }
+                FileReadLock::InProcess(file_path.clone())
+            }
+            ReadLockStrategy::Rename => {
+                let lock_path = file_path.with_file_name(format!("{file_name}.camel-lock"));
+                if fs::rename(&file_path, &lock_path).await.is_err() {
+                    continue;
+                }
+                FileReadLock::Rename {
+                    original: file_path.clone(),
+                    locked: lock_path,
+                }
+            }
+        };
+
+        let active_path = lock.active_path();
+
         let (file, metadata) = match tokio::time::timeout(config.read_timeout, async {
-            let f = fs::File::open(&file_path).await?;
+            let f = fs::File::open(active_path).await?;
             let m = f.metadata().await?;
             Ok::<_, std::io::Error>((f, m))
         })
@@ -516,6 +818,12 @@ async fn poll_directory(
                     error = %e,
                     "Failed to open file"
                 );
+                if let FileReadLock::Rename { original, locked } = &lock {
+                    let _ = fs::rename(locked, original).await;
+                }
+                if let FileReadLock::InProcess(path) = &lock {
+                    in_process_locks.remove(path);
+                }
                 continue;
             }
             Err(_) => {
@@ -524,16 +832,45 @@ async fn poll_directory(
                     timeout_ms = config.read_timeout.as_millis(),
                     "Timeout opening file"
                 );
+                if let FileReadLock::Rename { original, locked } = &lock {
+                    let _ = fs::rename(locked, original).await;
+                }
+                if let FileReadLock::InProcess(path) = &lock {
+                    in_process_locks.remove(path);
+                }
                 continue;
             }
         };
 
-        let file_len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
-        let stream = ReaderStream::new(file).map(|res| res.map_err(CamelError::from));
-
-        let last_modified = metadata
+        if let Some(key) = metadata
             .as_ref()
-            .and_then(|m| m.modified().ok())
+            .and_then(|m| build_idempotent_key(config.idempotent_key, active_path, &file_name, m))
+        {
+            let mut repo = idempotent_repo.lock().await;
+            if repo.contains(&key) {
+                if let FileReadLock::Rename { original, locked } = &lock {
+                    let _ = fs::rename(locked, original).await;
+                }
+                if let FileReadLock::InProcess(path) = &lock {
+                    in_process_locks.remove(path);
+                }
+                continue;
+            }
+            repo.insert(key);
+        }
+
+        let file_len = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let initial_mtime = metadata.as_ref().and_then(|m| m.modified().ok());
+
+        let raw_stream = ReaderStream::new(file).map(|res| res.map_err(CamelError::from));
+        let stream = ModificationDetectingStream::new(
+            raw_stream,
+            active_path.to_path_buf(),
+            file_len,
+            initial_mtime,
+        );
+
+        let last_modified = initial_mtime
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
@@ -587,6 +924,12 @@ async fn poll_directory(
         );
 
         if context.send(exchange).await.is_err() {
+            if let FileReadLock::Rename { original, locked } = &lock {
+                let _ = fs::rename(locked, original).await;
+            }
+            if let FileReadLock::InProcess(path) = &lock {
+                in_process_locks.remove(path);
+            }
             break;
         }
 
@@ -594,49 +937,202 @@ async fn poll_directory(
             seen.insert(file_path.clone());
         }
 
-        if config.noop {
-            // Do nothing
-        } else if config.delete {
-            if let Err(e) = fs::remove_file(&file_path).await {
-                warn!(file = %file_path.display(), error = %e, "Failed to delete file");
-            }
-        } else if let Some(ref move_dir) = config.move_to {
-            let target_dir = base_path.join(move_dir);
-            if let Err(e) = fs::create_dir_all(&target_dir).await {
-                warn!(dir = %target_dir.display(), error = %e, "Failed to create move directory");
+        if !config.noop
+            && !config.delete
+            && let Some(ref move_dir) = config.move_to
+        {
+            if std::path::Path::new(move_dir).is_absolute() {
+                warn!(move_to = %move_dir, "Ignoring absolute move_to path outside base directory");
+                if let FileReadLock::Rename { original, locked } = &lock {
+                    let _ = fs::rename(locked, original).await;
+                }
+                if let FileReadLock::InProcess(path) = &lock {
+                    in_process_locks.remove(path);
+                }
                 continue;
             }
-            let target_path = target_dir.join(&file_name);
-            if let Err(e) = fs::rename(&file_path, &target_path).await {
-                warn!(
-                    from = %file_path.display(),
-                    to = %target_path.display(),
-                    error = %e,
-                    "Failed to move file"
-                );
+
+            let canonical_base = match fs::canonicalize(base_path).await {
+                Ok(path) => path,
+                Err(e) => {
+                    warn!(base = %base_path.display(), error = %e, "Failed to canonicalize base path for move_to validation");
+                    if let FileReadLock::Rename { original, locked } = &lock {
+                        let _ = fs::rename(locked, original).await;
+                    }
+                    if let FileReadLock::InProcess(path) = &lock {
+                        in_process_locks.remove(path);
+                    }
+                    continue;
+                }
+            };
+
+            let target_dir = base_path.join(move_dir);
+            let resolved_target_dir = if target_dir.exists() {
+                match fs::canonicalize(&target_dir).await {
+                    Ok(path) => path,
+                    Err(e) => {
+                        warn!(dir = %target_dir.display(), error = %e, "Failed to canonicalize move target directory");
+                        if let FileReadLock::Rename { original, locked } = &lock {
+                            let _ = fs::rename(locked, original).await;
+                        }
+                        if let FileReadLock::InProcess(path) = &lock {
+                            in_process_locks.remove(path);
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                target_dir.clone()
+            };
+
+            if !resolved_target_dir.starts_with(&canonical_base) {
+                warn!(dir = %target_dir.display(), base = %canonical_base.display(), "Skipping move_to outside base directory");
+                if let FileReadLock::Rename { original, locked } = &lock {
+                    let _ = fs::rename(locked, original).await;
+                }
+                if let FileReadLock::InProcess(path) = &lock {
+                    in_process_locks.remove(path);
+                }
+                continue;
             }
+
+            if let Err(e) = fs::create_dir_all(&target_dir).await {
+                warn!(dir = %target_dir.display(), error = %e, "Failed to create move directory");
+                if let FileReadLock::Rename { original, locked } = &lock {
+                    let _ = fs::rename(locked, original).await;
+                }
+                if let FileReadLock::InProcess(path) = &lock {
+                    in_process_locks.remove(path);
+                }
+                continue;
+            }
+        }
+
+        finalize_locked_file(config, &lock, base_path, &file_name).await;
+
+        if let FileReadLock::InProcess(path) = &lock {
+            in_process_locks.remove(path);
         }
     }
 
     Ok(())
 }
 
+enum FileReadLock {
+    None(PathBuf),
+    InProcess(PathBuf),
+    Rename { original: PathBuf, locked: PathBuf },
+}
+
+impl FileReadLock {
+    fn active_path(&self) -> &std::path::Path {
+        match self {
+            Self::None(path) | Self::InProcess(path) => path,
+            Self::Rename { locked, .. } => locked,
+        }
+    }
+}
+
+fn build_idempotent_key(
+    strategy: IdempotentKey,
+    active_path: &std::path::Path,
+    file_name: &str,
+    metadata: &std::fs::Metadata,
+) -> Option<String> {
+    match strategy {
+        IdempotentKey::None => None,
+        IdempotentKey::FileName => Some(file_name.to_string()),
+        IdempotentKey::FilePath => Some(active_path.to_string_lossy().to_string()),
+        IdempotentKey::FileSize => Some(metadata.len().to_string()),
+        IdempotentKey::Digest => metadata
+            .modified()
+            .ok()
+            .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|ts| format!("{}:{}", active_path.to_string_lossy(), ts.as_nanos())),
+    }
+}
+
+async fn finalize_locked_file(
+    config: &FileConfig,
+    lock: &FileReadLock,
+    base_path: &std::path::Path,
+    file_name: &str,
+) {
+    match lock {
+        FileReadLock::None(path) | FileReadLock::InProcess(path) => {
+            if config.noop {
+                return;
+            }
+            if config.delete {
+                if let Err(e) = fs::remove_file(path).await {
+                    warn!(file = %path.display(), error = %e, "Failed to delete file");
+                }
+            } else if let Some(ref move_dir) = config.move_to {
+                let target_path = base_path.join(move_dir).join(file_name);
+                if let Err(e) = fs::rename(path, &target_path).await {
+                    warn!(from = %path.display(), to = %target_path.display(), error = %e, "Failed to move file");
+                }
+            }
+        }
+        FileReadLock::Rename { original, locked } => {
+            if config.noop {
+                if let Err(e) = fs::rename(locked, original).await {
+                    warn!(from = %locked.display(), to = %original.display(), error = %e, "Failed to unlock file");
+                }
+            } else if config.delete {
+                if let Err(e) = fs::remove_file(locked).await {
+                    warn!(file = %locked.display(), error = %e, "Failed to delete file");
+                }
+            } else if let Some(ref move_dir) = config.move_to {
+                let target_path = base_path.join(move_dir).join(file_name);
+                if let Err(e) = fs::rename(locked, &target_path).await {
+                    warn!(from = %locked.display(), to = %target_path.display(), error = %e, "Failed to move locked file");
+                }
+            }
+        }
+    }
+}
+
 async fn list_files(
     dir: &std::path::Path,
     recursive: bool,
 ) -> Result<Vec<std::path::PathBuf>, CamelError> {
-    let mut files = Vec::new();
-    let mut read_dir = fs::read_dir(dir).await.map_err(CamelError::from)?;
+    async fn list_files_inner(
+        dir: &std::path::Path,
+        recursive: bool,
+        visited: &mut HashSet<PathBuf>,
+    ) -> Result<Vec<std::path::PathBuf>, CamelError> {
+        let mut files = Vec::new();
+        let canonical_dir = fs::canonicalize(dir).await.map_err(CamelError::from)?;
 
-    while let Some(entry) = read_dir.next_entry().await.map_err(CamelError::from)? {
-        let path = entry.path();
-        if path.is_file() {
-            files.push(path);
-        } else if path.is_dir() && recursive {
-            let mut sub_files = Box::pin(list_files(&path, true)).await?;
-            files.append(&mut sub_files);
+        if !visited.insert(canonical_dir) {
+            return Ok(files);
         }
+
+        let mut read_dir = fs::read_dir(dir).await.map_err(CamelError::from)?;
+        while let Some(entry) = read_dir.next_entry().await.map_err(CamelError::from)? {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .await
+                .map_err(CamelError::from)?;
+            let file_type = metadata.file_type();
+
+            if file_type.is_file() {
+                files.push(path);
+            } else if file_type.is_dir() && recursive {
+                let mut sub_files = Box::pin(list_files_inner(&path, true, visited)).await?;
+                files.append(&mut sub_files);
+            } else if file_type.is_symlink() {
+                // Skip symlink entries to avoid symlink traversal and recursion cycles.
+                continue;
+            }
+        }
+
+        Ok(files)
     }
+
+    let mut visited = HashSet::new();
+    let mut files = list_files_inner(dir, recursive, &mut visited).await?;
 
     files.sort();
     Ok(files)
@@ -646,50 +1142,99 @@ async fn list_files(
 // Path validation for security
 // ---------------------------------------------------------------------------
 
+/// Returns true if the path string contains a `..` component (path traversal).
+fn path_contains_traversal(path: &str) -> bool {
+    std::path::Path::new(path)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+fn is_valid_temp_prefix(prefix: &str) -> bool {
+    !prefix.contains('\0')
+        && !std::path::Path::new(prefix).is_absolute()
+        && !prefix.contains(std::path::MAIN_SEPARATOR)
+        && !prefix.contains('/')
+        && !prefix.contains('\\')
+}
+
 fn validate_path_is_within_base(
     base_dir: &std::path::Path,
     target_path: &std::path::Path,
 ) -> Result<(), CamelError> {
-    let canonical_base = base_dir.canonicalize().map_err(|e| {
-        CamelError::ProcessorError(format!("Cannot canonicalize base directory: {}", e))
-    })?;
-
-    // For non-existent paths, canonicalize the parent and construct the full path
-    let canonical_target = if target_path.exists() {
-        target_path.canonicalize().map_err(|e| {
-            CamelError::ProcessorError(format!("Cannot canonicalize target path: {}", e))
-        })?
-    } else if let Some(parent) = target_path.parent() {
-        // Ensure parent exists (should have been created by auto_create)
-        if !parent.exists() {
-            return Err(CamelError::ProcessorError(format!(
-                "Parent directory '{}' does not exist",
-                parent.display()
-            )));
-        }
-        let canonical_parent = parent.canonicalize().map_err(|e| {
-            CamelError::ProcessorError(format!("Cannot canonicalize parent directory: {}", e))
+    // If both base and target exist, use strict canonicalize comparison.
+    // Otherwise, do lexical traversal check (sufficient since config-time
+    // validation already rejects '..' in fileName).
+    if base_dir.exists() {
+        let canonical_base = base_dir.canonicalize().map_err(|e| {
+            CamelError::ProcessorError(format!("Cannot canonicalize base directory: {}", e))
         })?;
-        // Reconstruct the full path with the filename
-        if let Some(filename) = target_path.file_name() {
-            canonical_parent.join(filename)
+
+        let canonical_target = if target_path.exists() {
+            target_path.canonicalize().map_err(|e| {
+                CamelError::ProcessorError(format!("Cannot canonicalize target path: {}", e))
+            })?
+        } else if let Some(parent) = target_path.parent() {
+            if parent.exists() {
+                let canonical_parent = parent.canonicalize().map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "Cannot canonicalize parent directory: {}",
+                        e
+                    ))
+                })?;
+                if let Some(filename) = target_path.file_name() {
+                    canonical_parent.join(filename)
+                } else {
+                    return Err(CamelError::ProcessorError(
+                        "Invalid target path: no filename".to_string(),
+                    ));
+                }
+            } else {
+                // Neither target nor its parent exist — use lexical traversal check.
+                let rel = target_path.strip_prefix(base_dir).map_err(|_| {
+                    CamelError::ProcessorError(format!(
+                        "Path '{}' is not under base '{}'",
+                        target_path.display(),
+                        base_dir.display()
+                    ))
+                })?;
+                if path_contains_traversal(&rel.to_string_lossy()) {
+                    return Err(CamelError::ProcessorError(format!(
+                        "Path '{}' contains directory traversal",
+                        target_path.display()
+                    )));
+                }
+                return Ok(());
+            }
         } else {
             return Err(CamelError::ProcessorError(
-                "Invalid target path: no filename".to_string(),
+                "Invalid target path: no parent directory".to_string(),
             ));
+        };
+
+        if !canonical_target.starts_with(&canonical_base) {
+            return Err(CamelError::ProcessorError(format!(
+                "Path '{}' is outside base directory '{}'",
+                canonical_target.display(),
+                canonical_base.display()
+            )));
         }
     } else {
-        return Err(CamelError::ProcessorError(
-            "Invalid target path: no parent directory".to_string(),
-        ));
-    };
-
-    if !canonical_target.starts_with(&canonical_base) {
-        return Err(CamelError::ProcessorError(format!(
-            "Path '{}' is outside base directory '{}'",
-            canonical_target.display(),
-            canonical_base.display()
-        )));
+        // Base dir doesn't exist yet (auto_create case).
+        // Lexical check: ensure no traversal in the relative portion.
+        let rel = target_path.strip_prefix(base_dir).map_err(|_| {
+            CamelError::ProcessorError(format!(
+                "Path '{}' is not under base '{}'",
+                target_path.display(),
+                base_dir.display()
+            ))
+        })?;
+        let rel_str = rel.to_string_lossy();
+        if path_contains_traversal(&rel_str) {
+            return Err(CamelError::ProcessorError(format!(
+                "Path '{}' contains directory traversal",
+                target_path.display()
+            )));
+        }
     }
 
     Ok(())
@@ -705,7 +1250,10 @@ struct FileProducer {
 }
 
 impl FileProducer {
-    fn resolve_filename(exchange: &Exchange, config: &FileConfig) -> Result<String, CamelError> {
+    async fn resolve_filename(
+        exchange: &Exchange,
+        config: &FileConfig,
+    ) -> Result<String, CamelError> {
         let raw = if let Some(name) = exchange
             .input
             .header("CamelFileName")
@@ -725,7 +1273,7 @@ impl FileProducer {
                         name
                     ))
                 })?;
-                let val = expr.evaluate(exchange).map_err(|e| {
+                let val = expr.evaluate(exchange).await.map_err(|e| {
                     CamelError::ProcessorError(format!(
                         "cannot evaluate fileName expression '{}': {e}",
                         name
@@ -757,13 +1305,16 @@ impl Service<Exchange> for FileProducer {
         let config = self.config.clone();
 
         Box::pin(async move {
-            let file_name = FileProducer::resolve_filename(&exchange, &config)?;
+            let file_name = FileProducer::resolve_filename(&exchange, &config).await?;
             let body = exchange.input.body.clone();
 
             let dir_path = std::path::Path::new(&config.directory);
             let target_path = dir_path.join(&file_name);
 
-            // 1. Auto-create directories
+            // 1. Security: validate path is within base directory
+            validate_path_is_within_base(dir_path, &target_path)?;
+
+            // 2. Auto-create directories (after path validation)
             if config.auto_create
                 && let Some(parent) = target_path.parent()
             {
@@ -773,17 +1324,27 @@ impl Service<Exchange> for FileProducer {
                     .map_err(CamelError::from)?;
             }
 
-            // 2. Security: validate path is within base directory
-            validate_path_is_within_base(dir_path, &target_path)?;
-
             // 3. Handle file-exist strategy
             match config.file_exist {
-                FileExistStrategy::Fail if target_path.exists() => {
-                    return Err(CamelError::ProcessorError(format!(
-                        "File already exists: {}",
-                        target_path.display()
-                    )));
+                FileExistStrategy::Fail => {
+                    let mut file = tokio::time::timeout(
+                        config.write_timeout,
+                        OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&target_path),
+                    )
+                    .await
+                    .map_err(|_| {
+                        CamelError::ProcessorError("Timeout opening file with create_new".into())
+                    })?
+                    .map_err(CamelError::from)?;
+
+                    write_body_with_charset(body, &config.charset, &mut file, config.write_timeout)
+                        .await?;
+                    file.flush().await.map_err(CamelError::from)?;
                 }
+                FileExistStrategy::Ignore if target_path.exists() => return Ok(exchange),
                 FileExistStrategy::Append => {
                     // Append: write directly without temp file (append is inherently non-atomic)
                     let mut file = tokio::time::timeout(
@@ -799,13 +1360,8 @@ impl Service<Exchange> for FileProducer {
                     })?
                     .map_err(CamelError::from)?;
 
-                    tokio::time::timeout(
-                        config.write_timeout,
-                        io::copy(&mut body.into_async_read(), &mut file),
-                    )
-                    .await
-                    .map_err(|_| CamelError::ProcessorError("Timeout writing to file".into()))?
-                    .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+                    write_body_with_charset(body, &config.charset, &mut file, config.write_timeout)
+                        .await?;
 
                     file.flush().await.map_err(CamelError::from)?;
                 }
@@ -830,26 +1386,18 @@ impl Service<Exchange> for FileProducer {
                             })?
                             .map_err(CamelError::from)?;
 
-                    let copy_result = tokio::time::timeout(
+                    let copy_result = write_body_with_charset(
+                        body,
+                        &config.charset,
+                        &mut file,
                         config.write_timeout,
-                        io::copy(&mut body.into_async_read(), &mut file),
                     )
                     .await;
 
                     // Flush any kernel buffers (best-effort; actual write errors come from io::copy above)
                     let _ = file.flush().await;
 
-                    match copy_result {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => {
-                            // Guard will clean up temp file on drop
-                            return Err(CamelError::ProcessorError(e.to_string()));
-                        }
-                        Err(_) => {
-                            // Guard will clean up temp file on drop
-                            return Err(CamelError::ProcessorError("Timeout writing file".into()));
-                        }
-                    }
+                    copy_result?;
 
                     // Atomic rename: temp → target
                     let rename_result = tokio::time::timeout(
@@ -875,6 +1423,17 @@ impl Service<Exchange> for FileProducer {
                 }
             }
 
+            if let Some(done_pattern) = &config.done_file_name {
+                let done_name = done_pattern.replace("${file:name}", &file_name);
+                tokio::time::timeout(
+                    config.write_timeout,
+                    fs::write(dir_path.join(done_name), []),
+                )
+                .await
+                .map_err(|_| CamelError::ProcessorError("Timeout creating done file".into()))?
+                .map_err(CamelError::from)?;
+            }
+
             // 4. Set output header
             let abs_path = target_path
                 .canonicalize()
@@ -894,6 +1453,60 @@ impl Service<Exchange> for FileProducer {
             Ok(exchange)
         })
     }
+}
+
+async fn write_body_with_charset(
+    body: Body,
+    charset: &Option<String>,
+    file: &mut fs::File,
+    timeout: Duration,
+) -> Result<(), CamelError> {
+    match body {
+        Body::Text(text) | Body::Xml(text) => {
+            let bytes = encode_text_by_charset(&text, charset)?;
+            tokio::time::timeout(timeout, file.write_all(&bytes))
+                .await
+                .map_err(|_| CamelError::ProcessorError("Timeout writing file".into()))?
+                .map_err(CamelError::from)?;
+            Ok(())
+        }
+        other => {
+            let mut reader = other.into_async_read()?;
+            tokio::time::timeout(timeout, io::copy(&mut reader, file))
+                .await
+                .map_err(|_| CamelError::ProcessorError("Timeout writing to file".into()))?
+                .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+            Ok(())
+        }
+    }
+}
+
+fn encode_text_by_charset(text: &str, charset: &Option<String>) -> Result<Vec<u8>, CamelError> {
+    let Some(charset) = charset.as_ref() else {
+        return Ok(text.as_bytes().to_vec());
+    };
+
+    if charset.eq_ignore_ascii_case("utf-8") {
+        return Ok(text.as_bytes().to_vec());
+    }
+
+    if charset.eq_ignore_ascii_case("iso-8859-1") {
+        let mut out = Vec::with_capacity(text.len());
+        for ch in text.chars() {
+            let code = ch as u32;
+            if code > 0xFF {
+                return Err(CamelError::ProcessorError(format!(
+                    "character '{ch}' cannot be encoded as ISO-8859-1"
+                )));
+            }
+            out.push(code as u8);
+        }
+        return Ok(out);
+    }
+
+    Err(CamelError::Config(format!(
+        "unsupported charset '{charset}', supported: UTF-8, ISO-8859-1"
+    )))
 }
 
 #[cfg(test)]
@@ -1060,16 +1673,34 @@ mod tests {
         let include_re = None;
         let exclude_re = None;
         let mut seen = std::collections::HashSet::new();
+        let in_process_locks = std::sync::Arc::new(DashMap::new());
+        let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
 
-        poll_directory(&config, &ctx, &include_re, &exclude_re, &mut seen)
-            .await
-            .unwrap();
+        poll_directory(
+            &config,
+            &ctx,
+            &include_re,
+            &exclude_re,
+            &mut seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await
+        .unwrap();
         assert!(rx.try_recv().is_ok(), "first poll should emit file");
         assert!(rx.try_recv().is_err(), "should only emit once");
 
-        poll_directory(&config, &ctx, &include_re, &exclude_re, &mut seen)
-            .await
-            .unwrap();
+        poll_directory(
+            &config,
+            &ctx,
+            &include_re,
+            &exclude_re,
+            &mut seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await
+        .unwrap();
         assert!(
             rx.try_recv().is_err(),
             "second poll should not re-emit seen file"
@@ -1094,18 +1725,36 @@ mod tests {
         let include_re = None;
         let exclude_re = None;
         let mut seen = std::collections::HashSet::new();
+        let in_process_locks = std::sync::Arc::new(DashMap::new());
+        let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
 
-        poll_directory(&config, &ctx, &include_re, &exclude_re, &mut seen)
-            .await
-            .unwrap();
+        poll_directory(
+            &config,
+            &ctx,
+            &include_re,
+            &exclude_re,
+            &mut seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await
+        .unwrap();
         let _ = rx.try_recv();
 
         let file2 = dir.path().join("b.txt");
         tokio::fs::write(&file2, b"b").await.unwrap();
 
-        poll_directory(&config, &ctx, &include_re, &exclude_re, &mut seen)
-            .await
-            .unwrap();
+        poll_directory(
+            &config,
+            &ctx,
+            &include_re,
+            &exclude_re,
+            &mut seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await
+        .unwrap();
         assert!(
             rx.try_recv().is_ok(),
             "b.txt should be emitted on second poll"
@@ -1514,6 +2163,55 @@ mod tests {
 
         let result = producer.oneshot(exchange).await;
         assert!(result.is_err(), "Should reject absolute path outside base");
+    }
+
+    #[tokio::test]
+    async fn test_file_producer_does_not_create_dirs_before_path_validation() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}"), &ctx)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let outside_parent = dir.path().parent().unwrap().join("escaped-create-dir");
+        if outside_parent.exists() {
+            std::fs::remove_dir_all(&outside_parent).unwrap();
+        }
+
+        let mut exchange = Exchange::new(Message::new("malicious"));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("../escaped-create-dir/file.txt".to_string()),
+        );
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_err(), "Should reject traversal path");
+        assert!(
+            !outside_parent.exists(),
+            "Must not create outside directories before path validation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_list_files_skips_symlink_cycle() {
+        use std::os::unix::fs as unix_fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("a.txt"), "x").unwrap();
+        unix_fs::symlink(dir.path(), nested.join("loop")).unwrap();
+
+        let files = list_files(dir.path(), true).await.unwrap();
+        assert_eq!(files.iter().filter(|p| p.ends_with("a.txt")).count(), 1);
     }
 
     // -----------------------------------------------------------------------
@@ -1980,6 +2678,332 @@ mod tests {
         assert!(
             dir.path().join("plain.txt").exists(),
             "literal fileName without expressions should still work"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Config validation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rejects_path_traversal_in_move_to() {
+        let result = FileConfig::from_uri("file:/tmp/inbox?move=../etc/passwd");
+        assert!(result.is_err(), "should reject path traversal in move_to");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("path traversal"),
+            "error should mention path traversal: {err}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_absolute_move_to() {
+        let result = FileConfig::from_uri("file:/tmp/inbox?move=/tmp/outside");
+        assert!(result.is_err(), "should reject absolute move_to");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("relative path") || err.contains("Invalid URI"),
+            "error should mention invalid move_to path: {err}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_path_traversal_in_temp_prefix() {
+        let result = FileConfig::from_uri("file:/tmp/inbox?tempPrefix=../tmp");
+        assert!(
+            result.is_err(),
+            "should reject path traversal in temp_prefix"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("path traversal"),
+            "error should mention path traversal: {err}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_temp_prefix_with_path_separator() {
+        let result = FileConfig::from_uri("file:/tmp/inbox?tempPrefix=tmp/sub");
+        assert!(result.is_err(), "should reject temp_prefix with separator");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("plain filename prefix"),
+            "error should mention plain filename prefix restriction: {err}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_absolute_temp_prefix() {
+        let result = FileConfig::from_uri("file:/tmp/inbox?tempPrefix=/tmp/");
+        assert!(result.is_err(), "should reject absolute temp_prefix");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("plain filename prefix"),
+            "error should mention plain filename prefix restriction: {err}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_null_byte_in_temp_prefix() {
+        let config = FileConfig {
+            directory: "/tmp/inbox".into(),
+            delay: Duration::from_millis(500),
+            delay_ms: 500,
+            initial_delay: Duration::from_millis(1000),
+            initial_delay_ms: 1000,
+            noop: false,
+            delete: false,
+            move_to: None,
+            file_name: Some("ok.txt".into()),
+            include: None,
+            exclude: None,
+            recursive: false,
+            file_exist: FileExistStrategy::Override,
+            read_lock_strategy: ReadLockStrategy::None,
+            idempotent_key: IdempotentKey::None,
+            done_file_name: None,
+            charset: None,
+            temp_prefix: Some("tmp\0".into()),
+            auto_create: true,
+            starting_directory_must_exist: false,
+            read_timeout: Duration::from_millis(30_000),
+            read_timeout_ms: 30_000,
+            write_timeout: Duration::from_millis(30_000),
+            write_timeout_ms: 30_000,
+        };
+
+        let result = config.validate();
+        assert!(result.is_err(), "should reject null byte in temp_prefix");
+    }
+
+    #[test]
+    fn test_rejects_null_byte_in_filename() {
+        // Null bytes in URI params are typically URL-encoded, so we test via
+        // direct config construction to simulate the validation logic.
+        let config = FileConfig {
+            directory: "/tmp/inbox".into(),
+            delay: Duration::from_millis(500),
+            delay_ms: 500,
+            initial_delay: Duration::from_millis(1000),
+            initial_delay_ms: 1000,
+            noop: false,
+            delete: false,
+            move_to: None,
+            file_name: Some("foo\0bar".into()),
+            include: None,
+            exclude: None,
+            recursive: false,
+            file_exist: FileExistStrategy::Override,
+            read_lock_strategy: ReadLockStrategy::None,
+            idempotent_key: IdempotentKey::None,
+            done_file_name: None,
+            charset: None,
+            temp_prefix: None,
+            auto_create: true,
+            starting_directory_must_exist: false,
+            read_timeout: Duration::from_millis(30_000),
+            read_timeout_ms: 30_000,
+            write_timeout: Duration::from_millis(30_000),
+            write_timeout_ms: 30_000,
+        };
+        let result = config.validate();
+        assert!(result.is_err(), "should reject null byte in filename");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("null"),
+            "error should mention null bytes: {err}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_empty_filename() {
+        let config = FileConfig {
+            directory: "/tmp/inbox".into(),
+            delay: Duration::from_millis(500),
+            delay_ms: 500,
+            initial_delay: Duration::from_millis(1000),
+            initial_delay_ms: 1000,
+            noop: false,
+            delete: false,
+            move_to: None,
+            file_name: Some("".into()),
+            include: None,
+            exclude: None,
+            recursive: false,
+            file_exist: FileExistStrategy::Override,
+            read_lock_strategy: ReadLockStrategy::None,
+            idempotent_key: IdempotentKey::None,
+            done_file_name: None,
+            charset: None,
+            temp_prefix: None,
+            auto_create: true,
+            starting_directory_must_exist: false,
+            read_timeout: Duration::from_millis(30_000),
+            read_timeout_ms: 30_000,
+            write_timeout: Duration::from_millis(30_000),
+            write_timeout_ms: 30_000,
+        };
+        let result = config.validate();
+        assert!(result.is_err(), "should reject empty filename");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("empty") || err.contains("must not"),
+            "error should mention empty: {err}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_nonexistent_directory_when_starting_directory_must_exist() {
+        let result =
+            FileConfig::from_uri("file:/tmp/nonexistent_dir_12345?startingDirectoryMustExist=true");
+        assert!(
+            result.is_err(),
+            "should reject non-existent directory when startingDirectoryMustExist=true"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("does not exist"),
+            "error should mention directory does not exist: {err}"
+        );
+    }
+
+    #[test]
+    fn test_accepts_existing_directory_when_starting_directory_must_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+        let result =
+            FileConfig::from_uri(&format!("file:{dir_path}?startingDirectoryMustExist=true"));
+        assert!(
+            result.is_ok(),
+            "should accept existing directory when startingDirectoryMustExist=true: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_valid_config_passes() {
+        let cfg = FileConfig::from_uri("file:/tmp/inbox").unwrap();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_file_exist_strategy_rejects_unknown() {
+        // Unknown strategy values should be rejected by from_str
+        let result = FileExistStrategy::from_str("BogusValue");
+        assert!(
+            result.is_err(),
+            "unknown FileExistStrategy should return Err"
+        );
+    }
+
+    #[test]
+    fn test_path_contains_traversal_detects_parent_dir() {
+        assert!(path_contains_traversal("../etc/passwd"));
+        assert!(path_contains_traversal("foo/../bar"));
+        assert!(path_contains_traversal(".."));
+        assert!(path_contains_traversal("a/b/../../../c"));
+    }
+
+    #[test]
+    fn test_path_contains_traversal_accepts_safe_paths() {
+        assert!(!path_contains_traversal("safe/path"));
+        assert!(!path_contains_traversal("/absolute/path"));
+        assert!(!path_contains_traversal("filename.txt"));
+        assert!(!path_contains_traversal(".hidden"));
+        assert!(!path_contains_traversal(""));
+    }
+
+    // -----------------------------------------------------------------------
+    // File modification detection tests (C-20)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_stream_detects_file_modified_during_read() {
+        use futures::StreamExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("mutable.txt");
+        std::fs::write(&file_path, b"initial content here").unwrap();
+
+        // Capture initial metadata
+        let initial_meta = std::fs::metadata(&file_path).unwrap();
+        let initial_size = initial_meta.len();
+        let initial_mtime = initial_meta.modified().ok();
+
+        // Create a raw file stream (simulating what the consumer does)
+        let file = tokio::fs::File::open(&file_path).await.unwrap();
+        let raw_stream = ReaderStream::new(file).map(|res| res.map_err(CamelError::from));
+
+        let mut stream = ModificationDetectingStream::new(
+            raw_stream,
+            file_path.clone(),
+            initial_size,
+            initial_mtime,
+        );
+
+        // Read a chunk (file not modified yet — should succeed)
+        let chunk = stream.next().await;
+        assert!(chunk.is_some(), "should produce at least one chunk");
+        assert!(chunk.as_ref().unwrap().is_ok(), "first chunk should be Ok");
+
+        // Modify the file (change content/size)
+        std::fs::write(&file_path, b"modified content - different size!!").unwrap();
+
+        // Drain remaining chunks — the stream should produce an error after EOF
+        let mut got_error = false;
+        while let Some(result) = stream.next().await {
+            if result.is_err() {
+                let err = result.unwrap_err();
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("file modified during read"),
+                    "expected modification error, got: {msg}"
+                );
+                got_error = true;
+                break;
+            }
+        }
+
+        assert!(
+            got_error,
+            "stream should detect file was modified during read"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_succeeds_when_file_not_modified() {
+        use futures::StreamExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("stable.txt");
+        std::fs::write(&file_path, b"stable content").unwrap();
+
+        let initial_meta = std::fs::metadata(&file_path).unwrap();
+        let initial_size = initial_meta.len();
+        let initial_mtime = initial_meta.modified().ok();
+
+        let file = tokio::fs::File::open(&file_path).await.unwrap();
+        let raw_stream = ReaderStream::new(file).map(|res| res.map_err(CamelError::from));
+
+        let mut stream = ModificationDetectingStream::new(
+            raw_stream,
+            file_path.clone(),
+            initial_size,
+            initial_mtime,
+        );
+
+        // Drain entire stream — should produce no errors
+        let mut all_ok = true;
+        while let Some(result) = stream.next().await {
+            if result.is_err() {
+                all_ok = false;
+                break;
+            }
+        }
+
+        assert!(
+            all_ok,
+            "stream should complete without errors when file is not modified"
         );
     }
 }

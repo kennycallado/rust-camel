@@ -11,6 +11,7 @@ pub struct XsltEndpoint {
     compiled: Arc<OnceCell<StylesheetId>>,
     params: Vec<(String, String)>,
     output_method: Option<String>,
+    fail_on_null_body: bool,
     client: Arc<XsltBridgeClient>,
     runtime: Arc<XsltBridgeRuntime>,
 }
@@ -21,6 +22,7 @@ impl XsltEndpoint {
         stylesheet_bytes: Vec<u8>,
         params: Vec<(String, String)>,
         output_method: Option<String>,
+        fail_on_null_body: bool,
         client: Arc<XsltBridgeClient>,
         runtime: Arc<XsltBridgeRuntime>,
     ) -> Self {
@@ -30,6 +32,7 @@ impl XsltEndpoint {
             compiled: Arc::new(OnceCell::new()),
             params,
             output_method,
+            fail_on_null_body,
             client,
             runtime,
         }
@@ -53,6 +56,7 @@ impl Endpoint for XsltEndpoint {
             Arc::clone(&self.compiled),
             self.params.clone(),
             self.output_method.clone(),
+            self.fail_on_null_body,
             Arc::clone(&self.client),
             Arc::clone(&self.runtime),
         )))

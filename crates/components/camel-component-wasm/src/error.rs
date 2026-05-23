@@ -42,6 +42,8 @@ impl std::fmt::Display for TrapReason {
 }
 
 /// Errors that can occur during WASM plugin execution.
+// TODO(WASM-005): WasmError may conflict with WIT-generated types in bindings.
+// If WIT adds an error resource named WasmError, rename this to CamelWasmError.
 #[derive(Debug, thiserror::Error)]
 pub enum WasmError {
     #[error("WASM module not found: {0}")]
@@ -123,11 +125,15 @@ impl WasmError {
 impl From<WasmError> for CamelError {
     fn from(err: WasmError) -> Self {
         match &err {
-            WasmError::GuestPanic(msg) => CamelError::ProcessorError(msg.clone()),
+            WasmError::GuestPanic(msg) => CamelError::ProcessorError(format!("wasm trap: {msg}")),
             WasmError::TypeConversion(msg) => CamelError::TypeConversionFailed(msg.clone()),
             WasmError::ModuleNotFound(msg) => CamelError::ComponentNotFound(msg.clone()),
-            WasmError::CompilationFailed(msg) => CamelError::EndpointCreationFailed(msg.clone()),
-            WasmError::InstantiationFailed(msg) => CamelError::EndpointCreationFailed(msg.clone()),
+            WasmError::CompilationFailed(msg) => {
+                CamelError::Config(format!("wasm compilation failed: {msg}"))
+            }
+            WasmError::InstantiationFailed(msg) => {
+                CamelError::Config(format!("wasm instantiation failed: {msg}"))
+            }
             WasmError::Io(msg) => CamelError::Io(msg.clone()),
             WasmError::Config(msg) => CamelError::Config(msg.clone()),
             // ── Phase 4 structured variants ──
@@ -139,7 +145,7 @@ impl From<WasmError> for CamelError {
                 plugin, timeout_secs
             )),
             WasmError::Trap { plugin, reason } => {
-                CamelError::ProcessorError(format!("WASM plugin '{}' trapped: {}", plugin, reason))
+                CamelError::ProcessorError(format!("wasm trap: plugin '{}': {}", plugin, reason))
             }
             WasmError::OutOfMemory {
                 plugin,
@@ -296,6 +302,15 @@ mod tests {
         let err = WasmError::GuestPanic("boom".to_string());
         let camel: CamelError = err.into();
         assert!(matches!(camel, CamelError::ProcessorError(_)));
+        assert!(camel.to_string().contains("wasm trap"));
+    }
+
+    #[test]
+    fn test_instantiation_maps_to_config_error() {
+        let err = WasmError::InstantiationFailed("bad import".to_string());
+        let camel: CamelError = err.into();
+        assert!(matches!(camel, CamelError::Config(_)));
+        assert!(camel.to_string().contains("instantiation failed"));
     }
 
     #[test]

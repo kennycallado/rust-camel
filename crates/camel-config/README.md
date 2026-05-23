@@ -395,7 +395,7 @@ camel-config = "*"
 
 - **camel-core** - Core framework and context
 - **camel-dsl** - YAML and JSON route definitions and parsing
-- **camel-runtime** - Route execution engine
+- **camel-processor** - EIP processors and middleware patterns
 
 ## Documentation
 

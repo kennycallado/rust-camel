@@ -202,13 +202,17 @@ fn is_option_type(ty: &Type) -> Option<Type> {
 
 /// Generate code to parse a value from params into a local variable
 /// Returns (variable_name, binding_code) where binding_code assigns to the variable
+///
+/// EMAC-005: Error messages include the URI parameter name (`param_name`) for
+/// traceability. When `#[uri_param(name = "...")]` is used, the custom name
+/// appears in errors; otherwise the Rust field name is used as the param name.
 fn generate_param_parsing(
     param_name: &str,
     field_name: &syn::Ident,
     ty: &Type,
     default: Option<&str>,
     endpoint_crate: &syn::Path,
-) -> TokenStream {
+) -> syn::Result<TokenStream> {
     let type_name = get_type_name(ty);
     let inner_type = is_option_type(ty);
 
@@ -216,29 +220,48 @@ fn generate_param_parsing(
     if let Some(inner_ty) = &inner_type {
         let inner_type_name = get_type_name(inner_ty);
 
-        return match inner_type_name.as_deref() {
+        // TODO(EMAC-004): Option<Vec<T>> parameter types are not yet supported.
+        // When the inner type is Vec<T>, the macro should parse a comma-separated
+        // URI parameter value into a Vec. Currently it falls through to the generic
+        // FromStr branch, which will fail for Vec<T>.
+
+        return Ok(match inner_type_name.as_deref() {
             Some("String") => quote! {
                 let #field_name = params.get(#param_name).cloned()
             },
             Some("bool") => quote! {
-                let #field_name = params.get(#param_name)
-                    .map(|v| v == "true")
+                let #field_name = if let Some(v) = params.get(#param_name) {
+                    Some(#endpoint_crate::uri::parse_bool_param(v).map_err(|e| #endpoint_crate::CamelError::InvalidUri(
+                        format!("invalid value for {}: {}", #param_name, e)
+                    ))?)
+                } else {
+                    None
+                }
             },
             Some("u64") | Some("u32") | Some("usize") | Some("i64") | Some("i32")
             | Some("isize") => quote! {
-                let #field_name = params.get(#param_name)
-                    .and_then(|v| v.parse().ok())
+                let #field_name = if let Some(v) = params.get(#param_name) {
+                    Some(v.parse::<#inner_ty>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
+                        format!("invalid value for {}: {}", #param_name, e)
+                    ))?)
+                } else {
+                    None
+                }
             },
             _ => quote! {
-                let #field_name = params.get(#param_name)
-                    .map(|v| v.parse().ok())
-                    .flatten()
+                let #field_name = if let Some(v) = params.get(#param_name) {
+                    Some(v.parse::<#inner_ty>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
+                        format!("invalid value for {}: {}", #param_name, e)
+                    ))?)
+                } else {
+                    None
+                }
             },
-        };
+        });
     }
 
     // Handle non-Option types
-    match type_name.as_deref() {
+    Ok(match type_name.as_deref() {
         Some("String") => {
             if let Some(default_val) = default {
                 quote! {
@@ -256,26 +279,40 @@ fn generate_param_parsing(
         }
         Some("bool") => {
             if let Some(default_val) = default {
-                let default_bool = default_val == "true";
+                let default_bool =
+                    matches!(default_val.to_lowercase().as_str(), "true" | "1" | "yes");
                 quote! {
-                    let #field_name = params.get(#param_name)
-                        .map(|v| v == "true")
-                        .unwrap_or(#default_bool)
+                    let #field_name = match params.get(#param_name) {
+                        Some(v) => #endpoint_crate::uri::parse_bool_param(v).map_err(|e| #endpoint_crate::CamelError::InvalidUri(
+                            format!("invalid value for {}: {}", #param_name, e)
+                        ))?,
+                        None => #default_bool,
+                    }
                 }
             } else {
                 // Require the param instead of silent false default
                 quote! {
-                    let #field_name = params.get(#param_name)
-                        .map(|v| v == "true")
-                        .ok_or_else(|| #endpoint_crate::CamelError::InvalidUri(
+                    let #field_name = #endpoint_crate::uri::parse_bool_param(
+                        &params.get(#param_name).ok_or_else(|| #endpoint_crate::CamelError::InvalidUri(
                             format!("missing required parameter: {}", #param_name)
                         ))?
+                    ).map_err(|e| #endpoint_crate::CamelError::InvalidUri(
+                        format!("invalid value for {}: {}", #param_name, e)
+                    ))?
                 }
             }
         }
         Some("u64") => {
             if let Some(default_val) = default {
-                let default_num: u64 = default_val.parse().unwrap_or(0);
+                let default_num: u64 = default_val.parse().map_err(|_| {
+                    syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "invalid default value for '{}': '{}' is not a valid u64",
+                            param_name, default_val
+                        ),
+                    )
+                })?;
                 quote! {
                     let #field_name = match params.get(#param_name) {
                         Some(v) => v.parse::<u64>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
@@ -299,7 +336,15 @@ fn generate_param_parsing(
         }
         Some("u32") => {
             if let Some(default_val) = default {
-                let default_num: u32 = default_val.parse().unwrap_or(0);
+                let default_num: u32 = default_val.parse().map_err(|_| {
+                    syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "invalid default value for '{}': '{}' is not a valid u32",
+                            param_name, default_val
+                        ),
+                    )
+                })?;
                 quote! {
                     let #field_name = match params.get(#param_name) {
                         Some(v) => v.parse::<u32>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
@@ -323,7 +368,15 @@ fn generate_param_parsing(
         }
         Some("usize") => {
             if let Some(default_val) = default {
-                let default_num: usize = default_val.parse().unwrap_or(0);
+                let default_num: usize = default_val.parse().map_err(|_| {
+                    syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "invalid default value for '{}': '{}' is not a valid usize",
+                            param_name, default_val
+                        ),
+                    )
+                })?;
                 quote! {
                     let #field_name = match params.get(#param_name) {
                         Some(v) => v.parse::<usize>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
@@ -347,7 +400,15 @@ fn generate_param_parsing(
         }
         Some("i64") => {
             if let Some(default_val) = default {
-                let default_num: i64 = default_val.parse().unwrap_or(0);
+                let default_num: i64 = default_val.parse().map_err(|_| {
+                    syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "invalid default value for '{}': '{}' is not a valid i64",
+                            param_name, default_val
+                        ),
+                    )
+                })?;
                 quote! {
                     let #field_name = match params.get(#param_name) {
                         Some(v) => v.parse::<i64>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
@@ -371,7 +432,15 @@ fn generate_param_parsing(
         }
         Some("i32") => {
             if let Some(default_val) = default {
-                let default_num: i32 = default_val.parse().unwrap_or(0);
+                let default_num: i32 = default_val.parse().map_err(|_| {
+                    syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "invalid default value for '{}': '{}' is not a valid i32",
+                            param_name, default_val
+                        ),
+                    )
+                })?;
                 quote! {
                     let #field_name = match params.get(#param_name) {
                         Some(v) => v.parse::<i32>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
@@ -397,9 +466,14 @@ fn generate_param_parsing(
             // Assume it's an enum or other type with FromStr
             if let Some(default_val) = default {
                 quote! {
-                    let #field_name = params.get(#param_name)
-                        .map(|v| v.parse::<#ty>().unwrap_or_else(|_| #default_val.parse().unwrap())) // allow-unwrap
-                        .unwrap_or_else(|| #default_val.parse().unwrap()) // allow-unwrap
+                    let #field_name = match params.get(#param_name) {
+                        Some(v) => v.parse::<#ty>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
+                            format!("invalid value for parameter '{}': {}", #param_name, e)
+                        ))?,
+                        None => #default_val.parse::<#ty>().map_err(|e| #endpoint_crate::CamelError::InvalidUri(
+                            format!("invalid default value for parameter '{}': {}", #param_name, e)
+                        ))?,
+                    };
                 }
             } else {
                 quote! {
@@ -414,44 +488,36 @@ fn generate_param_parsing(
                 }
             }
         }
-    }
+    })
 }
 
-pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
+pub fn impl_uri_config(input: &DeriveInput) -> syn::Result<TokenStream> {
     let struct_name = &input.ident;
 
-    let uri_config_attr = match parse_uri_config_attr(&input.attrs) {
-        Ok(a) => a,
-        Err(e) => return e.to_compile_error(),
-    };
+    let uri_config_attr = parse_uri_config_attr(&input.attrs)?;
 
     let skip_impl = uri_config_attr.skip_impl;
     let endpoint_crate = uri_config_attr.crate_path;
 
     // Extract scheme from struct attributes
-    let scheme = match extract_scheme(&input.attrs) {
-        Ok(s) => s,
-        Err(e) => return e.to_compile_error(),
-    };
+    let scheme = extract_scheme(&input.attrs)?;
 
     // Get struct fields
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => &fields.named,
             _ => {
-                return syn::Error::new(
+                return Err(syn::Error::new(
                     proc_macro2::Span::call_site(),
                     "UriConfig only supports structs with named fields",
-                )
-                .to_compile_error();
+                ));
             }
         },
         _ => {
-            return syn::Error::new(
+            return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 "UriConfig can only be derived for structs",
-            )
-            .to_compile_error();
+            ));
         }
     };
 
@@ -521,15 +587,14 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
                     field_info.push((field_name, field_type, FieldType::Path));
                 } else {
                     // Additional path field without attribute - error
-                    return syn::Error::new_spanned(
+                    return Err(syn::Error::new_spanned(
                         field,
                         "only one field can be the path field (first field without #[uri_param])",
-                    )
-                    .to_compile_error();
+                    ));
                 }
             }
             Err(e) => {
-                return e.to_compile_error();
+                return Err(e);
             }
         }
     }
@@ -572,7 +637,7 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
                     field_type,
                     default.as_deref(),
                     &endpoint_crate,
-                );
+                )?;
                 bindings.push(parsing_code);
             }
             FieldType::DurationFromMs { .. } => {
@@ -614,7 +679,7 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
 
     if skip_impl {
         // Generate an inherent method for parsing, user implements UriConfig manually
-        quote! {
+        Ok(quote! {
             impl #struct_name {
                 /// Parse URI components into this config.
                 /// Call this from your custom `UriConfig::from_components` implementation.
@@ -622,10 +687,10 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
                     #parsing_logic
                 }
             }
-        }
+        })
     } else {
         // Generate full UriConfig trait implementation
-        quote! {
+        Ok(quote! {
             impl #endpoint_crate::UriConfig for #struct_name {
                 fn scheme() -> &'static str {
                     #scheme_lit
@@ -649,6 +714,6 @@ pub fn impl_uri_config(input: &DeriveInput) -> TokenStream {
                     #parsing_logic
                 }
             }
-        }
+        })
     }
 }

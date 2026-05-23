@@ -14,9 +14,13 @@ pub enum OpenSearchOperation {
     SEARCH,
     GET,
     DELETE,
+    EXISTS,
     UPDATE,
     BULK,
     MULTIGET,
+    DELETEINDEX,
+    MULTISEARCH,
+    PING,
     UNKNOWN(String),
 }
 
@@ -29,10 +33,17 @@ impl FromStr for OpenSearchOperation {
             "SEARCH" => Ok(OpenSearchOperation::SEARCH),
             "GET" => Ok(OpenSearchOperation::GET),
             "DELETE" => Ok(OpenSearchOperation::DELETE),
+            "EXISTS" => Ok(OpenSearchOperation::EXISTS),
             "UPDATE" => Ok(OpenSearchOperation::UPDATE),
             "BULK" => Ok(OpenSearchOperation::BULK),
             "MULTIGET" => Ok(OpenSearchOperation::MULTIGET),
-            other => Ok(OpenSearchOperation::UNKNOWN(other.to_string())),
+            "DELETE_INDEX" => Ok(OpenSearchOperation::DELETEINDEX),
+            "MULTI_SEARCH" => Ok(OpenSearchOperation::MULTISEARCH),
+            "PING" => Ok(OpenSearchOperation::PING),
+            other => Err(CamelError::Config(format!(
+                "unknown OpenSearch operation: {}",
+                other
+            ))),
         }
     }
 }
@@ -44,9 +55,13 @@ impl fmt::Display for OpenSearchOperation {
             OpenSearchOperation::SEARCH => write!(f, "SEARCH"),
             OpenSearchOperation::GET => write!(f, "GET"),
             OpenSearchOperation::DELETE => write!(f, "DELETE"),
+            OpenSearchOperation::EXISTS => write!(f, "EXISTS"),
             OpenSearchOperation::UPDATE => write!(f, "UPDATE"),
             OpenSearchOperation::BULK => write!(f, "BULK"),
             OpenSearchOperation::MULTIGET => write!(f, "MULTIGET"),
+            OpenSearchOperation::DELETEINDEX => write!(f, "DELETE_INDEX"),
+            OpenSearchOperation::MULTISEARCH => write!(f, "MULTI_SEARCH"),
+            OpenSearchOperation::PING => write!(f, "PING"),
             OpenSearchOperation::UNKNOWN(s) => write!(f, "{}", s),
         }
     }
@@ -80,6 +95,14 @@ pub struct OpenSearchConfig {
     pub default_operation: Option<OpenSearchOperation>,
     #[serde(default)]
     pub index_name: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_bulk_bytes: Option<usize>,
+    #[serde(default)]
+    pub size: Option<u32>,
+    #[serde(default)]
+    pub from: Option<u32>,
 }
 
 impl OpenSearchConfig {
@@ -115,6 +138,31 @@ impl OpenSearchConfig {
         self.password = Some(v.into());
         self
     }
+
+    pub fn with_index_name(mut self, v: impl Into<String>) -> Self {
+        self.index_name = Some(v.into());
+        self
+    }
+
+    pub fn with_timeout_ms(mut self, v: u64) -> Self {
+        self.timeout_ms = Some(v);
+        self
+    }
+
+    pub fn with_max_bulk_bytes(mut self, v: usize) -> Self {
+        self.max_bulk_bytes = Some(v);
+        self
+    }
+
+    pub fn with_size(mut self, v: u32) -> Self {
+        self.size = Some(v);
+        self
+    }
+
+    pub fn with_from(mut self, v: u32) -> Self {
+        self.from = Some(v);
+        self
+    }
 }
 
 impl Default for OpenSearchConfig {
@@ -126,6 +174,10 @@ impl Default for OpenSearchConfig {
             password: None,
             default_operation: None,
             index_name: None,
+            timeout_ms: None,
+            max_bulk_bytes: None,
+            size: None,
+            from: None,
         }
     }
 }
@@ -139,6 +191,10 @@ impl fmt::Debug for OpenSearchConfig {
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("default_operation", &self.default_operation)
             .field("index_name", &self.index_name)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_bulk_bytes", &self.max_bulk_bytes)
+            .field("size", &self.size)
+            .field("from", &self.from)
             .finish()
     }
 }
@@ -169,6 +225,7 @@ impl fmt::Debug for OpenSearchConfig {
 /// - `operation` - OpenSearch operation to perform (default: SEARCH)
 /// - `is_tls` - Whether to use HTTPS (determined by scheme: `opensearchs` = true)
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct OpenSearchEndpointConfig {
     /// OpenSearch server hostname. `None` if not set in URI.
     pub host: Option<String>,
@@ -190,6 +247,18 @@ pub struct OpenSearchEndpointConfig {
 
     /// Whether to use HTTPS. Determined by scheme (`opensearchs` = true).
     pub is_tls: bool,
+
+    /// Request timeout in milliseconds.
+    pub timeout_ms: Option<u64>,
+
+    /// Maximum serialized bulk payload size in bytes.
+    pub max_bulk_bytes: Option<usize>,
+
+    /// Search result size (pagination page size).
+    pub size: Option<u32>,
+
+    /// Search result offset (pagination start).
+    pub from: Option<u32>,
 }
 
 impl fmt::Debug for OpenSearchEndpointConfig {
@@ -202,6 +271,10 @@ impl fmt::Debug for OpenSearchEndpointConfig {
             .field("index_name", &self.index_name)
             .field("operation", &self.operation)
             .field("is_tls", &self.is_tls)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_bulk_bytes", &self.max_bulk_bytes)
+            .field("size", &self.size)
+            .field("from", &self.from)
             .finish()
     }
 }
@@ -293,6 +366,40 @@ impl OpenSearchEndpointConfig {
         // Parse username and password
         let username = parts.params.get("username").cloned();
         let password = parts.params.get("password").cloned();
+        let timeout_ms = parts
+            .params
+            .get("timeout_ms")
+            .map(|v| {
+                v.parse::<u64>().map_err(|_| {
+                    CamelError::InvalidUri("timeout_ms must be a valid u64".to_string())
+                })
+            })
+            .transpose()?;
+        let max_bulk_bytes = parts
+            .params
+            .get("max_bulk_bytes")
+            .map(|v| {
+                v.parse::<usize>().map_err(|_| {
+                    CamelError::InvalidUri("max_bulk_bytes must be a valid usize".to_string())
+                })
+            })
+            .transpose()?;
+        let size = parts
+            .params
+            .get("size")
+            .map(|v| {
+                v.parse::<u32>()
+                    .map_err(|_| CamelError::InvalidUri("size must be a valid u32".to_string()))
+            })
+            .transpose()?;
+        let from = parts
+            .params
+            .get("from")
+            .map(|v| {
+                v.parse::<u32>()
+                    .map_err(|_| CamelError::InvalidUri("from must be a valid u32".to_string()))
+            })
+            .transpose()?;
 
         Ok(Self {
             host,
@@ -302,6 +409,10 @@ impl OpenSearchEndpointConfig {
             index_name,
             operation,
             is_tls,
+            timeout_ms,
+            max_bulk_bytes,
+            size,
+            from,
         })
     }
 
@@ -330,7 +441,56 @@ impl OpenSearchEndpointConfig {
             },
             operation,
             is_tls: self.is_tls,
+            timeout_ms: self.timeout_ms.or(global.timeout_ms),
+            max_bulk_bytes: self.max_bulk_bytes.or(global.max_bulk_bytes),
+            size: self.size.or(global.size),
+            from: self.from.or(global.from),
         }
+    }
+
+    pub fn with_host(mut self, v: impl Into<String>) -> Self {
+        self.host = Some(v.into());
+        self
+    }
+
+    pub fn with_port(mut self, v: u16) -> Self {
+        self.port = Some(v);
+        self
+    }
+
+    pub fn with_username(mut self, v: impl Into<String>) -> Self {
+        self.username = Some(v.into());
+        self
+    }
+
+    pub fn with_password(mut self, v: impl Into<String>) -> Self {
+        self.password = Some(v.into());
+        self
+    }
+
+    pub fn with_operation(mut self, v: OpenSearchOperation) -> Self {
+        self.operation = v;
+        self
+    }
+
+    pub fn with_timeout_ms(mut self, v: u64) -> Self {
+        self.timeout_ms = Some(v);
+        self
+    }
+
+    pub fn with_max_bulk_bytes(mut self, v: usize) -> Self {
+        self.max_bulk_bytes = Some(v);
+        self
+    }
+
+    pub fn with_size(mut self, v: u32) -> Self {
+        self.size = Some(v);
+        self
+    }
+
+    pub fn with_from(mut self, v: u32) -> Self {
+        self.from = Some(v);
+        self
     }
 
     /// Build the base URL for the OpenSearch connection.
@@ -370,6 +530,10 @@ mod tests {
             OpenSearchOperation::DELETE
         );
         assert_eq!(
+            OpenSearchOperation::from_str("EXISTS").unwrap(),
+            OpenSearchOperation::EXISTS
+        );
+        assert_eq!(
             OpenSearchOperation::from_str("UPDATE").unwrap(),
             OpenSearchOperation::UPDATE
         );
@@ -381,6 +545,18 @@ mod tests {
             OpenSearchOperation::from_str("MULTIGET").unwrap(),
             OpenSearchOperation::MULTIGET
         );
+        assert_eq!(
+            OpenSearchOperation::from_str("DELETE_INDEX").unwrap(),
+            OpenSearchOperation::DELETEINDEX
+        );
+        assert_eq!(
+            OpenSearchOperation::from_str("MULTI_SEARCH").unwrap(),
+            OpenSearchOperation::MULTISEARCH
+        );
+        assert_eq!(
+            OpenSearchOperation::from_str("PING").unwrap(),
+            OpenSearchOperation::PING
+        );
         // Case insensitive
         assert_eq!(
             OpenSearchOperation::from_str("index").unwrap(),
@@ -390,11 +566,13 @@ mod tests {
             OpenSearchOperation::from_str("Search").unwrap(),
             OpenSearchOperation::SEARCH
         );
-        // Unknown captures unrecognized values
-        match OpenSearchOperation::from_str("CUSTOM_OP").unwrap() {
-            OpenSearchOperation::UNKNOWN(s) => assert_eq!(s, "CUSTOM_OP"),
-            other => panic!("expected UNKNOWN, got {:?}", other),
-        }
+        // Unknown operations are rejected at config time
+        let err = OpenSearchOperation::from_str("CUSTOM_OP").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown OpenSearch operation"),
+            "expected unknown operation error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -403,9 +581,13 @@ mod tests {
         assert_eq!(OpenSearchOperation::SEARCH.to_string(), "SEARCH");
         assert_eq!(OpenSearchOperation::GET.to_string(), "GET");
         assert_eq!(OpenSearchOperation::DELETE.to_string(), "DELETE");
+        assert_eq!(OpenSearchOperation::EXISTS.to_string(), "EXISTS");
         assert_eq!(OpenSearchOperation::UPDATE.to_string(), "UPDATE");
         assert_eq!(OpenSearchOperation::BULK.to_string(), "BULK");
         assert_eq!(OpenSearchOperation::MULTIGET.to_string(), "MULTIGET");
+        assert_eq!(OpenSearchOperation::DELETEINDEX.to_string(), "DELETE_INDEX");
+        assert_eq!(OpenSearchOperation::MULTISEARCH.to_string(), "MULTI_SEARCH");
+        assert_eq!(OpenSearchOperation::PING.to_string(), "PING");
         assert_eq!(
             OpenSearchOperation::UNKNOWN("CUSTOM".to_string()).to_string(),
             "CUSTOM"
@@ -413,7 +595,17 @@ mod tests {
 
         // Roundtrip
         for s in &[
-            "INDEX", "SEARCH", "GET", "DELETE", "UPDATE", "BULK", "MULTIGET",
+            "INDEX",
+            "SEARCH",
+            "GET",
+            "DELETE",
+            "EXISTS",
+            "UPDATE",
+            "BULK",
+            "MULTIGET",
+            "DELETE_INDEX",
+            "MULTI_SEARCH",
+            "PING",
         ] {
             let op = OpenSearchOperation::from_str(s).unwrap();
             assert_eq!(op.to_string(), *s);
@@ -463,6 +655,16 @@ mod tests {
         assert_eq!(cfg.username, Some("admin".to_string()));
         assert_eq!(cfg.password, Some("secret".to_string()));
         assert_eq!(cfg.operation, OpenSearchOperation::GET);
+    }
+
+    #[test]
+    fn test_endpoint_config_with_search_pagination() {
+        let cfg = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/myindex?operation=SEARCH&size=25&from=100",
+        )
+        .unwrap();
+        assert_eq!(cfg.size, Some(25));
+        assert_eq!(cfg.from, Some(100));
     }
 
     #[test]
@@ -535,11 +737,21 @@ mod tests {
 
     #[test]
     fn test_merge_with_global_default_operation_fallback() {
-        let ep = OpenSearchEndpointConfig::from_uri(
-            "opensearch://localhost:9200/myindex?operation=UNKNOWN_OP",
-        )
-        .unwrap();
-        assert!(matches!(ep.operation, OpenSearchOperation::UNKNOWN(_)));
+        // Build an endpoint config programmatically with UNKNOWN operation to test
+        // the merge_with_global fallback path.
+        let ep = OpenSearchEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(9200),
+            username: None,
+            password: None,
+            index_name: "myindex".to_string(),
+            operation: OpenSearchOperation::UNKNOWN("UNKNOWN_OP".to_string()),
+            is_tls: false,
+            timeout_ms: None,
+            max_bulk_bytes: None,
+            size: None,
+            from: None,
+        };
 
         let global = OpenSearchConfig::default().with_default_operation(OpenSearchOperation::INDEX);
 
@@ -588,6 +800,10 @@ mod tests {
         assert!(cfg.password.is_none());
         assert!(cfg.default_operation.is_none());
         assert!(cfg.index_name.is_none());
+        assert!(cfg.timeout_ms.is_none());
+        assert!(cfg.max_bulk_bytes.is_none());
+        assert!(cfg.size.is_none());
+        assert!(cfg.from.is_none());
     }
 
     #[test]
@@ -597,12 +813,22 @@ mod tests {
             .with_port(9200)
             .with_default_operation(OpenSearchOperation::BULK)
             .with_username("admin")
-            .with_password("secret");
+            .with_password("secret")
+            .with_index_name("idx")
+            .with_timeout_ms(5000)
+            .with_max_bulk_bytes(32_000)
+            .with_size(10)
+            .with_from(20);
         assert_eq!(cfg.host, "es-prod");
         assert_eq!(cfg.port, 9200);
         assert_eq!(cfg.default_operation, Some(OpenSearchOperation::BULK));
         assert_eq!(cfg.username, Some("admin".to_string()));
         assert_eq!(cfg.password, Some("secret".to_string()));
+        assert_eq!(cfg.index_name, Some("idx".to_string()));
+        assert_eq!(cfg.timeout_ms, Some(5000));
+        assert_eq!(cfg.max_bulk_bytes, Some(32_000));
+        assert_eq!(cfg.size, Some(10));
+        assert_eq!(cfg.from, Some(20));
     }
 
     #[test]
@@ -705,5 +931,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.index_name, "my-index_01");
+    }
+
+    // ── OS-012: Unknown operation rejected at config time ─────────────────────
+
+    #[test]
+    fn test_unknown_operation_rejected_at_config_time() {
+        let result = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/myindex?operation=UNKNOWN",
+        );
+        assert!(result.is_err(), "expected Err for unknown operation");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("unknown OpenSearch operation"),
+            "expected unknown operation error, got: {}",
+            err
+        );
     }
 }

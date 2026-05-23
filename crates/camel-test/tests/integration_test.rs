@@ -19,7 +19,7 @@ use camel_test::CamelTestContext;
 // Test 1: Timer → Mock (verify exchanges received)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn timer_to_mock() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -58,7 +58,7 @@ async fn timer_to_mock() {
 // Test 2: Timer → Filter → Mock (verify filtering behavior)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn timer_filter_mock() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -116,7 +116,7 @@ async fn timer_filter_mock() {
 // Test N: Filter EIP — matching exchanges reach inner mock
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn filter_matching_exchanges_reach_inner_mock() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -160,7 +160,7 @@ async fn filter_matching_exchanges_reach_inner_mock() {
 // Test N+1: Filter EIP — non-matching exchanges skip inner, reach outer mock
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn filter_non_matching_continue_outer_pipeline() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -206,7 +206,7 @@ async fn filter_non_matching_continue_outer_pipeline() {
 // Test 3: Timer → SetHeader → Mock (verify headers set)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn timer_set_header_mock() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -255,7 +255,7 @@ async fn timer_set_header_mock() {
 // Test 4: Timer → SetHeader → Log (verify full pipeline with log producer)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn timer_to_log() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -282,7 +282,7 @@ async fn timer_to_log() {
 // Test 5: Multiple routes in a single context
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn multiple_routes() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -352,7 +352,7 @@ fn failing_step(msg: &'static str) -> BoxProcessor {
 // Test 6: DLC receives the failed exchange
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn dlc_receives_failed_exchange() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -384,7 +384,7 @@ async fn dlc_receives_failed_exchange() {
 // Test 7: Retry recovers before DLC
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn retry_recovers_before_dlc() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -436,7 +436,7 @@ async fn retry_recovers_before_dlc() {
 // Test 8: onException with specific handled_by endpoint
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn on_exception_handled_by_specific_endpoint() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -477,7 +477,7 @@ async fn on_exception_handled_by_specific_endpoint() {
 // Test 9: Global error handler fallback
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn global_error_handler_fallback() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -512,7 +512,7 @@ async fn global_error_handler_fallback() {
 // Test 10: Per-route handler overrides global
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn per_route_overrides_global() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -554,7 +554,7 @@ async fn per_route_overrides_global() {
 // Test 11: direct: error bubbles to calling route's DLC
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn direct_error_bubbles_to_caller() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -601,7 +601,7 @@ async fn direct_error_bubbles_to_caller() {
 // Test 12: direct: error contained in subroute (does not reach caller)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn direct_error_contained_in_subroute() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -652,7 +652,7 @@ async fn direct_error_contained_in_subroute() {
 // Test 13: No error handler — route continues without crashing
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn no_error_handler_logs_and_continues() {
     let h = CamelTestContext::builder().with_timer().build().await;
 
@@ -686,7 +686,7 @@ async fn no_error_handler_logs_and_continues() {
 ///   but the pipeline is stuck in the backoff loop and never processes them.
 /// - Result: DLC receives exactly `failure_threshold` exchanges; `mock:sink`
 ///   receives zero.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn circuit_breaker_with_error_handler() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -750,7 +750,7 @@ async fn circuit_breaker_with_error_handler() {
 // Test 15: Split with timer and mock (end-to-end)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn split_with_timer_and_mock() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -813,7 +813,7 @@ async fn split_with_timer_and_mock() {
 // Test 16: Split with error handler (stop_on_exception + DLC)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn split_with_error_handler() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -865,7 +865,7 @@ async fn split_with_error_handler() {
 // Test 17: File consumer → Mock (read files from directory)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn file_consumer_to_mock() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_str().unwrap();
@@ -911,7 +911,7 @@ async fn file_consumer_to_mock() {
 // Test 18: Timer → File producer (write files)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn timer_to_file_producer() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_str().unwrap();
@@ -945,7 +945,7 @@ async fn timer_to_file_producer() {
 // Test 19: File consumer → Transform → File producer (file-to-file pipeline)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn file_to_file_pipeline() {
     let input_dir = tempfile::tempdir().unwrap();
     let output_dir = tempfile::tempdir().unwrap();
@@ -989,7 +989,7 @@ async fn file_to_file_pipeline() {
 // Test 20: HTTP component registration and endpoint creation
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_component_registration_and_endpoint_creation() {
     use camel_component_api::Component;
 
@@ -1012,7 +1012,7 @@ async fn http_component_registration_and_endpoint_creation() {
 // Test 21: HTTP query params are forwarded (Bug #3 verification)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_query_params_forwarding_config() {
     use camel_component_http::HttpEndpointConfig;
     use camel_endpoint::UriConfig;
@@ -1058,7 +1058,7 @@ async fn http_query_params_forwarding_config() {
 //          response body lands in mock endpoint
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_get_e2e() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1124,7 +1124,7 @@ async fn http_get_e2e() {
 //          to wiremock, response captured by mock
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_post_with_body_e2e() {
     use wiremock::matchers::{body_string, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1188,7 +1188,7 @@ async fn http_post_with_body_e2e() {
 // Test 24: HTTP response headers are mapped into exchange headers
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_response_headers_mapped_e2e() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1251,7 +1251,7 @@ async fn http_response_headers_mapped_e2e() {
 // Test 25: HTTP 500 with throwExceptionOnFailure=true triggers error
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_error_handling_e2e() {
     use camel_api::error_handler::ErrorHandlerConfig;
     use wiremock::matchers::{method, path};
@@ -1323,7 +1323,7 @@ async fn http_error_handling_e2e() {
 //          completionSize=3, expect 3 batches each with Body::Json([...])
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn aggregator_collect_all() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -1351,7 +1351,8 @@ async fn aggregator_collect_all() {
         .aggregate(
             AggregatorConfig::correlate_by("orderId")
                 .complete_when_size(3)
-                .build(),
+                .build()
+                .expect("valid aggregator config"),
         )
         .to("mock:aggregated")
         .build()
@@ -1393,7 +1394,7 @@ async fn aggregator_collect_all() {
 //          expect 1 exchange with body "0+1+2+3"
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn aggregator_custom_strategy() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -1429,7 +1430,8 @@ async fn aggregator_custom_strategy() {
             AggregatorConfig::correlate_by("key")
                 .complete_when_size(4)
                 .strategy(camel_api::aggregator::AggregationStrategy::Custom(fold_fn))
-                .build(),
+                .build()
+                .expect("valid aggregator config"),
         )
         .to("mock:custom-agg")
         .build()
@@ -1463,7 +1465,7 @@ async fn aggregator_custom_strategy() {
 //          expect 1 exchange at mock:scatter-gather
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn aggregator_scatter_gather() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -1479,7 +1481,8 @@ async fn aggregator_scatter_gather() {
         .aggregate(
             AggregatorConfig::correlate_by("CamelTimerName")
                 .complete_when_size(3)
-                .build(),
+                .build()
+                .expect("valid aggregator config"),
         )
         .to("mock:scatter-gather")
         .build()
@@ -1510,7 +1513,7 @@ async fn aggregator_scatter_gather() {
 // Test 29 (Aggregator): complete on inactivity timeout
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn aggregator_agg_timeout_emits_after_inactivity() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -1527,7 +1530,8 @@ async fn aggregator_agg_timeout_emits_after_inactivity() {
         .aggregate(
             AggregatorConfig::correlate_by("key")
                 .complete_on_timeout(std::time::Duration::from_millis(200))
-                .build(),
+                .build()
+                .expect("valid aggregator config"),
         )
         .to("mock:agg-timeout-result")
         .build()
@@ -1549,7 +1553,7 @@ async fn aggregator_agg_timeout_emits_after_inactivity() {
 // Test 30 (Aggregator): force completion on stop flushes pending group
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn aggregator_agg_force_completion_on_stop() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -1567,7 +1571,8 @@ async fn aggregator_agg_force_completion_on_stop() {
             AggregatorConfig::correlate_by("key")
                 .complete_when_size(100)
                 .force_completion_on_stop(true)
-                .build(),
+                .build()
+                .expect("valid aggregator config"),
         )
         .to("mock:agg-force-result")
         .build()
@@ -1593,7 +1598,7 @@ async fn aggregator_agg_force_completion_on_stop() {
 // Test 29: set_body("enriched") replaces body end-to-end
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn route_set_body_static() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -1629,7 +1634,7 @@ async fn route_set_body_static() {
 // Test 30: set_body_fn reads exchange and transforms body
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn route_set_body_fn() {
     use camel_api::body::Body;
 
@@ -1672,7 +1677,7 @@ async fn route_set_body_fn() {
 // Test 31: set_header_fn reads body and writes it into a header
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn route_set_header_fn() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -1712,7 +1717,7 @@ async fn route_set_header_fn() {
 // Test 26: HTTP query params forwarded in actual request to wiremock
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_query_params_forwarded_e2e() {
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1779,7 +1784,7 @@ async fn http_query_params_forwarded_e2e() {
 ///       .stop()             ← active=true exchanges stop here
 ///     .end_filter()
 ///     .to("mock:outer")     ← only active=false exchanges reach here
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn stop_inside_filter_prevents_outer_pipeline() {
     use std::time::Duration;
 
@@ -1833,7 +1838,7 @@ async fn stop_inside_filter_prevents_outer_pipeline() {
 // This test verifies that a route with Multicast correctly sends copies
 // of the exchange to each endpoint defined in the multicast scope.
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn multicast_sends_to_multiple_endpoints() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -1878,7 +1883,7 @@ async fn multicast_sends_to_multiple_endpoints() {
 // This test verifies that MulticastService correctly sets the CAMEL_MULTICAST_INDEX
 // and CAMEL_MULTICAST_COMPLETE properties on each cloned exchange.
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn multicast_metadata_properties() {
     use camel_processor::CAMEL_MULTICAST_INDEX;
 
@@ -1952,7 +1957,7 @@ async fn multicast_metadata_properties() {
 // This test verifies that parallel multicast with CollectAll strategy produces
 // a JSON array body containing the results from all endpoints.
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn multicast_parallel_collect_all() {
     use camel_api::body::Body;
     use camel_api::multicast::MulticastStrategy;
@@ -2004,7 +2009,7 @@ async fn multicast_parallel_collect_all() {
 // Test: HTTP concurrent pipeline processes multiple requests simultaneously
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_concurrent_pipeline() {
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -2069,7 +2074,7 @@ async fn http_concurrent_pipeline() {
 // Test: HTTP route with .sequential() override processes one at a time
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_sequential_override() {
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -2133,7 +2138,7 @@ async fn http_sequential_override() {
 // Test: HTTP route with .concurrent(2) limits parallelism to 2
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_concurrent_with_semaphore_limit() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2211,7 +2216,7 @@ async fn http_concurrent_with_semaphore_limit() {
 // Test: HTTP concurrent pipeline with circuit breaker (short duration)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_concurrent_with_circuit_breaker() {
     use camel_api::error_handler::ErrorHandlerConfig;
 
@@ -2304,7 +2309,7 @@ async fn http_concurrent_with_circuit_breaker() {
 // Test: HTTP concurrent shutdown drains in-flight exchanges
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_concurrent_shutdown_drains_inflight() {
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -2363,7 +2368,7 @@ async fn http_concurrent_shutdown_drains_inflight() {
 // Test: HTTP concurrent error propagation to HTTP responses
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_concurrent_error_propagation() {
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -2450,7 +2455,7 @@ async fn http_concurrent_error_propagation() {
 // ---------------------------------------------------------------------------
 
 // Test A: when clause routes matching exchange
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn choice_when_routes_matching_exchange() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -2496,7 +2501,7 @@ async fn choice_when_routes_matching_exchange() {
 }
 
 // Test B: otherwise fires when no when matches
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn choice_otherwise_fires_when_no_when_matches() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -2536,7 +2541,7 @@ async fn choice_otherwise_fires_when_no_when_matches() {
 }
 
 // Test C: no match and no otherwise → exchange continues past choice
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn choice_no_match_no_otherwise_continues() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -2571,7 +2576,7 @@ async fn choice_no_match_no_otherwise_continues() {
 }
 
 // Test D: short-circuit — only first matching when fires
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn choice_short_circuits_first_match() {
     let h = CamelTestContext::builder()
         .with_timer()
@@ -2613,7 +2618,7 @@ async fn choice_short_circuits_first_match() {
 // Test: Delay step waits at least configured duration
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn delay_step_waits_configured_duration() {
     use camel_api::body::Body;
     use camel_api::{Exchange, Message};
@@ -2671,7 +2676,7 @@ async fn delay_step_waits_configured_duration() {
 // Test: XML body pipeline — direct:xml-in → convert_body_to(Text) → mock:xml-out
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn xml_body_pipeline() {
     use camel_api::body::Body;
     use camel_api::{Exchange, Message};
@@ -2784,7 +2789,7 @@ async fn mock_new_assertion_api() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_consumer_string_status_code_e2e() {
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -2799,7 +2804,16 @@ async fn http_consumer_string_status_code_e2e() {
 
     h.add_route(route).await.unwrap();
     h.start().await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Wait for port to be ready (retry up to 5s to handle concurrent test load).
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect("127.0.0.1:18091")
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 
     let client = reqwest::Client::new();
     let resp = client
@@ -2816,7 +2830,7 @@ async fn http_consumer_string_status_code_e2e() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_consumer_invalid_string_status_code_fallback_e2e() {
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -2834,7 +2848,16 @@ async fn http_consumer_invalid_string_status_code_fallback_e2e() {
 
     h.add_route(route).await.unwrap();
     h.start().await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Wait for port to be ready (retry up to 5s to handle concurrent test load).
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect("127.0.0.1:18092")
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 
     let client = reqwest::Client::new();
     let resp = client
@@ -2851,7 +2874,7 @@ async fn http_consumer_invalid_string_status_code_fallback_e2e() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_consumer_overflow_status_code_fallback_e2e() {
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -2883,7 +2906,7 @@ async fn http_consumer_overflow_status_code_fallback_e2e() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_consumer_stop_returns_204_e2e() {
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -2914,7 +2937,7 @@ async fn http_consumer_stop_returns_204_e2e() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_consumer_headers_arrive_title_case_e2e() {
     let h = CamelTestContext::builder()
         .with_component(HttpComponent::new())
@@ -2990,7 +3013,7 @@ async fn http_consumer_headers_arrive_title_case_e2e() {
 // L2: on_exception inline steps integration tests
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_on_exception_steps_returns_custom_error_e2e() {
     use camel_api::error_handler::ErrorHandlerConfig;
     use camel_api::{Body, BoxProcessor, BoxProcessorExt, CamelError};
@@ -3053,7 +3076,7 @@ async fn http_on_exception_steps_returns_custom_error_e2e() {
     h.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn http_on_exception_handled_false_propagates_e2e() {
     use camel_api::error_handler::ErrorHandlerConfig;
     use camel_api::{BoxProcessor, BoxProcessorExt, CamelError};

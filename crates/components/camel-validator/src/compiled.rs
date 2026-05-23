@@ -6,7 +6,23 @@ use serde_yml::Value as YamlValue;
 
 use crate::config::{SchemaType, ValidatorConfig};
 use crate::error::ValidatorError;
+use crate::resolver::{FilesystemResolver, ResourceResolver};
 use crate::xsd_bridge::XsdBridge;
+
+/// Returns an approximate byte-length for a [`Body`] variant.
+///
+/// This is a rough estimate used only for backpressure (rejecting obviously
+/// oversized payloads). `Body::Stream` is not measurable and returns `None`.
+pub(crate) fn approx_body_byte_len(body: &Body) -> Option<usize> {
+    match body {
+        Body::Empty => Some(0),
+        Body::Bytes(b) => Some(b.len()),
+        Body::Text(s) => Some(s.len()),
+        Body::Xml(s) => Some(s.len()),
+        Body::Json(v) => serde_json::to_vec(v).ok().map(|v| v.len()),
+        Body::Stream(_) => None,
+    }
+}
 
 pub(crate) enum CompiledValidator {
     Xml {
@@ -15,9 +31,16 @@ pub(crate) enum CompiledValidator {
         /// caused by block_on's temporary runtime).
         xsd_bytes: Vec<u8>,
         backend: Arc<dyn XsdBridge>,
+        max_payload_bytes: Option<usize>,
     },
-    Json(Arc<jsonschema::Validator>),
-    Yaml(Arc<jsonschema::Validator>),
+    Json {
+        validator: Arc<jsonschema::Validator>,
+        max_payload_bytes: Option<usize>,
+    },
+    Yaml {
+        validator: Arc<jsonschema::Validator>,
+        max_payload_bytes: Option<usize>,
+    },
 }
 
 impl std::fmt::Debug for CompiledValidator {
@@ -33,35 +56,47 @@ impl CompiledValidator {
     ) -> Result<Self, CamelError> {
         let path = &config.schema_path;
 
-        let content = std::fs::read(path).map_err(|e| {
-            CamelError::EndpointCreationFailed(format!(
-                "failed to read schema file '{}': {e}",
-                path.display()
-            ))
+        let resolver = FilesystemResolver;
+        let path_str = path.to_str().ok_or_else(|| {
+            CamelError::EndpointCreationFailed("schema path contains non-UTF-8 characters".into())
         })?;
+        let content = resolver.resolve(path_str)?;
 
         match config.schema_type {
-            SchemaType::Xml => Ok(Self::compile_xsd(&content, xsd_backend)),
-            SchemaType::Json => Self::compile_json(&content, path),
-            SchemaType::Yaml => Self::compile_yaml_schema(&content, path),
-            SchemaType::RelaxNg | SchemaType::Schematron => Err(ValidatorError::UnsupportedMode(
-                "RelaxNG/Schematron require a future xml-bridge update",
-            )
-            .to_endpoint_error()),
+            SchemaType::Xml => Ok(Self::compile_xsd(
+                &content,
+                xsd_backend,
+                config.max_payload_bytes,
+            )),
+            SchemaType::Json => Self::compile_json(&content, path, config.max_payload_bytes),
+            SchemaType::Yaml => Self::compile_yaml_schema(&content, path, config.max_payload_bytes),
+            SchemaType::RelaxNg | SchemaType::Schematron => Err(CamelError::Config(format!(
+                "schema type {:?} is not yet supported; supported: Xml, Json, Yaml",
+                config.schema_type
+            ))),
         }
     }
 
-    fn compile_xsd(content: &[u8], backend: Arc<dyn XsdBridge>) -> Self {
+    fn compile_xsd(
+        content: &[u8],
+        backend: Arc<dyn XsdBridge>,
+        max_payload_bytes: Option<usize>,
+    ) -> Self {
         // Bridge startup and schema registration are deferred to the first validate()
         // call, which runs in a proper async context. This avoids runtime issues
         // caused by block_on's temporary runtime (channel I/O tasks would die with it).
         CompiledValidator::Xml {
             xsd_bytes: content.to_vec(),
             backend,
+            max_payload_bytes,
         }
     }
 
-    fn compile_json(content: &[u8], path: &Path) -> Result<Self, CamelError> {
+    fn compile_json(
+        content: &[u8],
+        path: &Path,
+        max_payload_bytes: Option<usize>,
+    ) -> Result<Self, CamelError> {
         let schema_value: serde_json::Value = serde_json::from_slice(content).map_err(|e| {
             CamelError::EndpointCreationFailed(format!(
                 "invalid JSON schema '{}': {e}",
@@ -76,10 +111,17 @@ impl CompiledValidator {
             ))
         })?;
 
-        Ok(CompiledValidator::Json(Arc::new(validator)))
+        Ok(CompiledValidator::Json {
+            validator: Arc::new(validator),
+            max_payload_bytes,
+        })
     }
 
-    fn compile_yaml_schema(content: &[u8], path: &Path) -> Result<Self, CamelError> {
+    fn compile_yaml_schema(
+        content: &[u8],
+        path: &Path,
+        max_payload_bytes: Option<usize>,
+    ) -> Result<Self, CamelError> {
         let yaml_str = std::str::from_utf8(content).map_err(|e| {
             CamelError::EndpointCreationFailed(format!(
                 "YAML schema '{}' is not valid UTF-8: {e}",
@@ -108,16 +150,40 @@ impl CompiledValidator {
             ))
         })?;
 
-        Ok(CompiledValidator::Yaml(Arc::new(validator)))
+        Ok(CompiledValidator::Yaml {
+            validator: Arc::new(validator),
+            max_payload_bytes,
+        })
     }
 
     pub async fn validate(&self, body: &Body) -> Result<(), CamelError> {
+        if let Some(limit) = self.max_payload_bytes()
+            && let Some(actual) = approx_body_byte_len(body)
+            && actual > limit
+        {
+            return Err(ValidatorError::PayloadTooLarge { actual, limit }.to_processor_error());
+        }
+
         match self {
-            CompiledValidator::Xml { xsd_bytes, backend } => {
-                Self::validate_xml(xsd_bytes, backend, body).await
-            }
-            CompiledValidator::Json(validator) => Self::validate_json(validator, body),
-            CompiledValidator::Yaml(validator) => Self::validate_yaml(validator, body),
+            CompiledValidator::Xml {
+                xsd_bytes, backend, ..
+            } => Self::validate_xml(xsd_bytes, backend, body).await,
+            CompiledValidator::Json { validator, .. } => Self::validate_json(validator, body),
+            CompiledValidator::Yaml { validator, .. } => Self::validate_yaml(validator, body),
+        }
+    }
+
+    fn max_payload_bytes(&self) -> Option<usize> {
+        match self {
+            CompiledValidator::Xml {
+                max_payload_bytes, ..
+            } => *max_payload_bytes,
+            CompiledValidator::Json {
+                max_payload_bytes, ..
+            } => *max_payload_bytes,
+            CompiledValidator::Yaml {
+                max_payload_bytes, ..
+            } => *max_payload_bytes,
         }
     }
 
@@ -127,9 +193,10 @@ impl CompiledValidator {
         body: &Body,
     ) -> Result<(), CamelError> {
         // Register lazily (idempotent: no-op if already registered).
-        let schema_id = backend.register(xsd_bytes.to_vec()).await.map_err(|e| {
-            CamelError::EndpointCreationFailed(format!("XSD schema registration failed: {e}"))
-        })?;
+        let schema_id = backend
+            .register(xsd_bytes.to_vec())
+            .await
+            .map_err(|e| CamelError::Config(format!("XSD registration failed: {e}")))?;
 
         let xml_bytes = match body {
             Body::Xml(s) => s.as_bytes().to_vec(),
@@ -214,7 +281,7 @@ impl CompiledValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SchemaType, ValidatorConfig};
+    use crate::config::{DEFAULT_SCHEMA_CACHE_MAX_ENTRIES, SchemaType, ValidatorConfig};
     use async_trait::async_trait;
 
     #[derive(Debug, Clone)]
@@ -249,12 +316,18 @@ mod tests {
         let cfg = ValidatorConfig {
             schema_path: schema.path().to_path_buf(),
             schema_type: SchemaType::Xml,
+            max_payload_bytes: None,
+            schema_cache_max_entries: DEFAULT_SCHEMA_CACHE_MAX_ENTRIES,
+            fail_on_null_body: true,
+            header_name: None,
+            fail_on_null_header: true,
         };
 
         let bridge = Arc::new(MockBridge {
-            register_err: Some(ValidatorError::CompilationFailed(
-                "COMPILATION_FAILED".to_string(),
-            )),
+            register_err: Some(ValidatorError::CompilationFailed {
+                message: "COMPILATION_FAILED".to_string(),
+                source: None,
+            }),
         });
 
         // compile() is now sync and always succeeds for XSD (deferred registration)
@@ -265,6 +338,24 @@ mod tests {
             .validate(&Body::Xml("<order/>".to_string()))
             .await
             .expect_err("expected validate to fail due to registration error");
+        assert!(matches!(err, CamelError::Config(_)));
         assert!(err.to_string().contains("COMPILATION_FAILED"));
+    }
+
+    #[test]
+    fn approx_body_byte_len_variants() {
+        assert_eq!(approx_body_byte_len(&Body::Empty), Some(0));
+        assert_eq!(
+            approx_body_byte_len(&Body::Text("hello".to_string())),
+            Some(5)
+        );
+        assert_eq!(
+            approx_body_byte_len(&Body::Xml("<a/>".to_string())),
+            Some(4)
+        );
+        // Json is serialized to measure
+        let json_len = approx_body_byte_len(&Body::Json(serde_json::json!({"id": 1})));
+        assert!(json_len.is_some());
+        assert!(json_len.unwrap() > 0);
     }
 }

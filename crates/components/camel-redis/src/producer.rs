@@ -191,6 +191,28 @@ impl RedisProducer {
             );
         }
     }
+
+    /// Health check: PINGs Redis and returns Ok(()) if reachable.
+    ///
+    /// Uses the same shared connection as normal operations. If no connection
+    /// exists yet, creates one (proving connectivity). On failure, returns
+    /// a `CamelError::ProcessorError`.
+    pub async fn check_connection(&self) -> Result<(), CamelError> {
+        let endpoint = self.config.safe_endpoint();
+        let mut connection = get_or_create_connection(&self.config, &self.conn, &endpoint).await?;
+
+        redis::cmd("PING")
+            .query_async::<String>(&mut connection)
+            .await
+            .map_err(|e| {
+                CamelError::ProcessorError(format!(
+                    "Redis health check PING failed for '{}': {}",
+                    endpoint, e
+                ))
+            })?;
+
+        Ok(())
+    }
 }
 
 /// Get an existing cached connection or create a new one.
@@ -565,5 +587,28 @@ mod tests {
 
         // Note: We can't actually test the connection creation without a real Redis
         // This is documented for integration testing
+    }
+
+    // REDIS-010: Health check method exists and returns error without live Redis
+    #[tokio::test]
+    async fn test_check_connection_fails_without_redis() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:9933").unwrap();
+        let producer = RedisProducer::new(config);
+        let result = producer.check_connection().await;
+        // Without a Redis on port 9933, this should fail
+        // The error may come from connection failure or PING failure
+        assert!(
+            result.is_err(),
+            "check_connection should fail without live Redis"
+        );
+    }
+
+    // REDIS-010: Verify check_connection method is callable on cloned producer
+    #[test]
+    fn test_check_connection_available_on_clone() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        let producer = RedisProducer::new(config);
+        let _clone = producer.clone();
+        // Verify the method exists and compiles — actual call requires live Redis
     }
 }

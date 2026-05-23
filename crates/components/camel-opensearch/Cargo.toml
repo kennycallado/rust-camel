@@ -16,7 +16,7 @@ camel-component-api = { workspace = true }
 opensearch = { version = "2.4.0", default-features = false, features = ["rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 tower = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }

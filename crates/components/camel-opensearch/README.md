@@ -137,10 +137,36 @@ let multiget_route = RouteBuilder::from("direct:multiget")
 
 ### With Authentication
 
+#### Basic Auth (Username/Password)
+
 ```rust
 let auth_route = RouteBuilder::from("direct:auth")
     .to("opensearch://localhost:9200/secure-data?operation=GET&username=admin&password=secret")
     .build()?;
+```
+
+#### API Key Auth
+
+```rust
+// Use the opensearchs:// scheme (HTTPS) with API key credentials
+let api_key_route = RouteBuilder::from("direct:apikey")
+    .to("opensearchs://opensearch.example.com:9200/secure-index?operation=SEARCH&username=${OPENSEARCH_API_KEY_ID}&password=${OPENSEARCH_API_KEY_SECRET}")
+    .build()?;
+```
+
+#### Global Auth Configuration
+
+```rust
+use camel_component_opensearch::{OpenSearchComponent, OpenSearchConfig, OpenSearchOperation};
+
+// Set global authentication defaults
+let global = OpenSearchConfig::default()
+    .with_host("opensearch.example.com")
+    .with_port(9200)
+    .with_username("admin")
+    .with_password("secret");
+
+let component = OpenSearchComponent::with_config(global);
 ```
 
 ### With TLS

@@ -4,7 +4,7 @@ use camel_core::{BuilderStep, RouteDefinition};
 use camel_function::provider::fake::{FakeProvider, FakeProviderConfig};
 use camel_function::{FunctionConfig, FunctionRuntimeService};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn with_lifecycle_after_build_propagates_function_invoker() {
     let provider = std::sync::Arc::new(FakeProvider::new(FakeProviderConfig::default()));
     let service = FunctionRuntimeService::with_fake_provider(FunctionConfig::default(), provider);

@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use tower::Service;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use camel_api::{CamelError, Exchange};
 use camel_core::Registry;
@@ -16,10 +17,49 @@ fn poisoned<T>(e: std::sync::PoisonError<T>) -> CamelError {
     CamelError::ProcessorError(format!("lock poisoned: {}", e))
 }
 
+/// Standalone runtime init — takes owned Arcs so the resulting future is `Send`
+/// without requiring `WasmProducer: Sync`.
+async fn ensure_runtime_fn(
+    module_path: PathBuf,
+    config: crate::config::WasmConfig,
+    registry: Arc<std::sync::Mutex<Registry>>,
+    runtime_store: Arc<std::sync::Mutex<Option<Arc<WasmRuntime>>>>,
+    state_store: crate::state_store::StateStore,
+) -> Result<Arc<WasmRuntime>, CamelError> {
+    {
+        let guard = runtime_store.lock().map_err(poisoned)?;
+        if let Some(ref rt) = *guard {
+            return Ok(Arc::clone(rt));
+        }
+    }
+
+    let runtime = Arc::new(WasmRuntime::new(&module_path, config).await?);
+
+    runtime
+        .call_init_once(
+            registry,
+            HashMap::new(),
+            state_store,
+            tokio::runtime::Handle::current(),
+        )
+        .await?;
+
+    {
+        let mut guard = runtime_store.lock().map_err(poisoned)?;
+        if guard.is_none() {
+            *guard = Some(Arc::clone(&runtime));
+        }
+    }
+
+    Ok(runtime)
+}
+
 use crate::runtime::WasmRuntime;
 use crate::serde_bridge::{exchange_to_wasm, wasm_to_exchange};
 
-#[derive(Clone)]
+type AcquireFut =
+    Option<Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>>;
+
 pub struct WasmProducer {
     module_path: PathBuf,
     registry: Arc<std::sync::Mutex<Registry>>,
@@ -27,6 +67,25 @@ pub struct WasmProducer {
     config: crate::config::WasmConfig,
     state_store: crate::state_store::StateStore,
     init_failed: Arc<AtomicBool>,
+    sem: Arc<Semaphore>,
+    pending_permit: Option<OwnedSemaphorePermit>,
+    acquire_fut: AcquireFut,
+}
+
+impl Clone for WasmProducer {
+    fn clone(&self) -> Self {
+        Self {
+            module_path: self.module_path.clone(),
+            registry: Arc::clone(&self.registry),
+            runtime: Arc::clone(&self.runtime),
+            config: self.config.clone(),
+            state_store: self.state_store.clone(),
+            init_failed: Arc::clone(&self.init_failed),
+            sem: Arc::clone(&self.sem),
+            pending_permit: None,
+            acquire_fut: None,
+        }
+    }
 }
 
 impl WasmProducer {
@@ -35,6 +94,7 @@ impl WasmProducer {
         registry: Arc<std::sync::Mutex<Registry>>,
         config: crate::config::WasmConfig,
     ) -> Self {
+        let max_concurrent_calls = config.max_concurrent_calls;
         Self {
             module_path,
             registry,
@@ -42,39 +102,14 @@ impl WasmProducer {
             config,
             state_store: crate::state_store::StateStore::new(),
             init_failed: Arc::new(AtomicBool::new(false)),
+            sem: Arc::new(Semaphore::new(max_concurrent_calls)),
+            pending_permit: None,
+            acquire_fut: None,
         }
     }
 
     pub fn config(&self) -> &crate::config::WasmConfig {
         &self.config
-    }
-
-    async fn ensure_runtime(&self) -> Result<Arc<WasmRuntime>, CamelError> {
-        {
-            let guard = self.runtime.lock().map_err(poisoned)?;
-            if let Some(ref rt) = *guard {
-                return Ok(Arc::clone(rt));
-            }
-        }
-
-        let runtime = Arc::new(WasmRuntime::new(&self.module_path, self.config.clone()).await?);
-
-        runtime
-            .call_init_once(
-                self.registry.clone(),
-                HashMap::new(),
-                self.state_store.clone(),
-            )
-            .await?;
-
-        {
-            let mut guard = self.runtime.lock().map_err(poisoned)?;
-            if guard.is_none() {
-                *guard = Some(Arc::clone(&runtime));
-            }
-        }
-
-        Ok(runtime)
     }
 }
 
@@ -83,27 +118,67 @@ impl Service<Exchange> for WasmProducer {
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if self.init_failed.load(Ordering::Relaxed) {
             return Poll::Ready(Err(CamelError::ProcessorError(
                 "wasm runtime initialization failed".to_string(),
             )));
         }
-        Poll::Ready(Ok(()))
+
+        if self.pending_permit.is_some() {
+            return Poll::Ready(Ok(()));
+        }
+
+        let fut = self
+            .acquire_fut
+            .get_or_insert_with(|| Box::pin(Arc::clone(&self.sem).acquire_owned()));
+
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(Ok(permit)) => {
+                self.acquire_fut = None;
+                self.pending_permit = Some(permit);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(Err(CamelError::ProcessorError(
+                "wasm producer semaphore closed".to_string(),
+            ))),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        let this = self.clone();
+        let permit = self.pending_permit.take();
+        // Extract owned fields before entering the async block to avoid
+        // borrowing &self / &this across an await (which would require
+        // WasmProducer: Sync, violated by the dyn Future in acquire_fut).
+        let module_path = self.module_path.clone();
+        let config = self.config.clone();
+        let registry = Arc::clone(&self.registry);
+        let registry2 = Arc::clone(&self.registry);
+        let runtime_store = Arc::clone(&self.runtime);
+        let state_store = self.state_store.clone();
+        let state_store2 = self.state_store.clone();
+        let init_failed = Arc::clone(&self.init_failed);
         Box::pin(async move {
-            let runtime = match this.ensure_runtime().await {
+            tracing::debug!(component = "wasm", "wasm call started");
+            let _permit = permit;
+            let runtime = match ensure_runtime_fn(
+                module_path.clone(),
+                config,
+                registry,
+                runtime_store,
+                state_store,
+            )
+            .await
+            {
                 Ok(rt) => {
-                    this.init_failed.store(false, Ordering::Relaxed);
+                    init_failed.store(false, Ordering::Relaxed);
                     rt
                 }
                 Err(e) => {
-                    this.init_failed.store(true, Ordering::Relaxed);
+                    init_failed.store(true, Ordering::Relaxed);
                     warn!(
-                        module = %this.module_path.display(),
+                        module = %module_path.display(),
                         error = %e,
                         "Failed to initialize WASM runtime"
                     );
@@ -111,13 +186,14 @@ impl Service<Exchange> for WasmProducer {
                 }
             };
 
-            let wasm_exchange = exchange_to_wasm(&exchange);
+            let wasm_exchange = exchange_to_wasm(&exchange)?;
 
             let result = runtime
                 .call_process(
-                    this.registry.clone(),
+                    registry2,
                     exchange.properties.clone(),
-                    this.state_store.clone(),
+                    state_store2,
+                    tokio::runtime::Handle::current(),
                     wasm_exchange,
                 )
                 .await;
@@ -127,14 +203,15 @@ impl Service<Exchange> for WasmProducer {
                     let mut out = exchange;
                     wasm_to_exchange(wasm_result, &mut out);
                     debug!(
-                        module = %this.module_path.display(),
+                        module = %module_path.display(),
                         "WASM producer completed successfully"
                     );
                     Ok(out)
                 }
                 Err(e) => {
+                    error!(component = "wasm", error = %e, "wasm call failed");
                     warn!(
-                        module = %this.module_path.display(),
+                        module = %module_path.display(),
                         error = %e,
                         "WASM guest error"
                     );
@@ -155,6 +232,7 @@ mod tests {
         let config = WasmConfig {
             timeout_secs: 5,
             max_memory_bytes: 1024,
+            max_concurrent_calls: 4,
         };
         let producer = WasmProducer::new(
             PathBuf::from("test.wasm"),
@@ -203,5 +281,31 @@ mod tests {
         assert!(
             matches!(result, Poll::Ready(Err(CamelError::ProcessorError(msg))) if msg.contains("wasm runtime initialization failed"))
         );
+    }
+
+    #[test]
+    fn test_poll_ready_pending_when_no_permits_available() {
+        let config = WasmConfig {
+            timeout_secs: 5,
+            max_memory_bytes: 1024,
+            max_concurrent_calls: 1,
+        };
+        let mut producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            config,
+        );
+
+        let permit = Arc::clone(&producer.sem)
+            .try_acquire_owned()
+            .expect("test should consume sole permit");
+
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let first = producer.poll_ready(&mut cx);
+        assert!(matches!(first, Poll::Pending));
+
+        drop(permit);
+        let second = producer.poll_ready(&mut cx);
+        assert!(matches!(second, Poll::Ready(Ok(()))));
     }
 }

@@ -27,7 +27,7 @@ async fn connect_docker() -> Option<Docker> {
     Some(docker)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_container_producer_run_with_volumes() {
     let docker = match connect_docker().await {
         Some(d) => d,
@@ -77,7 +77,7 @@ async fn test_container_producer_run_with_volumes() {
         .await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_container_producer_exec() {
     let docker = match connect_docker().await {
         Some(d) => d,

@@ -1,16 +1,17 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use camel_bridge::channel::connect_channel;
 use camel_bridge::download::ensure_binary_for_spec;
 use camel_bridge::health::wait_for_health;
-use camel_bridge::process::{BridgeProcess, BridgeProcessConfig, CxfProfileEnvVars};
+use camel_bridge::process::{BridgeProcess, BridgeProcessConfig, CxfProfileEnvVars, Redacted};
 use camel_bridge::spec::CXF_BRIDGE;
 use camel_component_api::CamelError;
 use dashmap::DashMap;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
@@ -38,7 +39,7 @@ pub struct BridgeSlot {
     pub state_rx: watch::Receiver<BridgeState>,
     pub(crate) state_tx: watch::Sender<BridgeState>,
     pub process: Arc<tokio::sync::Mutex<Option<BridgeProcess>>>,
-    pub(crate) health_monitor_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    pub(crate) health_monitor_handle: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -72,6 +73,10 @@ const MAX_RESTART_ATTEMPTS: u32 = 10;
 
 pub struct CxfBridgePool {
     pub(crate) slots: DashMap<String, Arc<BridgeSlot>>,
+    /// Atomic counter for exact pool-size enforcement (CXF-016).
+    /// Incremented on insert, decremented on remove, so that concurrent
+    /// callers cannot race past `max_bridges`.
+    pub(crate) slot_count: AtomicUsize,
     pub(crate) shutting_down: Arc<AtomicBool>,
     pub(crate) max_bridges: usize,
     pub(crate) bridge_start_timeout_ms: u64,
@@ -94,6 +99,7 @@ impl CxfBridgePool {
         let configured_profiles = pool_config.profiles.clone();
         Ok(Self {
             slots: DashMap::new(),
+            slot_count: AtomicUsize::new(0),
             shutting_down: Arc::new(AtomicBool::new(false)),
             max_bridges: pool_config.max_bridges,
             bridge_start_timeout_ms: pool_config.bridge_start_timeout_ms,
@@ -112,6 +118,7 @@ impl CxfBridgePool {
     #[cfg(any(test, feature = "test-util"))]
     pub fn insert_slot_for_test(&self, key: String, slot: BridgeSlot) {
         self.slots.insert(key, Arc::new(slot));
+        self.slot_count.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn begin_shutdown(&self) {
@@ -132,11 +139,25 @@ impl CxfBridgePool {
             return Ok(Arc::clone(entry.value()));
         }
 
-        if self.slots.len() >= self.max_bridges {
-            return Err(CxfError::Config(format!(
-                "cannot create bridge slot '{}': max_bridges limit ({}) reached",
-                key, self.max_bridges
-            )));
+        // CXF-016: use atomic compare-and-swap so concurrent callers cannot
+        // race past max_bridges. AcqRel ensures the slot insertion is
+        // ordered after the count increment.
+        loop {
+            let current = self.slot_count.load(Ordering::Acquire);
+            if current >= self.max_bridges {
+                return Err(CxfError::Config(format!(
+                    "cannot create bridge slot '{}': max_bridges limit ({}) reached",
+                    key, self.max_bridges
+                )));
+            }
+            if self
+                .slot_count
+                .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+            // CAS failed — another thread incremented; retry.
         }
 
         let key_owned = key.to_string();
@@ -148,6 +169,8 @@ impl CxfBridgePool {
 
         let slot = match self.slots.entry(key_owned.clone()) {
             dashmap::Entry::Occupied(existing) => {
+                // Another thread won the race — undo the counter increment.
+                self.slot_count.fetch_sub(1, Ordering::AcqRel);
                 return Ok(Arc::clone(existing.get()));
             }
             dashmap::Entry::Vacant(entry) => {
@@ -179,6 +202,9 @@ impl CxfBridgePool {
                 let _ = slot.state_tx.send(BridgeState::Ready { channel });
             }
             Err(e) => {
+                // Intentionally keep slot_count at +1 for degraded slots: the health
+                // monitor will attempt to restart this slot, so it continues to occupy
+                // one pool position. This prevents unbounded re-allocation attempts.
                 let _ = slot
                     .state_tx
                     .send(BridgeState::Degraded(format!("Initial start failed: {e}")));
@@ -205,7 +231,11 @@ impl CxfBridgePool {
         let result = tokio::time::timeout(Duration::from_millis(start_timeout_ms), async {
             let binary_path = ensure_binary_for_spec(&CXF_BRIDGE, bridge_version, bridge_cache_dir)
                 .await
-                .map_err(|e| CxfError::Bridge(e.to_string()))?;
+                .map_err(|e| CxfError::Bridge {
+                    message: e.to_string(),
+                    slot_key: slot.key.clone(),
+                    source: None,
+                })?;
 
             let profile_env_vars: Vec<CxfProfileEnvVars> = slot
                 .configured_profiles
@@ -217,11 +247,11 @@ impl CxfBridgePool {
                     port_name: p.port_name.clone(),
                     address: p.address.clone(),
                     keystore_path: p.security.keystore_path.clone(),
-                    keystore_password: p.security.keystore_password.clone(),
+                    keystore_password: p.security.keystore_password.clone().map(Redacted::new),
                     truststore_path: p.security.truststore_path.clone(),
-                    truststore_password: p.security.truststore_password.clone(),
+                    truststore_password: p.security.truststore_password.clone().map(Redacted::new),
                     sig_username: p.security.sig_username.clone(),
-                    sig_password: p.security.sig_password.clone(),
+                    sig_password: p.security.sig_password.clone().map(Redacted::new),
                     enc_username: p.security.enc_username.clone(),
                     security_actions_out: p.security.security_actions_out.clone(),
                     security_actions_in: p.security.security_actions_in.clone(),
@@ -249,12 +279,20 @@ impl CxfBridgePool {
 
             let process = BridgeProcess::start(&config)
                 .await
-                .map_err(|e| CxfError::Bridge(e.to_string()))?;
+                .map_err(|e| CxfError::Bridge {
+                    message: e.to_string(),
+                    slot_key: slot.key.clone(),
+                    source: None,
+                })?;
 
             let port = process.grpc_port();
             let channel = connect_channel(port)
                 .await
-                .map_err(|e| CxfError::Transport(e.to_string()))?;
+                .map_err(|e| CxfError::Transport {
+                    message: e.to_string(),
+                    endpoint: format!("grpc://127.0.0.1:{port}"),
+                    source: None,
+                })?;
 
             wait_for_health(&channel, Duration::from_secs(10), |ch| {
                 let mut client = CxfBridgeClient::new(ch);
@@ -264,16 +302,19 @@ impl CxfBridgePool {
                 }
             })
             .await
-            .map_err(|e| CxfError::Bridge(e.to_string()))?;
+            .map_err(|e| CxfError::Bridge {
+                message: e.to_string(),
+                slot_key: slot.key.clone(),
+                source: None,
+            })?;
 
             Ok::<(BridgeProcess, Channel), CxfError>((process, channel))
         })
         .await
-        .map_err(|_| {
-            CxfError::Bridge(format!(
-                "CXF bridge start timed out after {}ms",
-                start_timeout_ms
-            ))
+        .map_err(|_| CxfError::Bridge {
+            message: format!("CXF bridge start timed out after {}ms", start_timeout_ms),
+            slot_key: slot.key.clone(),
+            source: None,
         })??;
         Ok(result)
     }
@@ -404,7 +445,11 @@ impl CxfBridgePool {
                                 &bridge_cache_dir,
                             )
                             .await
-                            .map_err(|e| CxfError::Bridge(e.to_string()))?;
+                            .map_err(|e| CxfError::Bridge {
+                                message: e.to_string(),
+                                slot_key: monitor_slot.key.clone(),
+                                source: None,
+                            })?;
 
                             let profile_env_vars: Vec<CxfProfileEnvVars> = profiles
                                 .iter()
@@ -415,11 +460,23 @@ impl CxfBridgePool {
                                     port_name: p.port_name.clone(),
                                     address: p.address.clone(),
                                     keystore_path: p.security.keystore_path.clone(),
-                                    keystore_password: p.security.keystore_password.clone(),
+                                    keystore_password: p
+                                        .security
+                                        .keystore_password
+                                        .clone()
+                                        .map(Redacted::new),
                                     truststore_path: p.security.truststore_path.clone(),
-                                    truststore_password: p.security.truststore_password.clone(),
+                                    truststore_password: p
+                                        .security
+                                        .truststore_password
+                                        .clone()
+                                        .map(Redacted::new),
                                     sig_username: p.security.sig_username.clone(),
-                                    sig_password: p.security.sig_password.clone(),
+                                    sig_password: p
+                                        .security
+                                        .sig_password
+                                        .clone()
+                                        .map(Redacted::new),
                                     enc_username: p.security.enc_username.clone(),
                                     security_actions_out: p.security.security_actions_out.clone(),
                                     security_actions_in: p.security.security_actions_in.clone(),
@@ -448,13 +505,22 @@ impl CxfBridgePool {
                                     .push(("CXF_ADDRESS".to_string(), addr.clone()));
                             }
 
-                            let process = BridgeProcess::start(&config)
-                                .await
-                                .map_err(|e| CxfError::Bridge(e.to_string()))?;
+                            let process = BridgeProcess::start(&config).await.map_err(|e| {
+                                CxfError::Bridge {
+                                    message: e.to_string(),
+                                    slot_key: monitor_slot.key.clone(),
+                                    source: None,
+                                }
+                            })?;
                             let port = process.grpc_port();
-                            let channel = connect_channel(port)
-                                .await
-                                .map_err(|e| CxfError::Transport(e.to_string()))?;
+                            let channel =
+                                connect_channel(port)
+                                    .await
+                                    .map_err(|e| CxfError::Transport {
+                                        message: e.to_string(),
+                                        endpoint: format!("grpc://127.0.0.1:{port}"),
+                                        source: None,
+                                    })?;
 
                             wait_for_health(&channel, Duration::from_secs(10), |ch| {
                                 let mut client = CxfBridgeClient::new(ch);
@@ -464,7 +530,11 @@ impl CxfBridgePool {
                                 }
                             })
                             .await
-                            .map_err(|e| CxfError::Bridge(e.to_string()))?;
+                            .map_err(|e| CxfError::Bridge {
+                                message: e.to_string(),
+                                slot_key: monitor_slot.key.clone(),
+                                source: None,
+                            })?;
 
                             Ok((process, channel))
                         }
@@ -519,17 +589,22 @@ impl CxfBridgePool {
     }
 
     pub async fn refresh_slot_channel(&self, key: &str) -> Result<(), CxfError> {
-        let slot = self
-            .slots
-            .get(key)
-            .ok_or_else(|| CxfError::Bridge(format!("no slot for key '{}'", key)))?;
+        let slot = self.slots.get(key).ok_or_else(|| CxfError::Bridge {
+            message: format!("no slot for key '{}'", key),
+            slot_key: key.to_string(),
+            source: None,
+        })?;
 
         let guard = slot.process.lock().await;
         if let Some(process) = guard.as_ref() {
             let port = process.grpc_port();
             let channel = connect_channel(port)
                 .await
-                .map_err(|e| CxfError::Transport(e.to_string()))?;
+                .map_err(|e| CxfError::Transport {
+                    message: e.to_string(),
+                    endpoint: format!("grpc://127.0.0.1:{port}"),
+                    source: None,
+                })?;
             let _ = slot.state_tx.send(BridgeState::Ready { channel });
         }
         Ok(())
@@ -541,18 +616,20 @@ impl CxfBridgePool {
             match &*rx.borrow() {
                 BridgeState::Ready { channel } => return Ok(channel.clone()),
                 BridgeState::Stopped => {
-                    return Err(CxfError::Bridge(format!(
-                        "CXF bridge '{}' is stopped",
-                        slot.key
-                    )));
+                    return Err(CxfError::Bridge {
+                        message: format!("CXF bridge '{}' is stopped", slot.key),
+                        slot_key: slot.key.clone(),
+                        source: None,
+                    });
                 }
                 _ => {}
             }
             if rx.changed().await.is_err() {
-                return Err(CxfError::Bridge(format!(
-                    "CXF bridge '{}' state channel closed",
-                    slot.key
-                )));
+                return Err(CxfError::Bridge {
+                    message: format!("CXF bridge '{}' state channel closed", slot.key),
+                    slot_key: slot.key.clone(),
+                    source: None,
+                });
             }
         }
     }
@@ -572,9 +649,11 @@ impl CxfBridgePool {
                     let _ = p.stop().await;
                 }
                 if let Some(handle) = slot.health_monitor_handle.lock().await.take()
-                    && let Err(e) = handle.await
+                    && tokio::time::timeout(Duration::from_secs(5), handle)
+                        .await
+                        .is_err()
                 {
-                    tracing::warn!("Health monitor task panicked: {}", e);
+                    warn!("Health monitor task did not stop in 5s; may have been aborted");
                 }
             }));
         }
@@ -769,5 +848,38 @@ mod tests {
             .borrow()
             .clone();
         assert!(matches!(state, BridgeState::Stopped));
+    }
+
+    #[tokio::test]
+    async fn slot_count_reflects_atomic_tracking() {
+        let pool = CxfBridgePool::from_config(test_pool_config()).expect("valid config");
+        assert_eq!(pool.slot_count.load(Ordering::Relaxed), 0);
+
+        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        pool.insert_slot_for_test("a".to_string(), BridgeSlot::new_ready_for_test(channel));
+        assert_eq!(pool.slot_count.load(Ordering::Relaxed), 1);
+
+        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        pool.insert_slot_for_test("b".to_string(), BridgeSlot::new_ready_for_test(channel));
+        assert_eq!(pool.slot_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn atomic_count_prevents_exceeding_max_bridges_concurrently() {
+        let mut pool_config = test_pool_config();
+        pool_config.max_bridges = 1;
+        let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("valid config"));
+
+        // Pre-fill the one allowed slot.
+        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        pool.insert_slot_for_test("slot0".to_string(), BridgeSlot::new_ready_for_test(channel));
+
+        // Attempting a second slot should fail because count == max_bridges.
+        let err = pool.get_or_create_slot("slot1").await;
+        assert!(err.is_err(), "should fail when max_bridges already reached");
+        assert!(
+            err.unwrap_err().to_string().contains("max_bridges"),
+            "error should mention max_bridges"
+        );
     }
 }

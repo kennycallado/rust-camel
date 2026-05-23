@@ -1,9 +1,10 @@
+use futures::future::join_all;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
-
-use futures::future::join_all;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 use camel_api::{
@@ -37,24 +38,32 @@ pub struct SplitterService {
     parallel: bool,
     parallel_limit: Option<usize>,
     stop_on_exception: bool,
+    cancel_token: CancellationToken,
 }
 
 impl SplitterService {
     /// Create a new `SplitterService` from a [`SplitterConfig`] and a sub-pipeline.
-    pub fn new(config: SplitterConfig, sub_pipeline: BoxProcessor) -> Self {
-        if config.parallel
-            && let Some(limit) = config.parallel_limit
-        {
-            assert!(limit > 0, "parallel_limit must be > 0");
-        }
-        Self {
+    pub fn new(config: SplitterConfig, sub_pipeline: BoxProcessor) -> Result<Self, CamelError> {
+        config.validate()?;
+        Ok(Self {
             expression: config.expression,
             sub_pipeline,
             aggregation: config.aggregation,
             parallel: config.parallel,
             parallel_limit: config.parallel_limit,
             stop_on_exception: config.stop_on_exception,
-        }
+            cancel_token: CancellationToken::new(),
+        })
+    }
+
+    /// Cancel all in-flight parallel tasks and prevent new ones from starting.
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
+    }
+
+    /// Check whether the splitter has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token.is_cancelled()
     }
 }
 
@@ -75,6 +84,7 @@ impl Service<Exchange> for SplitterService {
         let parallel = self.parallel;
         let parallel_limit = self.parallel_limit;
         let stop_on_exception = self.stop_on_exception;
+        let cancel_token = self.cancel_token.clone();
 
         Box::pin(async move {
             // Split the exchange into fragments.
@@ -94,9 +104,23 @@ impl Service<Exchange> for SplitterService {
                 frag.set_property(CAMEL_SPLIT_COMPLETE, Value::Bool(i == total - 1));
             }
 
+            // Check cancellation before processing.
+            if cancel_token.is_cancelled() {
+                return Err(CamelError::ProcessorError(
+                    "Splitter cancelled, dropping exchange".to_string(),
+                ));
+            }
+
             // Process fragments through the sub-pipeline.
             let results = if parallel {
-                process_parallel(fragments, sub_pipeline, parallel_limit, stop_on_exception).await
+                process_parallel(
+                    fragments,
+                    sub_pipeline,
+                    parallel_limit,
+                    stop_on_exception,
+                    cancel_token,
+                )
+                .await
             } else {
                 process_sequential(fragments, sub_pipeline, stop_on_exception).await
             };
@@ -146,25 +170,57 @@ async fn process_parallel(
     sub_pipeline: BoxProcessor,
     parallel_limit: Option<usize>,
     _stop_on_exception: bool,
+    cancel_token: CancellationToken,
 ) -> Vec<Result<Exchange, CamelError>> {
-    let semaphore = parallel_limit.map(|limit| std::sync::Arc::new(Semaphore::new(limit)));
+    let semaphore = parallel_limit.map(|limit| Arc::new(Semaphore::new(limit)));
 
     let futures: Vec<_> = fragments
         .into_iter()
         .map(|fragment| {
             let mut pipeline = sub_pipeline.clone();
             let sem = semaphore.clone();
+            let cancel = cancel_token.clone();
             async move {
+                // Check cancellation before acquiring semaphore.
+                if cancel.is_cancelled() {
+                    return Err(CamelError::ProcessorError("Splitter cancelled".to_string()));
+                }
+
                 // Acquire semaphore permit if a limit is set.
                 let _permit = match &sem {
-                    Some(s) => Some(s.acquire().await.map_err(|e| {
-                        CamelError::ProcessorError(format!("semaphore error: {e}"))
-                    })?),
+                    Some(s) => {
+                        tokio::select! {
+                            result = s.acquire() => {
+                                Some(result.map_err(|e| {
+                                    CamelError::ProcessorError(format!("semaphore error: {e}"))
+                                })?)
+                            }
+                            _ = cancel.cancelled() => {
+                                return Err(CamelError::ProcessorError(
+                                    "Splitter cancelled while waiting for semaphore".to_string(),
+                                ));
+                            }
+                        }
+                    }
                     None => None,
                 };
 
-                tower::ServiceExt::ready(&mut pipeline).await?;
-                pipeline.call(fragment).await
+                // Check cancellation again after acquiring.
+                if cancel.is_cancelled() {
+                    return Err(CamelError::ProcessorError("Splitter cancelled".to_string()));
+                }
+
+                tokio::select! {
+                    result = async {
+                        tower::ServiceExt::ready(&mut pipeline).await?;
+                        pipeline.call(fragment).await
+                    } => result,
+                    _ = cancel.cancelled() => {
+                        Err(CamelError::ProcessorError(
+                            "Splitter cancelled during processing".to_string(),
+                        ))
+                    }
+                }
             }
         })
         .collect();
@@ -279,10 +335,8 @@ mod tests {
         let config = SplitterConfig::new(camel_api::split_body_lines())
             .parallel(true)
             .parallel_limit(0);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            SplitterService::new(config, passthrough_pipeline());
-        }));
-        assert!(result.is_err(), "zero parallel_limit should panic");
+        let result = SplitterService::new(config, passthrough_pipeline());
+        assert!(result.is_err(), "zero parallel_limit should return Err");
     }
 
     // ── 1. Sequential + LastWins ───────────────────────────────────────
@@ -291,7 +345,7 @@ mod tests {
     async fn test_split_sequential_last_wins() {
         let config = SplitterConfig::new(camel_api::split_body_lines())
             .aggregation(AggregationStrategy::LastWins);
-        let mut svc = SplitterService::new(config, uppercase_pipeline());
+        let mut svc = SplitterService::new(config, uppercase_pipeline()).unwrap();
 
         let result = svc
             .ready()
@@ -309,7 +363,7 @@ mod tests {
     async fn test_split_sequential_collect_all() {
         let config = SplitterConfig::new(camel_api::split_body_lines())
             .aggregation(AggregationStrategy::CollectAll);
-        let mut svc = SplitterService::new(config, uppercase_pipeline());
+        let mut svc = SplitterService::new(config, uppercase_pipeline()).unwrap();
 
         let result = svc
             .ready()
@@ -331,7 +385,7 @@ mod tests {
     async fn test_split_sequential_original() {
         let config = SplitterConfig::new(camel_api::split_body_lines())
             .aggregation(AggregationStrategy::Original);
-        let mut svc = SplitterService::new(config, uppercase_pipeline());
+        let mut svc = SplitterService::new(config, uppercase_pipeline()).unwrap();
 
         let result = svc
             .ready()
@@ -358,7 +412,7 @@ mod tests {
 
         let config = SplitterConfig::new(camel_api::split_body_lines())
             .aggregation(AggregationStrategy::Custom(joiner));
-        let mut svc = SplitterService::new(config, uppercase_pipeline());
+        let mut svc = SplitterService::new(config, uppercase_pipeline()).unwrap();
 
         let result = svc
             .ready()
@@ -376,7 +430,7 @@ mod tests {
     async fn test_split_stop_on_exception() {
         // 5 fragments, fail on the 2nd (index 1), stop=true
         let config = SplitterConfig::new(camel_api::split_body_lines()).stop_on_exception(true);
-        let mut svc = SplitterService::new(config, fail_on_nth(1));
+        let mut svc = SplitterService::new(config, fail_on_nth(1)).unwrap();
 
         let result = svc
             .ready()
@@ -397,7 +451,7 @@ mod tests {
         let config = SplitterConfig::new(camel_api::split_body_lines())
             .stop_on_exception(false)
             .aggregation(AggregationStrategy::LastWins);
-        let mut svc = SplitterService::new(config, fail_on_nth(1));
+        let mut svc = SplitterService::new(config, fail_on_nth(1)).unwrap();
 
         let result = svc
             .ready()
@@ -416,7 +470,7 @@ mod tests {
     async fn test_split_empty_fragments() {
         // Body::Empty → no fragments → return original unchanged.
         let config = SplitterConfig::new(camel_api::split_body_lines());
-        let mut svc = SplitterService::new(config, passthrough_pipeline());
+        let mut svc = SplitterService::new(config, passthrough_pipeline()).unwrap();
 
         let mut ex = Exchange::new(Message::default()); // Body::Empty
         ex.set_property("marker", Value::Bool(true));
@@ -451,7 +505,7 @@ mod tests {
 
         let config = SplitterConfig::new(camel_api::split_body_lines())
             .aggregation(AggregationStrategy::CollectAll);
-        let mut svc = SplitterService::new(config, recorder);
+        let mut svc = SplitterService::new(config, recorder).unwrap();
 
         let result = svc
             .ready()
@@ -510,7 +564,7 @@ mod tests {
         let boxed: BoxProcessor = BoxProcessor::new(inner);
 
         let config = SplitterConfig::new(camel_api::split_body_lines());
-        let mut svc = SplitterService::new(config, boxed);
+        let mut svc = SplitterService::new(config, boxed).unwrap();
 
         // First poll should be Pending.
         let waker = futures::task::noop_waker();
@@ -538,7 +592,7 @@ mod tests {
         let config = SplitterConfig::new(camel_api::split_body_lines())
             .parallel(true)
             .aggregation(AggregationStrategy::CollectAll);
-        let mut svc = SplitterService::new(config, uppercase_pipeline());
+        let mut svc = SplitterService::new(config, uppercase_pipeline()).unwrap();
 
         let result = svc
             .ready()
@@ -584,7 +638,7 @@ mod tests {
             .parallel(true)
             .parallel_limit(2)
             .aggregation(AggregationStrategy::CollectAll);
-        let mut svc = SplitterService::new(config, pipeline);
+        let mut svc = SplitterService::new(config, pipeline).unwrap();
 
         let result = svc
             .ready()
@@ -608,7 +662,7 @@ mod tests {
         let config = SplitterConfig::new(camel_api::split_body_lines())
             .parallel(true)
             .stop_on_exception(true);
-        let mut svc = SplitterService::new(config, failing_pipeline());
+        let mut svc = SplitterService::new(config, failing_pipeline()).unwrap();
 
         let result = svc
             .ready()
@@ -715,5 +769,44 @@ mod tests {
             assert_eq!(arr[0]["_stream"]["origin"], serde_json::Value::Null);
             assert_eq!(arr[0]["_stream"]["placeholder"], true);
         }
+    }
+
+    // ── 14. Parallel cancellation ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_splitter_parallel_cancel_aborts_processing() {
+        use std::sync::atomic::AtomicBool;
+
+        let started = Arc::new(AtomicBool::new(false));
+
+        let s = Arc::clone(&started);
+        let pipeline = BoxProcessor::from_fn(move |ex: Exchange| {
+            let s = Arc::clone(&s);
+            Box::pin(async move {
+                s.store(true, Ordering::SeqCst);
+                // Long-running task that should be cancelled.
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(ex)
+            })
+        });
+
+        let config = SplitterConfig::new(camel_api::split_body_lines())
+            .parallel(true)
+            .aggregation(AggregationStrategy::LastWins);
+        let svc = SplitterService::new(config, pipeline).unwrap();
+
+        // Cancel before calling — call should return an error.
+        svc.cancel();
+        assert!(svc.is_cancelled());
+
+        let mut svc_clone = svc.clone();
+        let result = svc_clone
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("a\nb\nc"))
+            .await;
+
+        assert!(result.is_err(), "cancelled splitter should return error");
     }
 }

@@ -266,15 +266,100 @@ mod derive_tests {
         assert!(!config.enabled);
     }
 
-    // Test: Issue 2 - Option<u64> with invalid value should return None, not Some(0)
+    // Test: EMAC-002 - Option<u64> with invalid value should return error, not silently None
     #[test]
-    fn test_option_numeric_invalid_returns_none() {
-        // Invalid numeric value should result in None, not Some(0)
-        let config = TimerConfig::from_uri("timer:tick?period=invalid").unwrap();
-        assert_eq!(
-            config.period, None,
-            "Invalid numeric value should return None, not Some(0)"
-        );
+    fn test_option_numeric_invalid_returns_error() {
+        // Invalid numeric value should propagate an error
+        let result = TimerConfig::from_uri("timer:tick?period=invalid");
+        assert!(result.is_err());
+        if let Err(CamelError::InvalidUri(msg)) = result {
+            assert!(
+                msg.contains("invalid value for period"),
+                "Error should mention the invalid param, got: {}",
+                msg
+            );
+        } else {
+            panic!("Expected InvalidUri error for invalid numeric Option value");
+        }
+    }
+
+    // Test: EMAC-003 - Boolean parsing is case-insensitive and accepts 1/0/yes/no
+    #[derive(Debug, Clone, UriConfig)]
+    #[uri_scheme = "booltest"]
+    struct BoolCaseConfig {
+        name: String,
+        #[uri_param]
+        flag: Option<bool>,
+    }
+
+    #[derive(Debug, Clone, UriConfig)]
+    #[uri_scheme = "booltest2"]
+    struct BoolDefaultConfig {
+        name: String,
+        #[uri_param(default = "false")]
+        enabled: bool,
+    }
+
+    #[test]
+    fn test_bool_case_insensitive_true_variants() {
+        for val in &["true", "True", "TRUE", "1", "yes", "Yes", "YES"] {
+            let uri = format!("booltest:foo?flag={}", val);
+            let config = BoolCaseConfig::from_uri(&uri).unwrap_or_else(|e| {
+                panic!("Failed to parse flag='{}' from URI '{}': {}", val, uri, e)
+            });
+            assert_eq!(
+                config.flag,
+                Some(true),
+                "flag='{}' should parse to Some(true)",
+                val
+            );
+        }
+    }
+
+    #[test]
+    fn test_bool_case_insensitive_false_variants() {
+        for val in &["false", "False", "FALSE", "0", "no", "No", "NO"] {
+            let uri = format!("booltest:foo?flag={}", val);
+            let config = BoolCaseConfig::from_uri(&uri).unwrap_or_else(|e| {
+                panic!("Failed to parse flag='{}' from URI '{}': {}", val, uri, e)
+            });
+            assert_eq!(
+                config.flag,
+                Some(false),
+                "flag='{}' should parse to Some(false)",
+                val
+            );
+        }
+    }
+
+    #[test]
+    fn test_bool_invalid_returns_error() {
+        let result = BoolCaseConfig::from_uri("booltest:foo?flag=maybe");
+        assert!(result.is_err());
+        if let Err(CamelError::InvalidUri(msg)) = result {
+            assert!(
+                msg.contains("invalid boolean value"),
+                "Error should mention invalid boolean, got: {}",
+                msg
+            );
+        } else {
+            panic!("Expected InvalidUri error for invalid bool value");
+        }
+    }
+
+    #[test]
+    fn test_bool_default_case_insensitive() {
+        // Override default with various case variants
+        for val in &["TRUE", "1", "YES"] {
+            let uri = format!("booltest2:bar?enabled={}", val);
+            let config = BoolDefaultConfig::from_uri(&uri).unwrap();
+            assert!(config.enabled, "enabled='{}' should be true", val);
+        }
+        for val in &["FALSE", "0", "NO"] {
+            let uri = format!("booltest2:bar?enabled={}", val);
+            let config = BoolDefaultConfig::from_uri(&uri).unwrap();
+            assert!(!config.enabled, "enabled='{}' should be false", val);
+        }
     }
 
     // Test: Issue 3 - Generic type fallback should include parse error in message

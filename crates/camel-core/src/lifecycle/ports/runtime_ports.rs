@@ -122,6 +122,19 @@ pub trait RuntimeExecutionPort: Send + Sync {
     async fn reload_route(&self, route_id: &str) -> Result<(), DomainError>;
     async fn remove_route(&self, route_id: &str) -> Result<(), DomainError>;
     async fn in_flight_count(&self, route_id: &str) -> Result<InFlightCountResult, DomainError>;
+
+    // TODO(CORE-003): Missing RuntimeEndpointRegistry parity. The following methods are needed:
+    // - health_check_endpoint(uri: &str) -> Result<HealthStatus, DomainError> — per-endpoint health
+    // - route_for_endpoint(uri: &str) -> Option<String> — map endpoint URI to owning route ID
+    // These are currently absent and block runtime introspection / management API completeness.
+
+    /// List all registered endpoint URIs across all routes.
+    ///
+    /// Default implementation returns an empty list. Adapters should override
+    /// to return actual endpoint URIs once endpoint tracking is implemented.
+    async fn list_endpoints(&self) -> Result<Vec<String>, DomainError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

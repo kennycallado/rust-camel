@@ -222,7 +222,7 @@ impl AggregatorConfigBuilder {
 
     pub fn try_build(self) -> Result<AggregatorConfig, CamelError> {
         let completion = self.completion.ok_or_else(|| {
-            CamelError::ProcessorError("completion condition required for AggregatorConfig".into())
+            CamelError::Config("completion condition required for AggregatorConfig".into())
         })?;
         Ok(AggregatorConfig {
             header_name: self.header_name,
@@ -236,9 +236,9 @@ impl AggregatorConfigBuilder {
         })
     }
 
-    /// Build the config. Panics if no completion condition was set.
-    pub fn build(self) -> AggregatorConfig {
-        self.try_build().expect("completion condition required") // allow-unwrap
+    /// Build the config. Returns an error if no completion condition was set.
+    pub fn build(self) -> Result<AggregatorConfig, CamelError> {
+        self.try_build()
     }
 }
 
@@ -250,7 +250,8 @@ mod tests {
     fn test_aggregator_config_complete_when_size() {
         let config = AggregatorConfig::correlate_by("orderId")
             .complete_when_size(3)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(config.header_name, "orderId");
         assert!(matches!(
             config.completion,
@@ -263,7 +264,8 @@ mod tests {
     fn test_aggregator_config_complete_when_predicate() {
         let config = AggregatorConfig::correlate_by("key")
             .complete_when(|bucket| bucket.len() >= 2)
-            .build();
+            .build()
+            .unwrap();
         assert!(matches!(
             config.completion,
             CompletionMode::Single(CompletionCondition::Predicate(_))
@@ -277,21 +279,30 @@ mod tests {
         let config = AggregatorConfig::correlate_by("key")
             .complete_when_size(1)
             .strategy(AggregationStrategy::Custom(f))
-            .build();
+            .build()
+            .unwrap();
         assert!(matches!(config.strategy, AggregationStrategy::Custom(_)));
     }
 
     #[test]
-    #[should_panic(expected = "completion condition required")]
-    fn test_aggregator_config_missing_completion_panics() {
-        AggregatorConfig::correlate_by("key").build();
+    fn test_aggregator_config_missing_completion_returns_err() {
+        let result = AggregatorConfig::correlate_by("key").build();
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error, got Ok"),
+        };
+        assert!(
+            err.to_string().contains("completion"),
+            "error message should mention 'completion': {err}"
+        );
     }
 
     #[test]
     fn test_complete_on_size_or_timeout() {
         let config = AggregatorConfig::correlate_by("key")
             .complete_on_size_or_timeout(3, Duration::from_secs(5))
-            .build();
+            .build()
+            .unwrap();
         assert!(matches!(config.completion, CompletionMode::Any(v) if v.len() == 2));
     }
 
@@ -299,7 +310,8 @@ mod tests {
     fn test_force_completion_on_stop_default() {
         let config = AggregatorConfig::correlate_by("key")
             .complete_when_size(1)
-            .build();
+            .build()
+            .unwrap();
         assert!(!config.force_completion_on_stop);
         assert!(!config.discard_on_timeout);
     }
@@ -312,7 +324,8 @@ mod tests {
             .bucket_ttl(Duration::from_secs(10))
             .force_completion_on_stop(true)
             .discard_on_timeout(true)
-            .build();
+            .build()
+            .unwrap();
 
         assert!(matches!(
             config.completion,
@@ -329,7 +342,8 @@ mod tests {
         let config = AggregatorConfig::correlate_by("original")
             .correlate_by("override")
             .complete_when_size(1)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(config.header_name, "override");
         assert!(matches!(
@@ -367,7 +381,8 @@ mod tests {
     fn test_complete_on_size_or_timeout_contains_both_conditions() {
         let config = AggregatorConfig::correlate_by("k")
             .complete_on_size_or_timeout(4, Duration::from_millis(250))
-            .build();
+            .build()
+            .unwrap();
 
         match config.completion {
             CompletionMode::Any(conditions) => {
@@ -399,7 +414,8 @@ mod tests {
         let config = AggregatorConfig::correlate_by("first")
             .correlate_by("second")
             .complete_when_size(2)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(config.header_name, "second");
         assert!(

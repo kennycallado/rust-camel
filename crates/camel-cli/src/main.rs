@@ -480,8 +480,8 @@ async fn run(
     ctx.register_language("js", Box::new(JsLanguage::new()))?;
     ctx.register_language("javascript", Box::new(JsLanguage::new()))?;
     ctx.register_language("rhai", Box::new(RhaiLanguage::new()))?;
-    ctx.register_language("jsonpath", Box::new(JsonPathLanguage))?;
-    ctx.register_language("xpath", Box::new(XPathLanguage))?;
+    ctx.register_language("jsonpath", Box::new(JsonPathLanguage::new()))?;
+    ctx.register_language("xpath", Box::new(XPathLanguage::new()))?;
 
     // 5. Discover and load initial routes
     match camel_dsl::discover_routes(&patterns) {

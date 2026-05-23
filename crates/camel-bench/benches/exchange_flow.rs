@@ -44,6 +44,8 @@ fn build_exchange_flow() -> BoxProcessor {
     compose_pipeline(vec![step1, step2, step3, step4, step5])
 }
 
+/// Benchmarks a 5-processor exchange flow (set-header → filter → choice → log → set-body)
+/// to measure overhead of sequential header/body mutations across a pipeline.
 fn bench_exchange_flow(c: &mut Criterion) {
     let mut group = c.benchmark_group("integration/exchange_flow");
     let rt = tokio::runtime::Runtime::new().unwrap();
