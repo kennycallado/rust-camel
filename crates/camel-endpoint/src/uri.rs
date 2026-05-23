@@ -37,6 +37,44 @@ fn unwrap_raw(value: &str) -> &str {
     }
 }
 
+fn is_raw_value(value: &str) -> bool {
+    value.starts_with("RAW(") && value.ends_with(')')
+}
+
+/// Percent-decode a string per RFC 3986.
+///
+/// `%XX` sequences are replaced by the byte represented by the hex digits.
+/// `+` is NOT treated as space (Camel URIs are not form-encoded).
+/// Returns an error for incomplete or invalid `%XX` sequences, or if the
+/// resulting bytes are not valid UTF-8.
+fn percent_decode(s: &str) -> Result<String, CamelError> {
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(CamelError::InvalidUri(format!(
+                    "incomplete percent-encoding at position {i} in '{s}'"
+                )));
+            }
+            let hi = char::from(bytes[i + 1]);
+            let lo = char::from(bytes[i + 2]);
+            let byte = u8::from_str_radix(&format!("{hi}{lo}"), 16).map_err(|_| {
+                CamelError::InvalidUri(format!("invalid percent-encoding '%{hi}{lo}' in '{s}'"))
+            })?;
+            result.push(byte);
+            i += 3;
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(result).map_err(|e| {
+        CamelError::InvalidUri(format!("percent-decoded bytes are not valid UTF-8: {e}"))
+    })
+}
+
 impl std::fmt::Debug for UriComponents {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut redacted_params = std::collections::HashMap::new();
@@ -84,7 +122,7 @@ pub fn parse_uri(uri: &str) -> Result<UriComponents, CamelError> {
 
     Ok(UriComponents {
         scheme: scheme.to_string(),
-        path: path.to_string(),
+        path: percent_decode(path)?,
         params,
     })
 }
@@ -103,20 +141,36 @@ fn parse_query(query: &str) -> Result<HashMap<String, String>, CamelError> {
             )));
         };
 
-        if params.contains_key(key) {
+        let decoded_key = percent_decode(key)?;
+
+        if params.contains_key(&decoded_key) {
             return Err(CamelError::InvalidUri(format!(
                 "duplicate query parameter: {}",
-                key
+                decoded_key
             )));
         }
 
-        let parsed_value = if is_sensitive_key(key) {
-            unwrap_raw(value).to_string()
-        } else {
+        let parsed_value = if is_raw_value(value) {
+            // RAW(...) signals "treat this value literally, no further processing".
+            // For sensitive keys: unwrap the RAW(...) wrapper so the stored value is
+            // the plain secret (consistent with pre-existing sensitive key handling).
+            // For non-sensitive keys: preserve the full `RAW(...)` string intact so
+            // downstream consumers can detect it and handle it explicitly (e.g., avoid
+            // encoding it again). This is intentional, not an oversight.
+            if is_sensitive_key(&decoded_key) {
+                unwrap_raw(value).to_string()
+            } else {
+                value.to_string()
+            }
+        } else if is_sensitive_key(&decoded_key) {
+            // Sensitive non-RAW: preserve literally (no decode)
             value.to_string()
+        } else {
+            // Non-sensitive non-RAW: percent-decode
+            percent_decode(value)?
         };
 
-        params.insert(key.to_string(), parsed_value);
+        params.insert(decoded_key, parsed_value);
     }
 
     Ok(params)
@@ -452,5 +506,116 @@ mod tests {
     fn test_invalid_scheme_with_underscore() {
         let result = parse_uri("bad_scheme:path");
         assert!(result.is_err());
+    }
+
+    // ENDPOINT-002: percent-decoding tests
+
+    #[test]
+    fn test_parse_uri_percent_encoded_path() {
+        let result = parse_uri("timer:my%20timer").unwrap();
+        assert_eq!(result.path, "my timer");
+    }
+
+    #[test]
+    fn test_parse_uri_percent_encoded_query_value() {
+        let result = parse_uri("log:info?description=hello%20world").unwrap();
+        assert_eq!(
+            result.params.get("description"),
+            Some(&"hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_uri_percent_encoded_special_chars() {
+        // %2F = '/', %3A = ':', %40 = '@'
+        let result = parse_uri("http://host/path?user=foo%40bar.com&redirect=%2Fhome").unwrap();
+        assert_eq!(result.params.get("user"), Some(&"foo@bar.com".to_string()));
+        assert_eq!(result.params.get("redirect"), Some(&"/home".to_string()));
+    }
+
+    #[test]
+    fn test_parse_uri_percent_encoded_path_with_slash() {
+        let result = parse_uri("file:my%2Fpath%2Fhere").unwrap();
+        assert_eq!(result.path, "my/path/here");
+    }
+
+    #[test]
+    fn test_raw_value_not_percent_decoded() {
+        // RAW(...) values bypass percent-decoding — they are already raw
+        let result = parse_uri("redis://localhost?password=RAW(%40secret)").unwrap();
+        assert_eq!(
+            result.params.get("password"),
+            Some(&"%40secret".to_string())
+        );
+    }
+
+    #[test]
+    fn test_percent_encoded_key_decoded() {
+        let result = parse_uri("foo:bar?my%20key=value").unwrap();
+        assert_eq!(result.params.get("my key"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_invalid_percent_sequence_returns_error() {
+        let result = parse_uri("foo:bar?key=%ZZ");
+        assert!(
+            result.is_err(),
+            "Expected error for invalid percent sequence %ZZ"
+        );
+    }
+
+    #[test]
+    fn test_incomplete_percent_sequence_returns_error() {
+        let result = parse_uri("foo:bar?key=val%");
+        assert!(
+            result.is_err(),
+            "Expected error for incomplete percent sequence"
+        );
+        let result2 = parse_uri("foo:bar?key=val%2");
+        assert!(
+            result2.is_err(),
+            "Expected error for truncated percent sequence"
+        );
+    }
+
+    #[test]
+    fn test_percent_encoded_plus_is_not_space() {
+        // Camel URIs are NOT form-encoded; '+' is a literal plus, not space
+        let result = parse_uri("foo:bar?key=a+b").unwrap();
+        assert_eq!(result.params.get("key"), Some(&"a+b".to_string()));
+    }
+
+    #[test]
+    fn test_percent_encoded_plus_decodes_to_plus() {
+        // %2B must decode to literal '+' in both path and query value
+        let result = parse_uri("file:a%2Bb?key=c%2Bd").unwrap();
+        assert_eq!(result.path, "a+b");
+        assert_eq!(result.params.get("key"), Some(&"c+d".to_string()));
+    }
+
+    #[test]
+    fn test_percent_encoded_multibyte_utf8() {
+        // %C3%A9 = U+00E9 LATIN SMALL LETTER E WITH ACUTE ('é')
+        let result = parse_uri("file:caf%C3%A9?name=r%C3%A9sum%C3%A9").unwrap();
+        assert_eq!(result.path, "café");
+        assert_eq!(result.params.get("name"), Some(&"résumé".to_string()));
+    }
+
+    #[test]
+    fn test_percent_encoded_null_byte_allowed() {
+        // %00 decodes to NUL byte — behavior is pinned: decoder allows it, result contains '\0'
+        let result = parse_uri("foo:bar?key=val%00end").unwrap();
+        assert_eq!(result.params.get("key"), Some(&"val\0end".to_string()));
+    }
+
+    #[test]
+    fn test_sensitive_key_percent_encoded() {
+        // Key is percent-decoded before sensitivity check; sensitive value is NOT percent-decoded
+        let result = parse_uri("db:conn?pass%77ord=abc%20def").unwrap();
+        // "pass%77ord" decodes key to "password" → sensitive → value stored literal
+        assert_eq!(
+            result.params.get("password"),
+            Some(&"abc%20def".to_string())
+        );
     }
 }
