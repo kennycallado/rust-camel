@@ -1852,10 +1852,7 @@ mod tests {
             .await
             .unwrap();
 
-        let uri = format!(
-            "file:{}?initialDelay=0&delay=50",
-            dir.path().display()
-        );
+        let uri = format!("file:{}?initialDelay=0&delay=50", dir.path().display());
         let config = FileConfig::from_uri(&uri).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();

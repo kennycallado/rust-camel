@@ -890,11 +890,11 @@ pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
         {
             continue;
         }
-        // Skip target directory
-        if path
-            .components()
-            .any(|c| c == Component::Normal("target".as_ref()))
-        {
+        // Skip target and worktree directories
+        if path.components().any(|c| {
+            c == Component::Normal("target".as_ref())
+                || c == Component::Normal(".worktrees".as_ref())
+        }) {
             continue;
         }
 
@@ -1081,10 +1081,10 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
         {
             continue;
         }
-        if path
-            .components()
-            .any(|c| c == Component::Normal("target".as_ref()))
-        {
+        if path.components().any(|c| {
+            c == Component::Normal("target".as_ref())
+                || c == Component::Normal(".worktrees".as_ref())
+        }) {
             continue;
         }
 
