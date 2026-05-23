@@ -1,6 +1,7 @@
 ## CRITICAL
 
 - Always read .opencode/instructions/behavior.md
+- Read CONTEXT-MAP.md for domain language and architecture decisions before any implementation task
 - If you have access to caveman skill, activate it
 - Never add to staging something that is in .gitignore
 

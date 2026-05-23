@@ -1,7 +1,9 @@
 /target
-/docs
 /.worktrees
-docs/
+docs/*
+!docs/adr
+docs/adr/*
+!docs/adr/*.md
 bridges/*/build/
 bridges/*/.gradle/
 bridges/*/.gradle-docker-cache/
