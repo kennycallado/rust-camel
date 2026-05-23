@@ -1,5 +1,6 @@
 use crate::error::CamelError;
 use quick_xml::Reader;
+use quick_xml::XmlVersion;
 use quick_xml::events::Event;
 
 fn check_root_element(depth: usize, root_count: &mut usize) -> Result<(), CamelError> {
@@ -366,9 +367,11 @@ fn parse_attrs(
             "@{}",
             String::from_utf8_lossy(attr.key.local_name().as_ref())
         );
-        let val = attr.decode_and_unescape_value(decoder).map_err(|err| {
-            CamelError::TypeConversionFailed(format!("cannot unescape attribute value: {err}"))
-        })?;
+        let val = attr
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+            .map_err(|err| {
+                CamelError::TypeConversionFailed(format!("cannot unescape attribute value: {err}"))
+            })?;
         map.insert(key, serde_json::Value::String(val.to_string()));
     }
     Ok(map)

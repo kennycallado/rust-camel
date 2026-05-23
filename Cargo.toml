@@ -124,7 +124,6 @@ rhai = { version = "1", features = ["sync"] }
 # Pin to 0.21: Context is !Send + !Sync
 boa_engine = { version = "0.21", features = [] }
 arc-swap = "1"
-serde_yaml = "0.9"
 config = "0.15"
 glob = "0.3"
 notify = { version = "8", features = ["macos_fsevent"] }
@@ -132,7 +131,7 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka", "postgres", "redis"] }
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 prometheus = "0.14"
-quick-xml = "0.39"
+quick-xml = "0.40"
 base64 = "0.22"
 rand = "0.10"
 sxd-document = "0.3"
@@ -145,16 +144,16 @@ ts-rs = "12"
 
 # WASM dependencies
 wit-bindgen = "0.57"
-wasmtime = { version = "44", features = ["component-model"] }
-wasmtime-wasi = "44"
+wasmtime = { version = "45", features = ["component-model"] }
+wasmtime-wasi = "45"
 
 # OpenTelemetry dependencies
-opentelemetry = { version = "0.31", features = ["trace", "logs", "metrics"] }
-opentelemetry_sdk = { version = "0.31", features = ["trace", "logs", "metrics", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "trace", "logs", "metrics"] }
-opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
-opentelemetry-appender-tracing = { version = "0.31" }
-tracing-opentelemetry = { version = "0.32", features = [] }
+opentelemetry = { version = "0.32", features = ["trace", "logs", "metrics"] }
+opentelemetry_sdk = { version = "0.32", features = ["trace", "logs", "metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "http-proto", "trace", "logs", "metrics"] }
+opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_experimental"] }
+opentelemetry-appender-tracing = { version = "0.32" }
+tracing-opentelemetry = { version = "0.33", features = [] }
 
 [profile.dev]
 debug = 1

@@ -650,7 +650,7 @@ routes:
   - id: r1
     from: direct:start
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.routes.len(), 1);
         assert_eq!(parsed.routes[0].id, "r1");
         assert_eq!(parsed.routes[0].from, "direct:start");
@@ -667,7 +667,7 @@ routes:
     from: timer:tick
     concurrent: 4
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.routes[0].concurrent, Some(4));
         assert!(!parsed.routes[0].sequential);
     }
@@ -681,7 +681,7 @@ routes:
     error_handler:
       dead_letter_channel: log:dlq
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         let eh = parsed.routes[0].error_handler.as_ref().unwrap();
         assert_eq!(eh.dead_letter_channel.as_deref(), Some("log:dlq"));
     }
@@ -696,7 +696,7 @@ routes:
       failure_threshold: 3
       open_duration_ms: 5000
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         let cb = parsed.routes[0].circuit_breaker.as_ref().unwrap();
         assert_eq!(cb.failure_threshold, 3);
         assert_eq!(cb.open_duration_ms, 5000);
@@ -710,7 +710,7 @@ routes:
     from: direct:in
     circuit_breaker: {}
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         let cb = parsed.routes[0].circuit_breaker.as_ref().unwrap();
         assert_eq!(cb.failure_threshold, 5);
         assert_eq!(cb.open_duration_ms, 30_000);
@@ -725,7 +725,7 @@ routes:
     steps:
       - to: log:out
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.routes[0].steps.len(), 1);
     }
 
@@ -738,7 +738,7 @@ routes:
     steps:
       - delay: 500
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
             YamlStep::Delay(d) => match &d.delay {
                 DelayBody::Short(ms) => assert_eq!(*ms, 500),
@@ -759,7 +759,7 @@ routes:
           delay_ms: 200
           dynamic_header: X-Delay
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
             YamlStep::Delay(d) => match &d.delay {
                 DelayBody::Full(cfg) => {
@@ -782,7 +782,7 @@ routes:
       retry:
         max_attempts: 3
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         let retry = parsed.routes[0]
             .error_handler
             .as_ref()
@@ -806,7 +806,7 @@ routes:
     steps:
       - stream_cache: true
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
             YamlStep::StreamCache(s) => match &s.stream_cache {
                 StreamCacheBody::Enabled(b) => assert!(*b),
@@ -825,7 +825,7 @@ routes:
     steps:
       - stop: true
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
             YamlStep::Stop(s) => assert!(s.stop),
             _ => panic!("expected stop"),
@@ -841,7 +841,7 @@ routes:
     steps:
       - convert_body_to: json
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
             YamlStep::ConvertBodyTo(s) => assert_eq!(s.convert_body_to, "json"),
             _ => panic!("expected convert_body_to"),
@@ -858,7 +858,7 @@ routes:
       - marshal: protobuf
       - unmarshal: protobuf
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.routes[0].steps.len(), 2);
     }
 
@@ -873,7 +873,7 @@ routes:
           name: myBean
           method: handle
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
             YamlStep::Bean(b) => {
                 assert_eq!(b.bean.name, "myBean");
@@ -894,7 +894,7 @@ routes:
           language: rhai
           source: "1 + 1"
 "#;
-        let parsed: YamlRoutes = serde_yaml::from_str(yaml).unwrap();
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
             YamlStep::Script(s) => {
                 assert_eq!(s.script.language, "rhai");

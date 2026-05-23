@@ -29,7 +29,7 @@ url.workspace = true
 camel-core.workspace = true
 camel-builder.workspace = true
 tokio = { workspace = true }
-opentelemetry_sdk = { version = "0.31", features = ["testing"] }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tower = { workspace = true }
 serial_test = "3"
 

@@ -66,7 +66,7 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 24] = [
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
 
 pub fn parse_yaml_to_declarative(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
-    let routes: YamlRoutes = serde_yaml::from_str(yaml).map_err(|e| {
+    let routes: YamlRoutes = serde_yml::from_str(yaml).map_err(|e| {
         error!(error = %e, "yaml parse failed");
         CamelError::RouteError(format!("YAML parse error: {e}"))
     })?;
