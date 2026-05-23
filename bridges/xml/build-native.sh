@@ -40,7 +40,9 @@ fi
 # --- Musl toolchain setup for static linking ---
 MUSL_PREFIX="/tmp/musl-toolchain"
 ZLIB_VERSION="1.3.1"
-MUSL_TOOLCHAIN_URL="https://more.musl.cc/11.2.1/x86_64-linux-musl/x86_64-linux-musl-native.tgz"
+MUSL_TOOLCHAIN_SHA256="eb1db6f0f3c2bdbdbfb993d7ef7e2eeef82ac1259f6a6e1757c33a97dbcef3ad"
+MUSL_TOOLCHAIN_URL="https://github.com/kennycallado/rust-camel/releases/download/musl-toolchain-v11.2.1/x86_64-linux-musl-native.tgz"
+MUSL_TOOLCHAIN_FALLBACK_URL="https://more.musl.cc/11.2.1/x86_64-linux-musl/x86_64-linux-musl-native.tgz"
 ZLIB_URL="https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz"
 
 echo "Setting up musl toolchain for static native-image build..."
@@ -48,8 +50,26 @@ echo "Setting up musl toolchain for static native-image build..."
 if [[ ! -x "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" ]]; then
     echo "  Downloading musl toolchain..."
     mkdir -p "${MUSL_PREFIX}"
-    curl -sSL --retry 3 --max-time 120 --retry-delay 5 "${MUSL_TOOLCHAIN_URL}" \
-        | tar -xz -C "${MUSL_PREFIX}" --strip-components=1
+    ARCHIVE="/tmp/musl-toolchain.tgz"
+
+    download_with_verify() {
+        local url="$1"
+        echo "  Trying ${url}..."
+        curl -sSL --retry 3 --max-time 120 --retry-delay 5 -o "${ARCHIVE}" "${url}"
+        echo "  Verifying SHA256..."
+        echo "${MUSL_TOOLCHAIN_SHA256}  ${ARCHIVE}" | sha256sum -c - || return 1
+    }
+
+    if ! download_with_verify "${MUSL_TOOLCHAIN_URL}"; then
+        echo "  Primary download failed, trying fallback..."
+        download_with_verify "${MUSL_TOOLCHAIN_FALLBACK_URL}" || {
+            echo "ERROR: Both musl toolchain downloads failed" >&2
+            exit 1
+        }
+    fi
+
+    tar -xz -C "${MUSL_PREFIX}" --strip-components=1 < "${ARCHIVE}"
+    rm -f "${ARCHIVE}"
 fi
 
 export CC="x86_64-linux-musl-gcc"

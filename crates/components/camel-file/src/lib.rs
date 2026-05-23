@@ -1848,29 +1848,39 @@ mod tests {
     #[tokio::test]
     async fn test_file_consumer_move_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let dir_path = dir.path().to_str().unwrap();
-
-        std::fs::write(dir.path().join("moveme.txt"), "data").unwrap();
-
-        let component = FileComponent::new();
-        let ctx = NoOpComponentContext;
-        let endpoint = component
-            .create_endpoint(&format!("file:{dir_path}?initialDelay=0&delay=100"), &ctx)
+        tokio::fs::write(dir.path().join("moveme.txt"), b"data")
+            .await
             .unwrap();
-        let mut consumer = endpoint.create_consumer().unwrap();
 
+        let uri = format!(
+            "file:{}?initialDelay=0&delay=50",
+            dir.path().display()
+        );
+        let config = FileConfig::from_uri(&uri).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let token = CancellationToken::new();
-        let ctx = ConsumerContext::new(tx, token.clone());
+        let ctx = ConsumerContext::new(tx, token);
 
-        tokio::spawn(async move {
-            consumer.start(ctx).await.unwrap();
-        });
+        let include_re = None;
+        let exclude_re = None;
+        let mut seen = std::collections::HashSet::new();
+        let in_process_locks = std::sync::Arc::new(DashMap::new());
+        let idempotent_repo = std::sync::Arc::new(tokio::sync::Mutex::new(HashSet::new()));
 
-        let _ = tokio::time::timeout(Duration::from_millis(500), async { rx.recv().await }).await;
-        token.cancel();
+        poll_directory(
+            &config,
+            &ctx,
+            &include_re,
+            &exclude_re,
+            &mut seen,
+            &in_process_locks,
+            &idempotent_repo,
+        )
+        .await
+        .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let ex = rx.try_recv().expect("should receive exchange");
+        drop(ex);
 
         assert!(
             !dir.path().join("moveme.txt").exists(),
