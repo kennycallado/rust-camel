@@ -33,7 +33,7 @@ pub use config::{
 };
 
 /// Version of the Java bridge binary this crate is compatible with.
-pub const BRIDGE_VERSION: &str = "0.2.1";
+pub const BRIDGE_VERSION: &str = "0.3.0";
 
 pub mod proto {
     tonic::include_proto!("jms_bridge");

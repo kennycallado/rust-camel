@@ -676,7 +676,7 @@ mod tests {
             bridge_start_timeout_ms: 15_000,
             health_check_interval_ms: 3_000,
             bridge_cache_dir: None,
-            version: "0.1.0".to_string(),
+            version: crate::BRIDGE_VERSION.to_string(),
             bind_address: None,
         }
     }
@@ -693,7 +693,7 @@ mod tests {
         let pool = CxfBridgePool::from_config(pool_config).expect("valid config");
         assert_eq!(pool.max_bridges, 2);
         assert_eq!(pool.bridge_start_timeout_ms, 15_000);
-        assert_eq!(pool.bridge_version, "0.1.0");
+        assert_eq!(pool.bridge_version, crate::BRIDGE_VERSION);
     }
 
     #[test]
