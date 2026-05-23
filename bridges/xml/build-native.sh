@@ -105,7 +105,7 @@ echo ""
 # when bash is used as --entrypoint in the container).
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
     build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true \
-    -Dquarkus.native.additional-build-args="-H:+AllowVMInspection,-Djdk.xml.entityExpansionLimit=64,-Djdk.xml.totalEntitySizeLimit=5000000,-Djdk.xml.maxGeneralEntitySizeLimit=100000,-Djdk.xml.elementAttributeLimit=10000,--initialize-at-run-time=net.sf.saxon.functions.hof.RandomNumberGenerator,--initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl,--initialize-at-run-time=org.xmlresolver,--static,--libc=musl" \
+    -Dquarkus.native.additional-build-args="-H:+AllowVMInspection,-H:-NativeLibrariesForNonPrimaryPlatforms,-Djdk.xml.entityExpansionLimit=64,-Djdk.xml.totalEntitySizeLimit=5000000,-Djdk.xml.maxGeneralEntitySizeLimit=100000,-Djdk.xml.elementAttributeLimit=10000,--initialize-at-run-time=net.sf.saxon.functions.hof.RandomNumberGenerator,--initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl,--initialize-at-run-time=org.xmlresolver,--static,--libc=musl" \
     -Pversion="${VERSION}" --no-daemon || {
     ERR_LOG=$(find build -name 'svm_err_b_*.md' -o -name '*.log' 2>/dev/null | head -3)
     for f in $ERR_LOG; do

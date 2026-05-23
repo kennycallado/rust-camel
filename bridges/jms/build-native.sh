@@ -105,7 +105,7 @@ echo ""
 # when bash is used as --entrypoint in the Mandrel container).
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
     build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true \
-    -Dquarkus.native.additional-build-args="-H:+AllowVMInspection,--static,--libc=musl" \
+    -Dquarkus.native.additional-build-args="-H:+AllowVMInspection,-H:-NativeLibrariesForNonPrimaryPlatforms,--static,--libc=musl" \
     -Pversion="${VERSION}" --no-daemon
 
 # Locate the native runner (resilient to Quarkus naming changes)
