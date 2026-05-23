@@ -7,13 +7,43 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            target: linux-musl-x86_64
+            build_method: docker
+          - os: macos-intel
+            runner: macos-13
+            target: macos-x86_64
+            build_method: native
+          - os: macos-arm
+            runner: macos-latest
+            target: macos-aarch64
+            build_method: native
+          - os: windows
+            runner: windows-latest
+            target: windows-x86_64
+            build_method: native
+
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Cache Gradle dependencies
+      - name: Setup GraalVM (native builds)
+        if: matrix.build_method == 'native'
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f # v1.5.3
+        with:
+          java-version: '21'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache Gradle dependencies (Docker)
+        if: matrix.build_method == 'docker'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: bridges/jms/.gradle-docker-cache
@@ -21,14 +51,30 @@ jobs:
           restore-keys: |
             gradle-
 
+      - name: Cache Gradle dependencies (native)
+        if: matrix.build_method == 'native'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: bridges/jms/.gradle-local-cache
+          key: gradle-native-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('bridges/jms/build.gradle.kts', 'bridges/jms/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-native-${{ runner.os }}-${{ matrix.target }}-
+
       - name: Extract version from tag
         id: version
+        shell: bash
         run: echo "version=${GITHUB_REF_NAME#jms-bridge-v}" >> $GITHUB_OUTPUT
 
-      - name: Build native bridge
+      - name: Build native bridge (Docker)
+        if: matrix.build_method == 'docker'
         run: cargo xtask build-jms-bridge --version ${{ steps.version.outputs.version }}
 
-      - name: Verify static binary
+      - name: Build native bridge (native)
+        if: matrix.build_method == 'native'
+        run: cargo xtask build-bridge-native --bridge jms --version ${{ steps.version.outputs.version }} --target ${{ matrix.target }}
+
+      - name: Verify static binary (Linux only)
+        if: matrix.os == 'linux'
         run: |
           BINARY=$(find bridges/jms/build/native -name 'jms-bridge' -type f)
           if readelf -l "$BINARY" | grep -q PT_INTERP; then
@@ -39,8 +85,10 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: bridge-linux-musl-x86_64
-          path: bridges/jms/build/release/*.tar.gz*
+          name: bridge-${{ matrix.target }}
+          path: |
+            bridges/jms/build/release/*.tar.gz*
+            bridges/jms/build/release/*.zip*
 
   release:
     needs: build
@@ -62,19 +110,24 @@ jobs:
         run: |
           cd artifacts
           VERSION="${{ steps.version.outputs.version }}"
-          sha256sum *.tar.gz > "jms-bridge-${VERSION}-SHA256SUMS"
+          sha256sum *.tar.gz *.zip > "jms-bridge-${VERSION}-SHA256SUMS"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           files: |
             artifacts/*.tar.gz
+            artifacts/*.zip
             artifacts/jms-bridge-*-SHA256SUMS
           generate_release_notes: true
           body: |
             ## JMS Bridge ${{ github.ref_name }}
 
-            **Platform:** Linux x86_64 (statically linked, musl)
-            **Requires:** Any Linux distribution (no shared library dependencies)
+            **Platforms:**
+            - `linux-musl-x86_64` — statically linked, any Linux (Alpine, Ubuntu, NixOS, scratch)
+            - `macos-x86_64` — Intel Macs
+            - `macos-aarch64` — Apple Silicon (M1/M2/M3+)
+            - `windows-x86_64` — Windows 10/11
 
-            macOS support is out of scope for this release. Use `CAMEL_JMS_BRIDGE_BINARY_PATH` with a custom build if needed.
+            **No shared library dependencies on Linux.**
+            **No JVM required — binaries are native images.**

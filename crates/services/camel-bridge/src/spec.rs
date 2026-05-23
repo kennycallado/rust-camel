@@ -17,8 +17,11 @@ pub struct BridgeSpec {
     /// Example: `"jms-bridge-{pid}.log"`
     pub log_file_template: &'static str,
     /// Whether pre-built binaries are available for macOS.
-    /// JMS bridge: false (requires Docker build). XML bridge: true (GraalVM native-image).
+    /// All bridges use GraalVM CE native-image which works on all platforms.
     pub macos_supported: bool,
+    /// Whether pre-built binaries are available for Windows.
+    /// All bridges use GraalVM CE native-image which works on all platforms.
+    pub windows_supported: bool,
 }
 
 /// Spec for the JMS bridge (`bridges/jms`).
@@ -29,7 +32,8 @@ pub const JMS_BRIDGE: BridgeSpec = BridgeSpec {
     cache_subdir: "jms-bridge",
     release_tag_prefix: "jms-bridge-v",
     log_file_template: "jms-bridge-{pid}.log",
-    macos_supported: false,
+    macos_supported: true,
+    windows_supported: true,
 };
 
 /// Spec for the XML bridge (`bridges/xml`).
@@ -41,6 +45,7 @@ pub const XML_BRIDGE: BridgeSpec = BridgeSpec {
     release_tag_prefix: "xml-bridge-v",
     log_file_template: "xml-bridge-{pid}.log",
     macos_supported: true,
+    windows_supported: true,
 };
 
 /// Spec for the CXF bridge (`bridges/cxf`).
@@ -51,5 +56,6 @@ pub const CXF_BRIDGE: BridgeSpec = BridgeSpec {
     cache_subdir: "cxf-bridge",
     release_tag_prefix: "cxf-bridge-v",
     log_file_template: "cxf-bridge-{pid}.log",
-    macos_supported: false,
+    macos_supported: true,
+    windows_supported: true,
 };

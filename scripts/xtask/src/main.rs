@@ -3,7 +3,7 @@ use std::process::Command;
 
 use clap::{Parser, Subcommand};
 
-const MANDREL_IMAGE: &str = "quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21";
+const GRAALVM_IMAGE: &str = "quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21";
 const EXPECTED_BINARY: &str = "build/native/jms-bridge";
 const EXPECTED_BINARY_XML: &str = "build/native/xml-bridge";
 const EXPECTED_BINARY_CXF: &str = "build/native/cxf-bridge";
@@ -18,7 +18,7 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::enum_variant_names)]
 enum Commands {
-    /// Build the JMS bridge native binary using Docker (Mandrel)
+    /// Build the JMS bridge native binary using Docker (GraalVM CE)
     BuildJmsBridge {
         /// Version tag to pass to build-native.sh (e.g. 0.2.0)
         #[arg(long)]
@@ -27,7 +27,7 @@ enum Commands {
         #[arg(long)]
         no_cache: bool,
     },
-    /// Build the XML bridge native binary using Docker (Mandrel)
+    /// Build the XML bridge native binary using Docker (GraalVM CE)
     BuildXmlBridge {
         /// Version tag to pass to build-native.sh (e.g. 0.2.0)
         #[arg(long)]
@@ -36,7 +36,7 @@ enum Commands {
         #[arg(long)]
         no_cache: bool,
     },
-    /// Build the CXF bridge native binary using Docker (Mandrel)
+    /// Build the CXF bridge native binary using Docker (GraalVM CE)
     BuildCxfBridge {
         /// Version tag to pass to build-native.sh (e.g. 0.2.0)
         #[arg(long)]
@@ -44,6 +44,18 @@ enum Commands {
         /// Clear Gradle cache before building
         #[arg(long)]
         no_cache: bool,
+    },
+    /// Build a bridge native binary directly (no Docker) for macOS/Windows CI
+    BuildBridgeNative {
+        /// Bridge name: jms, xml, or cxf
+        #[arg(long)]
+        bridge: String,
+        /// Version tag
+        #[arg(long)]
+        version: Option<String>,
+        /// Target platform: macos-x86_64, macos-aarch64, windows-x86_64
+        #[arg(long)]
+        target: String,
     },
     /// Generate canonical route spec artifacts (JSON Schema, TypeScript types)
     Schema,
@@ -75,6 +87,16 @@ fn main() {
         }
         Commands::BuildCxfBridge { version, no_cache } => {
             if let Err(e) = build_cxf_bridge(version, no_cache) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::BuildBridgeNative {
+            bridge,
+            version,
+            target,
+        } => {
+            if let Err(e) = build_bridge_native(&bridge, version.as_deref(), &target) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -250,7 +272,7 @@ fn build_bridge(
         args.push(format!("--user={uid}:{gid}"));
     }
 
-    args.push(MANDREL_IMAGE.to_string());
+    args.push(GRAALVM_IMAGE.to_string());
 
     // build-native.sh args
     args.push("./build-native.sh".to_string());
@@ -261,7 +283,7 @@ fn build_bridge(
     }
 
     println!("Building {bridge_name} bridge native image...");
-    println!("  Image:     {MANDREL_IMAGE}");
+    println!("  Image:     {GRAALVM_IMAGE}");
     println!("  Source:    {}", bridge_dir.display());
     if let Some(ref v) = version {
         println!("  Version:   {v}");
@@ -292,8 +314,15 @@ fn build_bridge(
     // 6. On NixOS, patch the glibc-linked binary so it uses the Nix-store
     //    linker and libraries. This makes the binary runnable without
     //    enabling nix-ld at the system level.
+    //    Skip for statically linked binaries (no dynamic interpreter to patch).
     #[cfg(target_os = "linux")]
-    patchelf_for_nixos(&binary_path)?;
+    {
+        if is_static_binary(&binary_path) {
+            println!("Binary is statically linked — skipping NixOS patchelf.");
+        } else {
+            patchelf_for_nixos(&binary_path)?;
+        }
+    }
 
     // 7. Print summary
     let metadata =
@@ -312,7 +341,285 @@ fn build_bridge(
     Ok(())
 }
 
-/// On NixOS, the Mandrel native binary is linked against glibc with
+fn build_bridge_native(bridge: &str, version: Option<&str>, target: &str) -> Result<(), String> {
+    let (bridge_name, bridge_dir, binary_name, extra_gradle_args) = match bridge {
+        "jms" => ("JMS", "jms", "jms-bridge", ""),
+        "xml" => ("XML", "xml", "xml-bridge", ""),
+        "cxf" => (
+            "CXF",
+            "cxf",
+            "cxf-bridge",
+            "-x spotlessJavaCheck -x spotlessCheck",
+        ),
+        other => return Err(format!("Unknown bridge: {other}. Use jms, xml, or cxf.")),
+    };
+
+    let ver = version.unwrap_or("dev");
+    validate_version(ver)?;
+
+    // Validate target matches host OS/arch to prevent mislabeled artifacts
+    let host_os = std::env::consts::OS;
+    let host_arch = std::env::consts::ARCH;
+    let target_os = if target.contains("linux") {
+        "linux"
+    } else if target.contains("macos") {
+        "macos"
+    } else if target.contains("windows") {
+        "windows"
+    } else {
+        return Err(format!("Unknown target OS in: {target}"));
+    };
+    let target_arch = if target.contains("x86_64") {
+        "x86_64"
+    } else if target.contains("aarch64") {
+        "aarch64"
+    } else {
+        return Err(format!("Unknown target arch in: {target}"));
+    };
+    if target_os != host_os || target_arch != host_arch {
+        return Err(format!(
+            "Target '{target}' does not match host '{host_os}-{host_arch}'. Cross-compilation is not supported."
+        ));
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = find_workspace_root_from(&manifest_dir)
+        .ok_or_else(|| "Cannot locate workspace root".to_string())?;
+
+    let bridge_path = workspace_root.join("bridges").join(bridge_dir);
+
+    println!("Building {bridge_name} bridge native image (native, no Docker)...");
+    println!("  Bridge:  {bridge}");
+    println!("  Target:  {target}");
+    println!("  Version: {ver}");
+    println!();
+
+    // Use gradlew script if available, otherwise invoke java with wrapper jar
+    let gradle_cmd = if cfg!(windows) {
+        "gradlew.bat"
+    } else {
+        "gradlew"
+    };
+    let gradle_script = bridge_path.join(gradle_cmd);
+
+    let (cmd, initial_args) = if gradle_script.exists() {
+        (gradle_script, Vec::new())
+    } else {
+        let jar_path = bridge_path
+            .join("gradle")
+            .join("wrapper")
+            .join("gradle-wrapper.jar");
+        if !jar_path.exists() {
+            return Err(format!(
+                "Gradle wrapper not found (tried {} and {})",
+                gradle_script.display(),
+                jar_path.display()
+            ));
+        }
+        let args = vec![
+            "-cp".to_string(),
+            jar_path
+                .to_str()
+                .ok_or("Non-UTF-8 path to gradle-wrapper.jar")?
+                .to_string(),
+            "org.gradle.wrapper.GradleWrapperMain".to_string(),
+        ];
+        (PathBuf::from("java"), args)
+    };
+
+    let mut args = initial_args;
+    args.extend([
+        "build".to_string(),
+        "-Dquarkus.package.jar.enabled=false".to_string(),
+        "-Dquarkus.native.enabled=true".to_string(),
+        format!("-Pversion={ver}"),
+        "--no-daemon".to_string(),
+    ]);
+
+    if !extra_gradle_args.is_empty() {
+        args.extend(extra_gradle_args.split_whitespace().map(String::from));
+    }
+
+    let status = Command::new(&cmd)
+        .args(&args)
+        .current_dir(&bridge_path)
+        .env("GRADLE_USER_HOME", bridge_path.join(".gradle-local-cache"))
+        .status()
+        .map_err(|e| format!("Failed to run Gradle: {e}"))?;
+
+    if !status.success() {
+        return Err(format!(
+            "Gradle build failed with exit code: {}",
+            status.code().unwrap_or(-1)
+        ));
+    }
+
+    let runner = locate_native_runner(&bridge_path, binary_name, ver)?;
+
+    let final_binary = bridge_path.join("build").join("native").join(binary_name);
+    if runner != final_binary {
+        let parent = final_binary
+            .parent()
+            .ok_or_else(|| format!("Cannot resolve parent of {}", final_binary.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create native dir: {e}"))?;
+        std::fs::copy(&runner, &final_binary).map_err(|e| format!("Cannot copy binary: {e}"))?;
+    }
+
+    let metadata =
+        std::fs::metadata(&final_binary).map_err(|e| format!("Cannot stat binary: {e}"))?;
+    let size_mb = metadata.len() as f64 / 1_048_576.0;
+
+    let bytes = std::fs::read(&final_binary).map_err(|e| format!("Cannot read binary: {e}"))?;
+    let sha256 = sha256_hex(&bytes);
+
+    println!("Build complete!");
+    println!("  Path:   {}", final_binary.display());
+    println!("  Size:   {:.1} MB", size_mb);
+    println!("  SHA256: {sha256}");
+
+    package_release(&final_binary, binary_name, ver, target, &bridge_path)?;
+
+    Ok(())
+}
+
+fn locate_native_runner(
+    bridge_path: &Path,
+    binary_name: &str,
+    version: &str,
+) -> Result<PathBuf, String> {
+    let build_dir = bridge_path.join("build");
+
+    let canonical = build_dir.join("native").join(binary_name);
+    if canonical.is_file() {
+        return Ok(canonical);
+    }
+
+    let runner_name = format!("{binary_name}-{version}-runner");
+    if let Ok(entries) = std::fs::read_dir(&build_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.contains(&runner_name)
+                && !name_str.ends_with(".jar")
+                && entry.path().is_file()
+            {
+                return Ok(entry.path());
+            }
+        }
+    }
+
+    let source_jar_dir = build_dir.join(format!("{binary_name}-{version}-native-image-source-jar"));
+    let runner_in_source = source_jar_dir.join(format!("{binary_name}-{version}-runner"));
+    if runner_in_source.is_file() {
+        return Ok(runner_in_source);
+    }
+
+    Err(format!(
+        "Native runner not found. Searched:\n  {}\n  build/*{runner_name}*\n  {}",
+        canonical.display(),
+        runner_in_source.display()
+    ))
+}
+
+fn package_release(
+    binary_path: &Path,
+    binary_name: &str,
+    version: &str,
+    target: &str,
+    bridge_dir: &Path,
+) -> Result<(), String> {
+    let is_windows = target.contains("windows");
+    let dist_name = format!("{binary_name}-{version}-{target}");
+    let build_dir = bridge_dir.join("build").join("release");
+    let bin_dir = build_dir.join(&dist_name).join("bin");
+
+    std::fs::create_dir_all(&bin_dir).map_err(|e| format!("Cannot create release dir: {e}"))?;
+
+    let dest_binary = if is_windows {
+        bin_dir.join(format!("{binary_name}.exe"))
+    } else {
+        bin_dir.join(binary_name)
+    };
+
+    std::fs::copy(binary_path, &dest_binary)
+        .map_err(|e| format!("Cannot copy binary to release dir: {e}"))?;
+
+    if is_windows {
+        let archive_path = build_dir.join(format!("{dist_name}.zip"));
+        let file =
+            std::fs::File::create(&archive_path).map_err(|e| format!("Cannot create zip: {e}"))?;
+        let mut zip_writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for entry in walkdir::WalkDir::new(build_dir.join(&dist_name))
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let rel = entry
+                .path()
+                .strip_prefix(&build_dir)
+                .map_err(|e| format!("strip_prefix: {e}"))?;
+            let rel_str = rel
+                .to_str()
+                .ok_or_else(|| format!("Non-UTF-8 path: {}", rel.display()))?;
+            zip_writer
+                .start_file(rel_str, options)
+                .map_err(|e| format!("zip start_file: {e}"))?;
+            let mut f = std::fs::File::open(entry.path())
+                .map_err(|e| format!("open {}: {e}", entry.path().display()))?;
+            std::io::copy(&mut f, &mut zip_writer).map_err(|e| format!("zip write: {e}"))?;
+        }
+        zip_writer
+            .finish()
+            .map_err(|e| format!("zip finish: {e}"))?;
+        let sha = sha256_hex(&std::fs::read(&archive_path).map_err(|e| format!("read zip: {e}"))?);
+        println!("Archive: {}", archive_path.display());
+        println!("SHA256:  {sha}");
+    } else {
+        let archive_path = build_dir.join(format!("{dist_name}.tar.gz"));
+        let status = Command::new("tar")
+            .args([
+                "-czf",
+                archive_path.to_str().ok_or("Non-UTF-8 archive path")?,
+                "-C",
+                build_dir.to_str().ok_or("Non-UTF-8 build dir")?,
+                &dist_name,
+            ])
+            .status()
+            .map_err(|e| format!("tar failed: {e}"))?;
+        if !status.success() {
+            return Err("tar command failed".to_string());
+        }
+        let sha =
+            sha256_hex(&std::fs::read(&archive_path).map_err(|e| format!("read tarball: {e}"))?);
+        println!("Tarball: {}", archive_path.display());
+        println!("SHA256:  {sha}");
+    }
+
+    Ok(())
+}
+
+/// Check if a binary is statically linked by looking for the absence of
+/// `PT_INTERP` in its ELF program headers. Static binaries have no dynamic
+/// interpreter segment.
+#[cfg(target_os = "linux")]
+fn is_static_binary(binary: &Path) -> bool {
+    let output = Command::new("readelf")
+        .args(["-l", binary.to_str().unwrap_or_default()])
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            !stdout.contains("PT_INTERP")
+        }
+        Err(_) => {
+            eprintln!("Warning: readelf failed, assuming dynamic binary");
+            false
+        }
+    }
+}
+
+/// On NixOS, the native binary is linked against glibc with
 /// interpreter `/lib64/ld-linux-x86-64.so.2`, which does not exist
 /// unless `nix-ld` is enabled at the system level.
 ///

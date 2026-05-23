@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::process::BridgeError;
@@ -60,6 +61,12 @@ pub async fn ensure_binary_for_spec(
     version: &str,
     cache_dir: &Path,
 ) -> Result<PathBuf, BridgeError> {
+    let binary_file_name = if cfg!(target_os = "windows") {
+        Cow::Owned(format!("{}.exe", spec.name))
+    } else {
+        Cow::Borrowed(spec.name)
+    };
+
     // Development override: use a local binary directly, skip download + verification.
     if let Ok(local_path) = std::env::var(spec.env_binary_path) {
         let path = PathBuf::from(&local_path);
@@ -85,7 +92,7 @@ pub async fn ensure_binary_for_spec(
             .join(bridge_dir)
             .join("build")
             .join("native")
-            .join(spec.name);
+            .join(&*binary_file_name);
         if local_path.is_file() {
             tracing::debug!(
                 "Found local xtask build at {} — skipping download",
@@ -101,14 +108,16 @@ pub async fn ensure_binary_for_spec(
     }
 
     let tarball_name = tarball_filename(spec, version)?;
-    // The tarball extracts to a directory named after the tarball (without .tar.gz)
-    // e.g. jms-bridge-0.1.0-linux-x86_64/bin/jms-bridge
-    let tarball_dir = tarball_name.trim_end_matches(".tar.gz");
+    // The tarball extracts to a directory named after the tarball (without .tar.gz or .zip)
+    // e.g. jms-bridge-0.1.0-linux-musl-x86_64/bin/jms-bridge (or .exe on Windows)
+    let tarball_dir = tarball_name
+        .trim_end_matches(".tar.gz")
+        .trim_end_matches(".zip");
     let bin_path = cache_dir
         .join(version)
         .join(tarball_dir)
         .join("bin")
-        .join(spec.name);
+        .join(&*binary_file_name);
     let hash_path = cache_dir.join(version).join(".binary.sha256");
     if bin_path.exists()
         && hash_path.exists()
@@ -170,7 +179,17 @@ pub async fn ensure_binary_for_spec(
 
     let dest = cache_dir.join(version);
     std::fs::create_dir_all(&dest).map_err(BridgeError::Io)?;
-    unpack_tarball(&tarball_bytes, &dest)?;
+    let (_, _, ext) = platform_tarball_parts(spec)?;
+    if ext == "zip" {
+        #[cfg(target_os = "windows")]
+        unpack_zip(&tarball_bytes, &dest)?;
+        #[cfg(not(target_os = "windows"))]
+        return Err(BridgeError::Download(
+            "zip unpacking only supported on Windows".to_string(),
+        ));
+    } else {
+        unpack_tarball(&tarball_bytes, &dest)?;
+    }
 
     #[cfg(unix)]
     {
@@ -220,17 +239,37 @@ fn resolve_release_base_url(
 }
 
 fn tarball_filename(spec: &BridgeSpec, version: &str) -> Result<String, BridgeError> {
-    let os = match std::env::consts::OS {
-        "linux" => "linux",
+    let (os, arch, ext) = platform_tarball_parts(spec)?;
+    Ok(format!("{}-{version}-{os}-{arch}.{ext}", spec.name))
+}
+
+fn platform_tarball_parts(
+    spec: &BridgeSpec,
+) -> Result<(&'static str, &'static str, &'static str), BridgeError> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
+    let (os_label, ext) = match os {
+        "linux" => ("linux-musl", "tar.gz"),
         "macos" => {
             if spec.macos_supported {
-                "macos"
+                ("macos", "tar.gz")
             } else {
                 return Err(BridgeError::Download(format!(
                     "Pre-built {} binaries are not available for macOS. Build the bridge manually with `cargo xtask build-{}-bridge` and set {} to the resulting binary path.",
                     spec.name,
                     bridge_dir_name(spec),
                     spec.env_binary_path,
+                )));
+            }
+        }
+        "windows" => {
+            if spec.windows_supported {
+                ("windows", "zip")
+            } else {
+                return Err(BridgeError::Download(format!(
+                    "Pre-built {} binaries are not available for Windows. Build the bridge manually and set {} to the resulting binary path.",
+                    spec.name, spec.env_binary_path,
                 )));
             }
         }
@@ -241,7 +280,8 @@ fn tarball_filename(spec: &BridgeSpec, version: &str) -> Result<String, BridgeEr
             )));
         }
     };
-    let arch = match std::env::consts::ARCH {
+
+    let arch_label = match arch {
         "x86_64" => "x86_64",
         "aarch64" => "aarch64",
         other => {
@@ -251,7 +291,8 @@ fn tarball_filename(spec: &BridgeSpec, version: &str) -> Result<String, BridgeEr
             )));
         }
     };
-    Ok(format!("{}-{version}-{os}-{arch}.tar.gz", spec.name))
+
+    Ok((os_label, arch_label, ext))
 }
 
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>, BridgeError> {
@@ -303,6 +344,40 @@ fn unpack_tarball(data: &[u8], dest: &Path) -> Result<(), BridgeError> {
             )));
         }
         entry.unpack_in(dest).map_err(BridgeError::Io)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn unpack_zip(data: &[u8], dest: &Path) -> Result<(), BridgeError> {
+    let reader = std::io::Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| BridgeError::Download(format!("zip read error: {e}")))?;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| BridgeError::Download(format!("zip entry error: {e}")))?;
+        let path = entry.mangled_path();
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(BridgeError::Download(format!(
+                "zip path traversal attempt: {}",
+                path.display()
+            )));
+        }
+        let out_path = dest.join(path);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path).map_err(BridgeError::Io)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent).map_err(BridgeError::Io)?;
+            }
+            let mut outfile = std::fs::File::create(&out_path).map_err(BridgeError::Io)?;
+            std::io::copy(&mut entry, &mut outfile).map_err(BridgeError::Io)?;
+        }
     }
     Ok(())
 }
@@ -388,10 +463,42 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn tarball_filename_contains_version() {
+    fn tarball_filename_linux_x86_64() {
         let name = tarball_filename(&JMS_BRIDGE, "0.1.0").unwrap();
-        assert!(name.starts_with("jms-bridge-0.1.0-"));
+        assert!(name.starts_with("jms-bridge-0.1.0-linux-musl-"));
         assert!(name.ends_with(".tar.gz"));
+    }
+
+    #[test]
+    fn tarball_filename_format_is_correct() {
+        let name = tarball_filename(&JMS_BRIDGE, "0.1.0").unwrap();
+        let expected_prefix = "jms-bridge-0.1.0-";
+        assert!(name.starts_with(expected_prefix));
+        assert!(name.ends_with(".tar.gz") || name.ends_with(".zip"));
+        let middle = &name[expected_prefix.len()..];
+        let parts: Vec<&str> = middle.rsplitn(2, '.').collect();
+        let name_part = parts.last().unwrap();
+        let dash_parts: Vec<&str> = name_part.split('-').collect();
+        assert!(
+            dash_parts.len() >= 2,
+            "expected os-arch format, got: {name_part}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn tarball_filename_macos() {
+        let name = tarball_filename(&JMS_BRIDGE, "0.1.0").unwrap();
+        assert!(name.starts_with("jms-bridge-0.1.0-macos-"));
+        assert!(name.ends_with(".tar.gz"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn tarball_filename_windows() {
+        let name = tarball_filename(&JMS_BRIDGE, "0.1.0").unwrap();
+        assert!(name.starts_with("jms-bridge-0.1.0-windows-"));
+        assert!(name.ends_with(".zip"));
     }
 
     #[test]

@@ -34,18 +34,59 @@ if [[ ! "$VERSION" =~ ^(dev|[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._]+)?)$ ]]; then
 fi
 
 # --- In-container execution ---
-# We are inside the Mandrel Docker container (quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21)
+# We are inside the GraalVM CE Docker container
 # GRADLE_USER_HOME is set by xtask to /project/.gradle-docker-cache
 
-echo "Building Quarkus native image (Mandrel) for CXF bridge..."
+# --- Musl toolchain setup for static linking ---
+MUSL_PREFIX="/tmp/musl-toolchain"
+ZLIB_VERSION="1.3.1"
+MUSL_TOOLCHAIN_URL="https://more.musl.cc/11.2.1/x86_64-linux-musl/x86_64-linux-musl-native.tgz"
+ZLIB_URL="https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz"
+
+echo "Setting up musl toolchain for static native-image build..."
+
+if [[ ! -x "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" ]]; then
+    echo "  Downloading musl toolchain..."
+    mkdir -p "${MUSL_PREFIX}"
+    curl -sSL --retry 3 --max-time 120 --retry-delay 5 "${MUSL_TOOLCHAIN_URL}" \
+        | tar -xz -C "${MUSL_PREFIX}" --strip-components=1
+fi
+
+export CC="x86_64-linux-musl-gcc"
+export CXX="x86_64-linux-musl-g++"
+export PATH="${MUSL_PREFIX}/bin:${PATH}"
+export LIBRARY_PATH="${MUSL_PREFIX}/lib:${LIBRARY_PATH:-}"
+export C_INCLUDE_PATH="${MUSL_PREFIX}/include:${C_INCLUDE_PATH:-}"
+
+# Build static zlib against musl if not already built
+if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
+    echo "  Building static zlib ${ZLIB_VERSION} against musl..."
+    ZLIB_SRC="/tmp/zlib-${ZLIB_VERSION}"
+    curl -sSL --retry 3 --max-time 120 --retry-delay 5 "${ZLIB_URL}" \
+        | tar -xz -C /tmp
+    cd "${ZLIB_SRC}"
+    CC=x86_64-linux-musl-gcc ./configure --static --prefix="${MUSL_PREFIX}"
+    make -j"$(nproc)" install
+    cd /project
+    rm -rf "${ZLIB_SRC}"
+fi
+
+echo "  Musl toolchain ready: $(x86_64-linux-musl-gcc --version | head -1)"
+echo "  CC=${CC}  CXX=${CXX}"
+echo ""
+
+echo "Building Quarkus native image (GraalVM CE + musl) for CXF bridge..."
 echo "  Version: ${VERSION}"
 echo "  Gradle home: ${GRADLE_USER_HOME:-<not set>}"
+echo "  Static:  yes (musl)"
 echo ""
 
 # Invoke Gradle via the wrapper jar directly (avoids JAVA_HOME lookup issues
-# when bash is used as --entrypoint in the Mandrel container).
+# when bash is used as --entrypoint in the container).
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
-    build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true -Pversion="${VERSION}" --no-daemon -x spotlessJavaCheck -x spotlessCheck
+    build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true \
+    -Dquarkus.native.additional-build-args="-H:+AllowVMInspection,-H:DynamicProxyConfigurationFiles=/project/src/main/resources/META-INF/native-image/proxy-config.json,--initialize-at-run-time=org.apache.cxf.attachment.AttachmentUtil,--initialize-at-run-time=org.apache.wss4j.common.saml.builder.SAML1ComponentBuilder,--initialize-at-run-time=org.apache.wss4j.common.saml.builder.SAML2ComponentBuilder,--initialize-at-run-time=org.apache.wss4j.common.saml.SamlAssertionWrapper,--initialize-at-run-time=org.opensaml.core.xml.config.XMLObjectProviderRegistry,--initialize-at-run-time=org.apache.cxf.interceptor.FIStaxInInterceptor,--initialize-at-run-time=org.apache.cxf.interceptor.FIStaxOutInterceptor,--initialize-at-run-time=org.apache.cxf.ws.security.trust.AbstractSTSClient,--static,--libc=musl" \
+    -Pversion="${VERSION}" --no-daemon -x spotlessJavaCheck -x spotlessCheck
 
 # Locate the native runner (resilient to Quarkus naming changes)
 RUNNER=$(find build -maxdepth 1 -name '*-runner' -not -name '*.jar' -type f 2>/dev/null | head -1)
@@ -57,16 +98,20 @@ fi
 
 echo "Native runner: $RUNNER"
 
-# Copy to canonical path — use install(1) instead of cp so that if the
-# destination binary is currently executing (ETXTBSY), install writes to a
-# fresh inode and atomically renames it into place rather than overwriting
-# the live file.
+# Verify static linking
+if readelf -l "$RUNNER" 2>/dev/null | grep -q PT_INTERP; then
+    echo "WARNING: Binary has dynamic interpreter (not fully static)" >&2
+else
+    echo "Verified: binary is statically linked (no PT_INTERP)"
+fi
+
+# Copy to canonical path
 mkdir -p build/native
 install -m 0777 "$RUNNER" build/native/cxf-bridge
 echo "Binary: build/native/cxf-bridge"
 
 # Package release tarball
-DIST_NAME="cxf-bridge-${VERSION}-linux-x86_64"
+DIST_NAME="cxf-bridge-${VERSION}-linux-musl-x86_64"
 BUILD_DIR="build/release"
 mkdir -p "${BUILD_DIR}/${DIST_NAME}/bin"
 install -m 0777 build/native/cxf-bridge "${BUILD_DIR}/${DIST_NAME}/bin/cxf-bridge"
