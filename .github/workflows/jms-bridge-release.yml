@@ -28,9 +28,18 @@ jobs:
       - name: Build native bridge
         run: cargo xtask build-jms-bridge --version ${{ steps.version.outputs.version }}
 
+      - name: Verify static binary
+        run: |
+          BINARY=$(find bridges/jms/build/native -name 'jms-bridge' -type f)
+          if readelf -l "$BINARY" | grep -q PT_INTERP; then
+            echo "::error::Binary is NOT statically linked"
+            exit 1
+          fi
+          echo "Verified: statically linked"
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: bridge-linux-x86_64
+          name: bridge-linux-musl-x86_64
           path: bridges/jms/build/release/*.tar.gz*
 
   release:
@@ -65,7 +74,7 @@ jobs:
           body: |
             ## JMS Bridge ${{ github.ref_name }}
 
-            **Platform:** Linux x86_64 (glibc ≥ 2.34)
-            **Requires:** Ubuntu 22.04+, Debian 12+, RHEL 9+, or NixOS with `programs.nix-ld.enable = true`
+            **Platform:** Linux x86_64 (statically linked, musl)
+            **Requires:** Any Linux distribution (no shared library dependencies)
 
             macOS support is out of scope for this release. Use `CAMEL_JMS_BRIDGE_BINARY_PATH` with a custom build if needed.
