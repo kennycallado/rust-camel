@@ -23,6 +23,25 @@ Escalate to experts (e_gpt5.5, e_opus4.7) only when workers are stuck after 2 at
 If a subagent needs ULTRATHINK instructions are in .opencode/instructions/ultrathink.md
 ```
 
+## QUALITY GATES
+
+```
+- name: fmt check
+  run: cargo fmt --check --all
+- name: clippy
+  run: |
+    cargo clippy --workspace --all-features \
+      --exclude camel-cli \
+      --exclude camel-component-kafka \
+      -- -D warnings
+    cargo clippy -p camel-component-kafka -- -D warnings
+    cargo clippy -p camel-cli -- -D warnings
+- name: lint-unwrap
+  run: cargo xtask lint-unwrap
+- name: lint-secrets
+  run: cargo xtask lint-secrets
+```
+
 ## MERGE TO MAIN
 
 ```
