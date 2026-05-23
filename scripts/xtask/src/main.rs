@@ -253,8 +253,6 @@ fn build_bridge(
     }
 
     // 5. Build docker run args
-    //    On Unix, run as the host uid:gid to avoid chmod/ownership issues on
-    //    bind-mounted Gradle cache directories.
     let mut args = vec![
         "run".to_string(),
         "--rm".to_string(),
@@ -262,6 +260,9 @@ fn build_bridge(
         format!("--volume={}:/project:z", bridge_dir.display()),
         "--workdir=/project".to_string(),
         "--env=GRADLE_USER_HOME=/project/.gradle-docker-cache".to_string(),
+        // GraalVM compiles and executes C helper binaries in /tmp —
+        // ensure /tmp has exec permission inside the container.
+        "--tmpfs=/tmp:rw,exec".to_string(),
         "--entrypoint".to_string(),
         "bash".to_string(),
     ];
