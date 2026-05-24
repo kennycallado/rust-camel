@@ -15,10 +15,6 @@ jobs:
             runner: ubuntu-latest
             target: linux-musl-x86_64
             build_method: docker
-          - os: macos-intel
-            runner: macos-13
-            target: macos-x86_64
-            build_method: native
           - os: macos-arm
             runner: macos-latest
             target: macos-aarch64
@@ -40,6 +36,7 @@ jobs:
         with:
           java-version: '21'
           distribution: 'graalvm'
+          native-image: 'true'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache Gradle dependencies (Docker)
@@ -125,7 +122,6 @@ jobs:
 
             **Platforms:**
             - `linux-musl-x86_64` — statically linked, any Linux (Alpine, Ubuntu, NixOS, scratch)
-            - `macos-x86_64` — Intel Macs
             - `macos-aarch64` — Apple Silicon (M1/M2/M3+)
             - `windows-x86_64` — Windows 10/11
 

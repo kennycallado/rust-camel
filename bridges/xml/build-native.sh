@@ -80,11 +80,13 @@ if [[ ! -x "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" ]]; then
     rm -f "${ARCHIVE}"
 fi
 
-export CC="x86_64-linux-musl-gcc"
-export CXX="x86_64-linux-musl-g++"
+# Only PATH and LIBRARY_PATH are exported globally.
+# CC/CXX/C_INCLUDE_PATH are intentionally NOT exported: GraalVM's probe
+# compilation phase uses the container's glibc gcc (knows glibc-only locale
+# constants like LC_ADDRESS). With --libc=musl, native-image finds
+# x86_64-linux-musl-gcc via PATH for the actual static linking.
 export PATH="${MUSL_PREFIX}/bin:${PATH}"
 export LIBRARY_PATH="${MUSL_PREFIX}/lib:${LIBRARY_PATH:-}"
-export C_INCLUDE_PATH="${MUSL_PREFIX}/include:${C_INCLUDE_PATH:-}"
 
 # Build static zlib against musl if not already built
 if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
@@ -99,13 +101,7 @@ if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
     rm -rf "${ZLIB_SRC}"
 fi
 
-if [[ ! -e /lib/ld-musl-x86_64.so.1 ]]; then
-    ln -sf "${MUSL_PREFIX}/lib/libc.so" /lib/ld-musl-x86_64.so.1
-    echo "  Linked musl loader: /lib/ld-musl-x86_64.so.1 -> ${MUSL_PREFIX}/lib/libc.so"
-fi
-
 echo "  Musl toolchain ready: $(x86_64-linux-musl-gcc --version | head -1)"
-echo "  CC=${CC}  CXX=${CXX}"
 echo ""
 
 echo "Building Quarkus native image (GraalVM CE + musl)..."
