@@ -478,7 +478,12 @@ impl Consumer for SedaConsumer {
                     )));
                 }
                 active.store(true, Ordering::SeqCst);
-                let receiver = rx_guard.take().unwrap();
+                let receiver = rx_guard.take().ok_or_else(|| {
+                    CamelError::EndpointCreationFailed(format!(
+                        "endpoint '{}' receiver already taken",
+                        self.state.config.name
+                    ))
+                })?;
                 drop(rx_guard);
 
                 let cancel = self.cancel_token.clone();
@@ -738,7 +743,7 @@ impl Service<Exchange> for SedaProducer {
                 return Ok(original);
             }
 
-            let reply_rx = reply_rx.unwrap();
+            let reply_rx = reply_rx.ok_or(CamelError::ChannelClosed)?;
             let result =
                 tokio::time::timeout(Duration::from_millis(producer_config.timeout_ms), reply_rx)
                     .await;
