@@ -26,6 +26,8 @@ quarkus:
       - "--initialize-at-run-time=org.apache.cxf.interceptor.FIStaxInInterceptor"
       - "--initialize-at-run-time=org.apache.cxf.interceptor.FIStaxOutInterceptor"
       - "--initialize-at-run-time=org.apache.cxf.ws.security.trust.AbstractSTSClient"
+      - "--static"
+      - "--libc=musl"
 
 cxf:
   address: ${CXF_ADDRESS:}

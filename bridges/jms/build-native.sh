@@ -34,7 +34,7 @@ if [[ ! "$VERSION" =~ ^(dev|[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._]+)?)$ ]]; then
 fi
 
 # --- In-container execution ---
-# We are inside the GraalVM Docker container
+# We are inside the GraalVM CE Docker container
 # GRADLE_USER_HOME is set by xtask to /project/.gradle-docker-cache
 
 # Fix ownership of cache/build dirs on exit (container runs as root,
@@ -114,17 +114,18 @@ echo "  Musl toolchain ready: $(x86_64-linux-musl-gcc --version | head -1)"
 echo "  CC=${CC}  CXX=${CXX}"
 echo ""
 
-echo "Building Quarkus native image (Mandrel + musl)..."
+echo "Building Quarkus native image (GraalVM CE + musl)..."
 echo "  Version: ${VERSION}"
 echo "  Gradle home: ${GRADLE_USER_HOME:-<not set>}"
 echo "  Static:  yes (musl)"
 echo ""
 
 # Invoke Gradle via the wrapper jar directly (avoids JAVA_HOME lookup issues
-# when bash is used as --entrypoint in the Mandrel container).
+# when bash is used as --entrypoint in the GraalVM CE container).
+# Keep native-image args in application.yml: passing them via Gradle -D did not
+# reach native-image reliably. GraalVM CE rejects NativeLibrariesForNonPrimaryPlatforms.
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
     build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true \
-    -Dquarkus.native.additional-build-args="-H:+AllowVMInspection,-H:-NativeLibrariesForNonPrimaryPlatforms,--static,--libc=musl" \
     -Pversion="${VERSION}" --no-daemon
 
 # Locate the native runner (resilient to Quarkus naming changes)

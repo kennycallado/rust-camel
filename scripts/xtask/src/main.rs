@@ -3,7 +3,7 @@ use std::process::Command;
 
 use clap::{Parser, Subcommand};
 
-const GRAALVM_IMAGE: &str = "quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21";
+const GRAALVM_IMAGE: &str = "quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21";
 const EXPECTED_BINARY: &str = "build/native/jms-bridge";
 const EXPECTED_BINARY_XML: &str = "build/native/xml-bridge";
 const EXPECTED_BINARY_CXF: &str = "build/native/cxf-bridge";
@@ -260,6 +260,9 @@ fn build_bridge(
         format!("--volume={}:/project:z", bridge_dir.display()),
         "--workdir=/project".to_string(),
         "--env=GRADLE_USER_HOME=/project/.gradle-docker-cache".to_string(),
+        // Native Image compiles and executes C helper probes in /tmp.
+        // Keep /tmp executable on hosted runners with restrictive defaults.
+        "--tmpfs=/tmp:rw,exec".to_string(),
         "--entrypoint".to_string(),
         "bash".to_string(),
     ];
