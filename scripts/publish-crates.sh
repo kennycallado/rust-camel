@@ -142,6 +142,7 @@ publish_crate "camel-core" "crates/camel-core"
 
 # Additional component crates (needed for tests / camel-builder)
 publish_crate "camel-component-direct" "crates/components/camel-direct"
+publish_crate "camel-component-seda" "crates/components/camel-component-seda"
 
 # Remaining core crates
 publish_crate "camel-health" "crates/camel-health"

@@ -1,0 +1,24 @@
+[package]
+name = "camel-component-seda"
+description = "SEDA component for rust-camel (asynchronous in-memory staging)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/camel-component-seda"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-component-api.workspace = true
+async-trait.workspace = true
+tower.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -49,6 +49,7 @@ camel-component-timer = { path = "crates/components/camel-timer", version = "=0.
 camel-component-log = { path = "crates/components/camel-log", version = "=0.11.0" }
 camel-component-file = { path = "crates/components/camel-file", version = "=0.11.0" }
 camel-component-direct = { path = "crates/components/camel-direct", version = "=0.11.0" }
+camel-component-seda = { path = "crates/components/camel-component-seda", version = "=0.11.0" }
 camel-component-mock = { path = "crates/components/camel-mock", version = "=0.11.0" }
 camel-component-http = { path = "crates/components/camel-http", version = "=0.11.0" }
 camel-component-ws = { path = "crates/components/camel-ws", version = "=0.11.0" }

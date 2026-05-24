@@ -108,6 +108,14 @@ macro_rules! impl_builder_methods {
                 self
             }
 
+            /// Register `SedaComponent`.
+            pub fn with_seda(mut self) -> Self {
+                self.registrations.push(Box::new(|ctx: &mut CamelContext| {
+                    ctx.register_component(camel_component_seda::SedaComponent::new());
+                }));
+                self
+            }
+
             /// Register any component that implements the `Component` trait.
             pub fn with_component<C>(mut self, component: C) -> Self
             where

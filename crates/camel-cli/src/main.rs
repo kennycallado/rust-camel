@@ -372,6 +372,7 @@ async fn run(
     ctx.register_component(camel_component_timer::TimerComponent::new());
     ctx.register_component(camel_component_log::LogComponent::new());
     ctx.register_component(camel_component_direct::DirectComponent::new());
+    ctx.register_component(camel_component_seda::SedaComponent::new());
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
     let validator_component = camel_component_validator::ValidatorComponent::new();

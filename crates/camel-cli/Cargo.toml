@@ -40,6 +40,7 @@ camel-component-api.workspace = true
 camel-component-container.workspace = true
 camel-component-controlbus.workspace = true
 camel-component-direct.workspace = true
+camel-component-seda.workspace = true
 camel-component-file.workspace = true
 camel-component-http.workspace = true
 camel-component-jms.workspace = true

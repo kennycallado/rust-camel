@@ -1183,6 +1183,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-component-seda"
+version = "0.11.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component-api",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "camel-component-sql"
 version = "0.11.0"
 dependencies = [
