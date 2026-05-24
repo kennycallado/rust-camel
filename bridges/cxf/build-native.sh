@@ -81,11 +81,12 @@ if [[ ! -x "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" ]]; then
 fi
 
 # PATH prepends musl toolchain so native-image finds x86_64-linux-musl-gcc
-# for --libc=musl static linking. The musl native toolchain also contains
-# plain gcc/cc binaries that would shadow the system gcc — we explicitly
-# pin CC to the system glibc-gcc so GraalVM probe compilation (PosixDirectives,
-# JNIHeaderDirectives, etc.) uses glibc headers and produces glibc-linked
-# binaries that can run in this container without a musl ELF interpreter.
+# for --libc=musl static linking.  We also pin CC to the system glibc-gcc so
+# that probe compilation (PosixDirectives, JNIHeaderDirectives, etc.) can
+# reference glibc headers.  However, when --libc=musl is active, native-image
+# internally overrides probe compilation to use x86_64-linux-musl-gcc from PATH
+# regardless of $CC, so those probes are musl-linked and require the musl ELF
+# interpreter to execute during the hosted phase.
 export PATH="${MUSL_PREFIX}/bin:${PATH}"
 export CC="/usr/bin/gcc"
 export LIBRARY_PATH="${MUSL_PREFIX}/lib:${LIBRARY_PATH:-}"
@@ -101,6 +102,13 @@ if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
     make -j"$(nproc)" install
     cd /project
     rm -rf "${ZLIB_SRC}"
+fi
+
+# native-image with --libc=musl uses x86_64-linux-musl-gcc for probe compilation
+# regardless of $CC; those probes link against musl and need this interpreter.
+if [[ ! -e /lib/ld-musl-x86_64.so.1 ]]; then
+    ln -sf "${MUSL_PREFIX}/lib/libc.so" /lib/ld-musl-x86_64.so.1
+    echo "  Linked musl loader: /lib/ld-musl-x86_64.so.1 -> ${MUSL_PREFIX}/lib/libc.so"
 fi
 
 echo "  Musl toolchain ready: $(x86_64-linux-musl-gcc --version | head -1)"
