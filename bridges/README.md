@@ -4,26 +4,27 @@ Language-specific bridge processes for Apache Camel components that require non-
 
 ## Available Bridges
 
-| Bridge | Runtime | Components |
-|--------|---------|------------|
-| [`jms/`](jms/) | Java / Quarkus | `camel-jms` |
-| [`xml/`](xml/) | Java / Quarkus (GraalVM native) | `camel-xslt`, `camel-validator` (XSD mode) |
+| Bridge         | Runtime        | Components                                 |
+| -------------- | -------------- | ------------------------------------------ |
+| [`cxf/`](cxf/) | Java / Quarkus | `camel-cxf`                                |
+| [`jms/`](jms/) | Java / Quarkus | `camel-jms`                                |
+| [`xml/`](xml/) | Java / Quarkus | `camel-xslt`, `camel-validator` (XSD mode) |
 
 ---
 
 ## Running Tests
 
-The bridges require a Java 21 toolchain with GraalVM/Mandrel for native compilation. In environments where Java is not installed (e.g. NixOS with Rust-only toolchain), use the official Quarkus builder image via Docker.
+The bridges require a Java 21 toolchain with GraalVM CE for native compilation. In environments where Java is not installed (e.g. NixOS with Rust-only toolchain), use the official Quarkus builder image via Docker.
 
 ### Prerequisites
 
 - Docker (or Podman with `alias docker=podman`)
-- Image: `quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21`
+- Image: `quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21`
 
 Pull once:
 
 ```bash
-docker pull quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21
+docker pull quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21
 ```
 
 ### xml bridge tests
@@ -39,7 +40,7 @@ docker run --rm \
   --env=HOME=/tmp \
   --env=APP_HOME= \
   --entrypoint bash \
-  quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21 \
+  quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21 \
   -c "rm -rf /project/build && ./gradlew test --no-daemon --project-cache-dir /tmp/gradle-project-cache 2>&1"
 ```
 
@@ -57,7 +58,7 @@ docker run --rm \
   --env=GRADLE_USER_HOME=/tmp/gradle-home \
   --env=HOME=/tmp \
   --entrypoint bash \
-  quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21 \
+  quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21 \
   -c "rm -rf /project/build && ./gradlew test --no-daemon --project-cache-dir /tmp/gradle-project-cache 2>&1"
 ```
 

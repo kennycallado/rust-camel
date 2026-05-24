@@ -17,7 +17,8 @@ Inbound adapter started by the Runtime for a Route's `from:` Endpoint. Receives 
 _Avoid_: listener, subscriber, source
 
 **Producer**:
-Outbound adapter created for a `to:` Endpoint. Sends an Exchange to an external system.
+Outbound adapter created for a `to:` Endpoint via `Endpoint::create_producer()`, which returns a
+`BoxProcessor`. Sends an Exchange to an external system by running it through the returned processor.
 _Avoid_: sender, publisher, sink
 
 **ExchangeEnvelope**:
@@ -29,12 +30,27 @@ The Consumer's declared execution strategy: `Sequential` (one Exchange at a time
 _Avoid_: threading model, parallelism setting
 
 **ComponentBundle**:
-A config-owned grouping of related Components (multiple URI schemes) registered together into CamelContext via a single call.
+A trait for a config-backed bundle that owns one TOML configuration key, deserializes its config,
+and registers all related Component schemes through a single `register_all` call.
 _Avoid_: plugin bundle, component group
+
+**ComponentContext**:
+Runtime context passed to Components during Endpoint and Consumer/Producer creation. Provides
+access to other components (`resolve_component`), languages (`resolve_language`), metrics
+(`metrics`), and platform services (`platform_service`).
+_Avoid_: global context, service locator (unqualified)
 
 **ConsumerContext**:
 The runtime handle provided to a Consumer when it starts — used to submit ExchangeEnvelopes into the Route's Pipeline and to detect shutdown.
 _Avoid_: consumer handle, context (unqualified)
+
+**Supervision**:
+Route-level ownership of Consumer failure handling. A Consumer reports failure by returning an error from its running task; the Route records the failure through the RuntimeBus and, when a supervision policy is configured, restarts the whole Route rather than letting the Consumer restart itself.
+_Avoid_: self-healing Consumer, hidden retry loop, task watchdog
+
+**ConsumerRestart**:
+Recreation of a Consumer as part of a Route restart after Consumer failure. ConsumerRestart is a Route lifecycle action: the old Consumer and Pipeline are stopped, a new Consumer is created from the Route's Endpoint, and Exchanges resume only after the Route is started again.
+_Avoid_: reconnect, retry, hot reload
 
 ## Example dialogue
 
