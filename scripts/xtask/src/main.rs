@@ -3,7 +3,7 @@ use std::process::Command;
 
 use clap::{Parser, Subcommand};
 
-const GRAALVM_IMAGE: &str = "quay.io/quarkus/ubi9-quarkus-graalvmce-builder-image:jdk-21";
+const GRAALVM_IMAGE: &str = "quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21";
 const EXPECTED_BINARY: &str = "build/native/jms-bridge";
 const EXPECTED_BINARY_XML: &str = "build/native/xml-bridge";
 const EXPECTED_BINARY_CXF: &str = "build/native/cxf-bridge";
@@ -228,16 +228,12 @@ fn build_bridge(
         }
     }
 
-    // 4. Ensure the Gradle cache dir exists and is world-writable so the container
-    //    user (quarkus/1001) can write to it regardless of the host user's uid.
+    // 4. Ensure the Gradle cache dir and build dir exist.
     let cache_dir = bridge_dir.join(".gradle-docker-cache");
     if !cache_dir.exists() {
         std::fs::create_dir_all(&cache_dir)
             .map_err(|e| format!("Failed to create Gradle cache dir: {e}"))?;
     }
-    // Make only the directories the container writes to world-writable.
-    // The container user (quarkus/1001) needs write access to build/ and
-    // .gradle-docker-cache/, but NOT to the entire source tree.
     #[cfg(unix)]
     {
         let build_dir = bridge_dir.join("build");
@@ -253,25 +249,20 @@ fn build_bridge(
     }
 
     // 5. Build docker run args
+    // Run as root — the GraalVM CE image sets USER 1001 but we need /lib
+    // write access for the musl loader symlink. cleanup_permissions trap
+    // in build-native.sh fixes ownership on exit.
     let mut args = vec![
         "run".to_string(),
         "--rm".to_string(),
+        "--user=0:0".to_string(),
         "--network=host".to_string(),
         format!("--volume={}:/project:z", bridge_dir.display()),
         "--workdir=/project".to_string(),
         "--env=GRADLE_USER_HOME=/project/.gradle-docker-cache".to_string(),
-        // GraalVM compiles and executes C helper binaries in /tmp —
-        // ensure /tmp has exec permission inside the container.
-        "--tmpfs=/tmp:rw,exec".to_string(),
         "--entrypoint".to_string(),
         "bash".to_string(),
     ];
-
-    #[cfg(unix)]
-    {
-        let (uid, gid) = host_uid_gid()?;
-        args.push(format!("--user={uid}:{gid}"));
-    }
 
     args.push(GRAALVM_IMAGE.to_string());
 
@@ -803,38 +794,6 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 #[cfg(unix)]
-fn host_uid_gid() -> Result<(String, String), String> {
-    let uid = Command::new("id")
-        .args(["-u"])
-        .output()
-        .map_err(|e| format!("Failed to resolve uid with `id -u`: {e}"))?;
-    if !uid.status.success() {
-        return Err(format!(
-            "`id -u` failed with exit code {}",
-            uid.status.code().unwrap_or(-1)
-        ));
-    }
-
-    let gid = Command::new("id")
-        .args(["-g"])
-        .output()
-        .map_err(|e| format!("Failed to resolve gid with `id -g`: {e}"))?;
-    if !gid.status.success() {
-        return Err(format!(
-            "`id -g` failed with exit code {}",
-            gid.status.code().unwrap_or(-1)
-        ));
-    }
-
-    let uid = String::from_utf8_lossy(&uid.stdout).trim().to_string();
-    let gid = String::from_utf8_lossy(&gid.stdout).trim().to_string();
-    if uid.is_empty() || gid.is_empty() {
-        return Err("Resolved empty uid/gid from id command".to_string());
-    }
-
-    Ok((uid, gid))
-}
-
 /// A single lint violation: file path, 1-based line number, line content.
 #[derive(Debug, PartialEq)]
 pub struct Violation {

@@ -34,8 +34,18 @@ if [[ ! "$VERSION" =~ ^(dev|[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._]+)?)$ ]]; then
 fi
 
 # --- In-container execution ---
-# We are inside the Mandrel Docker container (quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21)
+# We are inside the GraalVM Docker container
 # GRADLE_USER_HOME is set by xtask to /project/.gradle-docker-cache
+
+# Fix ownership of cache/build dirs on exit (container runs as root,
+# but host may have different uid). chown first, chmod fallback.
+HOST_UID="$(stat -c '%u' /project 2>/dev/null || echo 0)"
+HOST_GID="$(stat -c '%g' /project 2>/dev/null || echo 0)"
+cleanup_permissions() {
+    chown -R "${HOST_UID}:${HOST_GID}" /project/build /project/.gradle-docker-cache 2>/dev/null \
+        || chmod -R a+rwX /project/build /project/.gradle-docker-cache 2>/dev/null || true
+}
+trap cleanup_permissions EXIT
 
 # --- Musl toolchain setup for static linking ---
 MUSL_PREFIX="/tmp/musl-toolchain"
@@ -89,6 +99,15 @@ if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
     make -j"$(nproc)" install
     cd /project
     rm -rf "${ZLIB_SRC}"
+fi
+
+# GraalVM's native-image compiles C helper probes using $CC (musl-gcc).
+# Those helpers link against ld-musl-x86_64.so.1 but the container's
+# /lib/ only has the glibc loader.  Create a symlink so the helpers
+# can execute during the hosted phase.
+if [[ ! -e /lib/ld-musl-x86_64.so.1 ]]; then
+    ln -sf "${MUSL_PREFIX}/lib/libc.so" /lib/ld-musl-x86_64.so.1
+    echo "  Linked musl loader: /lib/ld-musl-x86_64.so.1 -> ${MUSL_PREFIX}/lib/libc.so"
 fi
 
 echo "  Musl toolchain ready: $(x86_64-linux-musl-gcc --version | head -1)"

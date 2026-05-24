@@ -37,6 +37,14 @@ fi
 # We are inside the GraalVM CE Docker container
 # GRADLE_USER_HOME is set by xtask to /project/.gradle-docker-cache
 
+HOST_UID="$(stat -c '%u' /project 2>/dev/null || echo 0)"
+HOST_GID="$(stat -c '%g' /project 2>/dev/null || echo 0)"
+cleanup_permissions() {
+    chown -R "${HOST_UID}:${HOST_GID}" /project/build /project/.gradle-docker-cache 2>/dev/null \
+        || chmod -R a+rwX /project/build /project/.gradle-docker-cache 2>/dev/null || true
+}
+trap cleanup_permissions EXIT
+
 # --- Musl toolchain setup for static linking ---
 MUSL_PREFIX="/tmp/musl-toolchain"
 ZLIB_VERSION="1.3.1"
@@ -89,6 +97,11 @@ if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
     make -j"$(nproc)" install
     cd /project
     rm -rf "${ZLIB_SRC}"
+fi
+
+if [[ ! -e /lib/ld-musl-x86_64.so.1 ]]; then
+    ln -sf "${MUSL_PREFIX}/lib/libc.so" /lib/ld-musl-x86_64.so.1
+    echo "  Linked musl loader: /lib/ld-musl-x86_64.so.1 -> ${MUSL_PREFIX}/lib/libc.so"
 fi
 
 echo "  Musl toolchain ready: $(x86_64-linux-musl-gcc --version | head -1)"

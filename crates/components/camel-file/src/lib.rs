@@ -982,7 +982,7 @@ async fn poll_directory(
                     }
                 }
             } else {
-                target_dir.clone()
+                canonical_base.join(move_dir)
             };
 
             if !resolved_target_dir.starts_with(&canonical_base) {
