@@ -53,6 +53,10 @@ async fn loop_count_integration() {
 
     h.add_route(route).await.unwrap();
     h.start().await;
+    // Allow spawned consumer tasks to register their endpoints.
+    // DirectConsumer::start() registers synchronously inside a tokio::spawn;
+    // on slow CI runners the task may not be scheduled before send_to_direct.
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let ex = Exchange::new(Message::new("0"));
     send_to_direct(&h, "direct:loop-count", ex).await;
@@ -95,6 +99,10 @@ routes:
         h.add_route(route).await.unwrap();
     }
     h.start().await;
+    // Allow spawned consumer tasks to register their endpoints.
+    // DirectConsumer::start() registers synchronously inside a tokio::spawn;
+    // on slow CI runners the task may not be scheduled before send_to_direct.
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let ex = Exchange::new(Message::new("0"));
     send_to_direct(&h, "direct:loop-yaml-in", ex).await;
@@ -140,6 +148,10 @@ async fn loop_while_integration() {
 
     h.add_route(route).await.unwrap();
     h.start().await;
+    // Allow spawned consumer tasks to register their endpoints.
+    // DirectConsumer::start() registers synchronously inside a tokio::spawn;
+    // on slow CI runners the task may not be scheduled before send_to_direct.
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let ex = Exchange::new(Message::new("0"));
     send_to_direct(&h, "direct:while-in", ex).await;
