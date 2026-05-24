@@ -82,17 +82,15 @@ if [[ ! -x "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" ]]; then
     rm -f "${ARCHIVE}"
 fi
 
-# PATH prepends musl toolchain so native-image finds x86_64-linux-musl-gcc
-# for --libc=musl static linking.  However, GraalVM also calls the bare 'gcc'
-# command from PATH (ignoring $CC) for probe compilation (PosixDirectives,
-# JNIHeaderDirectives, etc.).  The musl toolchain's 'gcc' lacks glibc-only
-# symbols (LC_ADDRESS, LC_PAPER, LM_ID_BASE, Lmid_t, RTLD_DI_LMID) causing
-# probe compilation to fail.  We override gcc/cc/g++ in ${MUSL_PREFIX}/bin/
-# with symlinks to /usr/bin/gcc so probes compile against glibc headers.
-# x86_64-linux-musl-gcc stays untouched for --libc=musl static linking.
-export PATH="${MUSL_PREFIX}/bin:${PATH}"
-export CC="/usr/bin/gcc"
-export LIBRARY_PATH="${MUSL_PREFIX}/lib:${LIBRARY_PATH:-}"
+# Expose ONLY x86_64-linux-musl-gcc to PATH via a minimal wrapper directory.
+# This lets GraalVM find it for --libc=musl static linking without polluting
+# PATH with musl binutils (ld, as, ar, etc.) that shadow system tools and
+# break GraalVM's probe compilation (PosixDirectives, JNIHeaderDirectives…).
+# The cross-compiler has its own sysroot so it finds its binutils and libz.a
+# without LIBRARY_PATH.
+mkdir -p /tmp/musl-bin
+ln -sf "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" /tmp/musl-bin/x86_64-linux-musl-gcc
+export PATH="/tmp/musl-bin:${PATH}"
 
 # Build static zlib against musl if not already built
 if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
@@ -107,13 +105,7 @@ if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
     rm -rf "${ZLIB_SRC}"
 fi
 
-# GraalVM calls 'gcc' from PATH (not $CC) for probe compilation; override the
-# musl toolchain's gcc/cc/g++ with symlinks to /usr/bin/gcc so probes compile
-# against glibc headers.  x86_64-linux-musl-gcc stays untouched.
-ln -sf /usr/bin/gcc "${MUSL_PREFIX}/bin/gcc"
-ln -sf /usr/bin/gcc "${MUSL_PREFIX}/bin/cc"
-ln -sf /usr/bin/g++ "${MUSL_PREFIX}/bin/g++" 2>/dev/null || true
-echo "  gcc override: $(${MUSL_PREFIX}/bin/gcc --version | head -1)"
+echo "  Musl toolchain ready: $(${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc --version | head -1)"
 
 echo "  Musl toolchain ready: $(x86_64-linux-musl-gcc --version | head -1)"
 echo ""
