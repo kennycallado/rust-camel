@@ -82,12 +82,14 @@ if [[ ! -x "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" ]]; then
     rm -f "${ARCHIVE}"
 fi
 
-# Only PATH and LIBRARY_PATH are exported globally.
-# CC/CXX/C_INCLUDE_PATH are intentionally NOT exported: GraalVM's probe
-# compilation phase uses the container's glibc gcc (knows glibc-only locale
-# constants like LC_ADDRESS). With --libc=musl, native-image finds
-# x86_64-linux-musl-gcc via PATH for the actual static linking.
+# PATH prepends musl toolchain so native-image finds x86_64-linux-musl-gcc
+# for --libc=musl static linking. The musl native toolchain also contains
+# plain gcc/cc binaries that would shadow the system gcc — we explicitly
+# pin CC to the system glibc-gcc so GraalVM probe compilation (PosixDirectives,
+# JNIHeaderDirectives, etc.) uses glibc headers and produces glibc-linked
+# binaries that can run in this container without a musl ELF interpreter.
 export PATH="${MUSL_PREFIX}/bin:${PATH}"
+export CC="/usr/bin/gcc"
 export LIBRARY_PATH="${MUSL_PREFIX}/lib:${LIBRARY_PATH:-}"
 
 # Build static zlib against musl if not already built
