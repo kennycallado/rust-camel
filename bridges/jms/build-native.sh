@@ -83,12 +83,13 @@ if [[ ! -x "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" ]]; then
 fi
 
 # PATH prepends musl toolchain so native-image finds x86_64-linux-musl-gcc
-# for --libc=musl static linking.  We also pin CC to the system glibc-gcc so
-# that probe compilation (PosixDirectives, JNIHeaderDirectives, etc.) can
-# reference glibc headers.  However, when --libc=musl is active, native-image
-# internally overrides probe compilation to use x86_64-linux-musl-gcc from PATH
-# regardless of $CC, so those probes are musl-linked and require the musl ELF
-# interpreter to execute during the hosted phase.
+# for --libc=musl static linking.  However, GraalVM also calls the bare 'gcc'
+# command from PATH (ignoring $CC) for probe compilation (PosixDirectives,
+# JNIHeaderDirectives, etc.).  The musl toolchain's 'gcc' lacks glibc-only
+# symbols (LC_ADDRESS, LC_PAPER, LM_ID_BASE, Lmid_t, RTLD_DI_LMID) causing
+# probe compilation to fail.  We override gcc/cc/g++ in ${MUSL_PREFIX}/bin/
+# with symlinks to /usr/bin/gcc so probes compile against glibc headers.
+# x86_64-linux-musl-gcc stays untouched for --libc=musl static linking.
 export PATH="${MUSL_PREFIX}/bin:${PATH}"
 export CC="/usr/bin/gcc"
 export LIBRARY_PATH="${MUSL_PREFIX}/lib:${LIBRARY_PATH:-}"
@@ -106,12 +107,13 @@ if [[ ! -f "${MUSL_PREFIX}/lib/libz.a" ]]; then
     rm -rf "${ZLIB_SRC}"
 fi
 
-# native-image with --libc=musl uses x86_64-linux-musl-gcc for probe compilation
-# regardless of $CC; those probes link against musl and need this interpreter.
-if [[ ! -e /lib/ld-musl-x86_64.so.1 ]]; then
-    ln -sf "${MUSL_PREFIX}/lib/libc.so" /lib/ld-musl-x86_64.so.1
-    echo "  Linked musl loader: /lib/ld-musl-x86_64.so.1 -> ${MUSL_PREFIX}/lib/libc.so"
-fi
+# GraalVM calls 'gcc' from PATH (not $CC) for probe compilation; override the
+# musl toolchain's gcc/cc/g++ with symlinks to /usr/bin/gcc so probes compile
+# against glibc headers.  x86_64-linux-musl-gcc stays untouched.
+ln -sf /usr/bin/gcc "${MUSL_PREFIX}/bin/gcc"
+ln -sf /usr/bin/gcc "${MUSL_PREFIX}/bin/cc"
+ln -sf /usr/bin/g++ "${MUSL_PREFIX}/bin/g++" 2>/dev/null || true
+echo "  gcc override: $(${MUSL_PREFIX}/bin/gcc --version | head -1)"
 
 echo "  Musl toolchain ready: $(x86_64-linux-musl-gcc --version | head -1)"
 echo ""
