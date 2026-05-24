@@ -15,5 +15,3 @@ quarkus:
       - "--initialize-at-run-time=net.sf.saxon.functions.hof.RandomNumberGenerator"
       - "--initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl"
       - "--initialize-at-run-time=org.xmlresolver"
-      - "--static"
-      - "--libc=musl"

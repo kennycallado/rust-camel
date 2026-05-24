@@ -17,7 +17,6 @@ quarkus:
         - META-INF/wsdl/**
     additional-build-args:
       - "-H:+AllowVMInspection"
-      - "-H:DynamicProxyConfigurationFiles=/project/src/main/resources/META-INF/native-image/proxy-config.json"
       - "--initialize-at-run-time=org.apache.cxf.attachment.AttachmentUtil"
       - "--initialize-at-run-time=org.apache.wss4j.common.saml.builder.SAML1ComponentBuilder"
       - "--initialize-at-run-time=org.apache.wss4j.common.saml.builder.SAML2ComponentBuilder"
@@ -26,8 +25,6 @@ quarkus:
       - "--initialize-at-run-time=org.apache.cxf.interceptor.FIStaxInInterceptor"
       - "--initialize-at-run-time=org.apache.cxf.interceptor.FIStaxOutInterceptor"
       - "--initialize-at-run-time=org.apache.cxf.ws.security.trust.AbstractSTSClient"
-      - "--static"
-      - "--libc=musl"
 
 cxf:
   address: ${CXF_ADDRESS:}

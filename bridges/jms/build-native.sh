@@ -122,8 +122,8 @@ echo ""
 
 # Invoke Gradle via the wrapper jar directly (avoids JAVA_HOME lookup issues
 # when bash is used as --entrypoint in the GraalVM CE container).
-# Keep native-image args in application.yml: passing them via Gradle -D did not
-# reach native-image reliably. GraalVM CE rejects NativeLibrariesForNonPrimaryPlatforms.
+# Inject musl/static args here so application.yml stays platform-neutral.
+export QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS="-H:+AllowVMInspection,--static,--libc=musl"
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
     build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true \
     -Pversion="${VERSION}" --no-daemon

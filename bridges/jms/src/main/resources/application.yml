@@ -7,5 +7,3 @@ quarkus:
   native:
     additional-build-args:
       - "-H:+AllowVMInspection"
-      - "--static"
-      - "--libc=musl"

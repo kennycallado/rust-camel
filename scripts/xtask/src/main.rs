@@ -796,7 +796,6 @@ fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
-#[cfg(unix)]
 /// A single lint violation: file path, 1-based line number, line content.
 #[derive(Debug, PartialEq)]
 pub struct Violation {

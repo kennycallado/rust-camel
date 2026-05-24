@@ -116,8 +116,8 @@ echo ""
 
 # Invoke Gradle via the wrapper jar directly (avoids JAVA_HOME lookup issues
 # when bash is used as --entrypoint in the container).
-# Keep native-image args in application.yml: passing them via Gradle -D did not
-# reach native-image reliably. GraalVM CE rejects NativeLibrariesForNonPrimaryPlatforms.
+# Inject musl/static args here so application.yml stays platform-neutral.
+export QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS="-H:+AllowVMInspection,--initialize-at-run-time=org.apache.cxf.attachment.AttachmentUtil,--initialize-at-run-time=org.apache.wss4j.common.saml.builder.SAML1ComponentBuilder,--initialize-at-run-time=org.apache.wss4j.common.saml.builder.SAML2ComponentBuilder,--initialize-at-run-time=org.apache.wss4j.common.saml.SamlAssertionWrapper,--initialize-at-run-time=org.opensaml.core.xml.config.XMLObjectProviderRegistry,--initialize-at-run-time=org.apache.cxf.interceptor.FIStaxInInterceptor,--initialize-at-run-time=org.apache.cxf.interceptor.FIStaxOutInterceptor,--initialize-at-run-time=org.apache.cxf.ws.security.trust.AbstractSTSClient,--static,--libc=musl"
 java -cp gradle/wrapper/gradle-wrapper.jar org.gradle.wrapper.GradleWrapperMain \
     build -Dquarkus.package.jar.enabled=false -Dquarkus.native.enabled=true \
     -Pversion="${VERSION}" --no-daemon -x spotlessJavaCheck -x spotlessCheck
