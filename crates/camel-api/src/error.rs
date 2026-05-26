@@ -90,6 +90,12 @@ impl From<std::io::Error> for CamelError {
     }
 }
 
+impl From<crate::template::TemplateError> for CamelError {
+    fn from(err: crate::template::TemplateError) -> Self {
+        CamelError::Config(err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

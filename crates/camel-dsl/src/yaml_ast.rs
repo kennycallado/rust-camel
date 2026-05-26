@@ -1,8 +1,15 @@
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct YamlRoutes {
+    #[serde(default)]
     pub routes: Vec<YamlRoute>,
+    #[serde(default)]
+    pub templates: Vec<YamlTemplate>,
+    #[serde(default)]
+    pub templated_routes: Vec<YamlTemplatedRoute>,
 }
 
 #[derive(Deserialize)]
@@ -619,6 +626,47 @@ fn default_lb_strategy() -> String {
     "round_robin".to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Template support types (Phase 4)
+// ---------------------------------------------------------------------------
+
+/// A reusable route template declared in YAML/JSON.
+#[derive(Deserialize, Debug)]
+pub struct YamlTemplate {
+    /// Unique identifier for this template.
+    pub id: String,
+    /// Parameters that callers must (or may) supply.
+    #[serde(default)]
+    pub parameters: Vec<YamlTemplateParameter>,
+    /// The route definition body — kept as a raw YAML value for later conversion.
+    pub route: serde_yml::Value,
+}
+
+/// A single parameter that a route template accepts.
+#[derive(Deserialize, Debug)]
+pub struct YamlTemplateParameter {
+    /// The parameter name (used inside `{{name}}` placeholders).
+    pub name: String,
+    /// Optional default value used when the caller does not supply one.
+    #[serde(default)]
+    pub default_value: Option<String>,
+    /// Optional human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// A request to instantiate a template with concrete parameter values.
+#[derive(Deserialize, Debug)]
+pub struct YamlTemplatedRoute {
+    pub route_template_ref: String,
+    /// Optional explicit route id for the resulting instance.
+    #[serde(default)]
+    pub route_id: Option<String>,
+    /// Concrete parameter values keyed by parameter name.
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,6 +950,97 @@ routes:
             }
             _ => panic!("expected script"),
         }
+    }
+
+    // --- Template AST tests (Phase 4) ---
+
+    #[test]
+    fn parse_yaml_with_templates_and_templated_routes() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+templates:
+  - id: http-route
+    parameters:
+      - name: path
+        default_value: /api
+        description: The REST path
+    route:
+      id: "instance-route"
+      from: "rest:{{path}}"
+      steps:
+        - to: "log:info"
+templated_routes:
+  - route_template_ref: http-route
+    route_id: my-http-route
+    parameters:
+      path: /users
+"#;
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(parsed.routes.len(), 1);
+        assert_eq!(parsed.templates.len(), 1);
+        assert_eq!(parsed.templated_routes.len(), 1);
+
+        let tpl = &parsed.templates[0];
+        assert_eq!(tpl.id, "http-route");
+        assert_eq!(tpl.parameters.len(), 1);
+        assert_eq!(tpl.parameters[0].name, "path");
+        assert_eq!(tpl.parameters[0].default_value.as_deref(), Some("/api"));
+        assert_eq!(
+            tpl.parameters[0].description.as_deref(),
+            Some("The REST path")
+        );
+
+        let tr = &parsed.templated_routes[0];
+        assert_eq!(tr.route_template_ref, "http-route");
+        assert_eq!(tr.route_id.as_deref(), Some("my-http-route"));
+        assert_eq!(tr.parameters["path"], "/users");
+    }
+
+    #[test]
+    fn parse_yaml_backward_compat_no_templates() {
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - to: log:info
+"#;
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(parsed.routes.len(), 1);
+        assert!(parsed.templates.is_empty());
+        assert!(parsed.templated_routes.is_empty());
+    }
+
+    #[test]
+    fn parse_yaml_template_with_empty_parameters() {
+        let yaml = r#"
+routes: []
+templates:
+  - id: simple-tpl
+    route:
+      id: simple-route
+      from: timer:tick
+"#;
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(parsed.templates.len(), 1);
+        assert!(parsed.templates[0].parameters.is_empty());
+    }
+
+    #[test]
+    fn parse_yaml_templated_routes_with_defaults() {
+        let yaml = r#"
+routes: []
+templated_routes:
+  - route_template_ref: my-tpl
+"#;
+        let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(parsed.templated_routes.len(), 1);
+        let tr = &parsed.templated_routes[0];
+        assert_eq!(tr.route_template_ref, "my-tpl");
+        assert!(tr.route_id.is_none());
+        assert!(tr.parameters.is_empty());
     }
 }
 

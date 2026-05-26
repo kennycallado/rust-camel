@@ -63,6 +63,7 @@ pub(crate) mod hot_reload;
 pub mod lifecycle;
 pub(crate) mod shared;
 pub mod step;
+pub mod template;
 
 #[cfg(feature = "internal-adapters")]
 pub mod route {
@@ -130,6 +131,7 @@ pub use crate::shared::observability::domain::{
     DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
 };
 pub use context::CamelContext;
+pub use template::TemplateRegistry;
 
 // Re-export route controller types from camel-api (they live there to avoid cyclic dependencies).
 pub use camel_api::CamelError;

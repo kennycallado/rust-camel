@@ -39,6 +39,7 @@ pub mod runtime;
 pub mod splitter;
 pub mod stream_cache;
 pub mod supervision;
+pub mod template;
 pub mod throttler;
 pub mod unit_of_work;
 pub mod value;
@@ -102,3 +103,9 @@ pub use supervision::SupervisionConfig;
 pub use throttler::{ThrottleStrategy, ThrottlerConfig};
 pub use unit_of_work::UnitOfWorkConfig;
 pub use value::{Headers, Value};
+
+// Template types
+pub use template::{
+    RouteTemplateSpec, TemplateError, TemplateInstanceRecord, TemplateParameterSpec,
+    TemplatedRouteSpec,
+};

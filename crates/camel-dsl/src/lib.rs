@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod env_interpolation;
 pub mod json;
 pub mod model;
+pub mod template;
 pub mod yaml;
 pub mod yaml_ast;
 
@@ -35,3 +36,10 @@ pub use yaml::{
     YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_canonical,
     parse_yaml_to_declarative, parse_yaml_with_threshold,
 };
+
+pub use template::json::{parse_json_templated_routes, parse_json_templates};
+pub use template::materializer::{
+    CompiledMaterializationResult, materialize_and_compile, materialize_template, resolve_params,
+    substitute_strings_in_json,
+};
+pub use template::yaml::{parse_yaml_templated_routes, parse_yaml_templates};

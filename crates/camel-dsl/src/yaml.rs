@@ -2213,4 +2213,136 @@ routes:
             "unexpected error: {err}"
         );
     }
+
+    // --- Template parsing tests (Phase 4) ---
+
+    #[test]
+    fn test_parse_yaml_templates_basic() {
+        use crate::template::yaml::parse_yaml_templates;
+        let yaml = r#"
+routes: []
+templates:
+  - id: http-route
+    parameters:
+      - name: path
+        default_value: /api
+    route:
+      id: "my-route"
+      from: "rest:{{path}}"
+      steps:
+        - to: "log:info"
+"#;
+        let specs = parse_yaml_templates(yaml).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].id, "http-route");
+        assert_eq!(specs[0].parameters.len(), 1);
+        assert_eq!(specs[0].parameters[0].name, "path");
+        assert_eq!(specs[0].route["id"], "my-route");
+    }
+
+    #[test]
+    fn test_parse_yaml_templated_routes_basic() {
+        use crate::template::yaml::parse_yaml_templated_routes;
+        let yaml = r#"
+routes: []
+templated_routes:
+  - route_template_ref: http-route
+    route_id: my-http-route
+    parameters:
+      path: /users
+"#;
+        let specs = parse_yaml_templated_routes(yaml).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].route_template_ref, "http-route");
+        assert_eq!(specs[0].route_id.as_deref(), Some("my-http-route"));
+        assert_eq!(specs[0].parameters["path"], "/users");
+    }
+
+    #[test]
+    fn test_parse_yaml_backward_compat_no_templates() {
+        use crate::template::yaml::{parse_yaml_templated_routes, parse_yaml_templates};
+        let yaml = r#"
+routes:
+  - id: r1
+    from: direct:start
+"#;
+        assert!(parse_yaml_templates(yaml).unwrap().is_empty());
+        assert!(parse_yaml_templated_routes(yaml).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_json_templates_basic() {
+        use crate::template::json::parse_json_templates;
+        let json = r#"
+{
+    "routes": [],
+    "templates": [
+        {
+            "id": "http-route",
+            "parameters": [{"name": "path", "default_value": "/api"}],
+            "route": {
+                "id": "my-route",
+                "from": "rest:{{path}}",
+                "steps": [{"to": "log:info"}]
+            }
+        }
+    ]
+}"#;
+        let specs = parse_json_templates(json).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].id, "http-route");
+        assert_eq!(specs[0].route["id"], "my-route");
+    }
+
+    #[test]
+    fn test_parse_json_templated_routes_basic() {
+        use crate::template::json::parse_json_templated_routes;
+        let json = r#"
+{
+    "routes": [],
+    "templated_routes": [
+        {
+            "route_template_ref": "http-route",
+            "route_id": "my-route",
+            "parameters": {"path": "/users"}
+        }
+    ]
+}"#;
+        let specs = parse_json_templated_routes(json).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].route_template_ref, "http-route");
+        assert_eq!(specs[0].parameters["path"], "/users");
+    }
+
+    #[test]
+    fn test_parse_json_backward_compat_no_templates() {
+        use crate::template::json::{parse_json_templated_routes, parse_json_templates};
+        let json = r#"
+{
+    "routes": [{"id": "r1", "from": "direct:start"}]
+}"#;
+        assert!(parse_json_templates(json).unwrap().is_empty());
+        assert!(parse_json_templated_routes(json).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_yaml_to_json_value_conversion() {
+        use crate::template::yaml::parse_yaml_templates;
+        let yaml = r#"
+routes: []
+templates:
+  - id: num-tpl
+    route:
+      id: num-route
+      count: 42
+      ratio: 3.14
+      enabled: true
+      nothing: null
+"#;
+        let specs = parse_yaml_templates(yaml).unwrap();
+        assert_eq!(specs[0].route["count"], 42);
+        assert_eq!(specs[0].route["ratio"], 3.14);
+        assert_eq!(specs[0].route["enabled"], true);
+        assert_eq!(specs[0].route["nothing"], serde_json::Value::Null);
+    }
 }

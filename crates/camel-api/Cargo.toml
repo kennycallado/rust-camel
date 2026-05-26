@@ -24,7 +24,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true, features = ["io"] }
 tower = { workspace = true, features = ["util"] }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
 opentelemetry = { workspace = true }
 quick-xml = { workspace = true }
 schemars.workspace = true

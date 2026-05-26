@@ -1,8 +1,10 @@
 //! Route discovery module - finds and loads routes from YAML/JSON files using glob patterns.
 
+use camel_api::template::{RouteTemplateSpec, TemplateError, TemplatedRouteSpec};
 use camel_core::route::RouteDefinition;
 use glob::glob;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -10,6 +12,7 @@ use std::path::Path;
 
 use crate::env_interpolation::interpolate_env;
 use crate::json::{parse_json, parse_json_with_threshold};
+use crate::template::materializer::materialize_and_compile;
 use crate::yaml::{parse_yaml, parse_yaml_with_threshold};
 
 /// Errors that can occur during route discovery.
@@ -49,6 +52,26 @@ pub enum DiscoveryError {
         "JSON file {path} matched by broad pattern '{pattern}' — use an explicit .json glob like 'routes/*.json'"
     )]
     JsonRequiresExplicitPattern { path: String, pattern: String },
+
+    /// Template reference points to a template id that was never defined.
+    #[error("Template '{template_id}' not found in {path}")]
+    TemplateNotFound { path: String, template_id: String },
+
+    /// A route id was produced more than once across regular + materialized routes.
+    #[error("Duplicate route id '{route_id}' in {path}")]
+    DuplicateRouteId { path: String, route_id: String },
+
+    /// Template parsing or materialization failed (invalid body, missing params, etc.).
+    #[error("Template error in {path}: {source}")]
+    MaterializationFailed {
+        path: String,
+        #[source]
+        source: TemplateError,
+    },
+
+    /// Duplicate template id across files, or invalid template spec in file.
+    #[error("Template error in {path}: {error}")]
+    TemplateSpec { path: String, error: String },
 }
 
 /// Returns true if the glob pattern explicitly targets `.json` files.
@@ -107,6 +130,9 @@ fn discover_routes_inner(
     stream_cache_threshold: Option<usize>,
 ) -> Result<Vec<RouteDefinition>, DiscoveryError> {
     let mut routes = Vec::new();
+    let mut templates: HashMap<String, RouteTemplateSpec> = HashMap::new();
+    // (path_str, templated_spec) — materialized after all files scanned
+    let mut templated_specs: Vec<(String, TemplatedRouteSpec)> = Vec::new();
 
     for pattern in patterns {
         let is_json_pattern = pattern_targets_json(pattern);
@@ -158,50 +184,104 @@ fn discover_routes_inner(
             let source_hash = hasher.finish();
 
             // Env interpolation happens before parsing for both YAML and JSON.
-            // NOTE: interpolation is textual — env values used inside JSON string
-            // positions must already be valid/escaped for JSON context, otherwise
-            // the subsequent JSON parse will fail with a DiscoveryError::Json.
             let content =
                 interpolate_env(&raw_content).map_err(|var_name| DiscoveryError::Env {
                     path: path_str.clone(),
                     var_name,
                 })?;
 
-            // Parse based on accepted extension — no fallback arm needed because
-            // the validation block above guarantees only yaml/yml/json reach here.
+            // Parse based on extension — collect templates, templated specs, and regular routes
             match ext.as_deref() {
                 Some("yaml") | Some("yml") => {
+                    // Parse regular routes
                     let file_routes =
                         match stream_cache_threshold {
                             Some(threshold) => parse_yaml_with_threshold(&content, threshold)
                                 .map_err(|e| DiscoveryError::Yaml {
-                                    path: path_str,
+                                    path: path_str.clone(),
                                     error: e.to_string(),
                                 })?,
                             None => parse_yaml(&content).map_err(|e| DiscoveryError::Yaml {
-                                path: path_str,
+                                path: path_str.clone(),
                                 error: e.to_string(),
                             })?,
                         };
                     for route in file_routes {
                         routes.push(route.with_source_hash(source_hash));
                     }
+
+                    // Parse templates
+                    let tpls =
+                        crate::template::yaml::parse_yaml_templates(&content).map_err(|e| {
+                            DiscoveryError::MaterializationFailed {
+                                path: path_str.clone(),
+                                source: e,
+                            }
+                        })?;
+                    for tpl in tpls {
+                        if templates.contains_key(&tpl.id) {
+                            return Err(DiscoveryError::TemplateSpec {
+                                path: path_str.clone(),
+                                error: format!("duplicate template id '{}'", tpl.id),
+                            });
+                        }
+                        templates.insert(tpl.id.clone(), tpl);
+                    }
+
+                    // Parse templated route specs for later materialization
+                    let specs = crate::template::yaml::parse_yaml_templated_routes(&content)
+                        .map_err(|e| DiscoveryError::MaterializationFailed {
+                            path: path_str.clone(),
+                            source: e,
+                        })?;
+                    for spec in specs {
+                        templated_specs.push((path_str.clone(), spec));
+                    }
                 }
                 Some("json") => {
+                    // Parse regular routes
                     let file_routes =
                         match stream_cache_threshold {
                             Some(threshold) => parse_json_with_threshold(&content, threshold)
                                 .map_err(|e| DiscoveryError::Json {
-                                    path: path_str,
+                                    path: path_str.clone(),
                                     error: e.to_string(),
                                 })?,
                             None => parse_json(&content).map_err(|e| DiscoveryError::Json {
-                                path: path_str,
+                                path: path_str.clone(),
                                 error: e.to_string(),
                             })?,
                         };
                     for route in file_routes {
                         routes.push(route.with_source_hash(source_hash));
+                    }
+
+                    // Parse templates
+                    let tpls =
+                        crate::template::json::parse_json_templates(&content).map_err(|e| {
+                            DiscoveryError::MaterializationFailed {
+                                path: path_str.clone(),
+                                source: e,
+                            }
+                        })?;
+                    for tpl in tpls {
+                        if templates.contains_key(&tpl.id) {
+                            return Err(DiscoveryError::TemplateSpec {
+                                path: path_str.clone(),
+                                error: format!("duplicate template id '{}'", tpl.id),
+                            });
+                        }
+                        templates.insert(tpl.id.clone(), tpl);
+                    }
+
+                    // Parse templated route specs for later materialization
+                    let specs = crate::template::json::parse_json_templated_routes(&content)
+                        .map_err(|e| DiscoveryError::MaterializationFailed {
+                            path: path_str.clone(),
+                            source: e,
+                        })?;
+                    for spec in specs {
+                        templated_specs.push((path_str.clone(), spec));
                     }
                 }
                 // SAFETY: Unreachable. The validation block above returns early for
@@ -211,6 +291,45 @@ fn discover_routes_inner(
                     ext
                 ),
             }
+        }
+    }
+
+    // Pass 2: materialize all templated specs using the collected templates
+    let mut seen_route_ids: HashSet<String> =
+        routes.iter().map(|r| r.route_id().to_string()).collect();
+
+    for (path_str, spec) in &templated_specs {
+        let template = templates.get(&spec.route_template_ref).ok_or_else(|| {
+            DiscoveryError::TemplateNotFound {
+                path: path_str.clone(),
+                template_id: spec.route_template_ref.clone(),
+            }
+        })?;
+
+        let compiled = materialize_and_compile(template, spec).map_err(|e| {
+            let source = match &e {
+                camel_api::CamelError::Config(msg) => TemplateError::InvalidBody(msg.clone()),
+                other => TemplateError::InvalidBody(other.to_string()),
+            };
+            DiscoveryError::MaterializationFailed {
+                path: path_str.clone(),
+                source,
+            }
+        })?;
+
+        for result in compiled {
+            let rid = result.route_def.route_id().to_string();
+            if !seen_route_ids.insert(rid.clone()) {
+                return Err(DiscoveryError::DuplicateRouteId {
+                    path: path_str.clone(),
+                    route_id: rid,
+                });
+            }
+            let route_def = match result.source_hash {
+                Some(h) => result.route_def.with_source_hash(h),
+                None => result.route_def,
+            };
+            routes.push(route_def);
         }
     }
 
@@ -581,5 +700,390 @@ mod tests {
         assert_eq!(routes[0].from_uri(), "timer:tick");
 
         unsafe { env::remove_var("TEST_JSON_GOOD_VAL") };
+    }
+
+    // ── Template-aware discovery ─────────────────────────────────────
+
+    #[test]
+    fn discovers_yaml_template_and_materializes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("routes.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes: []
+templates:
+  - id: http-route
+    parameters:
+      - name: path
+    route:
+      id: "materialized-http"
+      from: "rest:{{path}}"
+      steps:
+        - to: "log:info"
+templated_routes:
+  - route_template_ref: http-route
+    route_id: "my-http"
+    parameters:
+      path: /api/users
+"#,
+        )
+        .unwrap();
+
+        let pattern = file_path.to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "my-http");
+        assert_eq!(routes[0].from_uri(), "rest:/api/users");
+    }
+
+    #[test]
+    fn discovers_json_template_and_materializes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("routes.json");
+        fs::write(
+            &file_path,
+            r#"{
+  "routes": [],
+  "templates": [
+    {
+      "id": "timer-route",
+      "parameters": [{"name": "period"}],
+      "route": {
+        "id": "materialized-timer",
+        "from": "timer:tick?period={{period}}",
+        "steps": []
+      }
+    }
+  ],
+  "templated_routes": [
+    {
+      "route_template_ref": "timer-route",
+      "parameters": {"period": "5000"}
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let pattern = file_path.to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "materialized-timer");
+        assert_eq!(routes[0].from_uri(), "timer:tick?period=5000");
+    }
+
+    #[test]
+    fn discovers_mixed_regular_routes_and_templates() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("mixed.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes:
+  - id: regular-route
+    from: direct:start
+    steps:
+      - to: log:info
+templates:
+  - id: log-route
+    parameters:
+      - name: level
+    route:
+      id: "materialized-log"
+      from: "direct:log"
+      steps:
+        - to: "log:{{level}}"
+templated_routes:
+  - route_template_ref: log-route
+    parameters:
+      level: warn
+"#,
+        )
+        .unwrap();
+
+        let pattern = file_path.to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 2);
+        let ids: Vec<&str> = routes.iter().map(|r| r.route_id()).collect();
+        assert!(ids.contains(&"regular-route"));
+        assert!(ids.contains(&"materialized-log"));
+    }
+
+    #[test]
+    fn discovers_cross_file_template_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        // File A: defines the template
+        let file_a = dir.path().join("templates.yaml");
+        fs::write(
+            &file_a,
+            r#"
+routes: []
+templates:
+  - id: shared-http
+    parameters:
+      - name: path
+    route:
+      id: "shared-route"
+      from: "rest:{{path}}"
+      steps:
+        - to: "log:shared"
+"#,
+        )
+        .unwrap();
+
+        // File B: instantiates the template
+        let file_b = dir.path().join("instances.yaml");
+        fs::write(
+            &file_b,
+            r#"
+routes: []
+templated_routes:
+  - route_template_ref: shared-http
+    parameters:
+      path: /cross-file
+"#,
+        )
+        .unwrap();
+
+        let pattern = dir.path().join("*.yaml").to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].route_id(), "shared-route");
+        assert_eq!(routes[0].from_uri(), "rest:/cross-file");
+    }
+
+    #[test]
+    fn missing_template_ref_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("missing.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes: []
+templated_routes:
+  - route_template_ref: nonexistent-template
+    parameters:
+      path: /test
+"#,
+        )
+        .unwrap();
+
+        let pattern = file_path.to_string_lossy().to_string();
+        let err = match discover_routes(&[pattern]) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        match &err {
+            DiscoveryError::TemplateNotFound {
+                path: _,
+                template_id,
+            } => {
+                assert_eq!(template_id, "nonexistent-template");
+            }
+            other => panic!("expected TemplateNotFound error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_template_ids_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // File A: defines template "dup-tpl"
+        let file_a = dir.path().join("a.yaml");
+        fs::write(
+            &file_a,
+            r#"
+routes: []
+templates:
+  - id: dup-tpl
+    route:
+      id: "route-a"
+      from: "direct:a"
+"#,
+        )
+        .unwrap();
+
+        // File B: also defines template "dup-tpl"
+        let file_b = dir.path().join("b.yaml");
+        fs::write(
+            &file_b,
+            r#"
+routes: []
+templates:
+  - id: dup-tpl
+    route:
+      id: "route-b"
+      from: "direct:b"
+"#,
+        )
+        .unwrap();
+
+        let pattern = dir.path().join("*.yaml").to_string_lossy().to_string();
+        let err = match discover_routes(&[pattern]) {
+            Ok(_) => panic!("expected error"),
+            Err(e) => e,
+        };
+        match &err {
+            DiscoveryError::TemplateSpec { path: _, error } => {
+                assert!(error.contains("dup-tpl"));
+                assert!(error.contains("duplicate"));
+            }
+            other => panic!("expected TemplateSpec error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn materialized_routes_preserve_source_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("hash-test.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes: []
+templates:
+  - id: hash-tpl
+    route:
+      id: "hash-route"
+      from: "direct:hash"
+      steps: []
+templated_routes:
+  - route_template_ref: hash-tpl
+    parameters: {}
+"#,
+        )
+        .unwrap();
+
+        let pattern = file_path.to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        let hash = routes[0].source_hash();
+        assert!(hash.is_some(), "materialized route should have source_hash");
+        assert_ne!(hash.unwrap(), 0, "source_hash should be non-zero");
+    }
+
+    #[test]
+    fn materialized_source_hash_reflects_template_body_not_instance_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let template_body = serde_json::json!({
+            "id": "same-route",
+            "from": "direct:x",
+            "steps": []
+        });
+        let template_hash = {
+            let s = serde_json::to_string(&template_body).unwrap();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            s.hash(&mut h);
+            h.finish()
+        };
+
+        let file_path = dir.path().join("two-instances.yaml");
+        fs::write(
+            &file_path,
+            format!(
+                r#"
+routes: []
+templates:
+  - id: shared-tpl
+    route:
+      id: "same-route"
+      from: "direct:x"
+      steps: []
+templated_routes:
+  - route_template_ref: shared-tpl
+    route_id: "inst-a"
+    parameters: {{}}
+  - route_template_ref: shared-tpl
+    route_id: "inst-b"
+    parameters: {{}}
+"#,
+            ),
+        )
+        .unwrap();
+
+        let pattern = file_path.to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 2);
+
+        for route in &routes {
+            let hash = route.source_hash().expect("should have source_hash");
+            assert_eq!(
+                hash, template_hash,
+                "materialized route source_hash must match template body hash, not instance file hash"
+            );
+        }
+    }
+
+    #[test]
+    fn template_only_file_without_routes_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("tpl-only.yaml");
+        fs::write(
+            &file_path,
+            r#"
+templates:
+  - id: solo-tpl
+    parameters:
+      - name: target
+    route:
+      id: "solo-{{target}}"
+      from: "direct:start"
+      steps:
+        - to: "{{target}}"
+templated_routes:
+  - route_template_ref: solo-tpl
+    parameters:
+      target: "log:info"
+"#,
+        )
+        .unwrap();
+
+        let pattern = file_path.to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].from_uri(), "direct:start");
+    }
+
+    #[test]
+    fn duplicate_route_ids_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("dup-rid.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes:
+  - id: "shared-id"
+    from: "direct:a"
+    steps: []
+templates:
+  - id: tpl
+    route:
+      id: "tpl-route"
+      from: "direct:b"
+      steps: []
+templated_routes:
+  - route_template_ref: tpl
+    route_id: "shared-id"
+    parameters: {}
+"#,
+        )
+        .unwrap();
+
+        let pattern = file_path.to_string_lossy().to_string();
+        let err = match discover_routes(&[pattern]) {
+            Ok(_) => panic!("expected duplicate route id error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("shared-id"),
+            "expected duplicate route id error, got: {msg}"
+        );
+        match &err {
+            DiscoveryError::DuplicateRouteId { route_id, .. } => {
+                assert_eq!(route_id, "shared-id");
+            }
+            other => panic!("expected DuplicateRouteId error, got: {other:?}"),
+        }
     }
 }

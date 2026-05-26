@@ -54,6 +54,7 @@ camel-component-timer.workspace = true
 camel-component-log.workspace = true
 camel-component-mock.workspace = true
 criterion.workspace = true
+uuid.workspace = true
 
 [[bench]]
 name = "context"

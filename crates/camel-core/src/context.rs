@@ -10,7 +10,8 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
     CamelError, FunctionInvoker, HealthReport, HealthStatus, Lifecycle, MetricsCollector,
     NoOpMetrics, NoopPlatformService, PlatformIdentity, PlatformService, ReadinessGate,
-    RuntimeCommandBus, RuntimeQueryBus, ServiceHealth, ServiceStatus, SupervisionConfig,
+    RouteTemplateSpec, RuntimeCommandBus, RuntimeQueryBus, ServiceHealth, ServiceStatus,
+    SupervisionConfig, TemplateInstanceRecord,
 };
 use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;
@@ -28,6 +29,7 @@ use crate::lifecycle::domain::LanguageRegistryError;
 use crate::lifecycle::ports::RuntimeExecutionPort;
 use crate::shared::components::domain::Registry;
 use crate::shared::observability::domain::TracerConfig;
+use crate::template::TemplateRegistry;
 
 static CONTEXT_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -47,6 +49,7 @@ pub struct CamelContextBuilder {
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
     lifecycle_services: Vec<Box<dyn Lifecycle>>,
     execution_factory: Option<ExecutionFactory>,
+    template_registry: Option<Arc<TemplateRegistry>>,
 }
 
 /// The CamelContext is the runtime engine that manages components, routes, and their lifecycle.
@@ -71,6 +74,7 @@ pub struct CamelContext {
     services: Vec<Box<dyn Lifecycle>>,
     component_configs: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
+    template_registry: Arc<TemplateRegistry>,
 }
 
 /// Opaque handle for runtime side-effect execution operations.
@@ -679,6 +683,35 @@ impl CamelContext {
             .get(&TypeId::of::<T>())
             .and_then(|b| b.downcast_ref::<T>())
     }
+
+    // --- Route Template Registry (data-only) ---
+
+    /// Register a route template specification.
+    ///
+    /// Returns `Err(CamelError)` if a template with the same ID is already registered.
+    pub fn add_route_template(&self, spec: RouteTemplateSpec) -> Result<(), CamelError> {
+        self.template_registry.register(spec)
+    }
+
+    /// Retrieve a route template specification by its ID.
+    pub fn get_route_template(&self, id: &str) -> Option<RouteTemplateSpec> {
+        self.template_registry.get(id)
+    }
+
+    /// Return all registered template IDs.
+    pub fn template_ids(&self) -> Vec<String> {
+        self.template_registry.template_ids()
+    }
+
+    /// Record a newly instantiated template instance.
+    pub fn record_template_instance(&self, record: TemplateInstanceRecord) {
+        self.template_registry.record_instance(record)
+    }
+
+    /// Return all instance records for a given template ID.
+    pub fn template_instances(&self, template_id: &str) -> Vec<TemplateInstanceRecord> {
+        self.template_registry.instances(template_id)
+    }
 }
 
 impl ComponentRegistrar for CamelContext {
@@ -722,6 +755,7 @@ impl CamelContextBuilder {
             function_invoker: None,
             lifecycle_services: Vec::new(),
             execution_factory: None,
+            template_registry: None,
         }
     }
 
@@ -791,6 +825,14 @@ impl CamelContextBuilder {
             self.function_invoker = Some(invoker);
         }
         self.lifecycle_services.push(Box::new(service));
+        self
+    }
+
+    /// Set a custom `TemplateRegistry` for route template storage.
+    ///
+    /// If not provided, a default empty registry is created during `build()`.
+    pub fn template_registry(mut self, registry: Arc<TemplateRegistry>) -> Self {
+        self.template_registry = Some(registry);
         self
     }
 
@@ -880,6 +922,10 @@ impl CamelContextBuilder {
             .try_set_runtime_handle(runtime_handle)
             .expect("controller actor mailbox should accept initial runtime handle"); // allow-unwrap
 
+        let template_registry = self
+            .template_registry
+            .unwrap_or_else(|| Arc::new(TemplateRegistry::new()));
+
         Ok(CamelContext {
             registry,
             route_controller: controller,
@@ -894,6 +940,7 @@ impl CamelContextBuilder {
             services: self.lifecycle_services,
             component_configs: HashMap::new(),
             function_invoker: self.function_invoker,
+            template_registry,
         })
     }
 }
