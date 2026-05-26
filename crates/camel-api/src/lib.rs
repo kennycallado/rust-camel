@@ -36,6 +36,7 @@ pub mod recipient_list;
 pub mod route_controller;
 pub mod routing_slip;
 pub mod runtime;
+pub mod security_policy;
 pub mod splitter;
 pub mod stream_cache;
 pub mod supervision;
@@ -95,6 +96,7 @@ pub use runtime::{
     RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult, canonical_contract_rejection_reason,
     canonical_contract_supports_step,
 };
+pub use security_policy::Principal;
 pub use splitter::{
     AggregationStrategy, SplitExpression, SplitterConfig, split_body, split_body_json_array,
     split_body_lines,
