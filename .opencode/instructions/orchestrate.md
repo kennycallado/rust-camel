@@ -10,6 +10,8 @@ When triggered, switch to orchestration mode: you become a coordinator who plans
 
 Suspend normal "execute first" behavior. In this mode you plan first, delegate always.
 
+**MANDATORY:** Load the `subagent-driven-development` skill via the `skill` tool before starting any orchestration work. This skill provides review templates, dispatch patterns, and quality gates that the orchestrator relies on. Do NOT skip this step.
+
 ## CORE PRINCIPLE
 
 **You plan, delegate, and review. Subagents implement.**
@@ -38,13 +40,20 @@ Subagents    = Hands (implementing, testing, fixing)
 | `e_gpt5.5`  | openai/gpt-5.5-pro      | Worker stuck after 2 attempts. Hard trait/lifetime puzzles. |
 | `e_opus4.7` | copilot/claude-opus-4.7 | Worker stuck after 2 attempts. Cross-crate arch conflicts.  |
 
+### Reviewers — validation tier
+
+| Agent       | Model           | Use For                                                              |
+| ----------- | --------------- | -------------------------------------------------------------------- |
+| `r_glm5.1`  | zhipuai/glm-5.1 | Read-only review of code + plan/spec after tasks and before merging |
+
 ### Agent Selection Rules
 
 1. **Default to `w_glm5.1`** — most balanced for implementation tasks
 2. **Rotate workers** — if workload is heavy, distribute across `w_gpt5.3-codex` and `w_qwen3.6-pro`
 3. **`w_mini` for simple tasks only** — renames, formatting, boilerplate, single-file mechanical changes. It will self-report if a task is too complex.
 4. **Experts (`e_*`) are escalation-only** — never assign as first attempt
-5. **Escalation path:** worker (attempt 1) → same/different worker (attempt 2) → expert (attempt 3) → stop and report to user
+5. **Reviewers (`r_*`) validate** — use after meaningful worker output, after plan changes, and for final review
+6. **Escalation path:** worker (attempt 1) → same/different worker (attempt 2) → expert (attempt 3) → stop and report to user
 
 ## ULTRATHINK TOGGLE
 
@@ -229,7 +238,8 @@ After each subagent returns:
 
 1. **Read the report** — What did they claim to do?
 2. **Verify** — Spot-check files, run `cargo check` / `cargo test` if applicable
-3. **Accept or reject:**
+3. **Request reviewer when useful** — dispatch `r_glm5.1` for standard/complex tasks, code+plan drift, or architecture-sensitive work
+4. **Accept or reject:**
    - **Accept:** Mark task complete, move to next
    - **Reject:** Follow escalation path
 
@@ -238,8 +248,8 @@ After each subagent returns:
 | Task Type     | Review Depth                         |
 | ------------- | ------------------------------------ |
 | Mechanical    | Glance at output, trust if clean     |
-| Standard      | Read changed files, check logic      |
-| Complex/ULTRA | Full review: code, tests, edge cases |
+| Standard      | Dispatch `r_glm5.1` or read changed files and check logic |
+| Complex/ULTRA | Dispatch `r_glm5.1`; full review: code, plan/spec, tests, edge cases |
 
 ### Escalation Path
 
@@ -273,7 +283,8 @@ After all tasks complete:
 
 1. **Run full verification** — `cargo check`, `cargo test`, `cargo clippy`
 2. **Cross-task integration check** — do pieces fit together?
-3. **Report to user** — summary of what was built, any open concerns
+3. **Dispatch `r_glm5.1`** — review final diff against spec/plan and repo context
+4. **Report to user** — summary of what was built, any open concerns
 
 ## RULES
 
@@ -282,6 +293,7 @@ After all tasks complete:
 - Implement code directly (delegate everything)
 - Dispatch parallel agents that touch the same files
 - Skip review of subagent output
+- Use reviewers to implement fixes
 - Continue past a blocked task without resolving it
 - Guess at user intent — ask if ambiguous
 - Assign experts on first attempt
