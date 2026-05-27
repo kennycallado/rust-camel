@@ -6,7 +6,7 @@ use regex::Regex;
 
 fn placeholder_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.\-]*)\s*\}\}").unwrap())
+    RE.get_or_init(|| Regex::new(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.\-]*)\s*\}\}").unwrap()) // allow-unwrap
 }
 
 /// Replace `{{name}}` placeholders in `input` with values from `values`.
@@ -44,7 +44,7 @@ pub fn substitute_placeholders(
     let result = placeholder_regex()
         .replace_all(input, |caps: &regex::Captures| {
             let name = &caps[1];
-            values.get(name).cloned().expect("validated above")
+            values.get(name).cloned().expect("validated above") // allow-unwrap
         })
         .into_owned();
 
