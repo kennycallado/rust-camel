@@ -504,7 +504,7 @@ fn default_max_delay_ms() -> u64 {
 
 /// Deep merge two TOML values
 /// Tables are merged recursively, with overlay values taking precedence
-fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
+pub(crate) fn merge_toml_values(base: &mut toml::Value, overlay: &toml::Value) {
     match (base, overlay) {
         (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) => {
             for (key, value) in overlay_table {
@@ -713,7 +713,54 @@ impl CamelConfig {
     ) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| ConfigError::Message(format!("Failed to read config file: {}", e)))?;
-        Self::build_from_toml_str_inner(&content, profile, merge_env)
+
+        let base_dir = std::path::Path::new(path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+
+        let mut root_value: toml::Value = toml::from_str(&content)
+            .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
+
+        let includes = Self::extract_includes(&root_value)?;
+
+        // Strip `include` before passing to inner builder (not a CamelConfig field)
+        if let toml::Value::Table(ref mut table) = root_value {
+            table.remove("include");
+        }
+
+        let env_profile = std::env::var("CAMEL_PROFILE").ok();
+        let effective_profile = profile.or(env_profile.as_deref());
+
+        let pre_sources = crate::include::load_includes(base_dir, &includes, effective_profile)?;
+
+        Self::build_from_toml_value_inner(root_value, profile, merge_env, pre_sources)
+    }
+
+    /// Validates and extracts the `include` field from a parsed TOML value.
+    /// Returns an error if `include` is present but not an array of strings.
+    fn extract_includes(raw_value: &toml::Value) -> Result<Vec<String>, ConfigError> {
+        match raw_value.get("include") {
+            None => Ok(vec![]),
+            Some(toml::Value::Array(arr)) => {
+                let mut paths = Vec::with_capacity(arr.len());
+                for (i, item) in arr.iter().enumerate() {
+                    match item.as_str() {
+                        Some(s) => paths.push(s.to_string()),
+                        None => {
+                            return Err(ConfigError::Message(format!(
+                                "include[{}] must be a string, got: {}",
+                                i, item
+                            )));
+                        }
+                    }
+                }
+                Ok(paths)
+            }
+            Some(other) => Err(ConfigError::Message(format!(
+                "'include' must be an array of strings, got: {}",
+                other.type_str()
+            ))),
+        }
     }
 
     pub fn from_env_or_default() -> Result<Self, ConfigError> {
@@ -735,7 +782,28 @@ impl CamelConfig {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| ConfigError::Message(format!("Failed to read config file: {}", e)))?;
-        Self::build_from_toml_str_inner(&content, profile, false)
+
+        let base_dir_owned = std::path::Path::new(path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+
+        let mut root_value: toml::Value = toml::from_str(&content)
+            .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
+
+        let includes = Self::extract_includes(&root_value)?;
+
+        if let toml::Value::Table(ref mut table) = root_value {
+            table.remove("include");
+        }
+
+        let env_profile = std::env::var("CAMEL_PROFILE").ok();
+        let effective_profile = profile.or(env_profile.as_deref());
+
+        let pre_sources =
+            crate::include::load_includes(&base_dir_owned, &includes, effective_profile)?;
+
+        Self::build_from_toml_value_inner(root_value, profile, false, pre_sources)
     }
 
     /// Async version of [`Self::from_file_with_env`] — uses `tokio::fs`.
@@ -751,27 +819,74 @@ impl CamelConfig {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| ConfigError::Message(format!("Failed to read config file: {}", e)))?;
-        Self::build_from_toml_str_inner(&content, profile, true)
+
+        let base_dir_owned = std::path::Path::new(path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+
+        let mut root_value: toml::Value = toml::from_str(&content)
+            .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
+
+        let includes = Self::extract_includes(&root_value)?;
+
+        if let toml::Value::Table(ref mut table) = root_value {
+            table.remove("include");
+        }
+
+        let env_profile = std::env::var("CAMEL_PROFILE").ok();
+        let effective_profile = profile.or(env_profile.as_deref());
+
+        let pre_sources =
+            crate::include::load_includes(&base_dir_owned, &includes, effective_profile)?;
+
+        Self::build_from_toml_value_inner(root_value, profile, true, pre_sources)
     }
 
-    fn build_from_toml_str_inner(
-        content: &str,
+    /// Core config builder. Accepts a pre-parsed (and `include`-stripped) `toml::Value`
+    /// so callers do not need to re-parse the content.
+    fn build_from_toml_value_inner(
+        mut config_value: toml::Value,
         profile: Option<&str>,
         merge_env: bool,
+        pre_sources: Vec<String>,
     ) -> Result<Self, ConfigError> {
         let env_profile = env::var("CAMEL_PROFILE").ok();
         let profile = profile.or(env_profile.as_deref());
 
-        let mut config_value: toml::Value = toml::from_str(content)
-            .map_err(|e| ConfigError::Message(format!("Failed to parse TOML: {}", e)))?;
+        // Defensively strip `include` in case callers forgot — it is not a CamelConfig field.
+        if let toml::Value::Table(ref mut table) = config_value {
+            table.remove("include");
+        }
 
-        apply_profile(&mut config_value, profile)?;
+        // Detect whether the root file has profile sections (e.g. [default], [production]).
+        // If it does, use strict profile handling (unknown profile → error).
+        // If it doesn't (flat config), use lenient handling (keep as-is).
+        let has_profile_structure = if let toml::Value::Table(ref table) = config_value {
+            table.contains_key("default") || profile.is_some_and(|p| table.contains_key(p))
+        } else {
+            false
+        };
+
+        if has_profile_structure {
+            apply_profile(&mut config_value, profile)?;
+        } else {
+            // Flat config — no profile sections, keep as-is
+            apply_profile_lenient(&mut config_value, profile);
+        }
 
         let merged_toml = toml::to_string(&config_value).map_err(|e| {
             ConfigError::Message(format!("Failed to serialize merged config: {}", e))
         })?;
 
-        let mut builder = Config::builder().add_source(config::File::from_str(
+        let mut builder = Config::builder();
+        for source_toml in pre_sources {
+            builder = builder.add_source(config::File::from_str(
+                &source_toml,
+                config::FileFormat::Toml,
+            ));
+        }
+        builder = builder.add_source(config::File::from_str(
             &merged_toml,
             config::FileFormat::Toml,
         ));
@@ -821,7 +936,10 @@ fn resolve_toml_value_placeholders(
 }
 
 /// Apply profile-based TOML section merging in-place.
-fn apply_profile(config_value: &mut toml::Value, profile: Option<&str>) -> Result<(), ConfigError> {
+pub(crate) fn apply_profile(
+    config_value: &mut toml::Value,
+    profile: Option<&str>,
+) -> Result<(), ConfigError> {
     if let Some(p) = profile {
         let default_value = config_value.get("default").cloned();
         let profile_value = config_value.get(p).cloned();
@@ -837,7 +955,37 @@ fn apply_profile(config_value: &mut toml::Value, profile: Option<&str>) -> Resul
     } else if let Some(default_val) = config_value.get("default").cloned() {
         *config_value = default_val;
     }
+    // If no profile active and no [default] → keep as-is
     Ok(())
+}
+
+/// Like `apply_profile` but lenient: if the included file has no profile sections,
+/// keep it as-is rather than returning an error. Use for included files that may be
+/// written as flat config without profile sections.
+pub(crate) fn apply_profile_lenient(value: &mut toml::Value, profile: Option<&str>) {
+    if let Some(p) = profile {
+        let default_value = value.get("default").cloned();
+        let profile_value = value.get(p).cloned();
+        match (default_value, profile_value) {
+            (Some(mut base), Some(overlay)) => {
+                merge_toml_values(&mut base, &overlay);
+                *value = base;
+            }
+            (None, Some(profile_val)) => {
+                *value = profile_val;
+            }
+            (Some(default_val), None) => {
+                // Has [default] but not this profile → use default
+                *value = default_val;
+            }
+            (None, None) => {
+                // No profile structure → use file as-is (flat config without profiles)
+            }
+        }
+    } else if let Some(default_val) = value.get("default").cloned() {
+        *value = default_val;
+    }
+    // If no profile active and no [default] → keep as-is
 }
 
 #[cfg(test)]

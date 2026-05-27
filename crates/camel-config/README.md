@@ -9,6 +9,7 @@ Configuration management for the Rust Camel framework. Provides profile-based co
 `camel-config` manages application configuration through:
 
 - **Camel.toml files** - Central configuration file
+- **Config modularization** - Split config across files with `include = [...]`
 - **Profile support** - Environment-specific settings ([default], [production], etc.)
 - **Environment variables** - Override any setting with `CAMEL_*` variables
 - **Route discovery** - Automatic route file discovery via glob patterns
@@ -18,6 +19,7 @@ Configuration management for the Rust Camel framework. Provides profile-based co
 ## Features
 
 - 🎯 **Profile-based configuration** - Deep merge of profile settings with defaults
+- 📦 **Config modularization** - Split `Camel.toml` across multiple files with `include`
 - 🌍 **Environment variable overrides** - Override any config value with `CAMEL_*` prefix
 - 📁 **Route discovery** - Automatic route file discovery from glob patterns
 - ⚙️ **Component defaults** - Set global defaults for all component endpoints
@@ -238,6 +240,52 @@ plugin = "my-auth-bean"
 ```
 
 WASM bean plugins registered at startup. Each entry creates an isolated WASM instance.
+
+## Config Modularization (include)
+
+Split your `Camel.toml` into smaller files using the top-level `include` field.
+Included files are merged in order — last wins — before the root file is applied.
+This is useful for sharing component defaults across deployments while keeping
+environment-specific overrides in the root file.
+
+```toml
+# Camel.toml
+include = ["config/components.toml", "config/observability.toml"]
+
+[default]
+routes = ["routes/*.yaml"]
+log_level = "info"
+
+[production]
+log_level = "warn"
+```
+
+```toml
+# config/components.toml  (flat — no profile sections required)
+[components.http]
+connect_timeout_ms = 5000
+max_connections = 200
+
+[components.kafka]
+brokers = "kafka:9092"
+group_id = "camel"
+```
+
+```toml
+# config/observability.toml
+[observability.prometheus]
+enabled = true
+port = 9090
+```
+
+**Rules:**
+
+- Paths are relative to the file declaring `include` (no absolute paths, no URL schemes).
+- Path traversal outside the directory is rejected (`../` and symlinks that escape).
+- Duplicate paths in the same `include` list are a fatal error.
+- Included files may not themselves use `include` (no recursive includes in V1 — a warning is logged and the field is ignored).
+- Profile propagation: if a profile is active, included files are processed with the same profile (using lenient mode — flat files without profile sections are accepted as-is).
+- All include errors are fatal; there is no partial-config fallback.
 
 ## Profile Selection
 

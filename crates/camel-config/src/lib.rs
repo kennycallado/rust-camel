@@ -6,6 +6,7 @@
 pub mod config;
 pub mod context_ext;
 pub mod discovery;
+pub(crate) mod include;
 pub mod properties;
 pub mod yaml;
 

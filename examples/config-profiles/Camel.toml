@@ -1,3 +1,7 @@
+# Shared component defaults live in a separate file so they can be reused
+# across deployment configs without duplication.
+include = ["config/components.toml"]
+
 [default]
 routes = ["routes/**/*.yaml"]
 log_level = "INFO"
@@ -17,15 +21,6 @@ detail_level = "minimal"
 [default.observability.tracer.outputs.stdout]
 enabled = true
 format = "json"
-
-# Component defaults - shared across all profiles
-[default.components.http]
-connect_timeout_ms = 30000
-allow_private_ips = false
-
-[default.components.kafka]
-brokers = "localhost:9092"
-group_id = "camel"
 
 # Development profile - more verbose, local services
 [development]
