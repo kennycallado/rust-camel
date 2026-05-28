@@ -644,7 +644,11 @@ impl CamelContext {
     }
 
     /// Check health status of all registered services.
-    pub fn health_check(&self) -> HealthReport {
+    ///
+    /// Currently reads service status synchronously. Declared `async` for
+    /// forward-compatibility when per-service health probes become async.
+    // TODO: await actual per-service health probes once Service::health() is async
+    pub async fn health_check_async(&self) -> HealthReport {
         let services: Vec<ServiceHealth> = self
             .services
             .iter()

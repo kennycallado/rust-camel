@@ -217,7 +217,7 @@ async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
         .expect("configure_context should succeed");
 
     // The health report should contain a service named "otel"
-    let report = ctx.health_check();
+    let report = ctx.health_check_async().await;
     let otel_service = report.services.iter().find(|s| s.name == "otel");
     assert!(
         otel_service.is_some(),
@@ -248,7 +248,7 @@ async fn test_configure_context_without_otel_no_lifecycle() {
         .expect("configure_context should succeed");
 
     // No OTel service should be registered
-    let report = ctx.health_check();
+    let report = ctx.health_check_async().await;
     let otel_service = report.services.iter().find(|s| s.name == "otel");
     assert!(
         otel_service.is_none(),

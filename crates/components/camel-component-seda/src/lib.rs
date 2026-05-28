@@ -456,7 +456,7 @@ struct SedaConsumer {
     consumer_id: ConsumerId,
     started: bool,
     cancel_token: CancellationToken,
-    forwarder_handles: Vec<JoinHandle<()>>,
+    forwarder_handles: Vec<JoinHandle<Result<(), CamelError>>>,
 }
 
 #[async_trait]
@@ -498,6 +498,7 @@ impl Consumer for SedaConsumer {
                             _ = cancel.cancelled() => break,
                         }
                     }
+                    Ok(())
                 });
                 self.forwarder_handles.push(handle);
             }
@@ -520,6 +521,7 @@ impl Consumer for SedaConsumer {
                             _ = cancel.cancelled() => break,
                         }
                     }
+                    Ok(())
                 });
                 self.forwarder_handles.push(handle);
             }
@@ -567,6 +569,14 @@ impl Consumer for SedaConsumer {
         ConcurrencyModel::Concurrent {
             max: Some(self.state.config.concurrent_consumers),
         }
+    }
+
+    fn background_task_handle(
+        &mut self,
+    ) -> Option<tokio::task::JoinHandle<Result<(), CamelError>>> {
+        // SEDA may have multiple forwarder handles; return the first one.
+        // The remaining handles are cancelled in stop().
+        self.forwarder_handles.pop()
     }
 }
 

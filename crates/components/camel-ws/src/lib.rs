@@ -770,7 +770,7 @@ pub struct WsConsumer {
     registry: Arc<WsConnectionRegistry>,
     server_state: Option<WsAppState>,
     registry_key: Option<(String, u16, String)>,
-    forward_task: Option<JoinHandle<()>>,
+    forward_task: Option<JoinHandle<Result<(), CamelError>>>,
 }
 
 impl WsConsumer {
@@ -847,12 +847,13 @@ impl Consumer for WsConsumer {
         global_registries().insert(registry_key.clone(), Arc::clone(&self.registry));
 
         let sender = ctx.sender();
-        let forward_task = tokio::spawn(async move {
+        let forward_task: JoinHandle<Result<(), CamelError>> = tokio::spawn(async move {
             while let Some(envelope) = env_rx.recv().await {
                 if sender.send(envelope).await.is_err() {
                     break;
                 }
             }
+            Ok(())
         });
 
         self.server_state = Some(state);
@@ -921,6 +922,10 @@ impl Consumer for WsConsumer {
         ConcurrencyModel::Concurrent {
             max: Some(self.cfg.inner.max_connections as usize),
         }
+    }
+
+    fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {
+        self.forward_task.take()
     }
 }
 

@@ -6,8 +6,10 @@ mod sealed {
     pub trait Sealed {}
 }
 
+/// Health status of a function provider instance.
+/// Named `FunctionHealthStatus` to avoid collision with `camel_api::FunctionHealthStatus`.
 #[derive(Debug, Clone)]
-pub enum HealthReport {
+pub enum FunctionHealthStatus {
     Healthy,
     Unhealthy(String),
 }
@@ -34,7 +36,7 @@ pub enum ProviderError {
 pub(crate) trait FunctionProvider: Send + Sync + sealed::Sealed {
     async fn spawn(&self, key: &RunnerPoolKey) -> Result<RunnerHandle, ProviderError>;
     async fn shutdown(&self, handle: RunnerHandle) -> Result<(), ProviderError>;
-    async fn health(&self, handle: &RunnerHandle) -> Result<HealthReport, ProviderError>;
+    async fn health(&self, handle: &RunnerHandle) -> Result<FunctionHealthStatus, ProviderError>;
     async fn register(
         &self,
         handle: &RunnerHandle,
@@ -144,16 +146,19 @@ pub mod fake {
             Ok(())
         }
 
-        async fn health(&self, handle: &RunnerHandle) -> Result<HealthReport, ProviderError> {
+        async fn health(
+            &self,
+            handle: &RunnerHandle,
+        ) -> Result<FunctionHealthStatus, ProviderError> {
             self.calls
                 .lock()
                 .expect("calls") // allow-unwrap
                 .push(FakeCall::Health(handle.id.clone()));
             if self.config.lock().expect("config").fail_on_health {
                 // allow-unwrap
-                return Ok(HealthReport::Unhealthy("configured".into()));
+                return Ok(FunctionHealthStatus::Unhealthy("configured".into()));
             }
-            Ok(HealthReport::Healthy)
+            Ok(FunctionHealthStatus::Healthy)
         }
 
         async fn register(

@@ -24,7 +24,7 @@ pub struct JmsConsumer {
     endpoint_config: JmsEndpointConfig,
     reconnect_interval_ms: u64,
     cancel_token: Option<CancellationToken>,
-    task_handles: Vec<JoinHandle<()>>,
+    task_handles: Vec<JoinHandle<Result<(), CamelError>>>,
 }
 
 impl JmsConsumer {
@@ -383,7 +383,7 @@ impl Consumer for JmsConsumer {
         // JMS-011: spawn concurrent consumer tasks
         let consumer_count = endpoint_config.concurrent_consumers;
         // allow-unwrap: consumer_count validated >= 1 in from_uri
-        let handles: Vec<JoinHandle<()>> = (0..consumer_count)
+        let handles: Vec<JoinHandle<Result<(), CamelError>>> = (0..consumer_count)
             .map(|idx| {
                 let pool = Arc::clone(&pool);
                 let broker_name = broker_name.clone();
@@ -402,6 +402,7 @@ impl Consumer for JmsConsumer {
                         idx,
                     )
                     .await;
+                    Ok(())
                 })
             })
             .collect();
@@ -432,6 +433,14 @@ impl Consumer for JmsConsumer {
 
     fn concurrency_model(&self) -> ConcurrencyModel {
         ConcurrencyModel::Sequential
+    }
+
+    fn background_task_handle(
+        &mut self,
+    ) -> Option<tokio::task::JoinHandle<Result<(), CamelError>>> {
+        // JMS may have multiple concurrent consumer handles; return the first.
+        // The remaining handles are joined in stop().
+        self.task_handles.pop()
     }
 }
 
@@ -575,6 +584,7 @@ mod tests {
             async move {
                 // Task waits for cancellation then exits cleanly.
                 cancel.cancelled().await;
+                Ok(())
             }
         })];
 

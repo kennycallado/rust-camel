@@ -1,7 +1,7 @@
 use crate::config::FunctionConfig;
 use crate::invoker::DefaultFunctionInvoker;
 use crate::pool::{RunnerPool, RunnerPoolKey, RunnerState};
-use crate::provider::{FunctionProvider, HealthReport, ProviderError};
+use crate::provider::{FunctionHealthStatus, FunctionProvider, ProviderError};
 use camel_api::function::{FunctionDefinition, FunctionId, FunctionInvoker};
 use camel_api::{CamelError, Lifecycle, ServiceStatus};
 use std::sync::Arc;
@@ -106,11 +106,11 @@ impl FunctionRuntimeService {
                 return Err(ProviderError::BootTimeout);
             }
             match self.provider.health(handle).await {
-                Ok(HealthReport::Healthy) => {
+                Ok(FunctionHealthStatus::Healthy) => {
                     *handle.state.lock().expect("state") = RunnerState::Healthy; // allow-unwrap
                     return Ok(());
                 }
-                Ok(HealthReport::Unhealthy(reason)) => {
+                Ok(FunctionHealthStatus::Unhealthy(reason)) => {
                     *handle.state.lock().expect("state") = RunnerState::Unhealthy {
                         // allow-unwrap
                         since: std::time::Instant::now(),
@@ -136,11 +136,11 @@ impl FunctionRuntimeService {
                     _ = handle.cancel.cancelled() => break,
                     _ = ticks.tick() => {
                         match provider.health(&handle).await {
-                            Ok(HealthReport::Healthy) => {
+                            Ok(FunctionHealthStatus::Healthy) => {
                                 unhealthy_count = 0;
                                 *handle.state.lock().expect("state") = RunnerState::Healthy; // allow-unwrap
                             }
-                            Ok(HealthReport::Unhealthy(reason)) => {
+                            Ok(FunctionHealthStatus::Unhealthy(reason)) => {
                                 unhealthy_count = unhealthy_count.saturating_add(1);
                                 if unhealthy_count >= 2 {
                                     *handle.state.lock().expect("state") = RunnerState::Unhealthy { since: std::time::Instant::now(), reason }; // allow-unwrap

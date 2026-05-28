@@ -304,7 +304,7 @@ async fn add_route_definition_does_not_require_mut() {
 #[tokio::test]
 async fn test_health_check_empty_context() {
     let ctx = CamelContext::builder().build().await.unwrap();
-    let report = ctx.health_check();
+    let report = ctx.health_check_async().await;
 
     assert_eq!(report.status, HealthStatus::Healthy);
     assert!(report.services.is_empty());
@@ -339,7 +339,7 @@ async fn test_health_check_degraded_when_service_stopped() {
         .unwrap()
         .with_lifecycle(StoppedService);
 
-    let report = ctx.health_check();
+    let report = ctx.health_check_async().await;
     assert_eq!(
         report.status,
         HealthStatus::Degraded,
@@ -378,7 +378,7 @@ async fn test_health_check_unhealthy_when_service_failed() {
         .unwrap()
         .with_lifecycle(FailedService);
 
-    let report = ctx.health_check();
+    let report = ctx.health_check_async().await;
     assert_eq!(
         report.status,
         HealthStatus::Unhealthy,
@@ -432,7 +432,7 @@ async fn test_health_check_failed_overrides_stopped() {
         .with_lifecycle(StoppedService)
         .with_lifecycle(FailedService);
 
-    let report = ctx.health_check();
+    let report = ctx.health_check_async().await;
     assert_eq!(
         report.status,
         HealthStatus::Unhealthy,

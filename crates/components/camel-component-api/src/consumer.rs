@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use camel_api::{CamelError, Exchange};
@@ -131,6 +132,21 @@ pub trait Consumer: Send + Sync {
     /// Default: `Sequential`.
     fn concurrency_model(&self) -> ConcurrencyModel {
         ConcurrencyModel::Sequential
+    }
+
+    /// Return a handle to the consumer's long-running background task so the
+    /// runtime can monitor it for unexpected exits after `start()` returns `Ok`.
+    ///
+    /// Default: `None` — consumer's work completes entirely within `start()`.
+    /// Override: return `Some(handle)` if `start()` spawns a detached task.
+    ///
+    /// **Contract:** the task must observe `ConsumerContext::cancelled()` so
+    /// runtime shutdown is distinguishable from crash exits.
+    ///
+    /// This method is called at most once; implementations should use `.take()`
+    /// to transfer ownership of the handle.
+    fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {
+        None
     }
 }
 

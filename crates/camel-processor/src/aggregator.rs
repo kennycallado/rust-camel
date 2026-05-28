@@ -32,29 +32,20 @@ pub const CAMEL_AGGREGATED_COMPLETION_REASON: &str = "CamelAggregatedCompletionR
 /// Internal bucket structure with timestamp tracking for TTL eviction.
 struct Bucket {
     exchanges: Vec<Exchange>,
-    #[allow(dead_code)]
-    created_at: Instant,
     last_updated: Instant,
 }
 
 impl Bucket {
     fn new() -> Self {
-        let now = Instant::now();
         Self {
             exchanges: Vec::new(),
-            created_at: now,
-            last_updated: now,
+            last_updated: Instant::now(),
         }
     }
 
     fn push(&mut self, exchange: Exchange) {
         self.exchanges.push(exchange);
         self.last_updated = Instant::now();
-    }
-
-    #[allow(dead_code)]
-    fn len(&self) -> usize {
-        self.exchanges.len()
     }
 
     fn is_expired(&self, ttl: Duration) -> bool {

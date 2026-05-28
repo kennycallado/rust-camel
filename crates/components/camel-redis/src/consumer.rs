@@ -214,6 +214,12 @@ impl Consumer for RedisConsumer {
     fn concurrency_model(&self) -> ConcurrencyModel {
         ConcurrencyModel::Sequential
     }
+
+    fn background_task_handle(
+        &mut self,
+    ) -> Option<tokio::task::JoinHandle<Result<(), CamelError>>> {
+        self.task_handle.take()
+    }
 }
 
 /// Runs a Pub/Sub consumer loop.

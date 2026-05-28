@@ -52,7 +52,7 @@ async fn wait_for_health(
     let start = std::time::Instant::now();
     loop {
         match provider.health_runner(handle).await {
-            Ok(camel_function::HealthReport::Healthy) => return Ok(()),
+            Ok(camel_function::FunctionHealthStatus::Healthy) => return Ok(()),
             _ => {
                 if start.elapsed() > timeout {
                     return Err(format!("runner not healthy after {:?}", timeout));
@@ -81,7 +81,10 @@ async fn test_spawn_and_health() {
         .await
         .expect("health");
     let report = provider.health_runner(&handle).await.expect("health");
-    assert!(matches!(report, camel_function::HealthReport::Healthy));
+    assert!(matches!(
+        report,
+        camel_function::FunctionHealthStatus::Healthy
+    ));
     provider.shutdown_runner(handle).await.expect("shutdown");
     assert_clean(&provider).await;
 }

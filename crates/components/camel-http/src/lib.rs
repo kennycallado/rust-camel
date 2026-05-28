@@ -541,15 +541,11 @@ pub(crate) type DispatchTable =
 type ServerKey = (String, u16);
 
 /// Handle to a running Axum server on one interface/port.
-#[allow(dead_code)]
 struct ServerHandle {
     dispatch: DispatchTable,
     max_request_body: usize,
     max_response_body: usize,
     max_inflight_requests: usize,
-    inflight: Arc<tokio::sync::Semaphore>,
-    /// Kept alive so the task isn't dropped; not used directly.
-    _task: tokio::task::JoinHandle<()>,
 }
 
 /// Process-global registry mapping (host, port) → running Axum server handle.
@@ -631,13 +627,13 @@ impl ServerRegistry {
                     max_response_body,
                     Arc::clone(&inflight),
                 ));
+                let addr_for_monitor = format!("{host_owned}:{port}");
+                tokio::spawn(monitor_axum_task(task, addr_for_monitor));
                 Ok::<ServerHandle, CamelError>(ServerHandle {
                     dispatch,
                     max_request_body,
                     max_response_body,
                     max_inflight_requests,
-                    inflight,
-                    _task: task,
                 })
             })
             .await?;
@@ -700,6 +696,28 @@ async fn run_axum_server(
     axum::serve(listener, app).await.unwrap_or_else(|e| {
         tracing::error!(error = %e, "Axum server error");
     });
+}
+
+/// Monitors an Axum server task and emits a structured error event if it
+/// exits unexpectedly.
+///
+/// # Limitations
+/// The HTTP server is shared across all routes on a port. Full per-route
+/// CrashNotification propagation is deferred — this provides observable
+/// structured logging as a first guard.
+async fn monitor_axum_task(handle: tokio::task::JoinHandle<()>, addr: String) {
+    match handle.await {
+        Ok(()) => {
+            // Clean exit (process shutdown or normal stop)
+        }
+        Err(join_err) => {
+            tracing::error!(
+                addr = %addr,
+                error = %join_err,
+                "Axum server task exited unexpectedly — all routes on this port are now dead"
+            );
+        }
+    }
 }
 
 async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl IntoResponse {
@@ -4340,5 +4358,25 @@ mod tests {
         );
 
         token.cancel();
+    }
+
+    // -----------------------------------------------------------------------
+    // Server monitor tests (GRL-005)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn monitor_task_silent_on_clean_exit() {
+        let handle: tokio::task::JoinHandle<()> = tokio::spawn(async {});
+        // Clean exit should complete without panicking or logging errors
+        monitor_axum_task(handle, "127.0.0.1:0".to_string()).await;
+    }
+
+    #[tokio::test]
+    async fn monitor_task_handles_panicked_task() {
+        let handle: tokio::task::JoinHandle<()> = tokio::spawn(async {
+            panic!("simulated server crash");
+        });
+        // Should complete without panicking even though the inner task panicked
+        monitor_axum_task(handle, "127.0.0.1:9999".to_string()).await;
     }
 }

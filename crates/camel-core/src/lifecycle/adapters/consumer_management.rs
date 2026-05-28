@@ -43,7 +43,7 @@ pub(crate) fn spawn_consumer_task(
     is_resume: bool,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = consumer.start(consumer_ctx).await {
+        if let Err(e) = consumer.start(consumer_ctx.clone()).await {
             if is_resume {
                 error!(route_id = %route_id, "Consumer error on resume: {e}");
             } else {
@@ -61,6 +61,52 @@ pub(crate) fn spawn_consumer_task(
             }
 
             publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
+            return;
+        }
+
+        // Consumer started successfully. If it detached a background task,
+        // monitor the handle for unexpected exits (crash propagation per
+        // ADR-0007).
+        if let Some(bg_handle) = consumer.background_task_handle() {
+            match bg_handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) if !consumer_ctx.is_cancelled() => {
+                    let error_msg = e.to_string();
+                    error!(route_id = %route_id, "Consumer background task failed: {error_msg}");
+                    if let Some(ref tx) = crash_notifier {
+                        let _ = tx
+                            .send(CrashNotification {
+                                route_id: route_id.clone(),
+                                error: error_msg.clone(),
+                            })
+                            .await;
+                    }
+                    publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(route_id = %route_id, "Consumer bg task error during shutdown: {e}");
+                }
+                Err(join_err) if !consumer_ctx.is_cancelled() => {
+                    let error_msg = format!("Consumer task panicked: {join_err}");
+                    error!(route_id = %route_id, "{error_msg}");
+                    if let Some(ref tx) = crash_notifier {
+                        let _ = tx
+                            .send(CrashNotification {
+                                route_id: route_id.clone(),
+                                error: error_msg.clone(),
+                            })
+                            .await;
+                    }
+                    publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
+                }
+                Err(join_err) => {
+                    // Task panicked during shutdown — expected on unclean exits; log for debugging
+                    tracing::debug!(
+                        route_id = %route_id,
+                        "Consumer bg task panicked during shutdown: {join_err}"
+                    );
+                }
+            }
         }
     })
 }
@@ -265,5 +311,91 @@ mod tests {
             .expect("crash notification should be sent");
         assert_eq!(notification.route_id, "route-resume");
         assert!(notification.error.contains("resume start failed"));
+    }
+
+    // --- GRL-001: Deferred failure crash propagation ---
+
+    struct DeferredFailConsumer {
+        handle: Option<tokio::task::JoinHandle<Result<(), CamelError>>>,
+    }
+
+    impl DeferredFailConsumer {
+        fn new(err: &'static str) -> Self {
+            let err_msg = err.to_string();
+            let handle = tokio::task::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                Err(CamelError::ProcessorError(err_msg))
+            });
+            Self {
+                handle: Some(handle),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Consumer for DeferredFailConsumer {
+        async fn start(&mut self, _ctx: ConsumerContext) -> Result<(), CamelError> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+        fn background_task_handle(
+            &mut self,
+        ) -> Option<tokio::task::JoinHandle<Result<(), CamelError>>> {
+            self.handle.take()
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_consumer_task_deferred_failure_sends_crash_notification() {
+        let (exchange_tx, _rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(exchange_tx, cancel);
+        let (crash_tx, mut crash_rx) = mpsc::channel(1);
+
+        let handle = spawn_consumer_task(
+            "route-deferred".to_string(),
+            Box::new(DeferredFailConsumer::new("broker lost")),
+            ctx,
+            Some(crash_tx),
+            None,
+            false,
+        );
+
+        handle.await.expect("outer task should complete");
+
+        let notification = crash_rx.recv().await.expect("crash notification expected");
+        assert_eq!(notification.route_id, "route-deferred");
+        assert!(notification.error.contains("broker lost"));
+    }
+
+    #[tokio::test]
+    async fn spawn_consumer_task_deferred_failure_suppressed_on_cancellation() {
+        let (exchange_tx, _rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(exchange_tx, cancel.clone());
+        let (crash_tx, mut crash_rx) = mpsc::channel(1);
+
+        // Cancel BEFORE the bg task exits — simulates graceful shutdown
+        cancel.cancel();
+
+        let handle = spawn_consumer_task(
+            "route-cancel".to_string(),
+            Box::new(DeferredFailConsumer::new("shutdown error")),
+            ctx,
+            Some(crash_tx),
+            None,
+            false,
+        );
+
+        handle.await.expect("outer task should complete");
+
+        // Should receive NO crash notification — error during shutdown is suppressed
+        crash_rx.close();
+        assert!(
+            crash_rx.recv().await.is_none(),
+            "no crash notification expected on cancelled shutdown"
+        );
     }
 }

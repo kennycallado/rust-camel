@@ -473,6 +473,12 @@ impl Consumer for MasterConsumer {
 
         Ok(())
     }
+
+    fn background_task_handle(
+        &mut self,
+    ) -> Option<tokio::task::JoinHandle<Result<(), CamelError>>> {
+        self.leadership_task.take()
+    }
 }
 
 #[cfg(test)]

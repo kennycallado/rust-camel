@@ -293,7 +293,7 @@ format = "json"
 ```rust
 use camel_api::{HealthStatus, ServiceStatus};
 
-let report = ctx.health_check();
+let report = ctx.health_check_async().await;
 
 match report.status {
     HealthStatus::Healthy => println!("All services healthy"),

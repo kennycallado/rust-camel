@@ -9,13 +9,16 @@ See [docs/function-step.md](./docs/function-step.md) for the full DSL reference.
 ## Quick Start
 
 ```rust
-use camel_function::{ContainerProvider, FunctionConfig, FunctionRuntimeService};
+use camel_function::{ContainerProvider, FunctionConfig, FunctionRuntimeService, PullPolicy};
 use camel_core::context::CamelContext;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = ContainerProvider::builder()
         .image("kennycallado/deno-runner:latest")
+        .pull_policy(PullPolicy::IfMissing) // Never | Always | IfMissing (default)
+        .boot_timeout(Duration::from_secs(30)) // max wait for container /health (default: 30s)
         .build()?;
 
     let service = FunctionRuntimeService::with_container_provider(
@@ -32,6 +35,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### ContainerProvider options
+
+| Builder method | Type | Default | Description |
+|---|---|---|---|
+| `.image(s)` | `&str` | — | Docker image to use as function runner (required) |
+| `.pull_policy(p)` | `PullPolicy` | `IfMissing` | `Never`: no pull; `Always`: pull on every start; `IfMissing`: pull only if image not found locally |
+| `.boot_timeout(d)` | `Duration` | 30s | Max time to wait for the container `/health` endpoint to respond after spawn |
+| `.instance_id(s)` | `&str` | random UUID | Scopes container labels for test isolation |
 
 ## Runner
 

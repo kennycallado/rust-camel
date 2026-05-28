@@ -6,13 +6,11 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use super::{FunctionProvider, HealthReport, ProviderError};
+use super::{FunctionHealthStatus, FunctionProvider, ProviderError};
 
 struct ContainerEntry {
     container_id: String,
     endpoint: String,
-    #[allow(dead_code)]
-    host_port: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -108,9 +106,7 @@ pub struct ContainerProvider {
     docker: bollard::Docker,
     image: String,
     instance_id: String,
-    #[allow(dead_code)]
     boot_timeout: std::time::Duration,
-    #[allow(dead_code)]
     pull_policy: PullPolicy,
     client: ProtocolClient,
     containers_by_handle: DashMap<String, ContainerEntry>,
@@ -204,7 +200,7 @@ impl ContainerProvider {
     pub async fn health_runner(
         &self,
         handle: &RunnerHandle,
-    ) -> Result<HealthReport, ProviderError> {
+    ) -> Result<FunctionHealthStatus, ProviderError> {
         FunctionProvider::health(self, handle).await
     }
 
@@ -238,6 +234,92 @@ impl ContainerProvider {
             std::time::Duration::from_millis(5000),
         )
         .await
+    }
+
+    /// Pull the configured image according to the current [PullPolicy].
+    async fn pull_image_if_needed(&self) -> Result<(), ProviderError> {
+        match self.pull_policy {
+            PullPolicy::Never => {}
+            PullPolicy::Always => {
+                self.pull_image().await?;
+            }
+            PullPolicy::IfMissing => match self.docker.inspect_image(&self.image).await {
+                Ok(_) => {}
+                Err(bollard::errors::Error::DockerResponseServerError {
+                    status_code: 404, ..
+                }) => {
+                    self.pull_image().await?;
+                }
+                Err(e) => {
+                    return Err(inspect_error_to_spawn_failed(&self.image, e));
+                }
+            },
+        }
+        Ok(())
+    }
+}
+
+/// Converts a non-404 Docker inspect error into a [`ProviderError::SpawnFailed`].
+///
+/// Extracted as a free function so the classification logic can be unit-tested
+/// without a live Docker daemon.
+fn inspect_error_to_spawn_failed(image: &str, e: bollard::errors::Error) -> ProviderError {
+    ProviderError::SpawnFailed(format!("failed to inspect image '{image}': {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_non_404_becomes_spawn_failed() {
+        let err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "internal server error".into(),
+        };
+        let result = inspect_error_to_spawn_failed("my-image:latest", err);
+        assert!(
+            matches!(result, ProviderError::SpawnFailed(ref msg) if msg.contains("my-image:latest")),
+            "expected SpawnFailed with image name, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn inspect_permission_denied_becomes_spawn_failed() {
+        let err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 403,
+            message: "permission denied".into(),
+        };
+        let result = inspect_error_to_spawn_failed("private/image:1.0", err);
+        assert!(matches!(
+            result,
+            ProviderError::SpawnFailed(ref msg) if msg.contains("private/image:1.0")
+        ));
+    }
+}
+
+impl ContainerProvider {
+    /// Execute the image pull via bollard's `create_image` API.
+    async fn pull_image(&self) -> Result<(), ProviderError> {
+        use futures::StreamExt;
+
+        let options = bollard::query_parameters::CreateImageOptionsBuilder::default()
+            .from_image(&self.image)
+            .build();
+
+        let mut stream = self.docker.create_image(Some(options), None, None);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(ProviderError::SpawnFailed(format!(
+                        "image pull failed for '{}': {e}",
+                        self.image
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn spawn_log_forwarder(&self, container_id: String) {
@@ -315,6 +397,8 @@ impl FunctionProvider for ContainerProvider {
             "spawning container"
         );
 
+        self.pull_image_if_needed().await?;
+
         let labels = std::collections::HashMap::from([
             ("camel.function.runner".to_string(), "true".to_string()),
             ("camel.function.context".to_string(), handle_id.clone()),
@@ -367,6 +451,25 @@ impl FunctionProvider for ContainerProvider {
 
         let endpoint = format!("http://127.0.0.1:{host_port}");
 
+        // Wait for the container to become healthy within boot_timeout.
+        let boot_timeout = self.boot_timeout;
+        let client = &self.client;
+        let endpoint_clone = endpoint.clone();
+        let ready_result = tokio::time::timeout(boot_timeout, async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if client.health(&endpoint_clone).await.is_ok() {
+                    return;
+                }
+            }
+        })
+        .await;
+
+        if ready_result.is_err() {
+            let _ = self.stop_and_remove_container(&container_id).await;
+            return Err(ProviderError::SpawnFailed("container boot timeout".into()));
+        }
+
         self.spawn_log_forwarder(container_id.clone());
 
         self.containers_by_handle.insert(
@@ -374,7 +477,6 @@ impl FunctionProvider for ContainerProvider {
             ContainerEntry {
                 container_id,
                 endpoint,
-                host_port,
             },
         );
 
@@ -396,7 +498,7 @@ impl FunctionProvider for ContainerProvider {
         Ok(())
     }
 
-    async fn health(&self, handle: &RunnerHandle) -> Result<HealthReport, ProviderError> {
+    async fn health(&self, handle: &RunnerHandle) -> Result<FunctionHealthStatus, ProviderError> {
         let endpoint = self
             .containers_by_handle
             .get(&handle.id)

@@ -244,7 +244,7 @@ struct DirectConsumer {
     name: String,
     registry: DirectRegistry,
     cancel: Option<CancellationToken>,
-    handle: Option<JoinHandle<()>>,
+    handle: Option<JoinHandle<Result<(), CamelError>>>,
 }
 
 #[async_trait]
@@ -314,6 +314,7 @@ impl Consumer for DirectConsumer {
             }
 
             debug!(endpoint_name = %name, "direct consumer stopped");
+            Ok(())
         });
 
         self.cancel = Some(cancel);
@@ -348,6 +349,14 @@ impl Consumer for DirectConsumer {
 
         debug!(endpoint_name = %self.name, "direct consumer stopped");
         Ok(())
+    }
+
+    fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {
+        // Take the handle so spawn_consumer_task can monitor it for unexpected
+        // panics. The consumer loop exits cleanly via the CancellationToken, so
+        // stop() drives shutdown through cancel.take(); the task removes itself
+        // from the registry on exit.
+        self.handle.take()
     }
 }
 

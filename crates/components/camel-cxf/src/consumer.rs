@@ -22,7 +22,7 @@ pub struct CxfConsumer {
     #[allow(dead_code)]
     profile_name: String,
     cancel_token: Option<CancellationToken>,
-    task_handle: Option<JoinHandle<()>>,
+    task_handle: Option<JoinHandle<Result<(), CamelError>>>,
 }
 
 impl CxfConsumer {
@@ -142,7 +142,7 @@ impl Consumer for CxfConsumer {
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
 
-        let handle = tokio::spawn(async move {
+        let handle: JoinHandle<Result<(), CamelError>> = tokio::spawn(async move {
             let mut consecutive_transport_failures: u32 = 0;
             let mut reconnect_attempt: u32 = 0;
             loop {
@@ -221,11 +221,11 @@ impl Consumer for CxfConsumer {
                     tokio::select! {
                         _ = cancel.cancelled() => {
                             info!("CXF consumer cancelled");
-                            return;
+                            return Ok(());
                         }
                         _ = ctx.cancelled() => {
                             info!("CXF consumer context cancelled");
-                            return;
+                            return Ok(());
                         }
                         msg = stream.message() => {
                             match msg {
@@ -318,6 +318,7 @@ impl Consumer for CxfConsumer {
                     }) => {}
                 }
             }
+            Ok(())
         });
 
         self.task_handle = Some(handle);
@@ -342,6 +343,12 @@ impl Consumer for CxfConsumer {
 
     fn concurrency_model(&self) -> ConcurrencyModel {
         ConcurrencyModel::Sequential
+    }
+
+    fn background_task_handle(
+        &mut self,
+    ) -> Option<tokio::task::JoinHandle<Result<(), CamelError>>> {
+        self.task_handle.take()
     }
 }
 
@@ -474,6 +481,7 @@ mod tests {
                 _ = cancel.cancelled() => {}
                 _ = tokio::time::sleep(Duration::from_secs(300)) => {}
             }
+            Ok(())
         });
         consumer.task_handle = Some(handle);
 

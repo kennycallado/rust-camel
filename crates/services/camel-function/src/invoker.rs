@@ -1,6 +1,6 @@
 use crate::config::FunctionConfig;
 use crate::pool::{RunnerPool, RunnerPoolKey, RunnerState};
-use crate::provider::{FunctionProvider, HealthReport};
+use crate::provider::{FunctionHealthStatus, FunctionProvider};
 use camel_api::Exchange;
 use camel_api::function::*;
 use std::collections::HashMap;
@@ -54,11 +54,11 @@ impl DefaultFunctionInvoker {
                 });
             }
             match self.provider.health(handle).await {
-                Ok(HealthReport::Healthy) => {
+                Ok(FunctionHealthStatus::Healthy) => {
                     *handle.state.lock().expect("state") = RunnerState::Healthy; // allow-unwrap
                     return Ok(());
                 }
-                Ok(HealthReport::Unhealthy(reason)) => {
+                Ok(FunctionHealthStatus::Unhealthy(reason)) => {
                     *handle.state.lock().expect("state") = RunnerState::Unhealthy {
                         // allow-unwrap
                         since: std::time::Instant::now(),

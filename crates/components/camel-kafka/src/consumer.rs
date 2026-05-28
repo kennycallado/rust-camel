@@ -146,6 +146,12 @@ impl Consumer for KafkaConsumer {
         // to preserve offset ordering and at-least-once commit semantics.
         ConcurrencyModel::Sequential
     }
+
+    fn background_task_handle(
+        &mut self,
+    ) -> Option<tokio::task::JoinHandle<Result<(), CamelError>>> {
+        self.task_handle.take()
+    }
 }
 
 pub fn resolve_payload_body(msg: &OwnedMessage) -> Body {

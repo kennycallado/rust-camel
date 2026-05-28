@@ -1,5 +1,5 @@
 use super::*;
-use crate::provider::{HealthReport, ProviderError};
+use crate::provider::{FunctionHealthStatus, ProviderError};
 use camel_api::function::*;
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ impl ProtocolClient {
         }
     }
 
-    pub async fn health(&self, endpoint: &str) -> Result<HealthReport, ProviderError> {
+    pub async fn health(&self, endpoint: &str) -> Result<FunctionHealthStatus, ProviderError> {
         let url = format!("{}/health", endpoint);
         let resp = self
             .http
@@ -37,12 +37,15 @@ impl ProtocolClient {
                 .await
                 .map_err(|e| ProviderError::HealthFailed(format!("decode health response: {e}")))?;
             if health.status == "ready" {
-                Ok(HealthReport::Healthy)
+                Ok(FunctionHealthStatus::Healthy)
             } else {
-                Ok(HealthReport::Unhealthy(health.status))
+                Ok(FunctionHealthStatus::Unhealthy(health.status))
             }
         } else {
-            Ok(HealthReport::Unhealthy(format!("status {}", resp.status())))
+            Ok(FunctionHealthStatus::Unhealthy(format!(
+                "status {}",
+                resp.status()
+            )))
         }
     }
 
