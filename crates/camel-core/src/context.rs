@@ -555,8 +555,10 @@ impl CamelContext {
 
     /// Graceful shutdown with custom timeout.
     ///
-    /// Note: The timeout parameter is currently not used directly; the RouteController
-    /// manages its own shutdown timeout. This may change in a future version.
+    /// Note: The timeout parameter is currently not propagated to the
+    /// RouteController's per-route shutdown timeout. The RouteController
+    /// uses a hardcoded 5-second default (`DEFAULT_SHUTDOWN_TIMEOUT`).
+    /// Full propagation is planned for a future version.
     pub async fn stop_timeout(&mut self, _timeout: std::time::Duration) -> Result<(), CamelError> {
         info!("Stopping CamelContext");
 

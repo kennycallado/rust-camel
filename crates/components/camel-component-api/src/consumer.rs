@@ -99,13 +99,38 @@ pub enum ConcurrencyModel {
     Concurrent { max: Option<usize> },
 }
 
-/// A Consumer receives messages from an external source and feeds them into the route.
+/// A Consumer receives data from an external system and submits Exchanges
+/// to the Route's Pipeline via the [`ConsumerContext`].
+///
+/// # Shutdown Contract
+///
+/// The Runtime guarantees the following lifecycle:
+///
+/// 1. `start()` is called once. The Runtime spawns a task that owns the Consumer.
+/// 2. On route stop, the Runtime cancels the [`ConsumerContext`] cancel token.
+/// 3. The spawned task calls `stop()` on ALL exit paths after `start()` succeeds
+///    (clean exit, crash, cancellation, natural completion).
+/// 4. `background_task_handle()` is a supervision hook for crash propagation (ADR-0007),
+///    NOT the shutdown API.
+///
+/// Component authors MUST ensure:
+///
+/// - `stop()` cancels all component-owned inner tasks and cleans up registrations/resources.
+/// - If inner tasks use a private `CancellationToken`, `stop()` MUST cancel it.
+/// - Best practice: inner tasks should use the [`ConsumerContext`] cancel token (or a child)
+///   so they respond to runtime shutdown without waiting for `stop()`.
+/// - If using a private token, `stop()` must cancel it to ensure prompt cleanup.
+/// - `background_task_handle()` returns the `JoinHandle` of the primary background task,
+///   if any. The Runtime monitors this handle for unexpected exits (crash propagation).
 #[async_trait]
 pub trait Consumer: Send + Sync {
     /// Start consuming messages, sending them through the provided context.
     async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError>;
 
-    /// Stop consuming messages.
+    /// Stop consuming messages and clean up all resources.
+    ///
+    /// Called by the Runtime on every exit path after `start()` succeeds.
+    /// See the [Shutdown Contract](#shutdown-contract) above.
     async fn stop(&mut self) -> Result<(), CamelError>;
 
     /// Temporarily suspend consuming messages without fully stopping.

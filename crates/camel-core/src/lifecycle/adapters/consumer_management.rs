@@ -67,53 +67,67 @@ pub(crate) fn spawn_consumer_task(
         // Consumer started successfully. If it detached a background task,
         // monitor the handle for unexpected exits (crash propagation per
         // ADR-0007).
-        if let Some(bg_handle) = consumer.background_task_handle() {
-            match bg_handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) if !consumer_ctx.is_cancelled() => {
-                    let error_msg = e.to_string();
-                    error!(route_id = %route_id, "Consumer background task failed: {error_msg}");
-                    if let Some(ref tx) = crash_notifier {
-                        let _ = tx
-                            .send(CrashNotification {
-                                route_id: route_id.clone(),
-                                error: error_msg.clone(),
-                            })
-                            .await;
+        if let Some(mut bg_handle) = consumer.background_task_handle() {
+            tokio::select! {
+                result = &mut bg_handle => {
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) if !consumer_ctx.is_cancelled() => {
+                            let error_msg = e.to_string();
+                            error!(route_id = %route_id, "Consumer background task failed: {error_msg}");
+                            if let Some(ref tx) = crash_notifier {
+                                let _ = tx
+                                    .send(CrashNotification {
+                                        route_id: route_id.clone(),
+                                        error: error_msg.clone(),
+                                    })
+                                    .await;
+                            }
+                            publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
+                        }
+                        Ok(Err(e)) => {
+                            tracing::debug!(route_id = %route_id, "Consumer bg task error during shutdown: {e}");
+                        }
+                        Err(join_err) if !consumer_ctx.is_cancelled() => {
+                            let error_msg = format!("Consumer task panicked: {join_err}");
+                            error!(route_id = %route_id, "{error_msg}");
+                            if let Some(ref tx) = crash_notifier {
+                                let _ = tx
+                                    .send(CrashNotification {
+                                        route_id: route_id.clone(),
+                                        error: error_msg.clone(),
+                                    })
+                                    .await;
+                            }
+                            publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
+                        }
+                        Err(join_err) => {
+                            tracing::debug!(
+                                route_id = %route_id,
+                                "Consumer bg task panicked during shutdown: {join_err}"
+                            );
+                        }
                     }
-                    publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
                 }
-                Ok(Err(e)) => {
-                    tracing::debug!(route_id = %route_id, "Consumer bg task error during shutdown: {e}");
-                }
-                Err(join_err) if !consumer_ctx.is_cancelled() => {
-                    let error_msg = format!("Consumer task panicked: {join_err}");
-                    error!(route_id = %route_id, "{error_msg}");
-                    if let Some(ref tx) = crash_notifier {
-                        let _ = tx
-                            .send(CrashNotification {
-                                route_id: route_id.clone(),
-                                error: error_msg.clone(),
-                            })
-                            .await;
-                    }
-                    publish_runtime_failure(runtime_for_consumer, &route_id, &error_msg).await;
-                }
-                Err(join_err) => {
-                    // Task panicked during shutdown — expected on unclean exits; log for debugging
-                    tracing::debug!(
-                        route_id = %route_id,
-                        "Consumer bg task panicked during shutdown: {join_err}"
-                    );
+                _ = consumer_ctx.cancelled() => {
+                    bg_handle.abort();
                 }
             }
+        } else {
+            // Inline consumer: start() returned, meaning the consumer's run
+            // loop completed naturally or the context was cancelled mid-run.
+            // No need to wait — just proceed to stop().
         }
+
+        // "finally" — always call stop() after start() succeeds
+        let _ = consumer.stop().await;
     })
 }
 
 pub(super) async fn stop_route_internal(
     routes: &mut HashMap<String, ManagedRoute>,
     route_id: &str,
+    shutdown_timeout: Duration,
 ) -> Result<(), CamelError> {
     let managed = routes
         .get_mut(route_id)
@@ -157,7 +171,7 @@ pub(super) async fn stop_route_internal(
         .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     managed.channel_sender = None;
 
-    let timeout_result = tokio::time::timeout(Duration::from_secs(5), async {
+    let timeout_result = tokio::time::timeout(shutdown_timeout, async {
         match (consumer_handle, pipeline_handle) {
             (Some(c), Some(p)) => {
                 let _ = tokio::join!(c, p);
@@ -174,7 +188,7 @@ pub(super) async fn stop_route_internal(
     .await;
 
     if timeout_result.is_err() {
-        warn!(route_id = %route_id, "Route shutdown timed out after 5s — tasks may still be running");
+        warn!(route_id = %route_id, "Route shutdown timed out after {:.0?} — tasks may still be running", shutdown_timeout);
     }
 
     let managed = routes
@@ -267,7 +281,7 @@ mod tests {
     async fn stop_route_internal_returns_not_found_when_route_absent() {
         let mut routes = HashMap::new();
 
-        let err = stop_route_internal(&mut routes, "missing-route")
+        let err = stop_route_internal(&mut routes, "missing-route", Duration::from_secs(5))
             .await
             .expect_err("stopping a missing route should fail");
 
@@ -283,7 +297,7 @@ mod tests {
             managed_route_with_handles(None, None, Some(tx)),
         );
 
-        let result = stop_route_internal(&mut routes, "route-1").await;
+        let result = stop_route_internal(&mut routes, "route-1", Duration::from_secs(5)).await;
 
         assert!(result.is_ok());
         let managed = routes.get("route-1").expect("route must still exist");
@@ -400,6 +414,52 @@ mod tests {
         assert!(
             crash_rx.recv().await.is_none(),
             "no crash notification expected on cancelled shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_consumer_task_calls_stop_on_cancellation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static STOP_CALLED: AtomicBool = AtomicBool::new(false);
+
+        struct StopTrackingConsumer;
+
+        #[async_trait]
+        impl Consumer for StopTrackingConsumer {
+            async fn start(&mut self, _context: ConsumerContext) -> Result<(), CamelError> {
+                Ok(())
+            }
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                STOP_CALLED.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let cancel = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(tx, cancel.clone());
+
+        let handle = spawn_consumer_task(
+            "test-route".into(),
+            Box::new(StopTrackingConsumer),
+            ctx,
+            None,
+            None,
+            false,
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        assert!(
+            result.is_ok(),
+            "spawn_consumer_task should complete after cancellation"
+        );
+        assert!(
+            STOP_CALLED.load(Ordering::SeqCst),
+            "consumer.stop() should have been called"
         );
     }
 }

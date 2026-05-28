@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
+
+const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -1144,7 +1146,12 @@ impl DefaultRouteController {
 
     /// Internal stop implementation that can set custom status.
     async fn stop_route_internal(&mut self, route_id: &str) -> Result<(), CamelError> {
-        super::consumer_management::stop_route_internal(&mut self.routes, route_id).await
+        super::consumer_management::stop_route_internal(
+            &mut self.routes,
+            route_id,
+            DEFAULT_SHUTDOWN_TIMEOUT,
+        )
+        .await
     }
 
     pub async fn start_route_reload(&mut self, route_id: &str) -> Result<(), CamelError> {
@@ -1536,7 +1543,7 @@ impl RouteController for DefaultRouteController {
         let consumer_handle = managed.consumer_handle.take();
 
         // Wait for consumer task to complete with timeout
-        let timeout_result = tokio::time::timeout(Duration::from_secs(5), async {
+        let timeout_result = tokio::time::timeout(DEFAULT_SHUTDOWN_TIMEOUT, async {
             if let Some(handle) = consumer_handle {
                 let _ = handle.await;
             }

@@ -61,10 +61,10 @@ async fn tracer_file_output_invalid_path_returns_error() {
     use camel_config::config::{
         CamelConfig, ComponentsConfig, ObservabilityConfig, PlatformCamelConfig,
     };
-    use std::collections::HashMap;
     use camel_core::{
         DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
     };
+    use std::collections::HashMap;
 
     // Build a CamelConfig that enables file tracing with an invalid path
     let config = CamelConfig {

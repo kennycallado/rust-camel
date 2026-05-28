@@ -82,14 +82,18 @@ impl LeadershipHandle {
         self.is_leader.load(Ordering::Acquire)
     }
 
-    /// Signal step-down AND await full teardown:
+    /// Signal step-down AND await full teardown with a 10-second timeout:
     /// lease release + loop termination + `StoppedLeading` delivered.
+    /// Returns `StepDownFailed` if teardown does not complete in time.
     pub async fn step_down(mut self) -> Result<(), PlatformError> {
         self.cancel.cancel();
-        self.terminated
+        let rx = self
+            .terminated
             .take()
-            .ok_or(PlatformError::StepDownFailed)?
+            .ok_or(PlatformError::StepDownFailed)?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx)
             .await
+            .map_err(|_| PlatformError::StepDownFailed)?
             .map_err(|_| PlatformError::StepDownFailed)
     }
 }
