@@ -16,7 +16,7 @@
 ```
 Use superpowers + worktree from main in ./.worktrees/
 activate ORCHESTRATE (.opencode/instructions/orchestrate.md) and TDD where possible.
-Delegate implementation to workers (w_qwen3.6-pro default, w_gpt5.3-codex or w_glm5.1 as alternatives).
+Delegate implementation to workers (w_gpt5.3-codex default, w_qwen3.6-pro or w_glm5.1 as alternatives).
 IMPORTANT! force subagentes to read AGENTS.md.
 CRITICAL! Spec + code review always after a task using reviewer `r_glm5.1`.
 Don't advance tasks with critical/important issues unresolved and resolve minor issues if relevant.

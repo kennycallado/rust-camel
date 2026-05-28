@@ -8,6 +8,7 @@ use camel_api::{
     RuntimeQueryBus, RuntimeQueryResult,
 };
 
+use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::application::commands::{
     CommandDeps, execute_command, handle_register_internal,
 };
@@ -40,6 +41,7 @@ pub struct RuntimeBus {
     dedup: Arc<dyn CommandDedupPort>,
     uow: Option<Arc<dyn RuntimeUnitOfWorkPort>>,
     execution: Option<Arc<dyn RuntimeExecutionPort>>,
+    health_registry: Option<Arc<HealthCheckRegistry>>,
     journal_recovered_once: OnceCell<()>,
 }
 
@@ -57,6 +59,7 @@ impl RuntimeBus {
             dedup,
             uow: None,
             execution: None,
+            health_registry: None,
             journal_recovered_once: OnceCell::new(),
         }
     }
@@ -68,6 +71,11 @@ impl RuntimeBus {
 
     pub fn with_execution(mut self, execution: Arc<dyn RuntimeExecutionPort>) -> Self {
         self.execution = Some(execution);
+        self
+    }
+
+    pub fn with_health_registry(mut self, health_registry: Arc<HealthCheckRegistry>) -> Self {
+        self.health_registry = Some(health_registry);
         self
     }
 
@@ -119,6 +127,7 @@ impl RuntimeBus {
             events: Arc::clone(&self.events),
             uow: self.uow.clone(),
             execution: self.execution.clone(),
+            health_registry: self.health_registry.clone(),
         }
     }
 

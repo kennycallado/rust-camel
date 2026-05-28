@@ -12,6 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 camel-api.workspace = true
 camel-bean.workspace = true
 camel-core.workspace = true

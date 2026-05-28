@@ -169,6 +169,10 @@ impl XjBridgeRuntime {
             || msg.contains("transport")
     }
 
+    pub(crate) fn state_rx(&self) -> &Arc<watch::Receiver<BridgeState>> {
+        &self.state_rx
+    }
+
     pub async fn shutdown(&self) {
         let mut guard = self.process.lock().await;
         if let Some(p) = guard.take()
@@ -370,10 +374,14 @@ impl Component for XjComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn ComponentContext,
+        ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let endpoint_config = XjEndpointConfig::from_uri(uri)?;
         self.block_on_result(self.runtime.ensure_bridge_started(self.client.as_ref()))?;
+
+        let health_check = crate::health::XjHealthCheck::new(Arc::clone(self.runtime.state_rx()));
+        ctx.register_current_route_health_check(Arc::new(health_check));
+
         let stylesheet_bytes = self
             .read_stylesheet(&endpoint_config.stylesheet_uri, endpoint_config.direction)
             .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;

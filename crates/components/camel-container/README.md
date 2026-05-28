@@ -18,6 +18,7 @@ The Container component provides Docker container lifecycle management for rust-
 - **Header-based Control**: Override operations and parameters via exchange headers
 - **Automatic Cleanup**: Orphaned containers are removed if start fails after create
 - **Reconnection**: Consumer automatically reconnects on connection failures
+- **Health Check**: Async Docker daemon ping probe
 - **Graceful Shutdown**: Clean cancellation via `CancellationToken`
 
 ## Installation
@@ -478,6 +479,22 @@ URI parameter `host` always overrides global default:
 
 // Overrides to use different host
 .to("container:list?host=unix:///var/run/docker.sock")
+```
+
+## Health Check
+
+The `container` component registers an async health check via `AsyncHealthCheck`.
+
+- **Probe**: Docker daemon ping via `Docker::ping()`
+- **Healthy**: Docker daemon responds to ping
+- **Unhealthy**: Docker daemon unreachable or ping fails/times out
+
+Health checks are exposed via the health server:
+
+```toml
+[observability.health]
+enabled = true
+port = 8080
 ```
 
 ## Documentation

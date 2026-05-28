@@ -153,6 +153,22 @@ group_id = "camel-prod"
 security_protocol = "SASL_SSL"
 ```
 
+## Health Check
+
+The `kafka` component registers an async health check via `AsyncHealthCheck`.
+
+- **Probe**: Kafka topic metadata request to the configured bootstrap brokers
+- **Healthy**: Kafka broker responds to metadata request
+- **Unhealthy**: Broker unreachable or metadata request fails/times out (5s default)
+
+Health checks are exposed via the health server:
+
+```toml
+[observability.health]
+enabled = true
+port = 8080
+```
+
 ## Known Limitations
 
 - Batch consumption mode not implemented

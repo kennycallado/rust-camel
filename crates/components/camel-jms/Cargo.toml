@@ -12,6 +12,7 @@ categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 camel-component-api = { workspace = true }
+camel-api       = { workspace = true }
 camel-bridge    = { workspace = true }
 tonic           = { workspace = true }
 tonic-prost     = { workspace = true }

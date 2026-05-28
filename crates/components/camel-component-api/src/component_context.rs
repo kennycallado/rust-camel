@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use camel_api::{MetricsCollector, PlatformService};
+use camel_api::{AsyncHealthCheck, MetricsCollector, PlatformService};
 use camel_language_api::Language;
 
 use crate::Component;
@@ -18,6 +18,20 @@ pub trait ComponentContext: Send + Sync {
 
     /// Access the active platform service.
     fn platform_service(&self) -> Arc<dyn PlatformService>;
+
+    fn register_route_health_check(&self, route_id: &str, check: Arc<dyn AsyncHealthCheck>);
+
+    fn unregister_route_health_check(&self, route_id: &str);
+
+    fn route_id(&self) -> Option<&str> {
+        None
+    }
+
+    fn register_current_route_health_check(&self, check: Arc<dyn AsyncHealthCheck>) {
+        if let Some(id) = self.route_id() {
+            self.register_route_health_check(id, check);
+        }
+    }
 }
 
 /// Default no-op component context for tests/examples.
@@ -39,4 +53,8 @@ impl ComponentContext for NoOpComponentContext {
     fn platform_service(&self) -> Arc<dyn PlatformService> {
         Arc::new(camel_api::NoopPlatformService::default())
     }
+
+    fn register_route_health_check(&self, _route_id: &str, _check: Arc<dyn AsyncHealthCheck>) {}
+
+    fn unregister_route_health_check(&self, _route_id: &str) {}
 }

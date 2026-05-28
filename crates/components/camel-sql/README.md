@@ -16,6 +16,7 @@ The SQL component provides comprehensive database integration for rust-camel, su
 - **Post-Processing Hooks**: `onConsume`, `onConsumeFailed`, `onConsumeBatchComplete` for consumer workflows
 - **Connection Pooling**: Configurable pool with min/max connections, idle timeout, and max lifetime
 - **Async Native**: Built on `tokio` and `sqlx`
+- **Health Check**: Async connection validation probe for SQL databases
 
 ## Installation
 
@@ -349,6 +350,22 @@ min_connections = 1
 max_connections = 20
 min_connections = 5
 idle_timeout_secs = 600
+```
+
+## Health Check
+
+The `camel-component-sql` component registers an async health check via `AsyncHealthCheck`.
+
+- **Probe**: Executes a `SELECT 1` validation query against the connection pool
+- **Healthy**: Connection pool returns a valid connection and query succeeds
+- **Degraded**: Connection fails or validation query times out
+
+Health checks are exposed via the health server:
+
+```toml
+[observability.health]
+enabled = true
+port = 8080
 ```
 
 ## Documentation

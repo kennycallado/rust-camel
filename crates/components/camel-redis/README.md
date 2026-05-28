@@ -13,6 +13,7 @@ The Redis component provides comprehensive Redis integration for rust-camel, sup
 - **Consumer Mode**: Subscribe to channels, blocking list pops
 - **Connection Options**: Host, port, password, database selection
 - **Async Native**: Built on `tokio` and async Redis client
+- **Health Check**: Async PING-based probe for Redis connectivity
 
 ## Installation
 
@@ -267,6 +268,22 @@ port = 6379
 [production.components.redis]
 host = "redis-prod.internal"
 port = 6379
+```
+
+## Health Check
+
+The `camel-component-redis` component registers an async health check via `AsyncHealthCheck`.
+
+- **Probe**: Sends a Redis `PING` command and validates the response
+- **Healthy**: Redis responds to PING with PONG
+- **Degraded**: PING fails or times out
+
+Health checks are exposed via the health server:
+
+```toml
+[observability.health]
+enabled = true
+port = 8080
 ```
 
 ## Documentation

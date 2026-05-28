@@ -6,7 +6,8 @@ use crate::lifecycle::domain::{RouteRuntimeAggregate, RouteRuntimeState};
 use async_trait::async_trait;
 use camel_api::CamelError;
 use camel_api::{
-    CanonicalRouteSpec, RuntimeCommand, RuntimeCommandResult, RuntimeQuery, RuntimeQueryResult,
+    AsyncHealthCheck, CanonicalRouteSpec, CheckResult, HealthStatus, RuntimeCommand,
+    RuntimeCommandResult, RuntimeQuery, RuntimeQueryResult, ServiceStatus,
 };
 use camel_component_api::{Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint};
 
@@ -304,7 +305,7 @@ async fn add_route_definition_does_not_require_mut() {
 #[tokio::test]
 async fn test_health_check_empty_context() {
     let ctx = CamelContext::builder().build().await.unwrap();
-    let report = ctx.health_check_async().await;
+    let report = ctx.health_check().await;
 
     assert_eq!(report.status, HealthStatus::Healthy);
     assert!(report.services.is_empty());
@@ -312,73 +313,53 @@ async fn test_health_check_empty_context() {
 
 #[tokio::test]
 async fn test_health_check_degraded_when_service_stopped() {
-    struct StoppedService;
+    struct DegradedCheck;
 
     #[async_trait]
-    impl Lifecycle for StoppedService {
+    impl AsyncHealthCheck for DegradedCheck {
         fn name(&self) -> &str {
-            "stopped-svc"
+            "degraded-check"
         }
 
-        async fn start(&mut self) -> Result<(), CamelError> {
-            Ok(())
-        }
-
-        async fn stop(&mut self) -> Result<(), CamelError> {
-            Ok(())
-        }
-
-        fn status(&self) -> ServiceStatus {
-            ServiceStatus::Stopped
+        async fn check(&self) -> CheckResult {
+            CheckResult::degraded("degraded-check", "slow")
         }
     }
 
-    let ctx = CamelContext::builder()
-        .build()
-        .await
-        .unwrap()
-        .with_lifecycle(StoppedService);
+    let ctx = CamelContext::builder().build().await.unwrap();
+    ctx.health_registry()
+        .register_for_route("route-1", Arc::new(DegradedCheck));
 
-    let report = ctx.health_check_async().await;
+    let report = ctx.health_check().await;
     assert_eq!(
         report.status,
         HealthStatus::Degraded,
-        "a stopped service with no failures should produce Degraded"
+        "a degraded check should produce Degraded"
     );
     assert_eq!(report.services.len(), 1);
-    assert_eq!(report.services[0].status, ServiceStatus::Stopped);
+    assert_eq!(report.services[0].name, "degraded-check");
 }
 
 #[tokio::test]
 async fn test_health_check_unhealthy_when_service_failed() {
-    struct FailedService;
+    struct FailedCheck;
 
     #[async_trait]
-    impl Lifecycle for FailedService {
+    impl AsyncHealthCheck for FailedCheck {
         fn name(&self) -> &str {
-            "failed-svc"
+            "failed-check"
         }
 
-        async fn start(&mut self) -> Result<(), CamelError> {
-            Ok(())
-        }
-
-        async fn stop(&mut self) -> Result<(), CamelError> {
-            Ok(())
-        }
-
-        fn status(&self) -> ServiceStatus {
-            ServiceStatus::Failed
+        async fn check(&self) -> CheckResult {
+            CheckResult::unhealthy("failed-check", "fail")
         }
     }
 
-    let ctx = CamelContext::builder()
-        .build()
-        .await
-        .unwrap()
-        .with_lifecycle(FailedService);
+    let ctx = CamelContext::builder().build().await.unwrap();
+    ctx.health_registry()
+        .register_for_route("route-1", Arc::new(FailedCheck));
 
-    let report = ctx.health_check_async().await;
+    let report = ctx.health_check().await;
     assert_eq!(
         report.status,
         HealthStatus::Unhealthy,
@@ -389,50 +370,36 @@ async fn test_health_check_unhealthy_when_service_failed() {
 
 #[tokio::test]
 async fn test_health_check_failed_overrides_stopped() {
-    struct StoppedService;
+    struct DegradedCheck;
 
     #[async_trait]
-    impl Lifecycle for StoppedService {
+    impl AsyncHealthCheck for DegradedCheck {
         fn name(&self) -> &str {
-            "stopped-svc"
+            "degraded-check"
         }
-        async fn start(&mut self) -> Result<(), CamelError> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> Result<(), CamelError> {
-            Ok(())
-        }
-        fn status(&self) -> ServiceStatus {
-            ServiceStatus::Stopped
+        async fn check(&self) -> CheckResult {
+            CheckResult::degraded("degraded-check", "slow")
         }
     }
 
-    struct FailedService;
+    struct FailedCheck;
 
     #[async_trait]
-    impl Lifecycle for FailedService {
+    impl AsyncHealthCheck for FailedCheck {
         fn name(&self) -> &str {
-            "failed-svc"
+            "failed-check"
         }
-        async fn start(&mut self) -> Result<(), CamelError> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> Result<(), CamelError> {
-            Ok(())
-        }
-        fn status(&self) -> ServiceStatus {
-            ServiceStatus::Failed
+        async fn check(&self) -> CheckResult {
+            CheckResult::unhealthy("failed-check", "fail")
         }
     }
 
-    let ctx = CamelContext::builder()
-        .build()
-        .await
-        .unwrap()
-        .with_lifecycle(StoppedService)
-        .with_lifecycle(FailedService);
+    let ctx = CamelContext::builder().build().await.unwrap();
+    let registry = ctx.health_registry();
+    registry.register_for_route("route-1", Arc::new(DegradedCheck));
+    registry.register_for_route("route-2", Arc::new(FailedCheck));
 
-    let report = ctx.health_check_async().await;
+    let report = ctx.health_check().await;
     assert_eq!(
         report.status,
         HealthStatus::Unhealthy,

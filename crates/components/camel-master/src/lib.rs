@@ -147,6 +147,15 @@ impl ComponentContext for MasterDelegateContext {
     fn platform_service(&self) -> Arc<dyn PlatformService> {
         Arc::clone(&self.platform_service)
     }
+
+    fn register_route_health_check(
+        &self,
+        _route_id: &str,
+        _check: Arc<dyn camel_api::AsyncHealthCheck>,
+    ) {
+    }
+
+    fn unregister_route_health_check(&self, _route_id: &str) {}
 }
 
 struct MasterConsumer {
@@ -558,6 +567,15 @@ mod tests {
             fn platform_service(&self) -> Arc<dyn PlatformService> {
                 Arc::new(NoopPlatformService::default())
             }
+
+            fn register_route_health_check(
+                &self,
+                _route_id: &str,
+                _check: Arc<dyn camel_api::AsyncHealthCheck>,
+            ) {
+            }
+
+            fn unregister_route_health_check(&self, _route_id: &str) {}
         }
 
         struct MockDelegateComponent;
@@ -631,6 +649,15 @@ mod tests {
         fn platform_service(&self) -> Arc<dyn PlatformService> {
             Arc::new(NoopPlatformService::default())
         }
+
+        fn register_route_health_check(
+            &self,
+            _route_id: &str,
+            _check: Arc<dyn camel_api::AsyncHealthCheck>,
+        ) {
+        }
+
+        fn unregister_route_health_check(&self, _route_id: &str) {}
     }
 
     struct MockProducerDelegateComponent {

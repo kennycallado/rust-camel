@@ -16,12 +16,17 @@ pub(crate) struct SqlEndpoint {
 }
 
 impl SqlEndpoint {
+    #[cfg(test)]
     pub fn new(uri: String, config: SqlEndpointConfig) -> Self {
-        Self {
-            uri,
-            config,
-            pool: Arc::new(OnceCell::new()),
-        }
+        Self::new_with_pool(uri, config, Arc::new(OnceCell::new()))
+    }
+
+    pub fn new_with_pool(
+        uri: String,
+        config: SqlEndpointConfig,
+        pool: Arc<OnceCell<AnyPool>>,
+    ) -> Self {
+        Self { uri, config, pool }
     }
 }
 

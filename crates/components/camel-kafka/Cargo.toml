@@ -13,6 +13,7 @@ categories = ["network-programming", "asynchronous", "development-tools"]
 
 [dependencies]
 camel-component-api = { workspace = true }
+camel-api       = { workspace = true }
 camel-otel      = { workspace = true, optional = true }
 rdkafka         = { version = "0.36", features = ["tokio"] }
 tokio           = { workspace = true }

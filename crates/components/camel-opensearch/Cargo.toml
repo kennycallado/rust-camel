@@ -12,6 +12,8 @@ keywords = ["camel", "opensearch", "integration", "messaging", "search"]
 categories = ["database", "asynchronous", "network-programming"]
 
 [dependencies]
+async-trait = { workspace = true }
+camel-api = { workspace = true }
 camel-component-api = { workspace = true }
 opensearch = { version = "2.4.0", default-features = false, features = ["rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }

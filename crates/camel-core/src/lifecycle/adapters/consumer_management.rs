@@ -250,6 +250,10 @@ mod tests {
                 Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 Arc::new(camel_api::NoOpMetrics),
                 Arc::new(camel_api::NoopPlatformService::default()),
+                Arc::new(crate::health_registry::HealthCheckRegistry::new(
+                    std::time::Duration::from_secs(5),
+                )),
+                None,
             ),
         ) {
             Ok(_) => panic!("unknown scheme should fail consumer creation"),

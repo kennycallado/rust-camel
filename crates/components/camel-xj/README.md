@@ -16,6 +16,7 @@ The component bundles built-in identity stylesheets for both directions, so you 
 - **Automatic retries**: Transient transport errors trigger bridge restart with configurable retry
 - **Payload size limits**: Reject oversized payloads before sending to the bridge process
 - **Graceful lifecycle**: Bridge process is cleaned up when the Camel context stops
+- **Health Check**: Async gRPC health probe for the xml-bridge sidecar
 
 ## Installation
 
@@ -132,3 +133,19 @@ let config = XjComponentConfig {
 ### Consumer Support
 
 XJ endpoints are **producer-only** — they do not support consumers. Use a `direct:` or `timer:` endpoint as the route source and send to the XJ endpoint.
+
+## Health Check
+
+The `camel-xj` component registers an async health check via `AsyncHealthCheck`.
+
+- **Probe**: Issues a gRPC `HealthCheckRequest` to the xml-bridge sidecar process
+- **Healthy**: Bridge gRPC channel reports `SERVING`
+- **Degraded**: Bridge channel unreachable or reports not serving
+
+Health checks are exposed via the health server:
+
+```toml
+[observability.health]
+enabled = true
+port = 8080
+```

@@ -4,8 +4,10 @@
 //! to manage container lifecycle (create, start, stop, remove) and consume container events.
 
 pub mod bundle;
+pub mod health;
 
 pub use bundle::ContainerBundle;
+pub use health::ContainerHealthCheck;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -1626,13 +1628,15 @@ impl Component for ContainerComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = ContainerConfig::from_uri(uri)?;
         // Apply global defaults if present and URI didn't set them
         if let Some(ref global) = self.config {
             config.apply_global_defaults(global);
         }
+        let health_check = ContainerHealthCheck::new(&config);
+        ctx.register_current_route_health_check(Arc::new(health_check));
         Ok(Box::new(ContainerEndpoint {
             uri: uri.to_string(),
             config,

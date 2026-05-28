@@ -20,6 +20,7 @@ mysql = ["sqlx/mysql"]
 sqlite = ["sqlx/sqlite"]
 
 [dependencies]
+camel-api = { workspace = true }
 camel-component-api = { workspace = true }
 sqlx = { version = "0.8", features = ["runtime-tokio", "any", "chrono"] }
 tokio = { workspace = true }

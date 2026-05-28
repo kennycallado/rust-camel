@@ -28,17 +28,20 @@
 pub mod bundle;
 pub mod config;
 pub mod consumer;
+pub mod health;
 pub mod manual_commit;
 pub mod producer;
 
 pub use bundle::KafkaBundle;
 pub use config::{KafkaConfig, KafkaEndpointConfig, ResolvedKafkaEndpointConfig};
 pub use consumer::KafkaConsumer;
+pub use health::KafkaHealthCheck;
 pub use manual_commit::KafkaManualCommit;
 pub use producer::KafkaProducer;
 
 use camel_component_api::{BoxProcessor, CamelError};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct KafkaComponent {
@@ -87,7 +90,7 @@ impl Component for KafkaComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = KafkaEndpointConfig::from_uri(uri)?;
         // Apply global config defaults if available
@@ -96,6 +99,8 @@ impl Component for KafkaComponent {
         }
         // Resolve all fields and validate — returns ResolvedKafkaEndpointConfig
         let resolved = config.resolve()?;
+        let health_check = KafkaHealthCheck::new(resolved.clone());
+        ctx.register_current_route_health_check(Arc::new(health_check));
         Ok(Box::new(KafkaEndpoint {
             uri: uri.to_string(),
             config: resolved,

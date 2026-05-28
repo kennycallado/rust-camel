@@ -20,6 +20,7 @@ wss://host:port/path[?options]
 - **Server-send mode**: send to all local clients (broadcast) or specific connections
 - **TLS**: secure server/client URIs via `wss://` (rustls, no OpenSSL dependency)
 - **Runtime enforcement**: max connections, message size, heartbeat, and idle timeout
+- **Health Check**: Async TCP listener probe for WebSocket server connectivity
 
 ## Installation
 
@@ -136,6 +137,22 @@ response_timeout_ms = 10000
 URI parameters still take precedence over global defaults.
 
 > **Note:** Global config from Camel.toml is parsed but not yet applied to endpoints. Currently only URI parameters and code defaults are active. Full 3-tier override (defaults → Camel.toml → URI) is planned.
+
+## Health Check
+
+The `camel-component-ws` component registers an async health check via `AsyncHealthCheck`.
+
+- **Probe**: Opens a TCP connection to the WebSocket server listener
+- **Healthy**: TCP socket bound and accepting connections
+- **Degraded**: TCP connect fails or times out
+
+Health checks are exposed via the health server:
+
+```toml
+[observability.health]
+enabled = true
+port = 8080
+```
 
 ## Documentation
 

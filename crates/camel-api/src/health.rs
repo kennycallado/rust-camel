@@ -3,9 +3,9 @@
 //! This module provides types for tracking and reporting the health status
 //! of services in a rust-camel application.
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 use crate::lifecycle::{HealthStatus, ServiceStatus};
 
@@ -32,19 +32,67 @@ impl Default for HealthReport {
 pub struct ServiceHealth {
     pub name: String,
     pub status: ServiceStatus,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
-pub type HealthChecker = Arc<dyn Fn() -> HealthReport + Send + Sync>;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckResult {
+    pub name: String,
+    pub status: HealthStatus,
+    pub message: Option<String>,
+}
+
+impl CheckResult {
+    pub fn healthy(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            status: HealthStatus::Healthy,
+            message: None,
+        }
+    }
+
+    pub fn unhealthy(name: &str, reason: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            status: HealthStatus::Unhealthy,
+            message: Some(reason.to_string()),
+        }
+    }
+
+    pub fn degraded(name: &str, reason: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            status: HealthStatus::Degraded,
+            message: Some(reason.to_string()),
+        }
+    }
+}
+
+#[async_trait]
+pub trait AsyncHealthCheck: Send + Sync {
+    fn name(&self) -> &str;
+    async fn check(&self) -> CheckResult;
+}
 
 /// Programmatic health state readable by platform adapters.
 /// `camel-health` implements this; `camel-platform-kubernetes` consumes it via this trait.
 /// Neither crate depends on the other.
+#[async_trait]
 pub trait HealthSource: Send + Sync {
-    fn liveness(&self) -> HealthStatus;
-    fn readiness(&self) -> HealthStatus;
+    async fn liveness(&self) -> HealthStatus;
+    async fn readiness(&self) -> HealthStatus;
+
+    async fn health_report(&self) -> HealthReport {
+        HealthReport {
+            status: self.readiness().await,
+            services: vec![],
+            timestamp: chrono::Utc::now(),
+        }
+    }
 
     /// Default: `Healthy` — non-K8s implementors need not override.
-    fn startup(&self) -> HealthStatus {
+    async fn startup(&self) -> HealthStatus {
         HealthStatus::Healthy
     }
 }
@@ -53,40 +101,42 @@ pub trait HealthSource: Send + Sync {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_health_source_default_startup() {
+    #[tokio::test]
+    async fn test_health_source_default_startup() {
         struct MinimalSource;
+        #[async_trait]
         impl HealthSource for MinimalSource {
-            fn liveness(&self) -> HealthStatus {
+            async fn liveness(&self) -> HealthStatus {
                 HealthStatus::Healthy
             }
 
-            fn readiness(&self) -> HealthStatus {
+            async fn readiness(&self) -> HealthStatus {
                 HealthStatus::Healthy
             }
         }
         let s = MinimalSource;
-        assert_eq!(s.startup(), HealthStatus::Healthy);
+        assert_eq!(s.startup().await, HealthStatus::Healthy);
     }
 
-    #[test]
-    fn test_health_source_custom_startup() {
+    #[tokio::test]
+    async fn test_health_source_custom_startup() {
         struct BootingSource;
+        #[async_trait]
         impl HealthSource for BootingSource {
-            fn liveness(&self) -> HealthStatus {
+            async fn liveness(&self) -> HealthStatus {
                 HealthStatus::Healthy
             }
 
-            fn readiness(&self) -> HealthStatus {
+            async fn readiness(&self) -> HealthStatus {
                 HealthStatus::Healthy
             }
 
-            fn startup(&self) -> HealthStatus {
+            async fn startup(&self) -> HealthStatus {
                 HealthStatus::Unhealthy
             }
         }
         let s = BootingSource;
-        assert_eq!(s.startup(), HealthStatus::Unhealthy);
+        assert_eq!(s.startup().await, HealthStatus::Unhealthy);
     }
 
     #[test]
@@ -96,6 +146,7 @@ mod tests {
             services: vec![ServiceHealth {
                 name: "prometheus".to_string(),
                 status: ServiceStatus::Started,
+                message: None,
             }],
             timestamp: chrono::Utc::now(),
         };
@@ -120,6 +171,7 @@ mod tests {
         let svc = ServiceHealth {
             name: "kafka".to_string(),
             status: ServiceStatus::Stopped,
+            message: None,
         };
 
         let json = serde_json::to_string(&svc).unwrap();
@@ -129,41 +181,26 @@ mod tests {
         let decoded: ServiceHealth = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.name, "kafka");
         assert_eq!(decoded.status, ServiceStatus::Stopped);
+        assert!(decoded.message.is_none());
     }
 
-    #[test]
-    fn test_health_checker_type_alias_invocation() {
-        let checker: HealthChecker = Arc::new(|| HealthReport {
-            status: HealthStatus::Unhealthy,
-            services: vec![ServiceHealth {
-                name: "db".to_string(),
-                status: ServiceStatus::Started,
-            }],
-            timestamp: chrono::Utc::now(),
-        });
-
-        let report = checker();
-        assert_eq!(report.status, HealthStatus::Unhealthy);
-        assert_eq!(report.services.len(), 1);
-        assert_eq!(report.services[0].name, "db");
-    }
-
-    #[test]
-    fn test_health_source_liveness_and_readiness() {
+    #[tokio::test]
+    async fn test_health_source_liveness_and_readiness() {
         struct MixedSource;
+        #[async_trait]
         impl HealthSource for MixedSource {
-            fn liveness(&self) -> HealthStatus {
+            async fn liveness(&self) -> HealthStatus {
                 HealthStatus::Healthy
             }
 
-            fn readiness(&self) -> HealthStatus {
+            async fn readiness(&self) -> HealthStatus {
                 HealthStatus::Unhealthy
             }
         }
 
         let s = MixedSource;
-        assert_eq!(s.liveness(), HealthStatus::Healthy);
-        assert_eq!(s.readiness(), HealthStatus::Unhealthy);
+        assert_eq!(s.liveness().await, HealthStatus::Healthy);
+        assert_eq!(s.readiness().await, HealthStatus::Unhealthy);
     }
 
     #[test]
@@ -174,10 +211,12 @@ mod tests {
                 ServiceHealth {
                     name: "db".to_string(),
                     status: ServiceStatus::Started,
+                    message: None,
                 },
                 ServiceHealth {
                     name: "queue".to_string(),
                     status: ServiceStatus::Stopped,
+                    message: None,
                 },
             ],
             timestamp: chrono::Utc::now(),
@@ -191,36 +230,61 @@ mod tests {
         assert_eq!(back.services[1].status, ServiceStatus::Stopped);
     }
 
-    #[test]
-    fn test_health_checker_can_be_cloned_and_reused() {
-        let checker: HealthChecker = Arc::new(HealthReport::default);
-        let checker2 = Arc::clone(&checker);
-        let r1 = checker();
-        let r2 = checker2();
-        assert_eq!(r1.status, HealthStatus::Healthy);
-        assert_eq!(r2.status, HealthStatus::Healthy);
-    }
-
-    #[test]
-    fn test_health_source_startup_override_independent_from_readiness() {
+    #[tokio::test]
+    async fn test_health_source_startup_override_independent_from_readiness() {
         struct StartupOnly;
+        #[async_trait]
         impl HealthSource for StartupOnly {
-            fn liveness(&self) -> HealthStatus {
+            async fn liveness(&self) -> HealthStatus {
                 HealthStatus::Healthy
             }
 
-            fn readiness(&self) -> HealthStatus {
+            async fn readiness(&self) -> HealthStatus {
                 HealthStatus::Unhealthy
             }
 
-            fn startup(&self) -> HealthStatus {
+            async fn startup(&self) -> HealthStatus {
                 HealthStatus::Healthy
             }
         }
 
         let source = StartupOnly;
-        assert_eq!(source.liveness(), HealthStatus::Healthy);
-        assert_eq!(source.readiness(), HealthStatus::Unhealthy);
-        assert_eq!(source.startup(), HealthStatus::Healthy);
+        assert_eq!(source.liveness().await, HealthStatus::Healthy);
+        assert_eq!(source.readiness().await, HealthStatus::Unhealthy);
+        assert_eq!(source.startup().await, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_check_result_healthy() {
+        let r = CheckResult::healthy("kafka");
+        assert_eq!(r.name, "kafka");
+        assert_eq!(r.status, HealthStatus::Healthy);
+        assert!(r.message.is_none());
+    }
+
+    #[test]
+    fn test_check_result_unhealthy() {
+        let r = CheckResult::unhealthy("redis", "connection refused");
+        assert_eq!(r.name, "redis");
+        assert_eq!(r.status, HealthStatus::Unhealthy);
+        assert_eq!(r.message.as_deref(), Some("connection refused"));
+    }
+
+    #[test]
+    fn test_check_result_degraded() {
+        let r = CheckResult::degraded("sql", "pool exhausted");
+        assert_eq!(r.name, "sql");
+        assert_eq!(r.status, HealthStatus::Degraded);
+        assert_eq!(r.message.as_deref(), Some("pool exhausted"));
+    }
+
+    #[test]
+    fn test_check_result_serialization_round_trip() {
+        let r = CheckResult::unhealthy("opensearch", "timeout");
+        let json = serde_json::to_string(&r).unwrap();
+        let back: CheckResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "opensearch");
+        assert_eq!(back.status, HealthStatus::Unhealthy);
+        assert_eq!(back.message.as_deref(), Some("timeout"));
     }
 }

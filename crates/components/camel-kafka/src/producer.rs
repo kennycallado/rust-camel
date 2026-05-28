@@ -128,40 +128,27 @@ impl KafkaProducer {
         self.stopped.store(true, Ordering::SeqCst);
     }
 
-    /// Health check: verifies that the Kafka brokers are reachable by
-    /// requesting cluster metadata.
-    ///
-    /// Returns `Ok(())` if the broker connection is healthy, or an error
-    /// describing the failure. Uses a short timeout (5 s) to avoid blocking.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let producer = KafkaProducer::new(resolved_config)?;
-    /// producer.check_connection().await?;
-    /// ```
-    pub async fn check_connection(&self) -> Result<(), CamelError> {
+    pub(crate) fn metadata_probe(
+        config: &ResolvedKafkaEndpointConfig,
+        timeout: Duration,
+    ) -> Result<(), CamelError> {
         use rdkafka::admin::AdminClient;
 
-        // Build a lightweight admin client to fetch metadata
         let mut cc = ClientConfig::new();
-        cc.set("bootstrap.servers", &self.config.brokers)
-            .set("request.timeout.ms", "5000")
-            .set("client.id", &self.config.client_id);
-        apply_security_config(&self.config, &mut cc);
+        cc.set("bootstrap.servers", &config.brokers)
+            .set("request.timeout.ms", timeout.as_millis().to_string())
+            .set("client.id", &config.client_id);
+        apply_security_config(config, &mut cc);
 
         let admin: AdminClient<_> = cc.create().map_err(|e| {
             CamelError::ProcessorError(format!("Health check: failed to create admin client: {e}"))
         })?;
 
-        // fetch_metadata is available on AdminClient via the inner client
-        let metadata = admin
-            .inner()
-            .fetch_metadata(None, Duration::from_secs(5))
-            .map_err(|e| {
-                CamelError::ProcessorError(format!(
-                    "Health check: failed to fetch metadata from brokers: {e}"
-                ))
-            })?;
+        let metadata = admin.inner().fetch_metadata(None, timeout).map_err(|e| {
+            CamelError::ProcessorError(format!(
+                "Health check: failed to fetch metadata from brokers: {e}"
+            ))
+        })?;
 
         if metadata.brokers().is_empty() {
             return Err(CamelError::ProcessorError(
@@ -170,6 +157,10 @@ impl KafkaProducer {
         }
 
         Ok(())
+    }
+
+    pub async fn check_connection(&self) -> Result<(), CamelError> {
+        Self::metadata_probe(&self.config, Duration::from_secs(5))
     }
 }
 

@@ -15,6 +15,7 @@
 - **StreamObserver API**: Routes send streaming responses via `GrpcStreamObserver` (on_next/on_error/on_completed)
 - **Metadata propagation**: gRPC metadata → Exchange headers (including binary `-bin` as base64)
 - **Shared server**: One HTTP/2 server per `(host, port)`, multiple consumers dispatch by path
+- **Health Check**: Async TCP connectivity probe to the gRPC endpoint
 - **Feature-gated** behind `grpc` feature in `camel-cli`
 
 ## Installation
@@ -120,6 +121,22 @@ if let Some(observer) = take_stream_observer(&exchange) {
 - **Server streaming**: Send one request, receive JSON array of responses
 - **Client streaming**: Send JSON array of requests, receive one response
 - **Bidi streaming**: Send JSON array of requests, receive JSON array of responses
+
+## Health Check
+
+The `grpc` component registers an async health check via `AsyncHealthCheck`.
+
+- **Probe**: TCP connect to the configured target `host:port`
+- **Healthy**: TCP connect succeeds
+- **Unhealthy**: TCP connect fails or times out (3s default)
+
+Health checks are exposed via the health server:
+
+```toml
+[observability.health]
+enabled = true
+port = 8080
+```
 
 ## License
 

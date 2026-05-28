@@ -15,6 +15,7 @@ The File component provides file system integration for rust-camel. It can read 
 - **Recursive directory scanning**
 - **Atomic writes**: Override strategy writes to a temp file then renames (panic-safe cleanup)
 - **Streaming**: Zero-copy reads (consumer) and writes (producer) via `Body::into_async_read()`
+- **Health Check**: Async directory metadata probe for consumers
 - **Security**: Path traversal protection
 
 ## Installation
@@ -230,6 +231,22 @@ Due to how the `#[derive(UriConfig)]` macro bakes defaults into the generated co
 ## Security
 
 The File component includes protection against path traversal attacks. Attempts to write files outside the configured directory (e.g., using `../` in the filename) will be rejected with an error.
+
+## Health Check
+
+The `file` component registers an async health check via `AsyncHealthCheck`.
+
+- **Probe**: Directory metadata check via `tokio::fs::metadata()` (consumers only; producers always report Healthy)
+- **Healthy**: Target directory exists and is accessible
+- **Degraded**: Directory missing, inaccessible, or probe times out
+
+Health checks are exposed via the health server:
+
+```toml
+[observability.health]
+enabled = true
+port = 8080
+```
 
 ## Documentation
 

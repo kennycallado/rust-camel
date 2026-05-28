@@ -20,6 +20,7 @@ pub fn ensure_rustls_provider() {
 use kube::api::{DeleteParams, PostParams, Preconditions};
 use kube::{Api, Client};
 use tokio::sync::{Notify, oneshot, watch};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
@@ -309,6 +310,9 @@ pub struct KubernetesPlatformService {
     identity: PlatformIdentity,
     readiness_gate: Arc<dyn ReadinessGate>,
     leadership: Arc<KubernetesLeadershipService>,
+    health_source: Option<Arc<dyn camel_api::HealthSource>>,
+    cancel_token: CancellationToken,
+    health_poll_task: Option<JoinHandle<()>>,
 }
 
 impl KubernetesPlatformService {
@@ -321,7 +325,41 @@ impl KubernetesPlatformService {
             identity,
             readiness_gate,
             leadership,
+            health_source: None,
+            cancel_token: CancellationToken::new(),
+            health_poll_task: None,
         }
+    }
+
+    pub fn with_health_source(mut self, source: Arc<dyn camel_api::HealthSource>) -> Self {
+        self.health_source = Some(Arc::clone(&source));
+
+        let readiness_gate = Arc::clone(&self.readiness_gate);
+        let cancel = self.cancel_token.clone();
+        self.health_poll_task = Some(tokio::spawn(async move {
+            loop {
+                let status = source.readiness().await;
+                match status {
+                    camel_api::HealthStatus::Healthy | camel_api::HealthStatus::Degraded => {
+                        if let Err(err) = readiness_gate.notify_ready().await {
+                            warn!(error = %err, "failed to notify kubernetes readiness state");
+                        }
+                    }
+                    camel_api::HealthStatus::Unhealthy => {
+                        if let Err(err) = readiness_gate.notify_not_ready("Unhealthy").await {
+                            warn!(error = %err, "failed to notify kubernetes readiness state");
+                        }
+                    }
+                }
+
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                    _ = cancel.cancelled() => break,
+                }
+            }
+        }));
+
+        self
     }
 
     /// Construct a `KubernetesPlatformService` from the default Kubernetes client and
@@ -373,6 +411,15 @@ impl PlatformService for KubernetesPlatformService {
 
     fn leadership(&self) -> Arc<dyn LeadershipService> {
         Arc::clone(&self.leadership) as Arc<dyn LeadershipService>
+    }
+}
+
+impl Drop for KubernetesPlatformService {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        if let Some(task) = self.health_poll_task.take() {
+            task.abort();
+        }
     }
 }
 

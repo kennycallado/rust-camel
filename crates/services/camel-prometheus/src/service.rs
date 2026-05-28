@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
 use crate::PrometheusMetrics;
 use async_trait::async_trait;
-use camel_api::{CamelError, HealthChecker, Lifecycle, MetricsCollector, ServiceStatus};
+use camel_api::{CamelError, HealthSource, Lifecycle, MetricsCollector, ServiceStatus};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
@@ -19,7 +19,7 @@ pub struct PrometheusService {
     bound_port: Arc<AtomicU16>,
     /// Current service status (Stopped=0, Started=1, Failed=2)
     status: Arc<AtomicU8>,
-    health_checker: Option<HealthChecker>,
+    health_source: Option<Arc<dyn HealthSource>>,
     /// Guard to prevent double-start
     started: AtomicBool,
 }
@@ -33,7 +33,7 @@ impl PrometheusService {
             shutdown_tx: None,
             bound_port: Arc::new(AtomicU16::new(0)),
             status: Arc::new(AtomicU8::new(0)),
-            health_checker: None,
+            health_source: None,
             started: AtomicBool::new(false),
         }
     }
@@ -57,16 +57,12 @@ impl PrometheusService {
         Arc::clone(&self.status)
     }
 
-    /// Set the health checker closure that will be called to get system health.
-    ///
-    /// The closure should capture a reference to CamelContext's health_check method.
-    pub fn set_health_checker(&mut self, checker: HealthChecker) {
-        self.health_checker = Some(checker);
+    pub fn set_health_source(&mut self, source: Arc<dyn HealthSource>) {
+        self.health_source = Some(source);
     }
 
-    /// Get a clone of the health checker if one is set.
-    pub fn health_checker(&self) -> Option<HealthChecker> {
-        self.health_checker.clone()
+    pub fn health_source(&self) -> Option<Arc<dyn HealthSource>> {
+        self.health_source.clone()
     }
 }
 
@@ -117,15 +113,15 @@ impl Lifecycle for PrometheusService {
         self.bound_port.store(actual_port, Ordering::SeqCst);
 
         let metrics = Arc::clone(&self.metrics);
-        let health_checker = self.health_checker.clone();
+        let health_source = self.health_source.clone();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
             if let Err(err) =
-                crate::MetricsServer::run_with_listener_and_health_checker_with_shutdown(
+                crate::MetricsServer::run_with_listener_and_health_source_with_shutdown(
                     listener,
                     metrics,
-                    health_checker,
+                    health_source,
                     shutdown_rx,
                 )
                 .await
@@ -173,9 +169,28 @@ impl Lifecycle for PrometheusService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::HealthReport;
+    use camel_api::HealthStatus;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::Ordering;
+
+    struct MockHealthSource {
+        readiness: HealthStatus,
+    }
+
+    #[async_trait]
+    impl HealthSource for MockHealthSource {
+        async fn liveness(&self) -> HealthStatus {
+            HealthStatus::Healthy
+        }
+
+        async fn readiness(&self) -> HealthStatus {
+            self.readiness
+        }
+
+        async fn startup(&self) -> HealthStatus {
+            HealthStatus::Healthy
+        }
+    }
 
     #[test]
     fn test_create_prometheus_service() {
@@ -253,29 +268,22 @@ mod tests {
         assert_eq!(service.status(), ServiceStatus::Failed);
     }
 
-    #[test]
-    fn test_health_checker_injection() {
-        use camel_api::HealthStatus;
-
+    #[tokio::test]
+    async fn test_health_source_injection() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 9090);
         let mut service = PrometheusService::new(addr);
 
-        // Initially no health checker
-        assert!(service.health_checker().is_none());
+        assert!(service.health_source().is_none());
 
-        // Inject health checker
-        let checker = Arc::new(|| HealthReport {
-            status: HealthStatus::Healthy,
-            services: vec![],
-            ..Default::default()
+        let source = Arc::new(MockHealthSource {
+            readiness: HealthStatus::Healthy,
         });
 
-        service.set_health_checker(checker);
-        assert!(service.health_checker().is_some());
+        service.set_health_source(source);
+        assert!(service.health_source().is_some());
 
-        // Call the checker
-        let report = service.health_checker().unwrap()();
-        assert_eq!(report.status, HealthStatus::Healthy);
+        let status = service.health_source().unwrap().readiness().await;
+        assert_eq!(status, HealthStatus::Healthy);
     }
 
     #[test]

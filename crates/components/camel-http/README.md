@@ -19,6 +19,7 @@ The HTTP component provides HTTP client (producer) and HTTP server (consumer) ca
 - **Native Response Streaming**: `Body::Stream` responses use chunked transfer encoding automatically
 - **Header Mapping**: Automatic header forwarding
 - **Status Code Handling**: Configurable success ranges
+- **Health Check**: Async TCP listener/connect probe
 
 ## Installation
 
@@ -328,6 +329,22 @@ from("http://0.0.0.0:8080/upload")
         Ok(())
     }))
     .build()
+```
+
+## Health Check
+
+The `http` component registers an async health check via `AsyncHealthCheck`.
+
+- **Probe**: TCP connect to the configured `host:port` (wildcard addresses like `0.0.0.0` are remapped to `127.0.0.1`)
+- **Healthy**: TCP socket is reachable
+- **Unhealthy**: Connection refused or probe times out (3s default)
+
+Health checks are exposed via the health server:
+
+```toml
+[observability.health]
+enabled = true
+port = 8080
 ```
 
 ## Documentation

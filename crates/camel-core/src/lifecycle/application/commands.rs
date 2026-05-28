@@ -12,6 +12,7 @@ use camel_api::{
 };
 use camel_api::{CamelError, RuntimeCommand, RuntimeCommandResult};
 
+use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::application::route_definition::{
     BuilderStep, DeclarativeWhenStep, RouteDefinition,
 };
@@ -30,6 +31,7 @@ pub struct CommandDeps {
     pub events: Arc<dyn EventPublisherPort>,
     pub uow: Option<Arc<dyn RuntimeUnitOfWorkPort>>,
     pub execution: Option<Arc<dyn RuntimeExecutionPort>>,
+    pub health_registry: Option<Arc<HealthCheckRegistry>>,
 }
 
 pub async fn execute_command(
@@ -186,6 +188,16 @@ async fn handle_lifecycle(
 
     let execution_command = command.clone();
     let events = aggregate.apply_command(command.clone())?;
+
+    if let RouteLifecycleCommand::Fail(error) = &execution_command
+        && let Some(health_registry) = &deps.health_registry
+    {
+        health_registry.force_unhealthy_for_route(
+            &route_id,
+            &format!("route:{route_id}"),
+            format!("route failed: {error}"),
+        );
+    }
 
     if events.is_empty() {
         let target = match &execution_command {
@@ -559,9 +571,12 @@ mod tests {
     use crate::lifecycle::domain::DomainError;
 
     use super::*;
+    use crate::health_registry::HealthCheckRegistry;
     use crate::lifecycle::ports::InFlightCountResult;
+    use camel_api::{AsyncHealthCheck, CheckResult, HealthStatus};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use crate::lifecycle::domain::RuntimeEvent;
     use async_trait::async_trait;
@@ -569,6 +584,27 @@ mod tests {
     #[derive(Clone, Default)]
     struct InMemoryTestRepo {
         routes: Arc<Mutex<HashMap<String, RouteRuntimeAggregate>>>,
+    }
+
+    struct AlwaysHealthyCheck {
+        check_name: String,
+    }
+
+    #[async_trait]
+    impl AsyncHealthCheck for AlwaysHealthyCheck {
+        fn name(&self) -> &str {
+            &self.check_name
+        }
+
+        async fn check(&self) -> CheckResult {
+            CheckResult::healthy(&self.check_name)
+        }
+    }
+
+    fn healthy_check(name: &str) -> Arc<dyn AsyncHealthCheck> {
+        Arc::new(AlwaysHealthyCheck {
+            check_name: name.to_string(),
+        })
     }
 
     #[async_trait]
@@ -914,6 +950,7 @@ mod tests {
             events,
             uow: None,
             execution: None,
+            health_registry: None,
         }
     }
 
@@ -929,7 +966,45 @@ mod tests {
             events,
             uow: None,
             execution: Some(execution),
+            health_registry: None,
         }
+    }
+
+    #[tokio::test]
+    async fn fail_route_forces_unhealthy_health_entry() {
+        let deps = build_test_deps_no_execution();
+        let health_registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        health_registry.register_for_route("route-f", healthy_check("consumer"));
+
+        let deps = CommandDeps {
+            health_registry: Some(Arc::clone(&health_registry)),
+            ..deps
+        };
+
+        let def = RouteDefinition::new("timer:test", vec![]).with_route_id("route-f");
+        handle_register_internal(&deps, def).await.unwrap();
+
+        handle_lifecycle(
+            &deps,
+            "route-f".to_string(),
+            RouteLifecycleCommand::Fail("boom".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let report = health_registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert_eq!(report.services.len(), 1);
+        assert_eq!(report.services[0].name, "route:route-f");
+        assert_eq!(
+            report.services[0].message.as_deref(),
+            Some("route failed: boom")
+        );
+
+        health_registry.register_for_route("route-f", healthy_check("consumer"));
+        let report = health_registry.check_all().await;
+        assert_eq!(report.status, HealthStatus::Healthy);
+        assert_eq!(report.services[0].name, "consumer");
     }
 
     #[tokio::test]

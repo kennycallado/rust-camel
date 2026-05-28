@@ -6,8 +6,8 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tracing::info;
 
-use camel_api::CamelError;
-use camel_api::HealthChecker;
+use async_trait::async_trait;
+use camel_api::{CamelError, HealthSource, HealthStatus};
 
 use crate::PrometheusMetrics;
 
@@ -15,15 +15,17 @@ pub struct MetricsServer;
 
 impl MetricsServer {
     pub async fn run(addr: SocketAddr, metrics: Arc<PrometheusMetrics>) -> Result<(), CamelError> {
-        Self::run_with_health_checker(addr, metrics, None).await
+        Self::run_with_health_source(addr, metrics, None).await
     }
 
-    pub async fn run_with_health_checker(
+    pub async fn run_with_health_source(
         addr: SocketAddr,
         metrics: Arc<PrometheusMetrics>,
-        checker: Option<HealthChecker>,
+        source: Option<Arc<dyn HealthSource>>,
     ) -> Result<(), CamelError> {
-        let health = camel_health::health_router(checker, None, None);
+        let source =
+            source.unwrap_or_else(|| Arc::new(DefaultHealthSource) as Arc<dyn HealthSource>);
+        let health = camel_health::health_router(source);
         let app = Router::new()
             .route("/metrics", get(Self::metrics_handler))
             .with_state(metrics)
@@ -43,15 +45,17 @@ impl MetricsServer {
         listener: TcpListener,
         metrics: Arc<PrometheusMetrics>,
     ) -> Result<(), CamelError> {
-        Self::run_with_listener_and_health_checker(listener, metrics, None).await
+        Self::run_with_listener_and_health_source(listener, metrics, None).await
     }
 
-    pub async fn run_with_listener_and_health_checker(
+    pub async fn run_with_listener_and_health_source(
         listener: TcpListener,
         metrics: Arc<PrometheusMetrics>,
-        checker: Option<HealthChecker>,
+        source: Option<Arc<dyn HealthSource>>,
     ) -> Result<(), CamelError> {
-        let health = camel_health::health_router(checker, None, None);
+        let source =
+            source.unwrap_or_else(|| Arc::new(DefaultHealthSource) as Arc<dyn HealthSource>);
+        let health = camel_health::health_router(source);
         let app = Router::new()
             .route("/metrics", get(Self::metrics_handler))
             .with_state(metrics)
@@ -66,13 +70,15 @@ impl MetricsServer {
             .map_err(|e| CamelError::Io(format!("Prometheus server failed: {e}")))
     }
 
-    pub async fn run_with_listener_and_health_checker_with_shutdown(
+    pub async fn run_with_listener_and_health_source_with_shutdown(
         listener: TcpListener,
         metrics: Arc<PrometheusMetrics>,
-        checker: Option<HealthChecker>,
+        source: Option<Arc<dyn HealthSource>>,
         shutdown: oneshot::Receiver<()>,
     ) -> Result<(), CamelError> {
-        let health = camel_health::health_router(checker, None, None);
+        let source =
+            source.unwrap_or_else(|| Arc::new(DefaultHealthSource) as Arc<dyn HealthSource>);
+        let health = camel_health::health_router(source);
         let app = Router::new()
             .route("/metrics", get(Self::metrics_handler))
             .with_state(metrics)
@@ -103,6 +109,23 @@ impl MetricsServer {
             [("content-type", "text/plain; version=0.0.4")],
             output,
         )
+    }
+}
+
+struct DefaultHealthSource;
+
+#[async_trait]
+impl HealthSource for DefaultHealthSource {
+    async fn liveness(&self) -> HealthStatus {
+        HealthStatus::Healthy
+    }
+
+    async fn readiness(&self) -> HealthStatus {
+        HealthStatus::Healthy
+    }
+
+    async fn startup(&self) -> HealthStatus {
+        HealthStatus::Healthy
     }
 }
 
@@ -143,8 +166,26 @@ pub fn test_reset_graceful_shutdown_observability() {
 mod tests {
     use super::*;
     use camel_api::metrics::MetricsCollector;
-    use camel_api::{HealthReport, HealthStatus};
     use tokio::time::{Duration, sleep};
+
+    struct MockHealthSource {
+        readiness: HealthStatus,
+    }
+
+    #[async_trait]
+    impl HealthSource for MockHealthSource {
+        async fn liveness(&self) -> HealthStatus {
+            HealthStatus::Healthy
+        }
+
+        async fn readiness(&self) -> HealthStatus {
+            self.readiness
+        }
+
+        async fn startup(&self) -> HealthStatus {
+            HealthStatus::Healthy
+        }
+    }
 
     #[tokio::test]
     async fn test_metrics_handler_returns_prometheus_format() {
@@ -175,16 +216,14 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let checker = Arc::new(|| HealthReport {
-            status: HealthStatus::Healthy,
-            services: vec![],
-            ..Default::default()
+        let source = Arc::new(MockHealthSource {
+            readiness: HealthStatus::Healthy,
         });
 
-        let handle = tokio::spawn(MetricsServer::run_with_listener_and_health_checker(
+        let handle = tokio::spawn(MetricsServer::run_with_listener_and_health_source(
             listener,
             Arc::clone(&metrics),
-            Some(checker),
+            Some(source),
         ));
 
         sleep(Duration::from_millis(50)).await;
@@ -233,7 +272,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
         let handle = tokio::spawn(
-            MetricsServer::run_with_listener_and_health_checker_with_shutdown(
+            MetricsServer::run_with_listener_and_health_source_with_shutdown(
                 listener,
                 metrics,
                 None,

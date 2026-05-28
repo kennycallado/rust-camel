@@ -22,6 +22,7 @@ pub mod config;
 pub mod endpoint;
 pub mod epoch;
 pub mod error;
+pub mod health;
 pub mod host_functions;
 pub mod producer;
 pub mod runtime;
@@ -33,10 +34,12 @@ pub use config::WasmConfig;
 pub use endpoint::WasmEndpoint;
 pub use epoch::EpochTicker;
 pub use error::{TrapReason, WasmError};
+pub use health::WasmHealthCheck;
 pub use state_store::StateStore;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use camel_api::CamelError;
 use camel_component_api::{Component, ComponentContext, Endpoint};
@@ -45,11 +48,17 @@ use camel_core::Registry;
 pub struct WasmComponent {
     registry: Arc<std::sync::Mutex<Registry>>,
     base_dir: PathBuf,
+    engine_loaded: Arc<AtomicBool>,
 }
 
 impl WasmComponent {
     pub fn new(registry: Arc<std::sync::Mutex<Registry>>, base_dir: PathBuf) -> Self {
-        Self { registry, base_dir }
+        Self {
+            registry,
+            base_dir,
+            // TODO: set to true when WASM module is successfully loaded/instantiated
+            engine_loaded: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     fn validate_and_resolve_path(&self, uri_path: &str) -> Result<PathBuf, CamelError> {
@@ -98,7 +107,7 @@ impl Component for WasmComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn ComponentContext,
+        ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let uri_without_scheme = uri.strip_prefix("wasm:").ok_or_else(|| {
             CamelError::InvalidUri(format!("WASM URI must start with 'wasm:': {uri}"))
@@ -112,6 +121,10 @@ impl Component for WasmComponent {
         }
 
         let module_path = self.validate_and_resolve_path(&path_part)?;
+
+        let health_check = WasmHealthCheck::new(Arc::clone(&self.engine_loaded));
+        ctx.register_current_route_health_check(Arc::new(health_check));
+
         Ok(Box::new(WasmEndpoint::new(
             uri.to_string(),
             module_path,

@@ -12,6 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+camel-api = { workspace = true }
 camel-component-api = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

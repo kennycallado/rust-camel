@@ -1,8 +1,10 @@
 pub mod bundle;
 pub mod config;
+pub mod health;
 use crate::config::parse_ok_status_code_range;
 pub use bundle::HttpBundle;
 pub use config::HttpConfig;
+pub use health::HttpHealthCheck;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -1253,12 +1255,16 @@ impl Component for HttpComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
         let client = build_client(&self.config, config.cookie_handling);
+        ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
+            server_config.host.clone(),
+            server_config.port,
+        )));
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,
@@ -1304,12 +1310,16 @@ impl Component for HttpsComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
         let client = build_client(&self.config, config.cookie_handling);
+        ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
+            server_config.host.clone(),
+            server_config.port,
+        )));
         Ok(Box::new(HttpEndpoint {
             uri: uri.to_string(),
             config,

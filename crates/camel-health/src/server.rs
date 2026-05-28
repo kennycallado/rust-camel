@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use camel_api::{CamelError, HealthChecker, Lifecycle, ServiceStatus};
+use camel_api::{CamelError, HealthSource, HealthStatus, Lifecycle, ServiceStatus};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -20,9 +20,7 @@ pub struct HealthServer {
     server_handle: Option<JoinHandle<()>>,
     bound_port: Arc<AtomicU16>,
     status: Arc<AtomicU8>,
-    health_checker: Option<HealthChecker>,
-    liveness_checker: Option<HealthChecker>,
-    startup_checker: Option<HealthChecker>,
+    health_source: Option<Arc<dyn HealthSource>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
@@ -33,36 +31,13 @@ impl HealthServer {
             server_handle: None,
             bound_port: Arc::new(AtomicU16::new(0)),
             status: Arc::new(AtomicU8::new(STATUS_STOPPED)),
-            health_checker: None,
-            liveness_checker: None,
-            startup_checker: None,
+            health_source: None,
             shutdown_tx: None,
         }
     }
 
-    pub fn new_with_checker(addr: SocketAddr, checker: Option<HealthChecker>) -> Self {
-        Self {
-            addr,
-            server_handle: None,
-            bound_port: Arc::new(AtomicU16::new(0)),
-            status: Arc::new(AtomicU8::new(STATUS_STOPPED)),
-            health_checker: checker,
-            liveness_checker: None,
-            startup_checker: None,
-            shutdown_tx: None,
-        }
-    }
-
-    pub fn set_health_checker(&mut self, checker: HealthChecker) {
-        self.health_checker = Some(checker);
-    }
-
-    pub fn set_liveness_checker(&mut self, checker: HealthChecker) {
-        self.liveness_checker = Some(checker);
-    }
-
-    pub fn set_startup_checker(&mut self, checker: HealthChecker) {
-        self.startup_checker = Some(checker);
+    pub fn set_health_source(&mut self, source: Arc<dyn HealthSource>) {
+        self.health_source = Some(source);
     }
 
     pub fn port(&self) -> u16 {
@@ -74,26 +49,20 @@ impl HealthServer {
     }
 }
 
-impl camel_api::HealthSource for HealthServer {
-    fn liveness(&self) -> camel_api::HealthStatus {
-        self.liveness_checker
-            .as_ref()
-            .map(|c| c().status)
-            .unwrap_or(camel_api::HealthStatus::Healthy)
+struct DefaultHealthSource;
+
+#[async_trait]
+impl HealthSource for DefaultHealthSource {
+    async fn liveness(&self) -> HealthStatus {
+        HealthStatus::Healthy
     }
 
-    fn readiness(&self) -> camel_api::HealthStatus {
-        self.health_checker
-            .as_ref()
-            .map(|c| c().status)
-            .unwrap_or(camel_api::HealthStatus::Healthy)
+    async fn readiness(&self) -> HealthStatus {
+        HealthStatus::Healthy
     }
 
-    fn startup(&self) -> camel_api::HealthStatus {
-        self.startup_checker
-            .as_ref()
-            .map(|c| c().status)
-            .unwrap_or(camel_api::HealthStatus::Healthy)
+    async fn startup(&self) -> HealthStatus {
+        HealthStatus::Healthy
     }
 }
 
@@ -126,19 +95,17 @@ impl Lifecycle for HealthServer {
         let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
         self.bound_port.store(actual_port, Ordering::SeqCst);
 
-        let checker = self.health_checker.clone();
-        let liveness = self.liveness_checker.clone();
-        let startup = self.startup_checker.clone();
+        let source = self.health_source.clone();
         let port = actual_port;
 
-        // Create a oneshot channel for graceful shutdown
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
         let handle = tokio::spawn(async move {
-            let app = crate::health_router(checker, liveness, startup);
+            let source =
+                source.unwrap_or_else(|| Arc::new(DefaultHealthSource) as Arc<dyn HealthSource>);
+            let app = crate::health_router(source);
             info!("Health server listening on port {}", port);
             let server = axum::serve(listener, app);
-            // Wait for shutdown signal
             let shutdown_future = async move {
                 let _ = shutdown_rx.await;
             };
@@ -155,18 +122,13 @@ impl Lifecycle for HealthServer {
 
     async fn stop(&mut self) -> Result<(), CamelError> {
         if let Some(handle) = self.server_handle.take() {
-            // Signal graceful shutdown via oneshot channel
             if let Some(tx) = self.shutdown_tx.take() {
                 let _ = tx.send(());
             }
 
-            // Await handle with timeout; only abort if timeout fires
             match tokio::time::timeout(SHUTDOWN_TIMEOUT, handle).await {
-                Ok(_) => {
-                    // Server shut down gracefully
-                }
+                Ok(_) => {}
                 Err(_) => {
-                    // Timeout — force abort as last resort
                     tracing::warn!(
                         "Health server did not shut down within {:?}, aborting",
                         SHUTDOWN_TIMEOUT
@@ -182,7 +144,6 @@ impl Lifecycle for HealthServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     async fn wait_for_server(port: u16, timeout_ms: u64) -> Result<(), String> {
@@ -203,6 +164,25 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }
+        }
+    }
+
+    struct FixedHealthSource {
+        readiness: HealthStatus,
+    }
+
+    #[async_trait]
+    impl HealthSource for FixedHealthSource {
+        async fn liveness(&self) -> HealthStatus {
+            HealthStatus::Healthy
+        }
+
+        async fn readiness(&self) -> HealthStatus {
+            self.readiness
+        }
+
+        async fn startup(&self) -> HealthStatus {
+            HealthStatus::Healthy
         }
     }
 
@@ -264,37 +244,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_health_source_reflects_checker_after_start() {
-        use camel_api::health::{HealthChecker, HealthReport, HealthSource};
-        use camel_api::lifecycle::HealthStatus;
-
-        let unhealthy = Arc::new(AtomicBool::new(true));
-        let checker: HealthChecker = {
-            let unhealthy = unhealthy.clone();
-            Arc::new(move || {
-                let status = if unhealthy.load(Ordering::SeqCst) {
-                    HealthStatus::Unhealthy
-                } else {
-                    HealthStatus::Healthy
-                };
-                HealthReport {
-                    status,
-                    ..HealthReport::default()
-                }
-            })
-        };
-
+    async fn test_health_source_reflects_state_via_http() {
+        let source: Arc<dyn HealthSource> = Arc::new(FixedHealthSource {
+            readiness: HealthStatus::Unhealthy,
+        });
         let mut server = HealthServer::new("127.0.0.1:0".parse().unwrap());
-        server.set_health_checker(checker);
+        server.set_health_source(source);
         server.start().await.unwrap();
+        wait_for_server(server.port(), 2000).await.unwrap();
 
-        let health = server.readiness();
-        assert_eq!(
-            health,
-            HealthStatus::Unhealthy,
-            "HealthSource must reflect checker state after start()"
-        );
-
+        let resp = reqwest::get(format!("http://127.0.0.1:{}/readyz", server.port()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
         server.stop().await.unwrap();
     }
 
@@ -318,66 +280,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_uses_cancel_not_abort() {
-        // Verify that stop() signals graceful shutdown and waits
         let addr = SocketAddr::from(([0, 0, 0, 0], 0));
         let mut server = HealthServer::new(addr);
         server.start().await.unwrap();
         let port = server.port();
         wait_for_server(port, 2000).await.unwrap();
 
-        // stop() should complete without panicking and use graceful shutdown
         let stop_result = server.stop().await;
         assert!(stop_result.is_ok(), "graceful shutdown should succeed");
         assert_eq!(server.status(), ServiceStatus::Stopped);
-    }
-}
-
-#[cfg(test)]
-mod server_tests {
-    use super::*;
-    use camel_api::{HealthReport, HealthSource, HealthStatus};
-
-    fn make_server() -> HealthServer {
-        HealthServer::new("127.0.0.1:0".parse().unwrap())
-    }
-
-    #[test]
-    fn test_health_source_liveness_no_checker_returns_healthy() {
-        let server = make_server();
-        assert_eq!(server.liveness(), HealthStatus::Healthy);
-    }
-
-    #[test]
-    fn test_health_source_readiness_no_checker_returns_healthy() {
-        let server = make_server();
-        assert_eq!(server.readiness(), HealthStatus::Healthy);
-    }
-
-    #[test]
-    fn test_health_source_startup_no_checker_returns_healthy() {
-        let server = make_server();
-        assert_eq!(server.startup(), HealthStatus::Healthy);
-    }
-
-    #[test]
-    fn test_health_source_liveness_with_unhealthy_checker() {
-        let mut server = make_server();
-        let checker = Arc::new(|| HealthReport {
-            status: HealthStatus::Unhealthy,
-            ..Default::default()
-        }) as camel_api::HealthChecker;
-        server.set_liveness_checker(checker);
-        assert_eq!(server.liveness(), HealthStatus::Unhealthy);
-    }
-
-    #[test]
-    fn test_health_source_startup_with_unhealthy_checker() {
-        let mut server = make_server();
-        let checker = Arc::new(|| HealthReport {
-            status: HealthStatus::Unhealthy,
-            ..Default::default()
-        }) as camel_api::HealthChecker;
-        server.set_startup_checker(checker);
-        assert_eq!(server.startup(), HealthStatus::Unhealthy);
     }
 }

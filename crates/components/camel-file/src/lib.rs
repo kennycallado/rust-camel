@@ -5,8 +5,10 @@
 //! Main modules: `bundle`.
 
 pub mod bundle;
+pub mod health;
 
 pub use bundle::FileBundle;
+pub use health::FileHealthCheck;
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -615,12 +617,15 @@ impl Component for FileComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = FileConfig::from_uri(uri)?;
         if let Some(ref global_config) = self.config {
             config.apply_global_defaults(global_config);
         }
+        let dir_path = std::path::PathBuf::from(&config.directory);
+        let health_check = FileHealthCheck::new(dir_path.clone());
+        ctx.register_current_route_health_check(std::sync::Arc::new(health_check));
         Ok(Box::new(FileEndpoint {
             uri: uri.to_string(),
             config,

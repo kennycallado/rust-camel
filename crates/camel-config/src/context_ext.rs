@@ -2,20 +2,22 @@ use crate::config::{CamelConfig, KubernetesPlatformCamelConfig, PlatformCamelCon
 #[cfg(feature = "otel")]
 use crate::config::{OtelProtocol, OtelSampler};
 use crate::discovery::discover_routes_with_threshold;
-use camel_api::{CamelError, PlatformService as PlatformServiceTrait};
+use async_trait::async_trait;
+use camel_api::{CamelError, HealthSource, HealthStatus, PlatformService as PlatformServiceTrait};
 use camel_core::CamelContext;
 use camel_core::OutputFormat;
 use camel_core::TracerConfig;
+use camel_core::health_registry::HealthCheckRegistry;
 use camel_core::route::RouteDefinition;
 #[cfg(feature = "otel")]
 use camel_otel::{
     OtelConfig, OtelProtocol as OtelProtocolOtel, OtelSampler as OtelSamplerOtel, OtelService,
 };
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicU8;
-#[cfg(feature = "kubernetes")]
+use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tracing::Level;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
@@ -24,6 +26,38 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 type HealthState = Arc<Mutex<Vec<(String, Arc<AtomicU8>)>>>;
+
+struct ContextHealthSource {
+    health_registry: Arc<HealthCheckRegistry>,
+    services: HealthState,
+}
+
+#[async_trait]
+impl HealthSource for ContextHealthSource {
+    async fn liveness(&self) -> HealthStatus {
+        let guard = self.services.lock().await;
+        let has_failed = guard.iter().any(|(_, s)| s.load(Ordering::SeqCst) == 2);
+        if has_failed {
+            HealthStatus::Unhealthy
+        } else {
+            HealthStatus::Healthy
+        }
+    }
+
+    async fn readiness(&self) -> HealthStatus {
+        let guard = self.services.lock().await;
+        let has_failed = guard.iter().any(|(_, s)| s.load(Ordering::SeqCst) == 2);
+        drop(guard);
+        if has_failed {
+            return HealthStatus::Unhealthy;
+        }
+        self.health_registry.check_all().await.status
+    }
+
+    async fn startup(&self) -> HealthStatus {
+        HealthStatus::Healthy
+    }
+}
 
 impl CamelConfig {
     /// Load routes from config file and return them (without adding to context yet)
@@ -75,9 +109,30 @@ impl CamelConfig {
             builder = builder.runtime_store(store);
         }
 
+        let health_registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        builder = builder.health_registry(Arc::clone(&health_registry));
+
+        let health_state: HealthState = Arc::new(Mutex::new(Vec::new()));
+        let health_source: Arc<dyn HealthSource> = Arc::new(ContextHealthSource {
+            health_registry: Arc::clone(&health_registry),
+            services: Arc::clone(&health_state),
+        });
+
+        let k8s_health_source = if matches!(config.platform, PlatformCamelConfig::Kubernetes(_))
+            && config
+                .observability
+                .health
+                .as_ref()
+                .is_some_and(|h| h.enabled)
+        {
+            Some(Arc::clone(&health_source))
+        } else {
+            None
+        };
+
         // Platform service wiring
         let platform_service: Arc<dyn PlatformServiceTrait> =
-            Self::build_platform_service(&config.platform).await?;
+            Self::build_platform_service(&config.platform, k8s_health_source).await?;
         builder = builder.platform_service(platform_service);
 
         if let Some(beans) = beans {
@@ -156,46 +211,6 @@ impl CamelConfig {
         let final_tracer_config = effective_tracer_config(tracer_config, otel_enabled);
         ctx = ctx.with_tracer_config(final_tracer_config).await;
 
-        let health_state: HealthState = Arc::new(Mutex::new(Vec::new()));
-
-        let create_checker = || {
-            let state = Arc::clone(&health_state);
-            Arc::new(move || {
-                let guard = state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let services: Vec<camel_api::ServiceHealth> = guard
-                    .iter()
-                    .map(|(name, status_arc)| camel_api::ServiceHealth {
-                        name: name.clone(),
-                        status: match status_arc.load(std::sync::atomic::Ordering::SeqCst) {
-                            0 => camel_api::ServiceStatus::Stopped,
-                            1 => camel_api::ServiceStatus::Started,
-                            _ => camel_api::ServiceStatus::Failed,
-                        },
-                    })
-                    .collect();
-                let has_failed = services
-                    .iter()
-                    .any(|s| s.status == camel_api::ServiceStatus::Failed);
-                let has_stopped = services
-                    .iter()
-                    .any(|s| s.status == camel_api::ServiceStatus::Stopped);
-                let status = if has_failed {
-                    camel_api::HealthStatus::Unhealthy
-                } else if has_stopped {
-                    camel_api::HealthStatus::Degraded
-                } else {
-                    camel_api::HealthStatus::Healthy
-                };
-                camel_api::HealthReport {
-                    status,
-                    services,
-                    ..Default::default()
-                }
-            }) as camel_api::HealthChecker
-        };
-
         if let Some(ref prom) = config.observability.prometheus
             && prom.enabled
         {
@@ -208,10 +223,10 @@ impl CamelConfig {
                     ))
                 })?;
             let mut prom_service = camel_prometheus::PrometheusService::new(addr);
-            prom_service.set_health_checker(create_checker());
+            prom_service.set_health_source(Arc::clone(&health_source));
             health_state
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .await
                 .push(("prometheus".to_string(), prom_service.status_arc()));
             ctx = ctx.with_lifecycle(prom_service);
         }
@@ -227,11 +242,11 @@ impl CamelConfig {
                         health_cfg.host, health_cfg.port
                     ))
                 })?;
-            let health_server =
-                camel_health::HealthServer::new_with_checker(addr, Some(create_checker()));
+            let mut health_server = camel_health::HealthServer::new(addr);
+            health_server.set_health_source(Arc::clone(&health_source));
             health_state
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .await
                 .push(("health".to_string(), health_server.status_arc()));
             ctx = ctx.with_lifecycle(health_server);
         }
@@ -241,16 +256,20 @@ impl CamelConfig {
 
     async fn build_platform_service(
         config: &PlatformCamelConfig,
+        health_source: Option<Arc<dyn HealthSource>>,
     ) -> Result<Arc<dyn PlatformServiceTrait>, CamelError> {
         match config {
             PlatformCamelConfig::Noop => Ok(Arc::new(camel_api::NoopPlatformService::default())),
-            PlatformCamelConfig::Kubernetes(k8s) => Self::build_kubernetes_platform(k8s).await,
+            PlatformCamelConfig::Kubernetes(k8s) => {
+                Self::build_kubernetes_platform(k8s, health_source).await
+            }
         }
     }
 
     #[cfg(feature = "kubernetes")]
     async fn build_kubernetes_platform(
         k8s: &KubernetesPlatformCamelConfig,
+        health_source: Option<Arc<dyn HealthSource>>,
     ) -> Result<Arc<dyn PlatformServiceTrait>, CamelError> {
         let namespace = k8s
             .namespace
@@ -267,9 +286,13 @@ impl CamelConfig {
             jitter_factor: k8s.jitter_factor,
         };
 
-        let service = camel_platform_kubernetes::KubernetesPlatformService::try_default(config)
+        let mut service = camel_platform_kubernetes::KubernetesPlatformService::try_default(config)
             .await
             .map_err(|e| CamelError::Config(e.to_string()))?;
+
+        if let Some(source) = health_source {
+            service = service.with_health_source(source);
+        }
 
         Ok(Arc::new(service))
     }
@@ -277,6 +300,7 @@ impl CamelConfig {
     #[cfg(not(feature = "kubernetes"))]
     async fn build_kubernetes_platform(
         _k8s: &KubernetesPlatformCamelConfig,
+        _health_source: Option<Arc<dyn HealthSource>>,
     ) -> Result<Arc<dyn PlatformServiceTrait>, CamelError> {
         Err(CamelError::Config(
             "platform.type = \"kubernetes\" requires camel-config feature `kubernetes`".into(),
@@ -813,7 +837,7 @@ type = "kubernetes"
 
     #[tokio::test]
     async fn build_platform_service_noop_returns_ok() {
-        let result = CamelConfig::build_platform_service(&PlatformCamelConfig::Noop).await;
+        let result = CamelConfig::build_platform_service(&PlatformCamelConfig::Noop, None).await;
         assert!(result.is_ok());
     }
 
@@ -821,7 +845,7 @@ type = "kubernetes"
     #[tokio::test]
     async fn build_kubernetes_platform_without_feature_returns_error() {
         let k8s = KubernetesPlatformCamelConfig::default();
-        let err = CamelConfig::build_kubernetes_platform(&k8s)
+        let err = CamelConfig::build_kubernetes_platform(&k8s, None)
             .await
             .err()
             .unwrap();

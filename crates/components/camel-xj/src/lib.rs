@@ -14,10 +14,12 @@ mod component;
 mod config;
 mod endpoint;
 mod error;
+pub mod health;
 mod identity;
 mod producer;
 
 pub use component::{XjBridgeRuntime, XjComponent, XjComponentConfig};
 pub use config::{Direction, XjEndpointConfig};
 pub use error::XjError;
+pub use health::XjHealthCheck;
 pub use identity::{JSON_TO_XML_XSLT, XML_TO_JSON_XSLT};

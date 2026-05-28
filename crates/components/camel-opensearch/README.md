@@ -13,6 +13,7 @@ The OpenSearch component provides comprehensive OpenSearch integration for rust-
 - **Connection Options**: Host, port, username, password, TLS support
 - **Async Native**: Built on `tokio` and async HTTP client
 - **Global Configuration**: Configure defaults via Camel.toml
+- **Health Check**: Async OpenSearch cluster health probe
 
 ## Installation
 
@@ -284,6 +285,22 @@ host = "opensearch-prod.internal"
 port = 9200
 username = "app-user"
 password = "${OPENSEARCH_PASSWORD}"
+```
+
+## Health Check
+
+The `opensearch` component registers an async health check via `AsyncHealthCheck`.
+
+- **Probe**: OpenSearch `cluster.health()` API call
+- **Healthy**: Cluster status is `green` or `yellow`
+- **Unhealthy**: Cluster status is `red`, request fails, or probe times out (10s default)
+
+Health checks are exposed via the health server:
+
+```toml
+[observability.health]
+enabled = true
+port = 8080
 ```
 
 ## Documentation

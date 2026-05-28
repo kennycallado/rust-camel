@@ -89,7 +89,7 @@ PrometheusService (Lifecycle trait)
 
 ## Health Endpoints
 
-Health endpoints are provided by the `camel-health` crate via `health_router()`. The `PrometheusService` accepts an optional `HealthChecker` and merges the health router into its HTTP server.
+Health endpoints are provided by the `camel-health` crate via `health_router()`. The `PrometheusService` accepts an optional `Arc<dyn HealthSource>` and merges the health router into its HTTP server.
 
 | Endpoint | Purpose | HTTP Status |
 |----------|---------|-------------|

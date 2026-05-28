@@ -24,6 +24,7 @@ use tracing::{info, warn};
 
 use crate::config::{BrokerConfig, JmsEndpointConfig, JmsPoolConfig};
 use crate::consumer::JmsConsumer;
+use crate::health::JmsHealthCheck;
 use crate::producer::JmsProducer;
 use crate::proto::{HealthRequest, bridge_service_client::BridgeServiceClient};
 
@@ -653,13 +654,16 @@ impl Component for JmsComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let endpoint_config = JmsEndpointConfig::from_uri(uri)?;
         let broker_name = self
             .pool
             .resolve_broker_name(endpoint_config.broker_name.as_deref())?;
         let resolved_broker_type = self.pool.resolve_broker_type(&self.scheme, &broker_name);
+
+        let health_check = JmsHealthCheck::new(Arc::clone(&self.pool), broker_name.clone());
+        ctx.register_current_route_health_check(Arc::new(health_check));
 
         Ok(Box::new(JmsEndpoint {
             pool: Arc::clone(&self.pool),

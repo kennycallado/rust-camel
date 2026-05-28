@@ -259,12 +259,15 @@ impl Component for XsltComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn ComponentContext,
+        ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let endpoint_config = XsltEndpointConfig::from_uri(uri)?;
         let stylesheet_bytes = self
             .read_stylesheet(&endpoint_config.stylesheet_uri)
             .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
+
+        let health_check = crate::health::XsltHealthCheck::new(Arc::clone(self.runtime.state_rx()));
+        ctx.register_current_route_health_check(Arc::new(health_check));
 
         Ok(Box::new(XsltEndpoint::new(
             uri.to_string(),

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use camel_component_api::{
     BoxProcessor, CamelError, Component, ComponentContext, Consumer, Endpoint, ProducerContext,
@@ -6,6 +7,7 @@ use camel_component_api::{
 
 use crate::config::{GrpcConfig, parse_grpc_uri};
 use crate::consumer::{GrpcConsumer, resolve_grpc_mode};
+use crate::health::GrpcHealthCheck;
 use crate::producer::GrpcProducer;
 
 pub struct GrpcComponent;
@@ -30,7 +32,7 @@ impl Component for GrpcComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn ComponentContext,
+        ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let (host, port, service_name, method_name, cfg) = parse_grpc_uri(uri)?;
         let proto_file = cfg.proto_file.clone().ok_or_else(|| {
@@ -39,6 +41,10 @@ impl Component for GrpcComponent {
             )
         })?;
         let addr = format!("http://{host}:{port}");
+
+        let health_check = GrpcHealthCheck::new(host.clone(), port);
+        ctx.register_current_route_health_check(Arc::new(health_check));
+
         Ok(Box::new(GrpcEndpoint {
             uri: uri.to_string(),
             addr,

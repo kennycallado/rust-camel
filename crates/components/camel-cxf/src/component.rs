@@ -7,6 +7,7 @@ use camel_component_api::{
 
 use crate::config::{CxfEndpointConfig, CxfProfileConfig};
 use crate::consumer::CxfConsumer;
+use crate::health::CxfHealthCheck;
 use crate::pool::CxfBridgePool;
 use crate::producer::CxfProducer;
 
@@ -31,14 +32,20 @@ impl Component for CxfComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let endpoint_config = CxfEndpointConfig::from_uri(uri)?;
-        Ok(Box::new(CxfEndpoint {
+        let endpoint = Box::new(CxfEndpoint {
             pool: Arc::clone(&self.pool),
             uri: uri.to_string(),
             endpoint_config,
-        }))
+        });
+
+        // Register the CXF bridge health check for this route.
+        let health_check = CxfHealthCheck::new(Arc::clone(&self.pool));
+        ctx.register_current_route_health_check(Arc::new(health_check));
+
+        Ok(endpoint)
     }
 }
 

@@ -8,14 +8,14 @@ use tracing::{info, warn};
 
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::{
-    CamelError, FunctionInvoker, HealthReport, HealthStatus, Lifecycle, MetricsCollector,
-    NoOpMetrics, NoopPlatformService, PlatformIdentity, PlatformService, ReadinessGate,
-    RouteTemplateSpec, RuntimeCommandBus, RuntimeQueryBus, ServiceHealth, ServiceStatus,
-    SupervisionConfig, TemplateInstanceRecord,
+    CamelError, FunctionInvoker, HealthReport, Lifecycle, MetricsCollector, NoOpMetrics,
+    NoopPlatformService, PlatformIdentity, PlatformService, ReadinessGate, RouteTemplateSpec,
+    RuntimeCommandBus, RuntimeQueryBus, SupervisionConfig, TemplateInstanceRecord,
 };
 use camel_component_api::{Component, ComponentContext, ComponentRegistrar};
 use camel_language_api::Language;
 
+use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::adapters::RuntimeExecutionAdapter;
 use crate::lifecycle::adapters::controller_actor::{
     RouteControllerHandle, spawn_controller_actor, spawn_supervision_task,
@@ -49,6 +49,7 @@ pub struct CamelContextBuilder {
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
     lifecycle_services: Vec<Box<dyn Lifecycle>>,
     execution_factory: Option<ExecutionFactory>,
+    health_registry: Option<Arc<HealthCheckRegistry>>,
     template_registry: Option<Arc<TemplateRegistry>>,
 }
 
@@ -72,6 +73,7 @@ pub struct CamelContext {
     languages: SharedLanguageRegistry,
     shutdown_timeout: std::time::Duration,
     services: Vec<Box<dyn Lifecycle>>,
+    health_registry: Arc<HealthCheckRegistry>,
     component_configs: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
     template_registry: Arc<TemplateRegistry>,
@@ -268,6 +270,7 @@ impl CamelContext {
         controller: RouteControllerHandle,
         store: crate::lifecycle::adapters::InMemoryRuntimeStore,
         execution_factory: Option<ExecutionFactory>,
+        health_registry: Arc<HealthCheckRegistry>,
     ) -> Arc<RuntimeBus> {
         let execution: Arc<dyn RuntimeExecutionPort> = if let Some(factory) = execution_factory {
             factory(controller.clone())
@@ -282,7 +285,8 @@ impl CamelContext {
                 Arc::new(store.clone()),
             )
             .with_uow(Arc::new(store))
-            .with_execution(execution),
+            .with_execution(execution)
+            .with_health_registry(health_registry),
         )
     }
 
@@ -579,6 +583,8 @@ impl CamelContext {
             }
         }
 
+        self.health_registry.cancel_token().cancel();
+
         // Then stop lifecycle services in reverse insertion order (LIFO)
         // Continue stopping all services even if some fail
         let mut first_error = None;
@@ -643,36 +649,14 @@ impl CamelContext {
         }
     }
 
-    /// Check health status of all registered services.
-    ///
-    /// Currently reads service status synchronously. Declared `async` for
-    /// forward-compatibility when per-service health probes become async.
-    // TODO: await actual per-service health probes once Service::health() is async
-    pub async fn health_check_async(&self) -> HealthReport {
-        let services: Vec<ServiceHealth> = self
-            .services
-            .iter()
-            .map(|s| ServiceHealth {
-                name: s.name().to_string(),
-                status: s.status(),
-            })
-            .collect();
+    /// Check health status of all registered services and lifecycle services.
+    pub async fn health_check(&self) -> HealthReport {
+        use camel_api::HealthSource;
+        self.health_report().await
+    }
 
-        let has_failed = services.iter().any(|s| s.status == ServiceStatus::Failed);
-        let has_stopped = services.iter().any(|s| s.status == ServiceStatus::Stopped);
-        let status = if has_failed {
-            HealthStatus::Unhealthy
-        } else if has_stopped {
-            HealthStatus::Degraded
-        } else {
-            HealthStatus::Healthy
-        };
-
-        HealthReport {
-            status,
-            services,
-            ..Default::default()
-        }
+    pub fn health_registry(&self) -> Arc<HealthCheckRegistry> {
+        Arc::clone(&self.health_registry)
     }
 
     /// Store a component config. Overwrites any previously stored config of the same type.
@@ -743,6 +727,88 @@ impl ComponentContext for CamelContext {
     fn platform_service(&self) -> Arc<dyn PlatformService> {
         Arc::clone(&self.platform_service)
     }
+
+    fn register_route_health_check(
+        &self,
+        route_id: &str,
+        check: Arc<dyn camel_api::AsyncHealthCheck>,
+    ) {
+        self.health_registry.register_for_route(route_id, check);
+    }
+
+    fn unregister_route_health_check(&self, route_id: &str) {
+        self.health_registry.unregister_for_route(route_id);
+    }
+}
+
+#[async_trait::async_trait]
+impl camel_api::HealthSource for CamelContext {
+    async fn liveness(&self) -> camel_api::HealthStatus {
+        let has_failed = self
+            .services
+            .iter()
+            .any(|s| s.status() == camel_api::ServiceStatus::Failed);
+        if has_failed {
+            camel_api::HealthStatus::Unhealthy
+        } else {
+            camel_api::HealthStatus::Healthy
+        }
+    }
+
+    async fn readiness(&self) -> camel_api::HealthStatus {
+        let has_failed = self
+            .services
+            .iter()
+            .any(|s| s.status() == camel_api::ServiceStatus::Failed);
+        if has_failed {
+            return camel_api::HealthStatus::Unhealthy;
+        }
+        let has_stopped = self
+            .services
+            .iter()
+            .any(|s| s.status() == camel_api::ServiceStatus::Stopped);
+        if has_stopped {
+            return camel_api::HealthStatus::Degraded;
+        }
+        self.health_registry.check_all().await.status
+    }
+
+    async fn health_report(&self) -> camel_api::HealthReport {
+        let mut report = self.health_registry.check_all().await;
+        let mut worst = report.status;
+        for service in &self.services {
+            let svc_status = service.status();
+            let health = match svc_status {
+                camel_api::ServiceStatus::Started => camel_api::HealthStatus::Healthy,
+                camel_api::ServiceStatus::Stopped => camel_api::HealthStatus::Degraded,
+                camel_api::ServiceStatus::Failed => camel_api::HealthStatus::Unhealthy,
+            };
+            if matches!(worst, camel_api::HealthStatus::Healthy)
+                && matches!(
+                    health,
+                    camel_api::HealthStatus::Degraded | camel_api::HealthStatus::Unhealthy
+                )
+            {
+                worst = health;
+            }
+            if matches!(worst, camel_api::HealthStatus::Degraded)
+                && matches!(health, camel_api::HealthStatus::Unhealthy)
+            {
+                worst = health;
+            }
+            report.services.push(camel_api::ServiceHealth {
+                name: service.name().to_string(),
+                status: svc_status,
+                message: None,
+            });
+        }
+        report.status = worst;
+        report
+    }
+
+    async fn startup(&self) -> camel_api::HealthStatus {
+        camel_api::HealthStatus::Healthy
+    }
 }
 
 impl CamelContextBuilder {
@@ -759,6 +825,7 @@ impl CamelContextBuilder {
             function_invoker: None,
             lifecycle_services: Vec::new(),
             execution_factory: None,
+            health_registry: None,
             template_registry: None,
         }
     }
@@ -807,6 +874,11 @@ impl CamelContextBuilder {
 
     pub fn shutdown_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.shutdown_timeout = timeout;
+        self
+    }
+
+    pub fn health_registry(mut self, registry: Arc<HealthCheckRegistry>) -> Self {
+        self.health_registry = Some(registry);
         self
     }
 
@@ -866,6 +938,9 @@ impl CamelContextBuilder {
         let platform_service = self
             .platform_service
             .unwrap_or_else(|| Arc::new(NoopPlatformService::default()));
+        let health_registry = self.health_registry.unwrap_or_else(|| {
+            Arc::new(HealthCheckRegistry::new(std::time::Duration::from_secs(5)))
+        });
 
         let (controller, actor_join, supervision_join) =
             if let Some(config) = self.supervision_config {
@@ -887,6 +962,7 @@ impl CamelContextBuilder {
                 if let Some(invoker) = self.function_invoker.clone() {
                     controller_impl = controller_impl.with_function_invoker(invoker);
                 }
+                controller_impl.set_health_registry(Arc::clone(&health_registry));
                 controller_impl.set_crash_notifier(crash_tx);
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 let supervision_join = spawn_supervision_task(
@@ -914,13 +990,18 @@ impl CamelContextBuilder {
                 if let Some(invoker) = self.function_invoker.clone() {
                     controller_impl = controller_impl.with_function_invoker(invoker);
                 }
+                controller_impl.set_health_registry(Arc::clone(&health_registry));
                 let (controller, actor_join) = spawn_controller_actor(controller_impl);
                 (controller, actor_join, None)
             };
 
         let store = self.runtime_store.unwrap_or_default();
-        let runtime =
-            CamelContext::build_runtime(controller.clone(), store, self.execution_factory);
+        let runtime = CamelContext::build_runtime(
+            controller.clone(),
+            store,
+            self.execution_factory,
+            Arc::clone(&health_registry),
+        );
         let runtime_handle: Arc<dyn camel_api::RuntimeHandle> = runtime.clone();
         controller
             .try_set_runtime_handle(runtime_handle)
@@ -942,6 +1023,7 @@ impl CamelContextBuilder {
             languages,
             shutdown_timeout: self.shutdown_timeout,
             services: self.lifecycle_services,
+            health_registry,
             component_configs: HashMap::new(),
             function_invoker: self.function_invoker,
             template_registry,

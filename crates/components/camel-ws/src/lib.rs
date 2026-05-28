@@ -1,13 +1,15 @@
 //! WebSocket component for rust-camel — Axum-based WebSocket server and Tokio-tungstenite client for bidirectional messaging.
 //!
 //! Main types: `WsComponent`, `WsBundle`, `WsConfig`, `WsServerConfig`, `WsClientConfig`, `WsEndpointConfig`.
-//! Main modules: `bundle`, `config`.
+//! Main modules: `bundle`, `config`, `health`.
 
 pub mod bundle;
 pub mod config;
+pub mod health;
 
 pub use bundle::WsBundle;
 pub use config::{WsClientConfig, WsConfig, WsEndpointConfig, WsServerConfig};
+pub use health::WsHealthCheck;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -640,7 +642,7 @@ impl Component for WsComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         self.config.validate()?;
         let mut cfg = WsEndpointConfig::from_uri(uri)?;
@@ -671,6 +673,8 @@ impl Component for WsComponent {
         if let Some(ref v) = self.config.subprotocols {
             cfg.subprotocols = v.clone();
         }
+        let health_check = WsHealthCheck::new(cfg.host.clone(), cfg.port);
+        ctx.register_current_route_health_check(std::sync::Arc::new(health_check));
         Ok(Box::new(WsEndpoint {
             uri: uri.to_string(),
             cfg,
@@ -708,7 +712,7 @@ impl Component for WssComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         self.config.validate()?;
         let mut cfg = WsEndpointConfig::from_uri(uri)?;
@@ -739,6 +743,8 @@ impl Component for WssComponent {
         if let Some(ref v) = self.config.subprotocols {
             cfg.subprotocols = v.clone();
         }
+        let health_check = WsHealthCheck::new(cfg.host.clone(), cfg.port);
+        ctx.register_current_route_health_check(std::sync::Arc::new(health_check));
         Ok(Box::new(WsEndpoint {
             uri: uri.to_string(),
             cfg,

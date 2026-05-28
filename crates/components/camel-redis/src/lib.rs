@@ -30,14 +30,17 @@ pub mod commands;
 pub mod config;
 pub mod consumer;
 pub mod executor;
+pub mod health;
 pub mod producer;
 
 use camel_component_api::{BoxProcessor, CamelError};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
+use std::sync::Arc;
 
 pub use bundle::RedisBundle;
 pub use config::{RedisCommand, RedisConfig, RedisEndpointConfig};
 pub use consumer::RedisConsumer;
+pub use health::RedisHealthCheck;
 pub use producer::RedisProducer;
 
 pub struct RedisComponent {
@@ -80,7 +83,7 @@ impl Component for RedisComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = RedisEndpointConfig::from_uri(uri)?;
         // Apply global config defaults if available
@@ -89,6 +92,10 @@ impl Component for RedisComponent {
         }
         // Resolve any remaining None fields to hardcoded defaults
         config.resolve_defaults();
+
+        let health_check = RedisHealthCheck::new(&config)?;
+        ctx.register_current_route_health_check(Arc::new(health_check));
+
         Ok(Box::new(RedisEndpoint {
             uri: uri.to_string(),
             config,

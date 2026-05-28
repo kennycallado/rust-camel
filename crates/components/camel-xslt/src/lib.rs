@@ -14,6 +14,7 @@ mod component;
 mod config;
 mod endpoint;
 mod error;
+pub mod health;
 mod producer;
 
 pub const BRIDGE_VERSION: &str = "0.3.0";
@@ -22,6 +23,7 @@ pub use client::{BridgeState, StylesheetId, XsltBridgeClient, XsltTransformBacke
 pub use component::{XsltBridgeRuntime, XsltComponent};
 pub use config::{XsltComponentConfig, XsltEndpointConfig};
 pub use error::XsltError;
+pub use health::XsltHealthCheck;
 
 pub mod proto {
     tonic::include_proto!("xml_bridge");

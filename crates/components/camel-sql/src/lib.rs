@@ -3,19 +3,25 @@ pub mod config;
 pub mod consumer;
 pub mod endpoint;
 pub mod headers;
+pub mod health;
 pub mod producer;
 pub mod query;
 pub(crate) mod utils;
 
+use std::sync::Arc;
+
 use camel_component_api::CamelError;
 use camel_component_api::UriConfig;
 use camel_component_api::{Component, Endpoint};
+use sqlx::AnyPool;
+use tokio::sync::OnceCell;
 
 pub use bundle::SqlBundle;
 pub use config::{
     PollStrategy, ProcessingStrategy, SqlEndpointConfig, SqlGlobalConfig, SqlOutputType,
     TransactionMode,
 };
+pub use health::SqlHealthCheck;
 
 pub struct SqlComponent {
     config: Option<SqlGlobalConfig>,
@@ -51,16 +57,21 @@ impl Component for SqlComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = SqlEndpointConfig::from_uri(uri)?;
         if let Some(ref global_config) = self.config {
             config.apply_defaults(global_config);
         }
         config.resolve_defaults();
-        Ok(Box::new(endpoint::SqlEndpoint::new(
+        let pool = Arc::new(OnceCell::<AnyPool>::new());
+        let health_check = SqlHealthCheck::new(Arc::clone(&pool));
+        ctx.register_current_route_health_check(Arc::new(health_check));
+
+        Ok(Box::new(endpoint::SqlEndpoint::new_with_pool(
             uri.to_string(),
             config,
+            pool,
         )))
     }
 }

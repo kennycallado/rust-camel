@@ -7,6 +7,7 @@
 
 pub mod bundle;
 pub mod config;
+pub mod health;
 pub mod producer;
 
 use camel_component_api::{BoxProcessor, CamelError};
@@ -14,6 +15,7 @@ use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 
 pub use bundle::OpenSearchBundle;
 pub use config::{OpenSearchConfig, OpenSearchEndpointConfig, OpenSearchOperation};
+pub use health::OpenSearchHealthCheck;
 pub use producer::OpenSearchProducer;
 
 // ---------------------------------------------------------------------------
@@ -60,13 +62,15 @@ impl Component for OpenSearchComponent {
     fn create_endpoint(
         &self,
         uri: &str,
-        _ctx: &dyn camel_component_api::ComponentContext,
+        ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = OpenSearchEndpointConfig::from_uri(uri)?;
         // Apply global config defaults if available
         if let Some(ref global_cfg) = self.config {
             config = config.merge_with_global(global_cfg);
         }
+        let health_check = OpenSearchHealthCheck::new(&config);
+        ctx.register_current_route_health_check(std::sync::Arc::new(health_check));
         Ok(Box::new(OpenSearchEndpoint {
             uri: uri.to_string(),
             config,

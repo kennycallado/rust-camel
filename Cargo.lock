@@ -944,6 +944,7 @@ version = "0.11.1"
 dependencies = [
  "async-trait",
  "bollard",
+ "camel-api",
  "camel-component-api",
  "futures",
  "once_cell",
@@ -1073,6 +1074,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "camel-api",
  "camel-component-api",
  "camel-otel",
  "futures",
@@ -1095,6 +1097,7 @@ version = "0.11.1"
 dependencies = [
  "async-trait",
  "bytes",
+ "camel-api",
  "camel-bridge",
  "camel-component-api",
  "dashmap",
@@ -1120,6 +1123,7 @@ version = "0.11.1"
 dependencies = [
  "async-trait",
  "bytes",
+ "camel-api",
  "camel-component-api",
  "camel-otel",
  "futures",
@@ -1164,6 +1168,8 @@ dependencies = [
 name = "camel-component-opensearch"
 version = "0.11.1"
 dependencies = [
+ "async-trait",
+ "camel-api",
  "camel-component-api",
  "futures-util",
  "opensearch",
@@ -1181,6 +1187,7 @@ name = "camel-component-redis"
 version = "0.11.1"
 dependencies = [
  "async-trait",
+ "camel-api",
  "camel-component-api",
  "futures-util",
  "percent-encoding",
@@ -1214,6 +1221,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "bytes",
+ "camel-api",
  "camel-component-api",
  "chrono",
  "futures",
@@ -1302,6 +1310,7 @@ dependencies = [
  "axum",
  "axum-server",
  "bytes",
+ "camel-api",
  "camel-component-api",
  "camel-otel",
  "dashmap",
@@ -1326,6 +1335,7 @@ dependencies = [
 name = "camel-config"
 version = "0.11.1"
 dependencies = [
+ "async-trait",
  "camel-api",
  "camel-bean",
  "camel-component-log",

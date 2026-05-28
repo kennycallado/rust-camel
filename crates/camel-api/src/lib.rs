@@ -71,7 +71,7 @@ pub use function::{
     ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId, FunctionInvocationError,
     FunctionInvoker, FunctionInvokerSync, PatchBody,
 };
-pub use health::{HealthChecker, HealthReport, HealthSource, ServiceHealth};
+pub use health::{AsyncHealthCheck, CheckResult, HealthReport, HealthSource, ServiceHealth};
 pub use lifecycle::{HealthStatus, Lifecycle, ServiceStatus};
 pub use load_balancer::{LoadBalanceStrategy, LoadBalancerConfig};
 pub use message::Message;

@@ -3,6 +3,7 @@ pub mod codec;
 pub mod component;
 pub mod config;
 pub mod consumer;
+pub mod health;
 pub mod mode;
 pub mod producer;
 pub mod server;
@@ -13,4 +14,5 @@ pub use config::{
     AuthConfig, ConsumerStrategy, GrpcConfig, GrpcServerConfig, InterceptorConfig,
     ProducerStrategy, TlsConfig,
 };
+pub use health::GrpcHealthCheck;
 pub use mode::GrpcMode;

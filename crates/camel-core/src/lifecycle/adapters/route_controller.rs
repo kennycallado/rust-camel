@@ -31,6 +31,7 @@ use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::error_handler::ErrorHandlerLayer;
 
+use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
 use crate::lifecycle::adapters::route_compiler::{
     compose_pipeline, compose_traced_pipeline_with_contracts,
@@ -171,6 +172,8 @@ pub(crate) struct ControllerComponentContext {
     languages: SharedLanguageRegistry,
     metrics: Arc<dyn MetricsCollector>,
     platform_service: Arc<dyn PlatformService>,
+    health_registry: Arc<HealthCheckRegistry>,
+    route_id: Option<String>,
 }
 
 impl ControllerComponentContext {
@@ -179,12 +182,16 @@ impl ControllerComponentContext {
         languages: SharedLanguageRegistry,
         metrics: Arc<dyn MetricsCollector>,
         platform_service: Arc<dyn PlatformService>,
+        health_registry: Arc<HealthCheckRegistry>,
+        route_id: Option<String>,
     ) -> Self {
         Self {
             registry,
             languages,
             metrics,
             platform_service,
+            health_registry,
+            route_id,
         }
     }
 }
@@ -204,6 +211,22 @@ impl ComponentContext for ControllerComponentContext {
 
     fn platform_service(&self) -> Arc<dyn PlatformService> {
         Arc::clone(&self.platform_service)
+    }
+
+    fn register_route_health_check(
+        &self,
+        route_id: &str,
+        check: Arc<dyn camel_api::AsyncHealthCheck>,
+    ) {
+        self.health_registry.register_for_route(route_id, check);
+    }
+
+    fn unregister_route_health_check(&self, route_id: &str) {
+        self.health_registry.unregister_for_route(route_id);
+    }
+
+    fn route_id(&self) -> Option<&str> {
+        self.route_id.as_deref()
     }
 }
 
@@ -307,9 +330,17 @@ pub struct DefaultRouteController {
     tracer_metrics: Option<Arc<dyn MetricsCollector>>,
     platform_service: Arc<dyn PlatformService>,
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
+    health_registry: Option<Arc<HealthCheckRegistry>>,
 }
 
 impl DefaultRouteController {
+    fn health_registry(&self) -> Arc<HealthCheckRegistry> {
+        self.health_registry.clone().unwrap_or_else(|| {
+            warn!("health_registry not configured — creating isolated fallback");
+            Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)))
+        })
+    }
+
     /// Create a new `DefaultRouteController` with the given registry.
     pub fn new(
         registry: Arc<std::sync::Mutex<Registry>>,
@@ -352,6 +383,7 @@ impl DefaultRouteController {
             tracer_metrics: None,
             platform_service,
             function_invoker: None,
+            health_registry: None,
         }
     }
 
@@ -374,6 +406,7 @@ impl DefaultRouteController {
             tracer_metrics: None,
             platform_service,
             function_invoker: None,
+            health_registry: None,
         }
     }
 
@@ -396,12 +429,17 @@ impl DefaultRouteController {
             tracer_metrics: None,
             platform_service,
             function_invoker: None,
+            health_registry: None,
         }
     }
 
     pub fn with_function_invoker(mut self, function_invoker: Arc<dyn FunctionInvoker>) -> Self {
         self.function_invoker = Some(function_invoker);
         self
+    }
+
+    pub fn set_health_registry(&mut self, registry: Arc<HealthCheckRegistry>) {
+        self.health_registry = Some(registry);
     }
 
     pub fn set_function_invoker(&mut self, invoker: Arc<dyn FunctionInvoker>) {
@@ -523,6 +561,8 @@ impl DefaultRouteController {
                 .clone()
                 .unwrap_or_else(|| Arc::new(NoOpMetrics)),
             Arc::clone(&self.platform_service),
+            self.health_registry(),
+            route_id.map(|s| s.to_string()),
         ));
 
         super::step_resolution::resolve_steps(
@@ -680,6 +720,8 @@ impl DefaultRouteController {
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
                 Arc::clone(&self.platform_service),
+                self.health_registry(),
+                Some(route_id.clone()),
             );
             let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
@@ -693,6 +735,8 @@ impl DefaultRouteController {
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
                 Arc::clone(&self.platform_service),
+                self.health_registry(),
+                Some(route_id.clone()),
             );
             let (uow_layer, counter) =
                 self.resolve_uow_layer(uow_config, &producer_ctx, &component_ctx, None)?;
@@ -791,6 +835,9 @@ impl DefaultRouteController {
             )));
         }
         self.routes.remove(route_id);
+        if let Some(reg) = &self.health_registry {
+            reg.unregister_for_route(route_id);
+        }
         info!(route_id = %route_id, "Route removed from controller (functions preserved for reload finalize)");
         Ok(())
     }
@@ -835,6 +882,8 @@ impl DefaultRouteController {
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
                 Arc::clone(&self.platform_service),
+                self.health_registry(),
+                Some(route_id.clone()),
             );
             let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
@@ -854,6 +903,8 @@ impl DefaultRouteController {
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
                 Arc::clone(&self.platform_service),
+                self.health_registry(),
+                Some(route_id.clone()),
             );
 
             let (uow_layer, _counter) = self.resolve_uow_layer(
@@ -910,6 +961,8 @@ impl DefaultRouteController {
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
                 Arc::clone(&self.platform_service),
+                self.health_registry(),
+                Some(route_id.clone()),
             );
             let layer = self.resolve_error_handler(config, &producer_ctx, &component_ctx)?;
             pipeline = BoxProcessor::new(layer.layer(pipeline));
@@ -928,6 +981,8 @@ impl DefaultRouteController {
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
                 Arc::clone(&self.platform_service),
+                self.health_registry(),
+                Some(route_id.clone()),
             );
 
             let (uow_layer, _counter) = self.resolve_uow_layer(
@@ -969,6 +1024,9 @@ impl DefaultRouteController {
             }
         }
         self.routes.remove(route_id);
+        if let Some(reg) = &self.health_registry {
+            reg.unregister_for_route(route_id);
+        }
         info!(route_id = %route_id, "Route removed from controller");
         Ok(())
     }
@@ -1156,6 +1214,8 @@ impl RouteController for DefaultRouteController {
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
                 Arc::clone(&self.platform_service),
+                self.health_registry(),
+                Some(route_id.to_string()),
             ),
         )?;
 
@@ -1427,7 +1487,11 @@ impl RouteController for DefaultRouteController {
     }
 
     async fn stop_route(&mut self, route_id: &str) -> Result<(), CamelError> {
-        self.stop_route_internal(route_id).await
+        self.stop_route_internal(route_id).await?;
+        if let Some(reg) = &self.health_registry {
+            reg.unregister_for_route(route_id);
+        }
+        Ok(())
     }
 
     async fn restart_route(&mut self, route_id: &str) -> Result<(), CamelError> {
@@ -1533,6 +1597,8 @@ impl RouteController for DefaultRouteController {
                     .clone()
                     .unwrap_or_else(|| Arc::new(NoOpMetrics)),
                 Arc::clone(&self.platform_service),
+                self.health_registry(),
+                Some(route_id.to_string()),
             ),
         )?;
 
