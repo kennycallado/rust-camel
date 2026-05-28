@@ -707,24 +707,6 @@ pub fn is_transient_redis_error(err: &CamelError) -> bool {
         || msg.contains("refused")
 }
 
-// ── Capped exponential backoff ──────────────────────────────────────────────
-
-/// Computes the backoff delay for a given attempt number using capped exponential
-/// backoff: `min(2^attempt * 100ms, max_delay)`.
-///
-/// - `attempt`: zero-based retry attempt number
-/// - `base_ms`: base delay in milliseconds (default 100)
-/// - `max_delay`: maximum delay cap
-pub fn backoff_delay(
-    attempt: u32,
-    base_ms: u64,
-    max_delay: std::time::Duration,
-) -> std::time::Duration {
-    let exponent = attempt.min(10);
-    let delay_ms = base_ms.saturating_mul(1u64 << exponent);
-    std::time::Duration::from_millis(delay_ms).min(max_delay)
-}
-
 // ── Command idempotency classification ──────────────────────────────────────
 
 /// Returns true if the command is idempotent (safe to retry without risk of
@@ -1429,25 +1411,6 @@ mod tests {
         assert!(!is_transient_redis_error(&CamelError::Config(
             "bad config".into()
         )));
-    }
-
-    // REDIS-002: Capped exponential backoff
-    #[test]
-    fn test_backoff_delay_grows_exponentially() {
-        let max = std::time::Duration::from_secs(5);
-        let d0 = backoff_delay(0, 100, max);
-        let d1 = backoff_delay(1, 100, max);
-        let d2 = backoff_delay(2, 100, max);
-        assert_eq!(d0, std::time::Duration::from_millis(100));
-        assert_eq!(d1, std::time::Duration::from_millis(200));
-        assert_eq!(d2, std::time::Duration::from_millis(400));
-    }
-
-    #[test]
-    fn test_backoff_delay_is_capped() {
-        let max = std::time::Duration::from_secs(2);
-        let d10 = backoff_delay(10, 100, max);
-        assert_eq!(d10, max);
     }
 
     // REDIS-002: Idempotency classification

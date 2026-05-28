@@ -1,5 +1,6 @@
 //! Supervision configuration for automatic route restart.
 
+use crate::BackoffConfig;
 use std::time::Duration;
 
 /// Configuration for route supervision (automatic restart on crash).
@@ -30,12 +31,12 @@ impl SupervisionConfig {
         if attempt == 0 {
             return self.initial_delay;
         }
-        // Cap exponent to prevent overflow with very large attempt counts
-        let exp = ((attempt - 1) as i32).min(63);
-        let exp_value = self.backoff_multiplier.powi(exp);
-        let millis = (self.initial_delay.as_millis() as f64 * exp_value) as u128;
-        let delay = Duration::from_millis(millis as u64);
-        delay.min(self.max_delay)
+        let backoff = BackoffConfig {
+            initial_delay: self.initial_delay,
+            multiplier: self.backoff_multiplier,
+            max_delay: self.max_delay,
+        };
+        backoff.delay_for_attempt(attempt - 1)
     }
 }
 

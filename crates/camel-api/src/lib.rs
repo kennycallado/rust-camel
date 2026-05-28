@@ -8,6 +8,7 @@
 // from camel-component-api here for a unified API surface.
 
 pub mod aggregator;
+pub mod backoff;
 pub mod body;
 pub mod body_converter;
 pub mod circuit_breaker;
@@ -48,6 +49,7 @@ pub mod xml_convert;
 
 // Re-export core types at crate root for convenience.
 pub use aggregator::{AggregationFn, AggregatorConfig, CompletionCondition};
+pub use backoff::{BackoffConfig, BackoffState};
 pub use body::{Body, BoxAsyncRead, StreamBody, StreamMetadata};
 pub use body_converter::{BodyType, convert as convert_body};
 pub use circuit_breaker::CircuitBreakerConfig;

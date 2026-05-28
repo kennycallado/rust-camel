@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use camel_api::{BackoffConfig, BackoffState};
 use camel_component_api::{Body, CamelError, Exchange, Message};
 use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 use futures_util::StreamExt;
@@ -8,7 +9,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{RedisCommand, RedisEndpointConfig, backoff_delay, is_transient_redis_error};
+use crate::config::{RedisCommand, RedisEndpointConfig, is_transient_redis_error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueuePopCommand {
@@ -325,6 +326,11 @@ async fn run_queue_consumer(
     let mut error_count: u32 = 0;
     const MAX_RETRIES: u32 = 10;
     const MAX_BACKOFF: Duration = Duration::from_secs(30);
+    let mut backoff = BackoffState::new(BackoffConfig {
+        initial_delay: Duration::from_millis(100),
+        multiplier: 2.0,
+        max_delay: MAX_BACKOFF,
+    });
 
     loop {
         tokio::select! {
@@ -344,6 +350,7 @@ async fn run_queue_consumer(
                     Ok(Some((key, value))) => {
                         // Reset error counter on success
                         error_count = 0;
+                        backoff.reset();
                         let exchange = build_exchange_from_blpop(key, value);
                         if let Err(e) = ctx.send(exchange).await {
                             error!("Failed to send exchange to pipeline: {}", e);
@@ -358,6 +365,7 @@ async fn run_queue_consumer(
                         if e.is_timeout() {
                             // Timeout - continue loop silently
                             error_count = 0;
+                            backoff.reset();
                         } else if is_transient_redis_error(&CamelError::ProcessorError(e.to_string())) {
                             error_count += 1;
                             if error_count > MAX_RETRIES {
@@ -371,7 +379,7 @@ async fn run_queue_consumer(
                                     queue_cmd, MAX_RETRIES, e
                                 )));
                             }
-                            let delay = backoff_delay(error_count - 1, 100, MAX_BACKOFF);
+                            let delay = backoff.next_delay();
                             warn!(
                                 command = %queue_cmd,
                                 error = %e,

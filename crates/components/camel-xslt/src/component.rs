@@ -2,6 +2,7 @@ use crate::client::{BridgeState, XsltBridgeClient};
 use crate::config::{XsltComponentConfig, XsltEndpointConfig};
 use crate::endpoint::XsltEndpoint;
 use crate::error::XsltError;
+use camel_api::{BackoffConfig, BackoffState};
 use camel_bridge::{
     channel::connect_channel,
     download::ensure_binary_for_spec,
@@ -12,6 +13,7 @@ use camel_bridge::{
 use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, watch};
 
 pub struct XsltBridgeRuntime {
@@ -127,6 +129,11 @@ impl XsltBridgeRuntime {
         self.ensure_bridge_started(client).await?;
         let max_retries = self.config.max_retries;
         let mut attempt = 0;
+        let mut backoff = BackoffState::new(BackoffConfig {
+            initial_delay: Duration::from_millis(100),
+            multiplier: 2.0,
+            max_delay: Duration::from_secs(30),
+        });
         loop {
             match client
                 .transform(
@@ -141,6 +148,7 @@ impl XsltBridgeRuntime {
                 Err(err) if Self::is_transport_error(&err) && attempt < max_retries => {
                     attempt += 1;
                     self.restart_bridge(client).await?;
+                    tokio::time::sleep(backoff.next_delay()).await;
                 }
                 Err(err) => return Err(err),
             }

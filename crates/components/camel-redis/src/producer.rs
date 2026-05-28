@@ -1,15 +1,14 @@
 use crate::commands;
 use crate::config::{
-    RedisCommand, RedisEndpointConfig, backoff_delay, is_idempotent_command,
-    is_transient_redis_error,
+    RedisCommand, RedisEndpointConfig, is_idempotent_command, is_transient_redis_error,
 };
+use camel_api::{BackoffConfig, BackoffState};
 use camel_component_api::{CamelError, Exchange};
 use redis::aio::MultiplexedConnection;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
 use tokio::sync::Mutex;
 use tower::Service;
 use tracing::{debug, info, warn};
@@ -302,8 +301,8 @@ impl Service<Exchange> for RedisProducer {
                     "Transient error on idempotent command, reconnecting with bounded retry"
                 );
                 const MAX_RETRIES: u32 = 10;
-                const MAX_BACKOFF: Duration = Duration::from_secs(30);
                 let mut last_err = e.clone();
+                let mut backoff = BackoffState::new(BackoffConfig::default());
 
                 for attempt in 0..MAX_RETRIES {
                     // Clear stale connection
@@ -312,7 +311,7 @@ impl Service<Exchange> for RedisProducer {
                         *guard = None;
                     }
 
-                    let delay = backoff_delay(attempt, 100, MAX_BACKOFF);
+                    let delay = backoff.next_delay();
                     debug!(
                         endpoint = %endpoint,
                         command = ?cmd,

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use camel_api::{BackoffConfig, BackoffState};
 use camel_component_api::{
     Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message,
 };
@@ -125,6 +126,11 @@ async fn consumer_loop(
     let map_headers = endpoint_config.map_jms_headers;
     let selector = endpoint_config.message_selector.clone();
     let mut consecutive_transport_failures: u32 = 0;
+    let mut backoff = BackoffState::new(BackoffConfig {
+        initial_delay: Duration::from_millis(reconnect_interval_ms),
+        multiplier: 2.0,
+        max_delay: Duration::from_secs(30),
+    });
 
     // JMS-010: message selector — pass to bridge subscription when available
     // TODO(JMS-010): pass selector to bridge subscription
@@ -164,7 +170,7 @@ async fn consumer_loop(
                         tokio::select! {
                             _ = cancel.cancelled() => break,
                             _ = ctx.cancelled() => break,
-                            _ = tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)) => {}
+                            _ = tokio::time::sleep(backoff.next_delay()) => {}
                         }
                         continue;
                     }
@@ -186,6 +192,7 @@ async fn consumer_loop(
             }) {
             Ok(resp) => {
                 consecutive_transport_failures = 0;
+                backoff.reset();
                 info!(
                     broker = %broker_name,
                     destination = %destination,
@@ -230,7 +237,7 @@ async fn consumer_loop(
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = ctx.cancelled() => break,
-                    _ = tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)) => {}
+                    _ = tokio::time::sleep(backoff.next_delay()) => {}
                 }
                 continue;
             }
@@ -259,6 +266,8 @@ async fn consumer_loop(
                 msg = stream.message() => {
                     match msg {
                         Ok(Some(jms_msg)) => {
+                            consecutive_transport_failures = 0;
+                            backoff.reset();
                             let exchange = build_exchange(&jms_msg, map_headers);
                             if let Err(e) = ctx.send(exchange).await {
                                 error!(
@@ -325,7 +334,7 @@ async fn consumer_loop(
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = ctx.cancelled() => break,
-            _ = tokio::time::sleep(Duration::from_millis(reconnect_interval_ms)) => {}
+            _ = tokio::time::sleep(backoff.next_delay()) => {}
         }
     }
 }

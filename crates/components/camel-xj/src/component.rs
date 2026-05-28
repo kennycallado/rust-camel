@@ -2,6 +2,7 @@ use crate::config::{Direction, XjEndpointConfig};
 use crate::endpoint::XjEndpoint;
 use crate::error::XjError;
 use crate::identity::{JSON_TO_XML_XSLT, XML_TO_JSON_XSLT};
+use camel_api::{BackoffConfig, BackoffState};
 use camel_bridge::{
     channel::connect_channel,
     download::ensure_binary_for_spec,
@@ -137,7 +138,11 @@ impl XjBridgeRuntime {
 
         let max_attempts = retry_count.saturating_add(1);
         let mut attempt = 1u32;
-        let delay = Duration::from_millis(retry_delay_ms);
+        let mut backoff = BackoffState::new(BackoffConfig {
+            initial_delay: Duration::from_millis(retry_delay_ms),
+            multiplier: 2.0,
+            max_delay: Duration::from_secs(30),
+        });
         loop {
             match client
                 .transform(
@@ -156,7 +161,7 @@ impl XjBridgeRuntime {
                     }
                     warn!("xj: retry attempt {attempt}/{max_attempts} after: {mapped}");
                     self.restart_bridge(client).await?;
-                    tokio::time::sleep(delay).await;
+                    tokio::time::sleep(backoff.next_delay()).await;
                     attempt = attempt.saturating_add(1);
                 }
             }

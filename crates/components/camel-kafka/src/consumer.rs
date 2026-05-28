@@ -20,6 +20,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use camel_api::{BackoffConfig, BackoffState};
+
 use crate::config::ResolvedKafkaEndpointConfig;
 use crate::config::apply_security_config;
 use crate::manual_commit::{CommitRequest, KafkaManualCommit};
@@ -340,9 +342,7 @@ async fn run_consumer_loop(
     // when partitions are assigned. No polling loop needed — recv() drives the
     // rebalance protocol automatically.
 
-    // KAFKA-016: capped exponential backoff state
-    let mut backoff_ms: u64 = 100;
-    const MAX_BACKOFF_MS: u64 = 30_000;
+    let mut backoff = BackoffState::new(BackoffConfig::default());
 
     loop {
         tokio::select! {
@@ -353,14 +353,12 @@ async fn run_consumer_loop(
             msg_result = consumer.recv() => {
                 match msg_result {
                     Err(e) => {
-                        warn!(error = %e, backoff_ms = backoff_ms, "Kafka consumer error, backing off");
-                        // KAFKA-016: capped exponential backoff
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        let delay = backoff.next_delay();
+                        warn!(error = %e, delay_ms = delay.as_millis(), "Kafka consumer error, backing off");
+                        tokio::time::sleep(delay).await;
                     }
                     Ok(msg) => {
-                        // Reset backoff on successful receive
-                        backoff_ms = 100;
+                        backoff.reset();
 
                         // Must detach before await point (BorrowedMessage not 'static)
                         let owned = msg.detach();
@@ -824,24 +822,20 @@ mod tests {
 
     #[test]
     fn test_exponential_backoff_sequence() {
-        // Verify the backoff logic: 100 → 200 → 400 → ... → 30000
-        const MAX_BACKOFF_MS: u64 = 30_000;
-        let mut backoff_ms: u64 = 100;
+        let mut state = BackoffState::new(BackoffConfig::default());
         let mut sequence = Vec::new();
         for _ in 0..20 {
-            sequence.push(backoff_ms);
-            backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+            sequence.push(state.next_delay().as_millis() as u64);
         }
-        // First few values
+
         assert_eq!(sequence[0], 100);
         assert_eq!(sequence[1], 200);
         assert_eq!(sequence[2], 400);
-        assert_eq!(sequence[3], 800);
-        // Caps at MAX_BACKOFF_MS
-        assert!(sequence.iter().all(|&v| v <= MAX_BACKOFF_MS));
-        // Last values should all be capped
-        assert_eq!(sequence[sequence.len() - 1], MAX_BACKOFF_MS);
-        assert_eq!(sequence[sequence.len() - 2], MAX_BACKOFF_MS);
+
+        let max_backoff_ms = 30_000u64;
+        assert!(sequence.iter().all(|&v| v <= max_backoff_ms));
+        assert_eq!(sequence[19], max_backoff_ms);
+        assert_eq!(sequence[18], max_backoff_ms);
     }
 
     // --- KAFKA-004: commit drain timeout ---

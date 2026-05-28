@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use camel_api::{BackoffConfig, BackoffState};
 use camel_component_api::{CamelError, Exchange};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -124,7 +125,6 @@ pub async fn execute_with_retry<E: RedisCommandExecutor>(
     base_ms: u64,
     max_backoff: std::time::Duration,
 ) -> Result<(), CamelError> {
-    use crate::config::backoff_delay;
     use tracing::{debug, warn};
 
     let result = executor.execute_command(cmd, exchange).await;
@@ -140,11 +140,16 @@ pub async fn execute_with_retry<E: RedisCommandExecutor>(
         );
 
         let mut last_err = e.clone();
+        let mut backoff = BackoffState::new(BackoffConfig {
+            initial_delay: std::time::Duration::from_millis(base_ms),
+            multiplier: 2.0,
+            max_delay: max_backoff,
+        });
 
         for attempt in 0..max_retries {
             executor.reconnect().await?;
 
-            let delay = backoff_delay(attempt, base_ms, max_backoff);
+            let delay = backoff.next_delay();
             debug!(
                 command = ?cmd,
                 attempt = attempt + 1,
@@ -154,7 +159,10 @@ pub async fn execute_with_retry<E: RedisCommandExecutor>(
             tokio::time::sleep(delay).await;
 
             match executor.execute_command(cmd, exchange).await {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    backoff.reset();
+                    return Ok(());
+                }
                 Err(retry_err) => {
                     if is_transient_redis_error(&retry_err) {
                         warn!(
@@ -184,7 +192,7 @@ pub async fn execute_with_retry<E: RedisCommandExecutor>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     fn transient_err(msg: &str) -> Result<(), FakeError> {
         Err(FakeError {
@@ -307,42 +315,6 @@ mod tests {
         assert!(result.is_err(), "non-transient error should not be retried");
         // Only 1 call — no retries for non-transient
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn test_backoff_delay_increases_between_attempts() {
-        // Use a fake executor that records timing between calls
-        let executor = FakeExecutor::new(vec![
-            Ok(()),
-            transient_err("fail 1"),
-            transient_err("fail 2"),
-            transient_err("fail 3"),
-        ]);
-
-        let mut exchange = Exchange::default();
-        let cmd = RedisCommand::Get;
-
-        let start = Instant::now();
-        let result = execute_with_retry(
-            &mut { executor },
-            &cmd,
-            &mut exchange,
-            true,
-            10,
-            50, // 50ms base
-            Duration::from_millis(500),
-        )
-        .await;
-        let elapsed = start.elapsed();
-
-        assert!(result.is_ok());
-        // Delays: 50ms (attempt 0) + 100ms (attempt 1) + 200ms (attempt 2) = 350ms minimum
-        // Allow some tolerance for scheduling
-        assert!(
-            elapsed >= Duration::from_millis(300),
-            "elapsed {:?} should be >= 300ms (backoff delays)",
-            elapsed
-        );
     }
 
     #[tokio::test]

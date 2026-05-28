@@ -21,6 +21,7 @@ use axum::extract::{FromRequest, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::{Router, serve};
+use camel_api::{BackoffConfig, BackoffState};
 use camel_component_api::{
     Body as CamelBody, BoxProcessor, CamelError, Exchange, Message as CamelMessage,
 };
@@ -1128,6 +1129,11 @@ impl Service<Exchange> for WsProducer {
             } else {
                 0
             };
+            let mut backoff = BackoffState::new(BackoffConfig {
+                initial_delay: std::time::Duration::from_millis(cfg.inner.reconnect_delay_ms),
+                multiplier: 2.0,
+                max_delay: std::time::Duration::from_secs(30),
+            });
             let mut attempts = 0usize;
             let mut ws_stream = loop {
                 let connect_future = tokio_tungstenite::connect_async(request.clone());
@@ -1147,10 +1153,7 @@ impl Service<Exchange> for WsProducer {
                                 max_retries,
                                 "WebSocket connect failed — retrying"
                             );
-                            tokio::time::sleep(std::time::Duration::from_millis(
-                                cfg.inner.reconnect_delay_ms,
-                            ))
-                            .await;
+                            tokio::time::sleep(backoff.next_delay()).await;
                             continue;
                         }
                         return Err(err);
@@ -1168,10 +1171,7 @@ impl Service<Exchange> for WsProducer {
                                 max_retries,
                                 "WebSocket connect timeout — retrying"
                             );
-                            tokio::time::sleep(std::time::Duration::from_millis(
-                                cfg.inner.reconnect_delay_ms,
-                            ))
-                            .await;
+                            tokio::time::sleep(backoff.next_delay()).await;
                             continue;
                         }
                         return Err(err);
@@ -1228,6 +1228,7 @@ impl Service<Exchange> for WsProducer {
                         tracing::debug!(url = url, "WebSocket producer received normal close");
                         exchange.input.body = CamelBody::Empty;
                     } else if cfg.inner.reconnect && attempts < max_retries {
+                        backoff.reset();
                         attempts += 1;
                         tracing::warn!(
                             url = url,
@@ -1235,10 +1236,7 @@ impl Service<Exchange> for WsProducer {
                             max_retries,
                             "WebSocket closed by peer — reconnecting"
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            cfg.inner.reconnect_delay_ms,
-                        ))
-                        .await;
+                        tokio::time::sleep(backoff.next_delay()).await;
                         return Err(CamelError::ProcessorError(format!(
                             "WebSocket reconnect required after close: code {}",
                             frame.map(|f| u16::from(f.code)).unwrap_or_default()
