@@ -1536,7 +1536,7 @@ impl RouteController for DefaultRouteController {
         let consumer_handle = managed.consumer_handle.take();
 
         // Wait for consumer task to complete with timeout
-        let timeout_result = tokio::time::timeout(Duration::from_secs(30), async {
+        let timeout_result = tokio::time::timeout(Duration::from_secs(5), async {
             if let Some(handle) = consumer_handle {
                 let _ = handle.await;
             }

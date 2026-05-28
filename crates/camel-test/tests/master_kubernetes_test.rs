@@ -205,6 +205,7 @@ async fn master_route_uses_kubernetes_platform_from_config() {
         }),
         stream_caching: Default::default(),
         beans: Default::default(),
+        _extra: Default::default(),
     };
 
     // Verify config parses correctly

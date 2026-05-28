@@ -1120,9 +1120,9 @@ async fn builder_shutdown_timeout_is_applied() {
 }
 
 #[tokio::test]
-async fn builder_default_shutdown_timeout_is_30_seconds() {
+async fn builder_default_shutdown_timeout_is_5_seconds() {
     let ctx = CamelContext::builder().build().await.unwrap();
-    assert_eq!(ctx.shutdown_timeout(), std::time::Duration::from_secs(30));
+    assert_eq!(ctx.shutdown_timeout(), std::time::Duration::from_secs(5));
 }
 
 #[tokio::test]

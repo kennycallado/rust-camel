@@ -157,7 +157,7 @@ pub(super) async fn stop_route_internal(
         .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     managed.channel_sender = None;
 
-    let timeout_result = tokio::time::timeout(Duration::from_secs(30), async {
+    let timeout_result = tokio::time::timeout(Duration::from_secs(5), async {
         match (consumer_handle, pipeline_handle) {
             (Some(c), Some(p)) => {
                 let _ = tokio::join!(c, p);
@@ -174,7 +174,7 @@ pub(super) async fn stop_route_internal(
     .await;
 
     if timeout_result.is_err() {
-        warn!(route_id = %route_id, "Route shutdown timed out after 30s — tasks may still be running");
+        warn!(route_id = %route_id, "Route shutdown timed out after 5s — tasks may still be running");
     }
 
     let managed = routes

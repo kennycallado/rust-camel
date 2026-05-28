@@ -27,10 +27,15 @@ async fn test_seda_connects_two_routes() {
     h.add_route(route_b).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let endpoint = h.mock().get_endpoint("result").unwrap();
+    for _ in 0..20 {
+        if endpoint.received_count().await >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     h.stop().await;
 
-    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(3).await;
 }
 
@@ -60,10 +65,15 @@ async fn test_seda_concurrent_load() {
     h.add_route(route_b).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    let endpoint = h.mock().get_endpoint("result").unwrap();
+    for _ in 0..30 {
+        if endpoint.received_count().await >= 50 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     h.stop().await;
 
-    let endpoint = h.mock().get_endpoint("result").unwrap();
     endpoint.assert_exchange_count(50).await;
 }
 
@@ -94,10 +104,15 @@ async fn test_seda_inout_integration() {
     h.add_route(route_b).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let endpoint = h.mock().get_endpoint("inout-result").unwrap();
+    for _ in 0..20 {
+        if endpoint.received_count().await >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     h.stop().await;
 
-    let endpoint = h.mock().get_endpoint("inout-result").unwrap();
     endpoint.assert_exchange_count(3).await;
 }
 
@@ -113,17 +128,17 @@ async fn test_seda_fanout_integration() {
 
     let route_a = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
         .route_id("fanout-producer")
-        .to("seda:broadcast?multipleConsumers=true")
+        .to("seda:broadcast?multipleConsumers=true&timeout=3000")
         .build()
         .unwrap();
 
-    let route_b = RouteBuilder::from("seda:broadcast?multipleConsumers=true")
+    let route_b = RouteBuilder::from("seda:broadcast?multipleConsumers=true&timeout=3000")
         .route_id("fanout-consumer-a")
         .to("mock:result-a")
         .build()
         .unwrap();
 
-    let route_c = RouteBuilder::from("seda:broadcast?multipleConsumers=true")
+    let route_c = RouteBuilder::from("seda:broadcast?multipleConsumers=true&timeout=3000")
         .route_id("fanout-consumer-b")
         .to("mock:result-b")
         .build()
@@ -134,12 +149,16 @@ async fn test_seda_fanout_integration() {
     h.add_route(route_c).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let endpoint_a = h.mock().get_endpoint("result-a").unwrap();
+    let endpoint_b = h.mock().get_endpoint("result-b").unwrap();
+    for _ in 0..20 {
+        if endpoint_a.received_count().await >= 3 && endpoint_b.received_count().await >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     h.stop().await;
 
-    let endpoint_a = h.mock().get_endpoint("result-a").unwrap();
     endpoint_a.assert_exchange_count(3).await;
-
-    let endpoint_b = h.mock().get_endpoint("result-b").unwrap();
     endpoint_b.assert_exchange_count(3).await;
 }

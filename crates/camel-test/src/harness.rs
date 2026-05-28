@@ -139,7 +139,11 @@ impl_builder_methods!(WithTimeControl);
 // ---------------------------------------------------------------------------
 
 async fn build_context(registrations: Vec<Registration>, mock: MockComponent) -> CamelTestContext {
-    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
+    let mut ctx = CamelContext::builder()
+        .shutdown_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .await
+        .unwrap(); // allow-unwrap
 
     // MockComponent is always registered.
     ctx.register_component(mock.clone());

@@ -61,6 +61,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
     use camel_config::config::{
         CamelConfig, ComponentsConfig, ObservabilityConfig, PlatformCamelConfig,
     };
+    use std::collections::HashMap;
     use camel_core::{
         DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
     };
@@ -100,6 +101,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: Default::default(),
         beans: Default::default(),
+        _extra: HashMap::new(),
     };
 
     // configure_context should propagate the file-open error

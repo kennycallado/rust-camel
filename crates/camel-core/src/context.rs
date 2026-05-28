@@ -820,7 +820,7 @@ impl CamelContextBuilder {
             platform_service: None,
             supervision_config: None,
             runtime_store: None,
-            shutdown_timeout: std::time::Duration::from_secs(30),
+            shutdown_timeout: std::time::Duration::from_secs(5),
             beans: None,
             function_invoker: None,
             lifecycle_services: Vec::new(),

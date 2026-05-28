@@ -713,8 +713,16 @@ mod tests {
 
         let config = OtelConfig::new("http://localhost:9999", "test-no-sub-replace");
         let mut service = OtelService::new(config);
-        let _ = service.start().await; // may succeed or fail — doesn't matter
-        let _ = service.stop().await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            service.start(),
+        )
+        .await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            service.stop(),
+        )
+        .await;
 
         // Emit a test event
         tracing::info!("test event after otel start");
