@@ -55,6 +55,12 @@ pub struct CamelConfig {
 
     #[serde(default)]
     pub beans: HashMap<String, BeanConfig>,
+
+    /// Catch-all for extra keys injected by config sources (e.g. CAMEL_* env vars)
+    /// or unknown fields in TOML. Nested structs use `deny_unknown_fields` to
+    /// catch typos in sections like `[observability.health]`.
+    #[serde(flatten)]
+    pub _extra: HashMap<String, toml::Value>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -114,6 +120,7 @@ impl CamelConfigBuilder {
             platform: defaults.platform,
             stream_caching: defaults.stream_caching,
             beans: defaults.beans,
+            _extra: HashMap::new(),
         }
     }
 }
@@ -134,6 +141,7 @@ impl Default for CamelConfig {
             platform: PlatformCamelConfig::default(),
             stream_caching: StreamCachingConfig::default(),
             beans: HashMap::new(),
+            _extra: HashMap::new(),
         }
     }
 }
@@ -151,6 +159,7 @@ pub enum PlatformCamelConfig {
 
 /// Kubernetes platform configuration for `[platform]` in Camel.toml.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct KubernetesPlatformCamelConfig {
     #[serde(default)]
     pub namespace: Option<String>,
@@ -204,6 +213,7 @@ pub struct ComponentsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PrometheusCamelConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -231,6 +241,7 @@ fn default_prometheus_port() -> u16 {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCamelConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -259,6 +270,7 @@ fn default_health_port() -> u16 {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     #[serde(default)]
     pub tracer: TracerConfig,
@@ -294,6 +306,7 @@ pub enum OtelSampler {
 
 /// OpenTelemetry configuration for `[observability.otel]` in Camel.toml.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OtelCamelConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -344,6 +357,7 @@ impl Default for OtelCamelConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SupervisionCamelConfig {
     /// Maximum number of restart attempts. `None` means retry forever.
     pub max_attempts: Option<u32>,
@@ -414,6 +428,7 @@ fn default_compaction_threshold_events() -> u64 {
 
 /// Configuration for the redb runtime event journal.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct JournalConfig {
     /// Path to the `.db` file. Created if it does not exist.
     pub path: std::path::PathBuf,
@@ -428,6 +443,7 @@ pub struct JournalConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct StreamCachingConfig {
     #[serde(default = "default_stream_cache_threshold")]
     pub threshold: usize,
@@ -446,6 +462,7 @@ impl Default for StreamCachingConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct BeanConfig {
     pub plugin: String,
     #[serde(default)]

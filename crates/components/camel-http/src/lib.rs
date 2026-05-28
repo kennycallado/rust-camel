@@ -107,11 +107,25 @@ pub struct HttpEndpointConfig {
     pub skip_response_headers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum HttpAuth {
     None,
     Basic { username: String, password: String },
     Bearer { token: String },
+}
+
+impl std::fmt::Debug for HttpAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HttpAuth::None => f.write_str("None"),
+            HttpAuth::Basic { username, .. } => f
+                .debug_struct("Basic")
+                .field("username", username)
+                .field("password", &"***")
+                .finish(),
+            HttpAuth::Bearer { .. } => f.debug_struct("Bearer").field("token", &"***").finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4388,5 +4402,57 @@ mod tests {
         });
         // Should complete without panicking even though the inner task panicked
         monitor_axum_task(handle, "127.0.0.1:9999".to_string()).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Credential redaction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn http_auth_basic_debug_redacts_password() {
+        let auth = HttpAuth::Basic {
+            username: "admin".to_string(),
+            password: "hunter2".to_string(),
+        };
+        let debug = format!("{:?}", auth);
+        assert!(
+            !debug.contains("hunter2"),
+            "password must be redacted: {debug}"
+        );
+        assert!(debug.contains("admin"), "username should appear: {debug}");
+    }
+
+    #[test]
+    fn http_auth_bearer_debug_redacts_token() {
+        let auth = HttpAuth::Bearer {
+            token: "eyJhbGciOiJIUzI1NiJ9.secret".to_string(),
+        };
+        let debug = format!("{:?}", auth);
+        assert!(
+            !debug.contains("eyJhbGci"),
+            "token must be redacted: {debug}"
+        );
+    }
+
+    #[test]
+    fn http_auth_none_debug_shows_variant() {
+        let debug = format!("{:?}", HttpAuth::None);
+        assert!(
+            debug.contains("None"),
+            "None variant should appear: {debug}"
+        );
+    }
+
+    #[test]
+    fn http_endpoint_config_debug_redacts_auth_credentials() {
+        let config = HttpEndpointConfig::from_uri(
+            "http://localhost/api?authMethod=Basic&authUsername=admin&authPassword=secret123",
+        )
+        .unwrap();
+        let debug = format!("{:?}", config);
+        assert!(
+            !debug.contains("secret123"),
+            "password must be redacted in HttpEndpointConfig debug: {debug}"
+        );
     }
 }

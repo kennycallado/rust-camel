@@ -15,7 +15,7 @@ pub struct WsConfig {
     pub subprotocols: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WsEndpointConfig {
     pub scheme: String,
     pub host: String,
@@ -37,6 +37,37 @@ pub struct WsEndpointConfig {
     pub send_timeout: Duration,
     pub binary_payload: bool,
     pub subprotocols: Vec<String>,
+}
+
+fn redacted_opt(opt: &Option<String>) -> Option<&'static str> {
+    if opt.is_some() { Some("***") } else { None }
+}
+
+impl std::fmt::Debug for WsEndpointConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsEndpointConfig")
+            .field("scheme", &self.scheme)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("path", &self.path)
+            .field("max_connections", &self.max_connections)
+            .field("max_message_size", &self.max_message_size)
+            .field("send_to_all", &self.send_to_all)
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("response_timeout", &self.response_timeout)
+            .field("allow_origin", &self.allow_origin)
+            .field("tls_cert", &redacted_opt(&self.tls_cert))
+            .field("tls_key", &redacted_opt(&self.tls_key))
+            .field("reconnect", &self.reconnect)
+            .field("reconnect_max_attempts", &self.reconnect_max_attempts)
+            .field("reconnect_delay_ms", &self.reconnect_delay_ms)
+            .field("send_timeout", &self.send_timeout)
+            .field("binary_payload", &self.binary_payload)
+            .field("subprotocols", &self.subprotocols)
+            .finish()
+    }
 }
 
 impl Default for WsEndpointConfig {
@@ -425,5 +456,27 @@ mod config_validation_tests {
     fn test_from_uri_subprotocols_empty_when_not_specified() {
         let cfg = WsEndpointConfig::from_uri("ws://localhost:8080").unwrap();
         assert!(cfg.subprotocols.is_empty());
+    }
+
+    #[test]
+    fn ws_endpoint_config_debug_redacts_tls() {
+        let config = WsEndpointConfig {
+            tls_cert: Some("/secret/cert.pem".to_string()),
+            tls_key: Some("/secret/key.pem".to_string()),
+            ..WsEndpointConfig::default()
+        };
+        let debug = format!("{:?}", config);
+        assert!(
+            !debug.contains("/secret/"),
+            "TLS paths must be redacted: {debug}"
+        );
+        assert!(
+            debug.contains("tls_cert"),
+            "field name should appear: {debug}"
+        );
+        assert!(
+            debug.contains("tls_key"),
+            "field name should appear: {debug}"
+        );
     }
 }

@@ -81,7 +81,10 @@ async fn test_spawn_and_health() {
         .await
         .expect("health");
     let report = provider.health_runner(&handle).await.expect("health");
-    assert!(matches!(report, camel_function::FunctionHealthStatus::Healthy));
+    assert!(matches!(
+        report,
+        camel_function::FunctionHealthStatus::Healthy
+    ));
     provider.shutdown_runner(handle).await.expect("shutdown");
     assert_clean(&provider).await;
 }

@@ -237,7 +237,7 @@ impl FromStr for RedisCommand {
 ///
 /// This struct holds component-level defaults that can be set via YAML config
 /// and applied to endpoint configurations when specific values aren't provided.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize)]
 #[serde(default)]
 pub struct RedisConfig {
     pub host: String,
@@ -251,6 +251,24 @@ pub struct RedisConfig {
     /// Cluster node URLs. Empty means single-node mode. Feature-gated behind `cluster`.
     #[cfg(feature = "cluster")]
     pub cluster_nodes: Vec<String>,
+}
+
+fn redacted_opt(opt: &Option<String>) -> Option<&'static str> {
+    if opt.is_some() { Some("***") } else { None }
+}
+
+impl std::fmt::Debug for RedisConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("RedisConfig");
+        s.field("host", &self.host)
+            .field("port", &self.port)
+            .field("password", &redacted_opt(&self.password))
+            .field("tls", &self.tls)
+            .field("tls_ca_cert", &redacted_opt(&self.tls_ca_cert));
+        #[cfg(feature = "cluster")]
+        s.field("cluster_nodes", &self.cluster_nodes);
+        s.finish()
+    }
 }
 
 impl Default for RedisConfig {
@@ -402,7 +420,7 @@ impl ClusterConfig {
 /// - `password` - Redis password for authentication (default: None)
 /// - `db` - Redis database number (default: 0)
 /// - `ssl` - Use TLS connection. `None` means not set (falls back to global config or false).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RedisEndpointConfig {
     /// Redis server hostname. `None` if not set in URI.
     /// Filled by `apply_defaults()` from global config, then `resolve_defaults()`.
@@ -434,6 +452,22 @@ pub struct RedisEndpointConfig {
     /// Filled by `apply_defaults()` from global config TLS setting.
     /// After resolution, use `is_ssl_enabled()` for the effective value.
     pub ssl: Option<bool>,
+}
+
+impl std::fmt::Debug for RedisEndpointConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisEndpointConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("command", &self.command)
+            .field("channels", &self.channels)
+            .field("key", &self.key)
+            .field("timeout", &self.timeout)
+            .field("password", &redacted_opt(&self.password))
+            .field("db", &self.db)
+            .field("ssl", &self.ssl)
+            .finish()
+    }
 }
 
 impl RedisEndpointConfig {
@@ -1538,6 +1572,56 @@ mod tests {
         assert_eq!(c.timeout, 1);
         assert_eq!(c.db, 0);
         assert_eq!(c.ssl, None);
+    }
+
+    // --- Debug redaction tests ---
+
+    #[test]
+    fn redis_config_debug_redacts_password() {
+        let config = RedisConfig::default().with_password("hunter2");
+        let debug = format!("{:?}", config);
+        assert!(
+            !debug.contains("hunter2"),
+            "password must be redacted in Debug: {debug}"
+        );
+        assert!(
+            debug.contains("password"),
+            "field name should appear: {debug}"
+        );
+        assert!(
+            debug.contains("***"),
+            "redacted value should appear: {debug}"
+        );
+    }
+
+    #[test]
+    fn redis_config_debug_redacts_tls_ca_cert() {
+        let config = RedisConfig::default().with_tls_ca_cert("/secret/ca.pem");
+        let debug = format!("{:?}", config);
+        assert!(
+            !debug.contains("/secret/"),
+            "tls_ca_cert path must be redacted: {debug}"
+        );
+    }
+
+    #[test]
+    fn redis_endpoint_config_debug_redacts_password() {
+        let config = RedisEndpointConfig {
+            host: Some("localhost".to_string()),
+            port: Some(6379),
+            command: RedisCommand::Get,
+            channels: vec![],
+            key: Some("mykey".to_string()),
+            timeout: 1,
+            password: Some("secret123".to_string()),
+            db: 0,
+            ssl: None,
+        };
+        let debug = format!("{:?}", config);
+        assert!(
+            !debug.contains("secret123"),
+            "password must be redacted: {debug}"
+        );
     }
 
     // --- REDIS-012: Cluster config tests ---

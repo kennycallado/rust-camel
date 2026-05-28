@@ -6,6 +6,7 @@ use camel_config::config::{
 };
 use camel_core::{DetailLevel, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs};
 use std::collections::HashMap;
+use toml::Value;
 
 fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> CamelConfig {
     CamelConfig {
@@ -48,6 +49,7 @@ fn make_config_with_stdout_format(format: OutputFormat, otel_enabled: bool) -> C
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        _extra: HashMap::<String, Value>::new(),
     }
 }
 

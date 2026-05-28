@@ -5,6 +5,7 @@ use camel_config::config::{ObservabilityConfig, OtelCamelConfig};
 use std::collections::HashMap;
 use std::fs;
 use tempfile::tempdir;
+use toml::Value;
 
 #[test]
 fn test_load_routes_from_config() {
@@ -96,6 +97,7 @@ async fn test_configure_context_with_supervision() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        _extra: HashMap::<String, Value>::new(),
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -121,6 +123,7 @@ async fn test_configure_context_sets_shutdown_timeout() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        _extra: HashMap::<String, Value>::new(),
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -150,6 +153,7 @@ async fn test_configure_context_with_valid_log_level() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        _extra: HashMap::<String, Value>::new(),
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -175,6 +179,7 @@ async fn test_configure_context_with_invalid_log_level() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        _extra: HashMap::<String, Value>::new(),
     };
 
     let result = CamelConfig::configure_context(&config).await;
@@ -210,6 +215,7 @@ async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        _extra: HashMap::<String, Value>::new(),
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -241,6 +247,7 @@ async fn test_configure_context_without_otel_no_lifecycle() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        _extra: HashMap::<String, Value>::new(),
     };
 
     let ctx = CamelConfig::configure_context(&config)
@@ -278,6 +285,7 @@ async fn test_configure_context_uses_runtime_journal_from_config() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        _extra: HashMap::<String, Value>::new(),
     };
 
     let mut ctx = CamelConfig::configure_context(&config)
@@ -299,4 +307,78 @@ async fn test_configure_context_uses_runtime_journal_from_config() {
         journal_path.exists(),
         "journal db file should exist after context creation"
     );
+}
+
+#[tokio::test]
+async fn test_config_rejects_unknown_field_in_health() {
+    let toml = r#"
+routes = []
+log_level = "INFO"
+timeout_ms = 5000
+drain_timeout_ms = 10000
+watch_debounce_ms = 300
+
+[observability.health]
+enabled = true
+potr = 8080
+"#;
+    let result = toml::from_str::<camel_config::CamelConfig>(toml);
+    assert!(result.is_err(), "should reject unknown field 'potr'");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("unknown field"),
+        "expected 'unknown field' error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_config_rejects_unknown_root_field() {
+    let toml = r#"
+routes = []
+log_level = "INFO"
+timeout_ms = 5000
+drain_timeout_ms = 10000
+watch_debounce_ms = 300
+unknown_root_field = "oops"
+"#;
+    // Root-level unknown fields are captured in _extra (flattened) rather than
+    // rejected, because the config crate can inject CAMEL_* env vars at the root.
+    // Nested structs (health, otel, etc.) use deny_unknown_fields for strict rejection.
+    let result = toml::from_str::<camel_config::CamelConfig>(toml);
+    assert!(
+        result.is_ok(),
+        "root unknown fields should be captured in _extra, not rejected"
+    );
+    let config = result.unwrap();
+    assert!(
+        config._extra.contains_key("unknown_root_field"),
+        "unknown root field should appear in _extra"
+    );
+}
+
+#[tokio::test]
+async fn test_config_accepts_custom_component_blocks() {
+    let toml = r#"
+routes = []
+log_level = "INFO"
+timeout_ms = 5000
+drain_timeout_ms = 10000
+watch_debounce_ms = 300
+
+[components.redis]
+host = "redis.example.com"
+port = 6379
+
+[components.my_custom]
+any_key = "any_value"
+"#;
+    let result = toml::from_str::<camel_config::CamelConfig>(toml);
+    assert!(
+        result.is_ok(),
+        "custom component blocks should still parse via flatten: {:?}",
+        result
+    );
+    let config = result.unwrap();
+    assert!(config.components.raw.contains_key("redis"));
+    assert!(config.components.raw.contains_key("my_custom"));
 }
