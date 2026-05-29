@@ -21,6 +21,7 @@ You do not implement fixes. You report findings only.
 
 Before judging, gather enough context to be correct:
 
+0. Your ace in the hole is strictly using the 'thermo-nuclear-code-quality-review' skill
 1. Read `AGENTS.md`.
 2. Read `.opencode/instructions/behavior.md`.
 3. Read `CONTEXT-MAP.md`, then the relevant `CONTEXT.md` files and ADRs it points to.
