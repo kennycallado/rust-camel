@@ -18,6 +18,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "aggregator"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -294,6 +308,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "auto-restart"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-builder",
+ "camel-component-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -423,6 +453,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bean-demo"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-bean",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -511,7 +559,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "cow-utils",
- "dashmap",
+ "dashmap 6.2.1",
  "dynify",
  "fast-float2",
  "float16",
@@ -787,7 +835,7 @@ dependencies = [
  "base64",
  "camel-api",
  "chrono",
- "dashmap",
+ "dashmap 6.2.1",
  "hex",
  "http",
  "jsonwebtoken",
@@ -996,7 +1044,7 @@ dependencies = [
  "camel-bridge",
  "camel-component-api",
  "camel-component-cxf",
- "dashmap",
+ "dashmap 6.2.1",
  "futures",
  "prost",
  "protoc-bin-vendored",
@@ -1037,7 +1085,7 @@ dependencies = [
  "camel-endpoint",
  "camel-language-api",
  "camel-language-simple",
- "dashmap",
+ "dashmap 6.2.1",
  "futures",
  "regex",
  "serde",
@@ -1120,7 +1168,7 @@ dependencies = [
  "camel-api",
  "camel-bridge",
  "camel-component-api",
- "dashmap",
+ "dashmap 6.2.1",
  "futures",
  "prost",
  "protoc-bin-vendored",
@@ -1300,7 +1348,7 @@ dependencies = [
  "camel-component-direct",
  "camel-core",
  "camel-dsl",
- "dashmap",
+ "dashmap 6.2.1",
  "hex",
  "jsonschema",
  "percent-encoding",
@@ -1357,7 +1405,7 @@ dependencies = [
  "camel-auth",
  "camel-component-api",
  "camel-otel",
- "dashmap",
+ "dashmap 6.2.1",
  "futures",
  "http",
  "rustls-pemfile",
@@ -1514,7 +1562,7 @@ dependencies = [
  "bollard",
  "bytes",
  "camel-api",
- "dashmap",
+ "dashmap 6.2.1",
  "futures",
  "reqwest 0.13.4",
  "serde",
@@ -1670,6 +1718,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-platform-kubernetes-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-platform-kubernetes",
+ "k8s-openapi",
+ "kube",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+]
+
+[[package]]
 name = "camel-processor"
 version = "0.12.0"
 dependencies = [
@@ -1763,7 +1824,7 @@ dependencies = [
  "camel-processor",
  "camel-xj",
  "camel-xslt",
- "dashmap",
+ "dashmap 6.2.1",
  "futures",
  "http",
  "k8s-openapi",
@@ -1817,7 +1878,7 @@ dependencies = [
  "camel-api",
  "camel-bridge",
  "camel-component-api",
- "dashmap",
+ "dashmap 6.2.1",
  "prost",
  "protoc-bin-vendored",
  "sha2 0.11.0",
@@ -1983,6 +2044,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "circuit-breaker"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2107,6 +2183,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "config-basic"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-config",
+ "camel-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "config-profiles"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-config",
+ "camel-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2143,6 +2247,98 @@ name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+
+[[package]]
+name = "container-example"
+version = "0.12.0"
+dependencies = [
+ "bollard",
+ "camel-api",
+ "camel-builder",
+ "camel-component-container",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "futures",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "container-hot-reload"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-component-container",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "container-nginx"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-component-container",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "content-based-routing"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "controlbus"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-controlbus",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "convert-body-to"
+version = "0.12.0"
+dependencies = [
+ "bytes",
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "convert_case"
@@ -2464,6 +2660,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "custom-component-bundle"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-component-api",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-config",
+ "camel-core",
+ "config",
+ "serde",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "darling"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2495,6 +2710,19 @@ dependencies = [
  "darling_core",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
 ]
 
 [[package]]
@@ -2542,6 +2770,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
 dependencies = [
  "uuid",
+]
+
+[[package]]
+name = "delayer"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2712,6 +2953,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "dynamic-router"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dynify"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2803,6 +3057,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "env-interpolation"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-config",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "equator"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2850,6 +3117,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "error-handling"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "etcetera"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2892,6 +3174,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-master-leader"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-builder",
+ "camel-component-api",
+ "camel-component-controlbus",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-master",
+ "tokio",
+ "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "example-master-leader-yaml"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-component-api",
+ "camel-component-controlbus",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-config",
+ "camel-core",
+ "camel-master",
+ "tokio",
+ "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "exchange-uow"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fancy-regex"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2923,6 +3258,51 @@ dependencies = [
  "portable-atomic",
  "rand 0.10.1",
  "web-time",
+]
+
+[[package]]
+name = "file-pipeline"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-file",
+ "camel-component-log",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "file-polling"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-file",
+ "camel-component-log",
+ "camel-core",
+ "chrono",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "file-streaming"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "camel-api",
+ "camel-component-api",
+ "camel-component-file",
+ "camel-core",
+ "futures",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3066,6 +3446,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "function-deno-enrich"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "camel-function",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3289,6 +3684,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "grpc-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-grpc",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3382,10 +3792,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "health-demo"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-config",
+ "camel-health",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hello-world"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "hermit-abi"
@@ -3438,6 +3876,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "hot-reload"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "hot-reload-yaml"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-component-log",
+ "camel-component-mock",
+ "camel-component-timer",
+ "camel-config",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "http"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3468,6 +3939,54 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+]
+
+[[package]]
+name = "http-client"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-http",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "http-server"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-http",
+ "camel-core",
+ "camel-processor",
+ "dashmap 5.5.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "http-streaming"
+version = "0.12.0"
+dependencies = [
+ "bytes",
+ "camel-api",
+ "camel-component-api",
+ "camel-component-http",
+ "futures",
+ "reqwest 0.13.4",
+ "tokio",
+ "tokio-util",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3911,6 +4430,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "jms-container-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-container",
+ "camel-component-jms",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "jms-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-jms",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "testcontainers",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3979,6 +4529,21 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "json-dsl"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4082,6 +4647,22 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "kafka-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-kafka",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4213,6 +4794,94 @@ dependencies = [
 ]
 
 [[package]]
+name = "language-js"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-language-js",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "language-jsonpath"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-language-api",
+ "camel-language-jsonpath",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "language-rhai"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-language-api",
+ "camel-language-rhai",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "language-simple"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-language-api",
+ "camel-language-simple",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "language-xpath"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-language-api",
+ "camel-language-xpath",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "lazy-route"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4303,6 +4972,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
+name = "load-balancer"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4318,6 +5000,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
+name = "log-eip"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-mock",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "loop-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4330,6 +5042,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "marshal-unmarshal"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-mock",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -4388,6 +5117,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "metrics-demo"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "micromap"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4419,6 +5162,34 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "multi-route-direct"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "multicast"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -4670,6 +5441,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "opensearch-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-opensearch",
+ "camel-component-timer",
+ "camel-core",
+ "chrono",
+ "reqwest 0.13.4",
+ "serde_json",
+ "testcontainers",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4793,6 +5582,23 @@ checksum = "49203cdcae0030493bad186b28da2fa25645fa276a51b6fec8010d281e02ef79"
 dependencies = [
  "dlv-list",
  "hashbrown 0.14.5",
+]
+
+[[package]]
+name = "otel-demo"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-http",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-otel",
+ "opentelemetry-appender-tracing",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5041,6 +5847,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "pipeline-concurrency"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-http",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "pkcs1"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5193,6 +6012,23 @@ dependencies = [
  "parking_lot",
  "protobuf",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "prometheus-demo"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-prometheus",
+ "rand 0.8.6",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5608,6 +6444,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "recipientlist"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "redb"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5643,6 +6492,23 @@ dependencies = [
  "url",
  "webpki-roots",
  "xxhash-rust",
+]
+
+[[package]]
+name = "redis-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-redis",
+ "camel-component-timer",
+ "camel-core",
+ "redis",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5910,6 +6776,19 @@ dependencies = [
  "serde_derive",
  "typeid",
  "unicode-ident",
+]
+
+[[package]]
+name = "routing-slip"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6240,6 +7119,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "seda-demo"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-seda",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "semver"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6524,6 +7417,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "showcase"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "camel-api",
+ "camel-builder",
+ "camel-component-api",
+ "camel-component-controlbus",
+ "camel-component-direct",
+ "camel-component-file",
+ "camel-component-http",
+ "camel-component-log",
+ "camel-component-mock",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6651,6 +7566,56 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "splitter"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "sql-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-sql",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "sql-streaming"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-sql",
+ "camel-component-timer",
+ "camel-core",
+ "camel-processor",
+ "futures",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tokio-stream",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -7102,6 +8067,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "throttler"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "time"
 version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7479,6 +8457,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
+name = "tracer-demo"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracing"
 version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7567,6 +8558,20 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-serde",
+]
+
+[[package]]
+name = "transform-pipeline"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -7736,12 +8741,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
 dependencies = [
  "base64",
+ "flate2",
  "log",
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
  "ureq-proto",
  "utf8-zero",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -7822,6 +8829,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "validator"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-component-validator",
+ "camel-core",
+ "camel-processor",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7899,6 +8922,21 @@ name = "wasite"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8dad83b4f25e74f184f64c43b150b91efe7647395b42289f38e50566d82855b"
+
+[[package]]
+name = "wasm-bean-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-bean",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-component-wasm",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "wasm-bindgen"
@@ -8000,6 +9038,20 @@ checksum = "5a879a421bd17c528b74721b2abf4c62e8f1d1889c2ba8c3c50d02deaf2ce395"
 dependencies = [
  "leb128fmt",
  "wasmparser 0.251.0",
+]
+
+[[package]]
+name = "wasm-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-component-wasm",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -8882,6 +9934,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wiretap"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-mock",
+ "camel-component-timer",
+ "camel-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9019,6 +10085,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
+name = "ws-server"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-ws",
+ "camel-core",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "xattr"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9026,6 +10106,45 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "xj-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-core",
+ "camel-xj",
+ "tokio",
+ "tower",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "xml-body"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "xslt-example"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-builder",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-core",
+ "camel-xslt",
+ "tokio",
+ "tower",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -9046,6 +10165,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "ts-rs",
+ "ureq",
  "walkdir",
  "zip",
 ]
@@ -9055,6 +10175,21 @@ name = "xxhash-rust"
 version = "0.8.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
+
+[[package]]
+name = "yaml-dsl"
+version = "0.12.0"
+dependencies = [
+ "camel-api",
+ "camel-component-direct",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
+ "camel-dsl",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "yaml-rust2"

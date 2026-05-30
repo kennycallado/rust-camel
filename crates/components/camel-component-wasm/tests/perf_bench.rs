@@ -50,7 +50,6 @@ fn make_exchange() -> WasmExchange {
 }
 
 #[tokio::test]
-#[ignore = "echo.wasm needs recompilation with updated WIT (route-id, message-id fields)"]
 async fn bench_instantiation_cost() {
     let wasm_path = echo_wasm_path();
     let config = WasmConfig::default();

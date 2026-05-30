@@ -65,7 +65,7 @@ async fn main() -> Result<(), CamelError> {
             move |mut exchange: camel_api::Exchange| {
                 let expr = Arc::clone(&expr);
                 Box::pin(async move {
-                    if let Ok(value) = expr.evaluate(&exchange)
+                    if let Ok(value) = expr.evaluate(&exchange).await
                         && let Some(name) = value.as_str()
                     {
                         exchange
@@ -79,7 +79,8 @@ async fn main() -> Result<(), CamelError> {
         .to("log:all-books?showBody=true&showHeaders=true")
         .filter({
             let pred = Arc::clone(&in_stock_pred);
-            move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
+            let handle = tokio::runtime::Handle::current();
+            move |ex: &camel_api::Exchange| handle.block_on(pred.matches(ex)).unwrap_or(false)
         })
         .to("log:in-stock?showBody=true&showHeaders=true")
         .end_filter()

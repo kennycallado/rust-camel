@@ -161,7 +161,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(LogComponent::new());
 
     // Create and configure bean registry
-    let mut bean_registry = BeanRegistry::new();
+    let bean_registry = BeanRegistry::new();
 
     // Register our OrderService bean
     bean_registry

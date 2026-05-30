@@ -38,27 +38,22 @@ async fn main() -> Result<(), CamelError> {
 
     let lang = SimpleLanguage::new();
 
-    // Predicate: only let 'order' messages through the filter
     let order_pred = lang
         .create_predicate("${header.type} == 'order'")
         .expect("valid predicate"); // allow-unwrap
 
-    // Predicate: compound condition using &&
     let high_priority_order_pred = lang
         .create_predicate("${header.type} == 'order' && ${header.priority} == 'high'")
         .expect("valid compound predicate"); // allow-unwrap
 
-    // Predicate: null-safe body existence check
     let body_present_pred = lang
         .create_predicate("${body} != null")
         .expect("valid body presence predicate"); // allow-unwrap
 
-    // Predicate: boolean literal comparison
     let approved_pred = lang
         .create_predicate("${header.approved} == true")
         .expect("valid boolean predicate"); // allow-unwrap
 
-    // Expression: evaluate ${header.type} to enrich the body
     let type_expr = lang
         .create_expression("${header.type}")
         .expect("valid expression"); // allow-unwrap
@@ -77,6 +72,8 @@ async fn main() -> Result<(), CamelError> {
 
     let types = ["order", "invoice", "order", "shipment"];
     let priorities = ["high", "low", "high", "low"];
+
+    let handle = tokio::runtime::Handle::current();
 
     let route = RouteBuilder::from("timer:tick?period=800&repeatCount=8")
         .route_id("language-simple-demo")
@@ -109,7 +106,8 @@ async fn main() -> Result<(), CamelError> {
         // Step 2: demonstrate body null check
         .filter({
             let pred = Arc::clone(&body_present_pred);
-            move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
+            let h = handle.clone();
+            move |ex: &camel_api::Exchange| h.block_on(pred.matches(ex)).unwrap_or(false)
         })
         .to("log:body-present?showBody=true&showHeaders=true")
         .end_filter()
@@ -119,7 +117,7 @@ async fn main() -> Result<(), CamelError> {
             move |mut exchange: camel_api::Exchange| {
                 let expr = Arc::clone(&type_expr);
                 Box::pin(async move {
-                    if let Ok(camel_api::Value::String(t)) = expr.evaluate(&exchange) {
+                    if let Ok(camel_api::Value::String(t)) = expr.evaluate(&exchange).await {
                         let current = exchange.input.body.as_text().unwrap_or("").to_string();
                         exchange.input.body = Body::Text(format!("{current} [type={t}]"));
                     }
@@ -130,21 +128,24 @@ async fn main() -> Result<(), CamelError> {
         // Step 4: filter — only 'order' messages pass
         .filter({
             let pred = Arc::clone(&order_pred);
-            move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
+            let h = handle.clone();
+            move |ex: &camel_api::Exchange| h.block_on(pred.matches(ex)).unwrap_or(false)
         })
         .to("log:orders?showBody=true&showHeaders=true")
         .end_filter()
         // Step 5: compound predicate with && for high-priority orders
         .filter({
             let pred = Arc::clone(&high_priority_order_pred);
-            move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
+            let h = handle.clone();
+            move |ex: &camel_api::Exchange| h.block_on(pred.matches(ex)).unwrap_or(false)
         })
         .to("log:high-priority-orders?showBody=true&showHeaders=true")
         .end_filter()
         // Step 6: boolean comparison against true literal
         .filter({
             let pred = Arc::clone(&approved_pred);
-            move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
+            let h = handle.clone();
+            move |ex: &camel_api::Exchange| h.block_on(pred.matches(ex)).unwrap_or(false)
         })
         .to("log:approved-orders?showBody=true&showHeaders=true")
         .end_filter()

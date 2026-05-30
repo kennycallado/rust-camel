@@ -118,20 +118,19 @@ async fn main() -> Result<(), CamelError> {
             move |mut exchange: camel_api::Exchange| {
                 let expr = Arc::clone(&expr);
                 Box::pin(async move {
-                    if let Ok(camel_api::Value::String(enriched)) = expr.evaluate(&exchange) {
+                    if let Ok(camel_api::Value::String(enriched)) = expr.evaluate(&exchange).await {
                         exchange.input.body = Body::Text(enriched);
                     }
                     Ok(exchange)
                 })
             }
         })
-        // Step 3: Rhai in-script mutation — compute tax and append to body
         .process({
             let expr = Arc::clone(&tax_expr);
             move |mut exchange: camel_api::Exchange| {
                 let expr = Arc::clone(&expr);
                 Box::pin(async move {
-                    if let Ok(camel_api::Value::String(tax_info)) = expr.evaluate(&exchange) {
+                    if let Ok(camel_api::Value::String(tax_info)) = expr.evaluate(&exchange).await {
                         let body = exchange.input.body.as_text().unwrap_or("").to_string();
                         exchange.input.body = Body::Text(format!("{body} ({tax_info})"));
                     }
@@ -154,7 +153,8 @@ async fn main() -> Result<(), CamelError> {
         // Step 6: filter — only high-value orders (amount > 100) to alert log
         .filter({
             let pred = Arc::clone(&high_value_pred);
-            move |ex: &camel_api::Exchange| pred.matches(ex).unwrap_or(false)
+            let handle = tokio::runtime::Handle::current();
+            move |ex: &camel_api::Exchange| handle.block_on(pred.matches(ex)).unwrap_or(false)
         })
         .to("log:high-value-alert?showBody=true")
         .end_filter()

@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use camel_api::recipient_list::{RecipientListConfig, RecipientListExpression};
 use camel_api::{CamelError, Value};
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
@@ -32,7 +32,7 @@ use camel_core::context::CamelContext;
 async fn main() -> Result<(), CamelError> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let mut ctx = CamelContext::new();
+    let mut ctx = CamelContext::builder().build().await.unwrap(); // allow-unwrap
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 

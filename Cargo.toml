@@ -8,18 +8,11 @@ members = [
     "crates/services/*",
     "crates/platforms/*",
     "crates/dataformats/*",
-    "examples/security-keycloak",
-    "examples/security-wasm-policy",
+    "examples/*",
 ]
 exclude = [
-    "examples/ai-poc",
-    "examples/container-hot-reload",
-    "examples/http-server",
-    "examples/jms-example",
-    "examples/kafka-example",
-    "examples/kubernetes-platform",
-    "examples/opensearch-example",
-    "examples/redis-example",
+    "examples/camel-cli-run",
+    "examples/cxf-example",
     "examples/security-wasm-policy/guest",
 ]
 

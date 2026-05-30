@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let fixtures_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
 
-    let mut bean_registry = BeanRegistry::new();
+    let bean_registry = BeanRegistry::new();
 
     let wasm_path = fixtures_dir.join("text_utils.wasm");
     let registry_arc = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
