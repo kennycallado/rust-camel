@@ -76,6 +76,13 @@ enum Commands {
         #[arg(long)]
         shell: bool,
     },
+    /// Publish all workspace crates to crates.io in topological order.
+    /// Skips crates already published and those with publish = false.
+    Publish {
+        /// Don't actually publish, just show what would be done
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() {
@@ -177,6 +184,19 @@ fn main() {
                     std::process::exit(1);
                 });
             if let Err(e) = publish_order(&workspace_root, shell) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Publish { dry_run } => {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let workspace_root = find_workspace_root_from(&manifest_dir)
+                .ok_or_else(|| "Cannot locate workspace root".to_string())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            if let Err(e) = publish_crates(&workspace_root, dry_run) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
@@ -1119,6 +1139,7 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
 }
 
 /// Represents a workspace crate with its publish-relevant metadata.
+#[derive(Clone)]
 struct WorkspaceCrate {
     name: String,
     path: String,
@@ -1126,10 +1147,12 @@ struct WorkspaceCrate {
     publish: bool,
 }
 
-fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
+/// Discover workspace crates and compute topological publish order.
+fn resolve_publish_order(
+    workspace_root: &Path,
+) -> Result<Vec<WorkspaceCrate>, String> {
     let mut crates: Vec<WorkspaceCrate> = Vec::new();
 
-    // Walk all Cargo.toml files under crates/
     let crates_dir = workspace_root.join("crates");
     for entry in walkdir::WalkDir::new(&crates_dir)
         .into_iter()
@@ -1146,7 +1169,6 @@ fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
         let name = extract_toml_name(&content)
             .ok_or_else(|| format!("No name in {}", path.display()))?;
 
-        // Skip non-camel crates (e.g. examples, test fixtures)
         if !name.starts_with("camel-") {
             continue;
         }
@@ -1169,14 +1191,12 @@ fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
         });
     }
 
-    // Build name → index map
     let name_map: std::collections::HashMap<String, usize> = crates
         .iter()
         .enumerate()
         .map(|(i, c)| (c.name.clone(), i))
         .collect();
 
-    // Topological sort (Kahn's algorithm) over publishable crates only
     let publishable: Vec<usize> = crates
         .iter()
         .enumerate()
@@ -1190,10 +1210,11 @@ fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
     for &ci in &publishable {
         for dep_name in &crates[ci].normal_deps {
             if let Some(&di) = name_map.get(dep_name)
-                && crates[di].publish {
-                    in_degree[ci] += 1;
-                    adj[di].push(ci);
-                }
+                && crates[di].publish
+            {
+                in_degree[ci] += 1;
+                adj[di].push(ci);
+            }
         }
     }
 
@@ -1216,7 +1237,11 @@ fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
 
     if sorted.len() != publishable.len() {
         let sorted_set: std::collections::HashSet<usize> = sorted.iter().copied().collect();
-        eprintln!("⚠️  CYCLE! Only sorted {} of {} publishable crates.", sorted.len(), publishable.len());
+        eprintln!(
+            "⚠️  CYCLE! Only sorted {} of {} publishable crates.",
+            sorted.len(),
+            publishable.len()
+        );
         for &ci in &publishable {
             if !sorted_set.contains(&ci) {
                 eprintln!("  {} (in-degree: {})", crates[ci].name, in_degree[ci]);
@@ -1225,15 +1250,20 @@ fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
         return Err("Cannot compute publish order due to dependency cycles".to_string());
     }
 
+    Ok(sorted.into_iter().map(|i| crates[i].clone()).collect())
+}
+
+fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
+    let sorted = resolve_publish_order(workspace_root)?;
+
     if shell {
-        for &ci in &sorted {
-            println!("publish_crate \"{}\" \"{}\"", crates[ci].name, crates[ci].path);
+        for c in &sorted {
+            println!("publish_crate \"{}\" \"{}\"", c.name, c.path);
         }
     } else {
         println!("Publish order ({} crates):", sorted.len());
         println!();
-        for (i, &ci) in sorted.iter().enumerate() {
-            let c = &crates[ci];
+        for (i, c) in sorted.iter().enumerate() {
             if c.normal_deps.is_empty() {
                 println!("{:3}. {:<42} (no deps)", i + 1, c.name);
             } else {
@@ -1241,7 +1271,7 @@ fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
                 println!("{:3}. {:<42} ← {}", i + 1, c.name, deps_str);
             }
         }
-        let skipped: Vec<&WorkspaceCrate> = crates.iter().filter(|c| !c.publish).collect();
+        let skipped: Vec<&WorkspaceCrate> = sorted.iter().filter(|c| !c.publish).collect();
         if !skipped.is_empty() {
             println!();
             println!("Skipped (publish = false):");
@@ -1249,6 +1279,138 @@ fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
                 println!("  - {}", c.name);
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Get workspace version from root Cargo.toml.
+fn workspace_version(workspace_root: &Path) -> Result<String, String> {
+    let cargo_toml = std::fs::read_to_string(workspace_root.join("Cargo.toml"))
+        .map_err(|e| format!("Failed to read root Cargo.toml: {e}"))?;
+    for line in cargo_toml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("version = ") {
+            return Ok(trimmed
+                .strip_prefix("version = ")
+                .unwrap()
+                .trim()
+                .trim_matches('"')
+                .to_string());
+        }
+    }
+    Err("No version found in root Cargo.toml".to_string())
+}
+
+/// Check if a crate version already exists on crates.io.
+fn crate_exists_on_crates_io(name: &str, version: &str) -> Result<bool, String> {
+    let url = format!("https://crates.io/api/v1/crates/{name}/{version}");
+    match ureq::get(&url).call() {
+        Ok(_) => Ok(true),
+        Err(ureq::Error::StatusCode(404)) => Ok(false),
+        Err(e) => Err(format!("Failed to check {name}@{version} on crates.io: {e}")),
+    }
+}
+
+/// Wait for a crate to appear in the registry index after publishing.
+fn wait_for_crate_index(name: &str, version: &str) -> Result<(), String> {
+    println!("⏳ Waiting for {name}@{version} to appear in Cargo registry index...");
+    let attempts = 20;
+    let delay = std::time::Duration::from_secs(15);
+
+    for attempt in 1..=attempts {
+        let output = std::process::Command::new("cargo")
+            .args(["info", &format!("{name}@{version}")])
+            .output()
+            .map_err(|e| format!("Failed to run cargo info: {e}"))?;
+
+        if output.status.success() {
+            println!("✅ {name}@{version} is visible in Cargo registry index");
+            return Ok(());
+        }
+
+        if attempt < attempts {
+            println!("   attempt {attempt}/{attempts}: not visible yet; retrying in 15s...");
+            std::thread::sleep(delay);
+        }
+    }
+
+    Err(format!("Timed out waiting for {name}@{version} in Cargo registry index"))
+}
+
+/// Publish all workspace crates to crates.io in topological order.
+fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
+    let sorted = resolve_publish_order(workspace_root)?;
+    let version = workspace_version(workspace_root)?;
+
+    println!("📦 Publishing rust-camel crates v{version} to crates.io");
+    println!("=============================================");
+
+    let mut published = 0;
+    let mut skipped = 0;
+
+    for c in &sorted {
+        println!();
+        println!("📦 Publishing {}...", c.name);
+
+        // Check if already published
+        match crate_exists_on_crates_io(&c.name, &version) {
+            Ok(true) => {
+                println!("⚠️  {}@{version} already exists on crates.io, skipping...", c.name);
+                skipped += 1;
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("⚠️  Could not check crates.io for {}@{version}: {e}", c.name);
+                // Continue anyway — the publish itself will fail if it exists
+            }
+        }
+
+        println!("📦 Publishing {}@{version}...", c.name);
+
+        if dry_run {
+            println!("⚠️  Dry-run: skipping cargo publish verification");
+            skipped += 1;
+            continue;
+        }
+
+        let output = std::process::Command::new("cargo")
+            .args([
+                "publish",
+                "--allow-dirty",
+            ])
+            .current_dir(workspace_root.join(&c.path))
+            .output()
+            .map_err(|e| format!("Failed to run cargo publish for {}: {e}", c.name))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}{stderr}");
+
+        if !output.status.success() {
+            if combined.contains("already exists") {
+                println!("⚠️  {}@{version} already exists (race), skipping...", c.name);
+                skipped += 1;
+                continue;
+            }
+            eprintln!("{combined}");
+            return Err(format!("Failed to publish {}@{version}", c.name));
+        }
+
+        println!("{combined}");
+        published += 1;
+
+        // Wait for registry index to propagate
+        wait_for_crate_index(&c.name, &version)?;
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+
+    println!();
+    if dry_run {
+        println!("🔍 DRY RUN complete: {} crates would be published, {} skipped", sorted.len() - skipped, skipped);
+    } else {
+        println!("✅ Published {published} crates, skipped {skipped} (already existed)");
     }
 
     Ok(())
