@@ -152,6 +152,7 @@ async fn test_simple_bean_route() {
         concurrency: None,
         error_handler: None,
         circuit_breaker: None,
+        security_policy: None,
         unit_of_work: None,
         steps: vec![DeclarativeStep::Bean(BeanStepDef::new(
             "orderService",
@@ -215,6 +216,7 @@ async fn test_multi_step_bean_route() {
         concurrency: None,
         error_handler: None,
         circuit_breaker: None,
+        security_policy: None,
         unit_of_work: None,
         steps: vec![
             DeclarativeStep::Bean(BeanStepDef::new("orderService", "process")),
@@ -275,6 +277,7 @@ async fn test_bean_with_validation() {
         concurrency: None,
         error_handler: None,
         circuit_breaker: None,
+        security_policy: None,
         unit_of_work: None,
         steps: vec![DeclarativeStep::Bean(BeanStepDef::new(
             "orderService",
@@ -362,6 +365,7 @@ async fn test_bean_route_with_other_steps() {
         concurrency: None,
         error_handler: None,
         circuit_breaker: None,
+        security_policy: None,
         unit_of_work: None,
         steps: vec![
             DeclarativeStep::Bean(BeanStepDef::new("orderService", "process")),
@@ -419,6 +423,7 @@ async fn test_unknown_bean_error() {
         concurrency: None,
         error_handler: None,
         circuit_breaker: None,
+        security_policy: None,
         unit_of_work: None,
         steps: vec![DeclarativeStep::Bean(BeanStepDef::new(
             "unknownService",
@@ -473,6 +478,7 @@ async fn test_yaml_to_bean_execution() {
         concurrency: None,
         error_handler: None,
         circuit_breaker: None,
+        security_policy: None,
         unit_of_work: None,
         steps: vec![DeclarativeStep::Bean(BeanStepDef::new(
             "orderService",

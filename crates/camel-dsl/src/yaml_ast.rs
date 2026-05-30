@@ -31,9 +31,64 @@ pub struct YamlRoute {
     #[serde(default)]
     pub circuit_breaker: Option<YamlCircuitBreaker>,
     #[serde(default)]
+    pub security_policy: Option<YamlSecurityPolicy>,
+    #[serde(default)]
     pub on_complete: Option<String>,
     #[serde(default)]
     pub on_failure: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct YamlSecurityPolicy {
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    #[serde(default)]
+    pub all_required: Option<bool>,
+    #[serde(default)]
+    pub r#ref: Option<String>,
+    #[serde(default)]
+    pub wasm: Option<String>,
+    #[serde(default)]
+    pub config: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub permission: Option<YamlPermissionPolicy>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct YamlPermissionPolicy {
+    pub policy: String,
+    #[serde(default)]
+    pub resource: Option<YamlPermissionValueSource>,
+    #[serde(default)]
+    pub action: Option<YamlPermissionValueSource>,
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    #[serde(default)]
+    pub context: Option<YamlPermissionContext>,
+    #[serde(default)]
+    pub cache_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub cache_negative_ttl_secs: Option<u64>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct YamlPermissionValueSource {
+    #[serde(default)]
+    pub literal: Option<String>,
+    #[serde(default)]
+    pub header: Option<String>,
+    #[serde(default)]
+    pub property: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct YamlPermissionContext {
+    #[serde(default)]
+    pub headers: Vec<String>,
+    #[serde(default)]
+    pub properties: Vec<String>,
 }
 
 #[derive(Deserialize)]

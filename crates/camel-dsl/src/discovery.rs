@@ -11,9 +11,10 @@ use std::io;
 use std::path::Path;
 
 use crate::env_interpolation::interpolate_env;
-use crate::json::{parse_json, parse_json_with_threshold};
+use crate::json::{parse_json, parse_json_with_threshold_and_security};
+use crate::model::SecurityCompileContext;
 use crate::template::materializer::materialize_and_compile;
-use crate::yaml::{parse_yaml, parse_yaml_with_threshold};
+use crate::yaml::{parse_yaml, parse_yaml_with_threshold_and_security};
 
 /// Errors that can occur during route discovery.
 #[derive(Debug, thiserror::Error)]
@@ -111,7 +112,7 @@ fn file_extension(path: &Path) -> Option<String> {
 /// let routes = discover_routes(&["routes/*.yaml".to_string(), "routes/*.json".to_string()])?;
 /// ```
 pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, DiscoveryError> {
-    discover_routes_inner(patterns, None)
+    discover_routes_inner(patterns, None, None)
 }
 
 /// Discovers routes with a custom stream-cache threshold.
@@ -122,12 +123,27 @@ pub fn discover_routes_with_threshold(
     patterns: &[String],
     stream_cache_threshold: usize,
 ) -> Result<Vec<RouteDefinition>, DiscoveryError> {
-    discover_routes_inner(patterns, Some(stream_cache_threshold))
+    discover_routes_inner(patterns, Some(stream_cache_threshold), None)
+}
+
+/// Discovers routes with a custom stream-cache threshold and security compile context.
+///
+/// Same as [`discover_routes_with_threshold`] but also passes a
+/// [`SecurityCompileContext`] through to route compilation, allowing
+/// permission evaluators and security policy registries to be resolved
+/// during DSL compilation.
+pub fn discover_routes_with_threshold_and_security(
+    patterns: &[String],
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+) -> Result<Vec<RouteDefinition>, DiscoveryError> {
+    discover_routes_inner(patterns, Some(stream_cache_threshold), Some(security_ctx))
 }
 
 fn discover_routes_inner(
     patterns: &[String],
     stream_cache_threshold: Option<usize>,
+    security_ctx: Option<SecurityCompileContext>,
 ) -> Result<Vec<RouteDefinition>, DiscoveryError> {
     let mut routes = Vec::new();
     let mut templates: HashMap<String, RouteTemplateSpec> = HashMap::new();
@@ -194,18 +210,21 @@ fn discover_routes_inner(
             match ext.as_deref() {
                 Some("yaml") | Some("yml") => {
                     // Parse regular routes
-                    let file_routes =
-                        match stream_cache_threshold {
-                            Some(threshold) => parse_yaml_with_threshold(&content, threshold)
-                                .map_err(|e| DiscoveryError::Yaml {
-                                    path: path_str.clone(),
-                                    error: e.to_string(),
-                                })?,
-                            None => parse_yaml(&content).map_err(|e| DiscoveryError::Yaml {
-                                path: path_str.clone(),
-                                error: e.to_string(),
-                            })?,
-                        };
+                    let file_routes = match stream_cache_threshold {
+                        Some(threshold) => parse_yaml_with_threshold_and_security(
+                            &content,
+                            threshold,
+                            security_ctx.clone().unwrap_or_default(),
+                        )
+                        .map_err(|e| DiscoveryError::Yaml {
+                            path: path_str.clone(),
+                            error: e.to_string(),
+                        })?,
+                        None => parse_yaml(&content).map_err(|e| DiscoveryError::Yaml {
+                            path: path_str.clone(),
+                            error: e.to_string(),
+                        })?,
+                    };
                     for route in file_routes {
                         routes.push(route.with_source_hash(source_hash));
                     }
@@ -240,18 +259,21 @@ fn discover_routes_inner(
                 }
                 Some("json") => {
                     // Parse regular routes
-                    let file_routes =
-                        match stream_cache_threshold {
-                            Some(threshold) => parse_json_with_threshold(&content, threshold)
-                                .map_err(|e| DiscoveryError::Json {
-                                    path: path_str.clone(),
-                                    error: e.to_string(),
-                                })?,
-                            None => parse_json(&content).map_err(|e| DiscoveryError::Json {
-                                path: path_str.clone(),
-                                error: e.to_string(),
-                            })?,
-                        };
+                    let file_routes = match stream_cache_threshold {
+                        Some(threshold) => parse_json_with_threshold_and_security(
+                            &content,
+                            threshold,
+                            security_ctx.clone().unwrap_or_default(),
+                        )
+                        .map_err(|e| DiscoveryError::Json {
+                            path: path_str.clone(),
+                            error: e.to_string(),
+                        })?,
+                        None => parse_json(&content).map_err(|e| DiscoveryError::Json {
+                            path: path_str.clone(),
+                            error: e.to_string(),
+                        })?,
+                    };
                     for route in file_routes {
                         routes.push(route.with_source_hash(source_hash));
                     }

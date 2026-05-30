@@ -14,6 +14,7 @@
 //! - Epoch-based fuel/interruption requires the `epoch` feature; long-running modules
 //!   without epoch support may block the async executor.
 
+pub mod authorization_policy;
 pub mod bean;
 pub mod bean_bindings;
 pub mod bindings;
@@ -26,15 +27,20 @@ pub mod health;
 pub mod host_functions;
 pub mod producer;
 pub mod runtime;
+pub mod security_policy;
+pub mod security_policy_bindings;
 pub mod serde_bridge;
 pub mod state_store;
+pub mod wasm_plugin_context;
 
+pub use authorization_policy::{WasmAuthorizationPolicyEvaluator, build_permission_registry};
 pub use bundle::WasmBundle;
 pub use config::WasmConfig;
 pub use endpoint::WasmEndpoint;
 pub use epoch::EpochTicker;
 pub use error::{TrapReason, WasmError};
 pub use health::WasmHealthCheck;
+pub use security_policy::WasmSecurityPolicy;
 pub use state_store::StateStore;
 
 use std::path::PathBuf;

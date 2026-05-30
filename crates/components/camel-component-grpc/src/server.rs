@@ -21,8 +21,13 @@ use crate::config::GrpcServerConfig;
 use crate::consumer::{GrpcReply, GrpcRequestEnvelope, GrpcStreamItem};
 use crate::mode::GrpcMode;
 
-pub(crate) type GrpcDispatchTable =
-    Arc<RwLock<HashMap<String, (mpsc::Sender<GrpcRequestEnvelope>, GrpcMode)>>>;
+pub(crate) type GrpcDispatchEntry = (
+    mpsc::Sender<GrpcRequestEnvelope>,
+    GrpcMode,
+    Option<Arc<dyn camel_auth::TokenAuthenticator>>,
+);
+
+pub(crate) type GrpcDispatchTable = Arc<RwLock<HashMap<String, GrpcDispatchEntry>>>;
 
 type ServerKey = (String, u16);
 
@@ -222,6 +227,48 @@ impl futures::Stream for GrpcItemStream {
     }
 }
 
+// ── Authentication helper ──────────────────────────────────────────────────
+
+async fn extract_principal(
+    authenticator: &dyn camel_auth::TokenAuthenticator,
+    metadata: &tonic::metadata::MetadataMap,
+) -> Result<camel_api::security_policy::Principal, tonic::Status> {
+    let token = metadata
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        })
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+
+    let token = match token {
+        Some(t) => t.to_string(),
+        None => {
+            return Err(tonic::Status::unauthenticated(
+                "missing or malformed authorization header",
+            ));
+        }
+    };
+
+    match authenticator.authenticate_bearer(&token).await {
+        Ok(p) => Ok(p),
+        Err(camel_api::CamelError::Unauthenticated(msg)) => {
+            Err(tonic::Status::unauthenticated(msg))
+        }
+        Err(camel_api::CamelError::ProcessorError(msg))
+            if msg.contains("auth provider unavailable") =>
+        {
+            Err(tonic::Status::unavailable(msg))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "gRPC authentication error");
+            Err(tonic::Status::internal(e.to_string()))
+        }
+    }
+}
+
 // ── Mode-aware dispatch ────────────────────────────────────────────────────
 
 async fn handle_grpc_request(
@@ -232,10 +279,12 @@ async fn handle_grpc_request(
 
     let entry = {
         let table = dispatch.read().await;
-        table.get(&path).map(|(tx, mode)| (tx.clone(), *mode))
+        table
+            .get(&path)
+            .map(|(tx, mode, auth)| (tx.clone(), *mode, auth.clone()))
     };
 
-    let Some((sender, mode)) = entry else {
+    let Some((sender, mode, authenticator_opt)) = entry else {
         let handler = UnimplementedHandler;
         let mut grpc = tonic::server::Grpc::new(RawBytesCodec);
         let response = grpc.unary(handler, req).await;
@@ -246,22 +295,34 @@ async fn handle_grpc_request(
 
     match mode {
         GrpcMode::Unary => {
-            let handler = UnaryHandler { sender };
+            let handler = UnaryHandler {
+                sender,
+                authenticator_opt,
+            };
             let response = grpc.unary(handler, req).await;
             Ok(response)
         }
         GrpcMode::ServerStreaming => {
-            let handler = ServerStreamingHandler { sender };
+            let handler = ServerStreamingHandler {
+                sender,
+                authenticator_opt,
+            };
             let response = grpc.server_streaming(handler, req).await;
             Ok(response)
         }
         GrpcMode::ClientStreaming => {
-            let handler = ClientStreamingHandler { sender };
+            let handler = ClientStreamingHandler {
+                sender,
+                authenticator_opt,
+            };
             let response = grpc.client_streaming(handler, req).await;
             Ok(response)
         }
         GrpcMode::Bidi => {
-            let handler = BidiHandler { sender };
+            let handler = BidiHandler {
+                sender,
+                authenticator_opt,
+            };
             let response = grpc.streaming(handler, req).await;
             Ok(response)
         }
@@ -290,6 +351,7 @@ impl Service<Request<Vec<u8>>> for UnimplementedHandler {
 
 struct UnaryHandler {
     sender: mpsc::Sender<GrpcRequestEnvelope>,
+    authenticator_opt: Option<Arc<dyn camel_auth::TokenAuthenticator>>,
 }
 
 impl tonic::server::UnaryService<Vec<u8>> for UnaryHandler {
@@ -297,14 +359,23 @@ impl tonic::server::UnaryService<Vec<u8>> for UnaryHandler {
     type Future = Pin<Box<dyn Future<Output = Result<Response<Self::Response>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Vec<u8>>) -> Self::Future {
+        let authenticator_opt = self.authenticator_opt.clone();
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let envelope = GrpcRequestEnvelope::Unary {
-            metadata: req.metadata().clone(),
-            body: req.into_inner(),
-            reply_tx,
-        };
         let sender = self.sender.clone();
+
         Box::pin(async move {
+            let principal = if let Some(ref authenticator) = authenticator_opt {
+                Some(extract_principal(authenticator.as_ref(), req.metadata()).await?)
+            } else {
+                None
+            };
+
+            let envelope = GrpcRequestEnvelope::Unary {
+                metadata: req.metadata().clone(),
+                body: req.into_inner(),
+                reply_tx,
+                principal,
+            };
             sender
                 .send(envelope)
                 .await
@@ -324,6 +395,7 @@ impl tonic::server::UnaryService<Vec<u8>> for UnaryHandler {
 
 struct ServerStreamingHandler {
     sender: mpsc::Sender<GrpcRequestEnvelope>,
+    authenticator_opt: Option<Arc<dyn camel_auth::TokenAuthenticator>>,
 }
 
 impl tonic::server::ServerStreamingService<Vec<u8>> for ServerStreamingHandler {
@@ -333,14 +405,23 @@ impl tonic::server::ServerStreamingService<Vec<u8>> for ServerStreamingHandler {
         Pin<Box<dyn Future<Output = Result<Response<Self::ResponseStream>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Vec<u8>>) -> Self::Future {
+        let authenticator_opt = self.authenticator_opt.clone();
         let (reply_tx, reply_rx) = mpsc::channel::<GrpcStreamItem>(64);
-        let envelope = GrpcRequestEnvelope::ServerStreaming {
-            metadata: req.metadata().clone(),
-            body: req.into_inner(),
-            reply_tx,
-        };
         let sender = self.sender.clone();
+
         Box::pin(async move {
+            let principal = if let Some(ref authenticator) = authenticator_opt {
+                Some(extract_principal(authenticator.as_ref(), req.metadata()).await?)
+            } else {
+                None
+            };
+
+            let envelope = GrpcRequestEnvelope::ServerStreaming {
+                metadata: req.metadata().clone(),
+                body: req.into_inner(),
+                reply_tx,
+                principal,
+            };
             sender
                 .send(envelope)
                 .await
@@ -356,6 +437,7 @@ impl tonic::server::ServerStreamingService<Vec<u8>> for ServerStreamingHandler {
 
 struct ClientStreamingHandler {
     sender: mpsc::Sender<GrpcRequestEnvelope>,
+    authenticator_opt: Option<Arc<dyn camel_auth::TokenAuthenticator>>,
 }
 
 impl tonic::server::ClientStreamingService<Vec<u8>> for ClientStreamingHandler {
@@ -363,16 +445,25 @@ impl tonic::server::ClientStreamingService<Vec<u8>> for ClientStreamingHandler {
     type Future = Pin<Box<dyn Future<Output = Result<Response<Self::Response>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Streaming<Vec<u8>>>) -> Self::Future {
+        let authenticator_opt = self.authenticator_opt.clone();
         let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(64);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<GrpcReply>();
-        let envelope = GrpcRequestEnvelope::ClientStreaming {
-            metadata: req.metadata().clone(),
-            body_rx,
-            reply_tx,
-        };
         let sender = self.sender.clone();
 
         Box::pin(async move {
+            let principal = if let Some(ref authenticator) = authenticator_opt {
+                Some(extract_principal(authenticator.as_ref(), req.metadata()).await?)
+            } else {
+                None
+            };
+
+            let envelope = GrpcRequestEnvelope::ClientStreaming {
+                metadata: req.metadata().clone(),
+                body_rx,
+                reply_tx,
+                principal,
+            };
+
             let forward_handle = tokio::spawn(async move {
                 let mut stream = req.into_inner();
                 while let Some(result) = stream.next().await {
@@ -417,6 +508,7 @@ impl tonic::server::ClientStreamingService<Vec<u8>> for ClientStreamingHandler {
 
 struct BidiHandler {
     sender: mpsc::Sender<GrpcRequestEnvelope>,
+    authenticator_opt: Option<Arc<dyn camel_auth::TokenAuthenticator>>,
 }
 
 impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
@@ -426,17 +518,26 @@ impl tonic::server::StreamingService<Vec<u8>> for BidiHandler {
         Pin<Box<dyn Future<Output = Result<Response<Self::ResponseStream>, Status>> + Send>>;
 
     fn call(&mut self, req: Request<Streaming<Vec<u8>>>) -> Self::Future {
+        let authenticator_opt = self.authenticator_opt.clone();
         let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(64);
         let (reply_tx, reply_rx) = mpsc::channel::<GrpcStreamItem>(64);
         let reply_tx_forward = reply_tx.clone();
-        let envelope = GrpcRequestEnvelope::Bidi {
-            metadata: req.metadata().clone(),
-            body_rx,
-            reply_tx,
-        };
         let sender = self.sender.clone();
 
         Box::pin(async move {
+            let principal = if let Some(ref authenticator) = authenticator_opt {
+                Some(extract_principal(authenticator.as_ref(), req.metadata()).await?)
+            } else {
+                None
+            };
+
+            let envelope = GrpcRequestEnvelope::Bidi {
+                metadata: req.metadata().clone(),
+                body_rx,
+                reply_tx,
+                principal,
+            };
+
             tokio::spawn(async move {
                 let mut stream = req.into_inner();
                 while let Some(result) = stream.next().await {
@@ -585,7 +686,10 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
         {
             let mut table = dispatch.write().await;
-            table.insert("/test.Service/Method".to_string(), (tx, GrpcMode::Unary));
+            table.insert(
+                "/test.Service/Method".to_string(),
+                (tx, GrpcMode::Unary, None),
+            );
         }
         assert!(dispatch.read().await.contains_key("/test.Service/Method"));
         {
@@ -623,10 +727,10 @@ mod tests {
         let path = "/pkg.Service/Method".to_string();
         {
             let mut table = dispatch.write().await;
-            table.insert(path.clone(), (tx, GrpcMode::ServerStreaming));
+            table.insert(path.clone(), (tx, GrpcMode::ServerStreaming, None));
         }
         let table = dispatch.read().await;
-        let (_, mode) = table.get(&path).unwrap();
+        let (_, mode, _) = table.get(&path).unwrap();
         assert_eq!(*mode, GrpcMode::ServerStreaming);
     }
 
@@ -637,13 +741,13 @@ mod tests {
         let path = "/pkg.Service/Method".to_string();
         {
             let mut table = dispatch.write().await;
-            table.insert(path.clone(), (tx, GrpcMode::Bidi));
+            table.insert(path.clone(), (tx, GrpcMode::Bidi, None));
         }
         {
             let mut table = dispatch.write().await;
             let removed = table.remove(&path);
             assert!(removed.is_some());
-            let (_, mode) = removed.unwrap();
+            let (_, mode, _) = removed.unwrap();
             assert_eq!(mode, GrpcMode::Bidi);
         }
         assert!(dispatch.read().await.is_empty());
@@ -662,13 +766,13 @@ mod tests {
             let mut table = dispatch.write().await;
             for (i, mode) in modes.iter().enumerate() {
                 let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
-                table.insert(format!("/svc/M{i}"), (tx, *mode));
+                table.insert(format!("/svc/M{i}"), (tx, *mode, None));
             }
         }
         let table = dispatch.read().await;
         assert_eq!(table.len(), 4);
         for (i, expected_mode) in modes.iter().enumerate() {
-            let (_, mode) = table.get(&format!("/svc/M{i}")).unwrap();
+            let (_, mode, _) = table.get(&format!("/svc/M{i}")).unwrap();
             assert_eq!(*mode, *expected_mode);
         }
     }
@@ -697,12 +801,14 @@ mod tests {
             metadata: metadata.clone(),
             body: body.clone(),
             reply_tx,
+            principal: None,
         };
         match envelope {
             GrpcRequestEnvelope::Unary {
                 metadata: m,
                 body: b,
                 reply_tx: tx,
+                ..
             } => {
                 assert!(m.get("x-test").is_some());
                 assert_eq!(b, body);
@@ -721,6 +827,7 @@ mod tests {
             metadata: tonic::metadata::MetadataMap::new(),
             body: vec![1],
             reply_tx,
+            principal: None,
         };
         match envelope {
             GrpcRequestEnvelope::ServerStreaming { reply_tx: tx, .. } => {
@@ -744,6 +851,7 @@ mod tests {
             metadata: tonic::metadata::MetadataMap::new(),
             body_rx,
             reply_tx,
+            principal: None,
         };
         let handle = tokio::spawn(async move {
             match envelope {
@@ -775,6 +883,7 @@ mod tests {
             metadata: tonic::metadata::MetadataMap::new(),
             body_rx,
             reply_tx,
+            principal: None,
         };
         let handle = tokio::spawn(async move {
             match envelope {
@@ -822,7 +931,7 @@ mod tests {
         let path = "/test.Unregister/Method".to_string();
         {
             let mut table = dispatch.write().await;
-            table.insert(path.clone(), (tx, GrpcMode::Unary));
+            table.insert(path.clone(), (tx, GrpcMode::Unary, None));
         }
         assert!(dispatch.read().await.contains_key(&path));
 
@@ -836,25 +945,37 @@ mod tests {
     #[test]
     fn test_unary_handler_is_constructable() {
         let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
-        let _handler = UnaryHandler { sender: _tx };
+        let _handler = UnaryHandler {
+            sender: _tx,
+            authenticator_opt: None,
+        };
     }
 
     #[test]
     fn test_server_streaming_handler_is_constructable() {
         let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
-        let _handler = ServerStreamingHandler { sender: _tx };
+        let _handler = ServerStreamingHandler {
+            sender: _tx,
+            authenticator_opt: None,
+        };
     }
 
     #[test]
     fn test_client_streaming_handler_is_constructable() {
         let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
-        let _handler = ClientStreamingHandler { sender: _tx };
+        let _handler = ClientStreamingHandler {
+            sender: _tx,
+            authenticator_opt: None,
+        };
     }
 
     #[test]
     fn test_bidi_handler_is_constructable() {
         let (_tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
-        let _handler = BidiHandler { sender: _tx };
+        let _handler = BidiHandler {
+            sender: _tx,
+            authenticator_opt: None,
+        };
     }
 
     #[tokio::test]
@@ -862,7 +983,10 @@ mod tests {
         let (tx, rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
         drop(rx);
 
-        let mut handler = UnaryHandler { sender: tx };
+        let mut handler = UnaryHandler {
+            sender: tx,
+            authenticator_opt: None,
+        };
         let req = Request::new(vec![1, 2, 3]);
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
@@ -878,7 +1002,10 @@ mod tests {
         let (tx, rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
         drop(rx);
 
-        let mut handler = ServerStreamingHandler { sender: tx };
+        let mut handler = ServerStreamingHandler {
+            sender: tx,
+            authenticator_opt: None,
+        };
         let req = Request::new(vec![1, 2, 3]);
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
@@ -896,7 +1023,10 @@ mod tests {
         let (tx, rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
         drop(rx);
 
-        let handler = ClientStreamingHandler { sender: tx };
+        let handler = ClientStreamingHandler {
+            sender: tx,
+            authenticator_opt: None,
+        };
         assert!(handler.sender.is_closed());
     }
 
@@ -905,7 +1035,10 @@ mod tests {
         let (tx, rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
         drop(rx);
 
-        let handler = BidiHandler { sender: tx };
+        let handler = BidiHandler {
+            sender: tx,
+            authenticator_opt: None,
+        };
         assert!(handler.sender.is_closed());
     }
 
@@ -913,7 +1046,10 @@ mod tests {
     async fn test_unary_handler_reply_channel_dropped() {
         let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
 
-        let mut handler = UnaryHandler { sender: tx };
+        let mut handler = UnaryHandler {
+            sender: tx,
+            authenticator_opt: None,
+        };
         let req = Request::new(vec![1, 2, 3]);
         let fut = handler.call(req);
 
@@ -937,7 +1073,10 @@ mod tests {
     async fn test_unary_handler_returns_ok_response() {
         let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
 
-        let mut handler = UnaryHandler { sender: tx };
+        let mut handler = UnaryHandler {
+            sender: tx,
+            authenticator_opt: None,
+        };
         let req = Request::new(vec![10, 20, 30]);
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
@@ -959,7 +1098,10 @@ mod tests {
     async fn test_unary_handler_returns_error_response() {
         let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
 
-        let mut handler = UnaryHandler { sender: tx };
+        let mut handler = UnaryHandler {
+            sender: tx,
+            authenticator_opt: None,
+        };
         let req = Request::new(vec![1]);
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
@@ -981,7 +1123,10 @@ mod tests {
     async fn test_server_streaming_handler_success() {
         let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
 
-        let mut handler = ServerStreamingHandler { sender: tx };
+        let mut handler = ServerStreamingHandler {
+            sender: tx,
+            authenticator_opt: None,
+        };
         let req = Request::new(vec![1, 2]);
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
@@ -1009,7 +1154,10 @@ mod tests {
     async fn test_server_streaming_handler_error_in_stream() {
         let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
 
-        let mut handler = ServerStreamingHandler { sender: tx };
+        let mut handler = ServerStreamingHandler {
+            sender: tx,
+            authenticator_opt: None,
+        };
         let req = Request::new(vec![1]);
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
@@ -1037,12 +1185,16 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(4);
         let (reply_tx, _reply_rx) = mpsc::channel::<GrpcStreamItem>(4);
 
-        let handler = BidiHandler { sender: tx };
+        let handler = BidiHandler {
+            sender: tx,
+            authenticator_opt: None,
+        };
         let (body_tx, body_rx) = mpsc::channel::<Vec<u8>>(4);
         let envelope_for_test = GrpcRequestEnvelope::Bidi {
             metadata: tonic::metadata::MetadataMap::new(),
             body_rx,
             reply_tx,
+            principal: None,
         };
 
         let send_result = handler.sender.send(envelope_for_test).await;
@@ -1075,6 +1227,185 @@ mod tests {
             GrpcStreamItem::Done => {}
             _ => panic!(),
         }
+    }
+
+    #[derive(Debug)]
+    struct MockAuthenticator {
+        should_fail_unauthenticated: bool,
+        should_fail_unavailable: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl camel_auth::TokenAuthenticator for MockAuthenticator {
+        async fn authenticate_bearer(
+            &self,
+            _token: &str,
+        ) -> Result<camel_api::security_policy::Principal, camel_api::CamelError> {
+            if self.should_fail_unavailable {
+                return Err(camel_api::CamelError::ProcessorError(
+                    "auth provider unavailable".into(),
+                ));
+            }
+            if self.should_fail_unauthenticated {
+                return Err(camel_api::CamelError::Unauthenticated(
+                    "invalid token".into(),
+                ));
+            }
+            Ok(camel_api::security_policy::Principal {
+                subject: "test-user".into(),
+                issuer: "test-issuer".into(),
+                audience: vec![],
+                scopes: vec![],
+                roles: vec![],
+                claims: serde_json::json!({}),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_grpc_auth_valid_token() {
+        let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> =
+            Some(Arc::new(MockAuthenticator {
+                should_fail_unauthenticated: false,
+                should_fail_unavailable: false,
+            }));
+
+        let mut handler = UnaryHandler {
+            sender: tx,
+            authenticator_opt: authenticator,
+        };
+
+        let mut request = Request::new(vec![]);
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer test-token".parse().unwrap());
+
+        let handle = tokio::spawn(async move {
+            let envelope = rx.recv().await.unwrap();
+            match envelope {
+                GrpcRequestEnvelope::Unary {
+                    principal,
+                    reply_tx,
+                    ..
+                } => {
+                    assert!(principal.is_some());
+                    let p = principal.unwrap();
+                    assert_eq!(p.subject, "test-user");
+                    assert_eq!(p.issuer, "test-issuer");
+                    let _ = reply_tx.send(GrpcReply::Ok(vec![]));
+                }
+                _ => panic!("expected Unary"),
+            }
+        });
+
+        let result = handler.call(request).await;
+        assert!(result.is_ok());
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_grpc_auth_missing_token() {
+        let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> =
+            Some(Arc::new(MockAuthenticator {
+                should_fail_unauthenticated: false,
+                should_fail_unavailable: false,
+            }));
+
+        let mut handler = UnaryHandler {
+            sender: tx,
+            authenticator_opt: authenticator,
+        };
+
+        let request = Request::new(vec![]);
+
+        let result = handler.call(request).await;
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn test_grpc_auth_invalid_token() {
+        let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> =
+            Some(Arc::new(MockAuthenticator {
+                should_fail_unauthenticated: true,
+                should_fail_unavailable: false,
+            }));
+
+        let mut handler = UnaryHandler {
+            sender: tx,
+            authenticator_opt: authenticator,
+        };
+
+        let mut request = Request::new(vec![]);
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer bad-token".parse().unwrap());
+
+        let result = handler.call(request).await;
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn test_grpc_auth_provider_unavailable() {
+        let (tx, _rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> =
+            Some(Arc::new(MockAuthenticator {
+                should_fail_unauthenticated: false,
+                should_fail_unavailable: true,
+            }));
+
+        let mut handler = UnaryHandler {
+            sender: tx,
+            authenticator_opt: authenticator,
+        };
+
+        let mut request = Request::new(vec![]);
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer valid-token".parse().unwrap());
+
+        let result = handler.call(request).await;
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn test_grpc_no_auth_configured() {
+        let (tx, mut rx) = mpsc::channel::<GrpcRequestEnvelope>(1);
+        let authenticator: Option<Arc<dyn camel_auth::TokenAuthenticator>> = None;
+
+        let mut handler = UnaryHandler {
+            sender: tx,
+            authenticator_opt: authenticator,
+        };
+
+        let request = Request::new(vec![]);
+
+        let handle = tokio::spawn(async move {
+            let envelope = rx.recv().await.unwrap();
+            match envelope {
+                GrpcRequestEnvelope::Unary {
+                    principal,
+                    reply_tx,
+                    ..
+                } => {
+                    assert!(principal.is_none());
+                    let _ = reply_tx.send(GrpcReply::Ok(vec![]));
+                }
+                _ => panic!("expected Unary"),
+            }
+        });
+
+        let result = handler.call(request).await;
+        assert!(result.is_ok());
+        handle.await.unwrap();
     }
 
     #[tokio::test]

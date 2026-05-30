@@ -107,6 +107,7 @@ publish_crate() {
 
 # Core crates (in dependency order)
 publish_crate "camel-api" "crates/camel-api"
+publish_crate "camel-auth" "crates/services/camel-auth"
 # SKIPPED: camel-util and camel-support removed — audit UTIL-001, SUPPORT-001
 # publish_crate "camel-util" "crates/camel-util"
 # publish_crate "camel-support" "crates/camel-support"
@@ -193,6 +194,7 @@ publish_crate "camel-xj" "crates/components/camel-xj"
 publish_crate "camel-component-cxf" "crates/components/camel-cxf"
 publish_crate "camel-master" "crates/components/camel-master"
 publish_crate "camel-component-opensearch" "crates/components/camel-opensearch"
+publish_crate "camel-component-keycloak" "crates/components/camel-component-keycloak"
 
 # camel-config depends on camel-otel, camel-prometheus and many component crates
 publish_crate "camel-config" "crates/camel-config"

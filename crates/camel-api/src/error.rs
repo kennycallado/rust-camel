@@ -60,6 +60,12 @@ pub enum CamelError {
 
     #[error("Stream size exceeded limit: {0}")]
     StreamLimitExceeded(usize),
+
+    #[error("Unauthenticated: {0}")]
+    Unauthenticated(String),
+
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
 }
 
 impl CamelError {
@@ -79,6 +85,8 @@ impl CamelError {
             Self::Stopped => "stopped",
             Self::StreamLimitExceeded(_) => "stream",
             Self::ChannelClosed => "channel",
+            Self::Unauthenticated(_) => "unauthenticated",
+            Self::Unauthorized(_) => "unauthorized",
             _ => "unknown",
         }
     }
@@ -127,6 +135,8 @@ mod tests {
             CamelError::Config("x".to_string()),
             CamelError::AlreadyConsumed,
             CamelError::StreamLimitExceeded(42),
+            CamelError::Unauthenticated("token expired".to_string()),
+            CamelError::Unauthorized("missing admin role".to_string()),
         ]
     }
 
@@ -228,5 +238,28 @@ mod tests {
             assert!(class.is_ascii());
             assert!(class.len() <= 15, "class too long: {class}");
         }
+    }
+
+    #[test]
+    fn test_auth_variants_classify() {
+        assert_eq!(
+            CamelError::Unauthenticated("x".to_string()).classify(),
+            "unauthenticated"
+        );
+        assert_eq!(
+            CamelError::Unauthorized("x".to_string()).classify(),
+            "unauthorized"
+        );
+    }
+
+    #[test]
+    fn test_auth_variants_are_clone() {
+        let err = CamelError::Unauthenticated("test".to_string());
+        let cloned = err.clone();
+        assert!(matches!(cloned, CamelError::Unauthenticated(_)));
+
+        let err2 = CamelError::Unauthorized("test".to_string());
+        let cloned2 = err2.clone();
+        assert!(matches!(cloned2, CamelError::Unauthorized(_)));
     }
 }

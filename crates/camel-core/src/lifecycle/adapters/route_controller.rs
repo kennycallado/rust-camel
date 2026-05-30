@@ -24,6 +24,7 @@ use camel_api::{
     NoopPlatformService, PlatformService, ProducerContext, RouteController, RuntimeCommand,
     RuntimeHandle,
 };
+use camel_auth::TokenAuthenticator;
 use camel_component_api::{
     ComponentContext, ConcurrencyModel, ConsumerContext, consumer::ExchangeEnvelope,
 };
@@ -32,6 +33,7 @@ pub use camel_processor::aggregator::SharedLanguageRegistry;
 use camel_processor::aggregator::{AggregatorService, has_timeout_condition};
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use camel_processor::error_handler::ErrorHandlerLayer;
+use camel_processor::security_policy_layer::SecurityPolicyLayer;
 
 use crate::health_registry::HealthCheckRegistry;
 use crate::lifecycle::adapters::exchange_uow::ExchangeUoWLayer;
@@ -132,6 +134,10 @@ pub(super) struct ManagedRoute {
     pub(super) in_flight: Option<Arc<std::sync::atomic::AtomicU64>>,
     pub(super) aggregate_split: Option<AggregateSplitInfo>,
     pub(super) agg_service: Option<Arc<std::sync::Mutex<AggregatorService>>>,
+    /// Stored security policy config for use when starting/resuming the consumer.
+    pub(super) security_policy: Option<camel_api::security_policy::SecurityPolicyConfig>,
+    /// Stored security authenticator for use when starting/resuming the consumer.
+    pub(super) security_authenticator: Option<Arc<dyn TokenAuthenticator>>,
 }
 
 pub(crate) struct PreparedRoute {
@@ -638,6 +644,8 @@ impl DefaultRouteController {
             steps,
             error_handler,
             circuit_breaker,
+            security_policy,
+            security_authenticator,
             unit_of_work,
             concurrency,
             ..
@@ -712,6 +720,11 @@ impl DefaultRouteController {
             pipeline = BoxProcessor::new(cb_layer.layer(pipeline));
         }
 
+        if let Some(sp_config) = security_policy.clone() {
+            let sp_layer = SecurityPolicyLayer::new(sp_config.policy);
+            pipeline = BoxProcessor::new(sp_layer.layer(pipeline));
+        }
+
         let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
 
         if let Some(config) = eh_config {
@@ -763,6 +776,8 @@ impl DefaultRouteController {
                 in_flight: uow_counter,
                 aggregate_split,
                 agg_service: None,
+                security_policy,
+                security_authenticator,
             },
         })
     }
@@ -872,6 +887,11 @@ impl DefaultRouteController {
             pipeline = BoxProcessor::new(cb_layer.layer(pipeline));
         }
 
+        if let Some(sp_config) = def.security_policy {
+            let sp_layer = SecurityPolicyLayer::new(sp_config.policy);
+            pipeline = BoxProcessor::new(sp_layer.layer(pipeline));
+        }
+
         let eh_config = def
             .error_handler
             .clone()
@@ -949,6 +969,11 @@ impl DefaultRouteController {
         if let Some(cb_config) = def.circuit_breaker {
             let cb_layer = CircuitBreakerLayer::new(cb_config);
             pipeline = BoxProcessor::new(cb_layer.layer(pipeline));
+        }
+
+        if let Some(sp_config) = def.security_policy {
+            let sp_layer = SecurityPolicyLayer::new(sp_config.policy);
+            pipeline = BoxProcessor::new(sp_layer.layer(pipeline));
         }
 
         let eh_config = def
@@ -1211,20 +1236,21 @@ impl RouteController for DefaultRouteController {
         let crash_notifier = self.crash_notifier.clone();
         let runtime_for_consumer = self.runtime.clone();
 
-        let (consumer, consumer_concurrency) = super::consumer_management::create_route_consumer(
-            &self.registry,
-            &from_uri,
-            &ControllerComponentContext::new(
-                Arc::clone(&self.registry),
-                Arc::clone(&self.languages),
-                self.tracer_metrics
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(NoOpMetrics)),
-                Arc::clone(&self.platform_service),
-                self.health_registry(),
-                Some(route_id.to_string()),
-            ),
-        )?;
+        let (mut consumer, consumer_concurrency) =
+            super::consumer_management::create_route_consumer(
+                &self.registry,
+                &from_uri,
+                &ControllerComponentContext::new(
+                    Arc::clone(&self.registry),
+                    Arc::clone(&self.languages),
+                    self.tracer_metrics
+                        .clone()
+                        .unwrap_or_else(|| Arc::new(NoOpMetrics)),
+                    Arc::clone(&self.platform_service),
+                    self.health_registry(),
+                    Some(route_id.to_string()),
+                ),
+            )?;
 
         // Resolve effective concurrency: route override > consumer default
         let effective_concurrency = concurrency.unwrap_or(consumer_concurrency);
@@ -1234,6 +1260,17 @@ impl RouteController for DefaultRouteController {
             .routes
             .get_mut(route_id)
             .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+
+        // Wire security context before spawning consumer
+        if let (Some(sp_config), Some(authenticator)) = (
+            managed.security_policy.as_ref(),
+            managed.security_authenticator.as_ref(),
+        ) {
+            use camel_component_api::SecurityContext;
+            let sec_ctx =
+                SecurityContext::from_arc(Arc::clone(&sp_config.policy), Arc::clone(authenticator));
+            consumer.set_security_context(sec_ctx);
+        }
 
         // Create channel for consumer to send exchanges
         let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(256);
@@ -1594,7 +1631,7 @@ impl RouteController for DefaultRouteController {
 
         info!(route_id = %route_id, "Resuming route (spawning consumer only)");
 
-        let (consumer, _) = super::consumer_management::create_route_consumer(
+        let (mut consumer, _) = super::consumer_management::create_route_consumer(
             &self.registry,
             &from_uri,
             &ControllerComponentContext::new(
@@ -1608,6 +1645,21 @@ impl RouteController for DefaultRouteController {
                 Some(route_id.to_string()),
             ),
         )?;
+
+        // Wire security context before spawning consumer
+        let managed = self
+            .routes
+            .get(route_id)
+            .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+        if let (Some(sp_config), Some(authenticator)) = (
+            managed.security_policy.as_ref(),
+            managed.security_authenticator.as_ref(),
+        ) {
+            use camel_component_api::SecurityContext;
+            let sec_ctx =
+                SecurityContext::from_arc(Arc::clone(&sp_config.policy), Arc::clone(authenticator));
+            consumer.set_security_context(sec_ctx);
+        }
 
         // Get the managed route for mutation
         let managed = self

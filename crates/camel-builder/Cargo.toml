@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true
+camel-auth.workspace = true
 camel-core.workspace = true
 camel-processor.workspace = true
 camel-component-api.workspace = true

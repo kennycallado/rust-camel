@@ -8,8 +8,20 @@ members = [
     "crates/services/*",
     "crates/platforms/*",
     "crates/dataformats/*",
+    "examples/security-keycloak",
+    "examples/security-wasm-policy",
 ]
-exclude = ["examples/*"]
+exclude = [
+    "examples/ai-poc",
+    "examples/container-hot-reload",
+    "examples/http-server",
+    "examples/jms-example",
+    "examples/kafka-example",
+    "examples/kubernetes-platform",
+    "examples/opensearch-example",
+    "examples/redis-example",
+    "examples/security-wasm-policy/guest",
+]
 
 [workspace.metadata.crane]
 name = "rust-camel"
@@ -31,6 +43,8 @@ categories = ["network-programming", "asynchronous", "development-tools"]
 # Exact pinning (=) ensures cargo publish verifies against the exact version
 # being released, not an older one already on crates.io.
 camel-api = { path = "crates/camel-api", version = "=0.11.1" }
+camel-auth = { path = "crates/services/camel-auth", version = "=0.11.1" }
+camel-component-keycloak = { path = "crates/components/camel-component-keycloak", version = "=0.11.1" }
 camel-bean = { path = "crates/camel-bean", version = "=0.11.1" }
 camel-bean-macros = { path = "crates/camel-bean-macros", version = "=0.11.1" }
 camel-cli = { path = "crates/camel-cli", version = "=0.11.1" }
@@ -82,7 +96,6 @@ camel-component-grpc = { path = "crates/components/camel-component-grpc", versio
 camel-component-opensearch = { path = "crates/components/camel-opensearch", version = "=0.11.1" }
 camel-wit = { path = "crates/camel-wit", version = "=0.11.1" }
 camel-component-wasm = { path = "crates/components/camel-component-wasm", version = "=0.11.1" }
-camel-auth = { path = "crates/services/camel-auth", version = "=0.11.1" }
 
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14" }
@@ -102,6 +115,7 @@ tracing = "0.1"
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 tokio-stream = "0.1"
 dashmap = "6"
+indexmap = "2"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 kube = { version = "3", features = ["runtime", "derive"] }
@@ -110,6 +124,8 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.13", features = ["rustls", "stream"], default-features = false }
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+wiremock = "0.6"
 sha2 = "0.11"
 hex = "0.4"
 flate2 = "1"
@@ -135,6 +151,8 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 prometheus = "0.14"
 quick-xml = "0.40"
 base64 = "0.22"
+rsa = { version = "0.9", features = ["pem"] }
+serde_urlencoded = "0.7"
 rand = "0.10"
 sxd-document = "0.3"
 jsonschema = { version = "0.46", default-features = false, features = ["resolve-file"] }

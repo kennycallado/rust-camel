@@ -15,13 +15,13 @@ use crate::contract::{DeclarativeStepKind, assert_contract_coverage};
 use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
-    DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep,
-    DelayStepDef, DynamicRouterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
-    LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
-    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
-    SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
-    StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef,
-    WhenStepDef, WireTapStepDef,
+    DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
+    DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DynamicRouterStepDef,
+    LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef,
+    LoopStepDef, MulticastAggregationDef, MulticastStepDef, RecipientListStepDef,
+    RoutingSlipStepDef, ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef,
+    SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef,
+    ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::yaml_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
@@ -90,19 +90,59 @@ pub fn parse_yaml_with_threshold(
     yaml: &str,
     stream_cache_threshold: usize,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_yaml_with_threshold_and_security(
+        yaml,
+        stream_cache_threshold,
+        SecurityCompileContext::default(),
+    )
+}
+
+pub fn parse_yaml_with_threshold_and_security(
+    yaml: &str,
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+) -> Result<Vec<RouteDefinition>, CamelError> {
     parse_yaml_to_declarative(yaml)?
         .into_iter()
         .map(|route| {
-            compile_declarative_route_with_stream_cache_threshold(route, stream_cache_threshold)
+            compile_declarative_route_with_stream_cache_threshold(
+                route,
+                stream_cache_threshold,
+                security_ctx.clone(),
+            )
         })
         .collect()
 }
 
 pub fn parse_yaml_to_canonical(yaml: &str) -> Result<Vec<CanonicalRouteSpec>, CamelError> {
-    parse_yaml_to_declarative(yaml)?
+    let routes = parse_yaml_to_declarative(yaml)?;
+    for route in &routes {
+        if route.security_policy.is_some() {
+            return Err(CamelError::RouteError(
+                "routes with security_policy cannot use the canonical/hot-reload path (not yet supported)".into(),
+            ));
+        }
+    }
+    routes
         .into_iter()
         .map(compile_declarative_route_to_canonical)
         .collect()
+}
+
+fn yaml_source_to_value_source(
+    yaml: crate::yaml_ast::YamlPermissionValueSource,
+) -> Result<camel_auth::PermissionValueSource, CamelError> {
+    if let Some(s) = yaml.literal {
+        Ok(camel_auth::PermissionValueSource::Literal(s))
+    } else if let Some(h) = yaml.header {
+        Ok(camel_auth::PermissionValueSource::Header(h))
+    } else if let Some(p) = yaml.property {
+        Ok(camel_auth::PermissionValueSource::Property(p))
+    } else {
+        Err(CamelError::RouteError(
+            "security_policy permission resource/action must specify exactly one of: literal, header, or property".into(),
+        ))
+    }
 }
 
 pub(crate) fn yaml_route_to_declarative_route(
@@ -193,6 +233,102 @@ pub(crate) fn yaml_route_to_declarative_route(
         })
         .transpose()?;
 
+    let security_policy = route
+        .security_policy
+        .map(|sp| {
+            let forms = [
+                sp.roles.is_some(),
+                sp.scopes.is_some(),
+                sp.r#ref.is_some(),
+                sp.wasm.is_some(),
+                sp.permission.is_some(),
+            ]
+            .iter()
+            .filter(|&&f| f)
+            .count();
+            if forms == 0 {
+                return Err(CamelError::RouteError(
+                    "security_policy must specify exactly one of: roles, scopes, ref, wasm, permission".into(),
+                ));
+            }
+            if forms > 1 {
+                return Err(CamelError::RouteError(
+                    "security_policy must specify exactly one of: roles, scopes, ref, wasm, permission (multiple forms found)".into(),
+                ));
+            }
+            if let Some(roles) = sp.roles {
+                if roles.is_empty() {
+                    return Err(CamelError::RouteError(
+                        "security_policy roles must not be empty".into(),
+                    ));
+                }
+                Ok(DeclarativeSecurityPolicy::Roles {
+                    roles,
+                    all_required: sp.all_required.unwrap_or(true),
+                })
+            } else if let Some(scopes) = sp.scopes {
+                if scopes.is_empty() {
+                    return Err(CamelError::RouteError(
+                        "security_policy scopes must not be empty".into(),
+                    ));
+                }
+                Ok(DeclarativeSecurityPolicy::Scopes {
+                    scopes,
+                    all_required: sp.all_required.unwrap_or(true),
+                })
+            } else if let Some(name) = sp.r#ref {
+                if sp.all_required.is_some() {
+                    return Err(CamelError::RouteError(
+                        "security_policy all_required is not valid with ref form".into(),
+                    ));
+                }
+                Ok(DeclarativeSecurityPolicy::Ref { name })
+            } else if let Some(path) = sp.wasm {
+                if sp.all_required.is_some() {
+                    return Err(CamelError::RouteError(
+                        "security_policy all_required is not valid with wasm form".into(),
+                    ));
+                }
+                Ok(DeclarativeSecurityPolicy::Wasm {
+                    path,
+                    config: sp.config.unwrap_or_default(),
+                })
+            } else if let Some(perm) = sp.permission {
+                if perm.policy.trim().is_empty() {
+                    return Err(CamelError::RouteError(
+                        "security_policy permission policy must not be empty".into(),
+                    ));
+                }
+                if sp.all_required.is_some() {
+                    return Err(CamelError::RouteError(
+                        "security_policy all_required is not valid with permission form".into(),
+                    ));
+                }
+                Ok(DeclarativeSecurityPolicy::Permission {
+                    policy: perm.policy,
+                    resource: perm.resource.map(yaml_source_to_value_source).transpose()?.unwrap_or(
+                        camel_auth::PermissionValueSource::Header("x-resource".into()),
+                    ),
+                    action: perm.action.map(yaml_source_to_value_source).transpose()?.unwrap_or(
+                        camel_auth::PermissionValueSource::Header("x-action".into()),
+                    ),
+                    scopes: perm.scopes.unwrap_or_default(),
+                    context: perm
+                        .context
+                        .map(|ctx| camel_auth::PermissionContextConfig {
+                            include_headers: ctx.headers,
+                            include_properties: ctx.properties,
+                        })
+                        .unwrap_or_default(),
+                    cache_ttl_secs: perm.cache_ttl_secs,
+                    cache_negative_ttl_secs: perm.cache_negative_ttl_secs,
+                })
+            } else {
+                unreachable!("validated forms count above")
+            }
+        })
+        .transpose()?;
+
     let unit_of_work = if route.on_complete.is_some() || route.on_failure.is_some() {
         Some(camel_api::UnitOfWorkConfig {
             on_complete: route.on_complete,
@@ -216,6 +352,7 @@ pub(crate) fn yaml_route_to_declarative_route(
         concurrency,
         error_handler,
         circuit_breaker,
+        security_policy,
         unit_of_work,
         steps,
     })
@@ -1311,6 +1448,398 @@ routes:
             err.contains("out-of-scope"),
             "expected explicit canonical subset reason, got: {err}"
         );
+    }
+
+    #[test]
+    fn parse_security_policy_roles() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["admin", "superuser"]
+      all_required: false
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert_eq!(routes.len(), 1);
+        let sp = routes[0].security_policy.as_ref().unwrap();
+        match sp {
+            DeclarativeSecurityPolicy::Roles {
+                roles,
+                all_required,
+            } => {
+                assert_eq!(roles, &vec!["admin".to_string(), "superuser".to_string()]);
+                assert!(!all_required);
+            }
+            _ => panic!("expected Roles"),
+        }
+    }
+
+    #[test]
+    fn parse_security_policy_scopes() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      scopes: ["read:api"]
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let sp = routes[0].security_policy.as_ref().unwrap();
+        match sp {
+            DeclarativeSecurityPolicy::Scopes {
+                scopes,
+                all_required,
+            } => {
+                assert_eq!(scopes, &vec!["read:api".to_string()]);
+                assert!(*all_required);
+            }
+            _ => panic!("expected Scopes"),
+        }
+    }
+
+    #[test]
+    fn parse_security_policy_ref() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      ref: "my-custom-policy"
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let sp = routes[0].security_policy.as_ref().unwrap();
+        match sp {
+            DeclarativeSecurityPolicy::Ref { name } => {
+                assert_eq!(name, "my-custom-policy");
+            }
+            _ => panic!("expected Ref"),
+        }
+    }
+
+    #[test]
+    fn parse_security_policy_wasm() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      wasm: "plugins/my-auth-policy.wasm"
+      config:
+        ldap_url: "ldap://corp"
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let sp = routes[0].security_policy.as_ref().unwrap();
+        match sp {
+            DeclarativeSecurityPolicy::Wasm { path, config } => {
+                assert_eq!(path, "plugins/my-auth-policy.wasm");
+                assert_eq!(config.get("ldap_url").unwrap(), "ldap://corp");
+            }
+            _ => panic!("expected Wasm"),
+        }
+    }
+
+    #[test]
+    fn parse_security_policy_permission() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: "keycloak-uma"
+        cache_ttl_secs: 60
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let sp = routes[0].security_policy.as_ref().unwrap();
+        match sp {
+            DeclarativeSecurityPolicy::Permission {
+                policy,
+                resource,
+                action,
+                scopes,
+                context,
+                cache_ttl_secs,
+                cache_negative_ttl_secs,
+            } => {
+                assert_eq!(policy, "keycloak-uma");
+                assert_eq!(
+                    resource,
+                    &camel_auth::PermissionValueSource::Header("x-resource".into())
+                );
+                assert_eq!(
+                    action,
+                    &camel_auth::PermissionValueSource::Header("x-action".into())
+                );
+                assert!(scopes.is_empty());
+                assert_eq!(context, &camel_auth::PermissionContextConfig::default());
+                assert_eq!(*cache_ttl_secs, Some(60));
+                assert_eq!(*cache_negative_ttl_secs, None);
+            }
+            _ => panic!("expected Permission"),
+        }
+    }
+
+    #[test]
+    fn parse_security_policy_permission_full_shape() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: "invoice-policy"
+        resource:
+          header: "CamelResourceId"
+        action:
+          literal: "read"
+        scopes: ["read", "write"]
+        context:
+          headers: ["CamelTenantId"]
+          properties: ["camel.auth.subject"]
+        cache_ttl_secs: 60
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let sp = routes[0].security_policy.as_ref().unwrap();
+        match sp {
+            DeclarativeSecurityPolicy::Permission {
+                policy,
+                resource,
+                action,
+                scopes,
+                context,
+                cache_ttl_secs,
+                cache_negative_ttl_secs,
+            } => {
+                assert_eq!(policy, "invoice-policy");
+                assert_eq!(
+                    resource,
+                    &camel_auth::PermissionValueSource::Header("CamelResourceId".to_string())
+                );
+                assert_eq!(
+                    action,
+                    &camel_auth::PermissionValueSource::Literal("read".to_string())
+                );
+                assert_eq!(scopes, &vec!["read".to_string(), "write".to_string()]);
+                assert_eq!(context.include_headers, vec!["CamelTenantId".to_string()]);
+                assert_eq!(
+                    context.include_properties,
+                    vec!["camel.auth.subject".to_string()]
+                );
+                assert_eq!(*cache_ttl_secs, Some(60));
+                assert_eq!(*cache_negative_ttl_secs, None);
+            }
+            _ => panic!("expected Permission"),
+        }
+    }
+
+    #[test]
+    fn parse_security_policy_permission_with_all_ttl() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: "keycloak-uma"
+        cache_ttl_secs: 120
+        cache_negative_ttl_secs: 30
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        let sp = routes[0].security_policy.as_ref().unwrap();
+        match sp {
+            DeclarativeSecurityPolicy::Permission {
+                policy,
+                resource,
+                action,
+                scopes,
+                context,
+                cache_ttl_secs,
+                cache_negative_ttl_secs,
+            } => {
+                assert_eq!(policy, "keycloak-uma");
+                assert_eq!(
+                    resource,
+                    &camel_auth::PermissionValueSource::Header("x-resource".into())
+                );
+                assert_eq!(
+                    action,
+                    &camel_auth::PermissionValueSource::Header("x-action".into())
+                );
+                assert!(scopes.is_empty());
+                assert_eq!(context, &camel_auth::PermissionContextConfig::default());
+                assert_eq!(*cache_ttl_secs, Some(120));
+                assert_eq!(*cache_negative_ttl_secs, Some(30));
+            }
+            _ => panic!("expected Permission"),
+        }
+    }
+
+    #[test]
+    fn parse_security_policy_permission_empty_policy_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: ""
+    steps:
+      - to: log:info
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_security_policy_permission_with_all_required_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      permission:
+        policy: "keycloak-uma"
+      all_required: true
+    steps:
+      - to: log:info
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_security_policy_empty_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy: {}
+    steps:
+      - to: log:info
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_security_policy_multiple_forms_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+      scopes: ["read"]
+    steps:
+      - to: log:info
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_security_policy_empty_roles_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: []
+    steps:
+      - to: log:info
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_security_policy_ref_with_all_required_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      ref: "my-policy"
+      all_required: true
+    steps:
+      - to: log:info
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_security_policy_empty_scopes_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      scopes: []
+    steps:
+      - to: log:info
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_security_policy_wasm_with_all_required_rejected() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      wasm: "plugin.wasm"
+      all_required: true
+    steps:
+      - to: log:info
+"#;
+        let result = parse_yaml_to_declarative(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_security_policy_none_is_ok() {
+        let yaml = r#"
+routes:
+  - id: r-plain
+    from: direct:start
+    steps:
+      - to: log:info
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert!(routes[0].security_policy.is_none());
+    }
+
+    #[test]
+    fn parse_yaml_to_canonical_rejects_security_policy() {
+        let yaml = r#"
+routes:
+  - id: r-sec
+    from: direct:start
+    security_policy:
+      roles: ["admin"]
+    steps:
+      - to: log:info
+"#;
+        let result = parse_yaml_to_canonical(yaml);
+        assert!(result.is_err());
     }
 
     #[test]

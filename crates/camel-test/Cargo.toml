@@ -57,9 +57,12 @@ camel-language-xpath.workspace = true
 camel-dsl.workspace = true
 camel-bean.workspace = true
 camel-function.workspace = true
+camel-component-ws.workspace = true
+camel-auth.workspace = true
 serde.workspace = true
 tokio-util.workspace = true
 serde_json.workspace = true
+async-trait.workspace = true
 tempfile = "3"
 wiremock = "0.6"
 reqwest = { workspace = true }
@@ -68,6 +71,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 redis = { version = "1", features = ["tokio-comp", "aio"] }
 toml.workspace = true
 futures.workspace = true
+http.workspace = true
+dashmap.workspace = true
 
 [features]
 integration-tests = [

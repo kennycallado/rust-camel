@@ -7,6 +7,7 @@ use std::process::Command;
 pub enum PluginType {
     Processor,
     Bean,
+    AuthorizationPolicy,
 }
 
 impl fmt::Display for PluginType {
@@ -14,6 +15,7 @@ impl fmt::Display for PluginType {
         match self {
             PluginType::Processor => write!(f, "processor"),
             PluginType::Bean => write!(f, "bean"),
+            PluginType::AuthorizationPolicy => write!(f, "authorization-policy"),
         }
     }
 }
@@ -67,6 +69,9 @@ fn run_plugin_new(args: PluginNewArgs) {
     let files = match plugin_type {
         PluginType::Bean => crate::template::bean::bean_files(&name),
         PluginType::Processor => crate::template::processor::processor_files(&name),
+        PluginType::AuthorizationPolicy => {
+            crate::template::authorization_policy::authorization_policy_files(&name)
+        }
     };
     let target = Path::new(&name);
 
@@ -103,6 +108,7 @@ fn run_plugin_new(args: PluginNewArgs) {
     let type_label = match plugin_type {
         PluginType::Bean => "bean",
         PluginType::Processor => "processor",
+        PluginType::AuthorizationPolicy => "authorization-policy",
     };
     println!("Created camel {} plugin '{}'\n", type_label, name);
     println!("Next steps:");
@@ -476,6 +482,18 @@ mod tests {
     fn plugin_type_display_values() {
         assert_eq!(PluginType::Processor.to_string(), "processor");
         assert_eq!(PluginType::Bean.to_string(), "bean");
+        assert_eq!(
+            PluginType::AuthorizationPolicy.to_string(),
+            "authorization-policy"
+        );
+    }
+
+    #[test]
+    fn plugin_type_authorization_policy_display() {
+        assert_eq!(
+            PluginType::AuthorizationPolicy.to_string(),
+            "authorization-policy"
+        );
     }
 
     #[test]

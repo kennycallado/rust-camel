@@ -18,7 +18,9 @@ pub mod registrar;
 pub use bundle::ComponentBundle;
 pub use component::Component;
 pub use component_context::{ComponentContext, NoOpComponentContext};
-pub use consumer::{ConcurrencyModel, Consumer, ConsumerContext, ExchangeEnvelope};
+pub use consumer::{
+    ConcurrencyModel, Consumer, ConsumerContext, ExchangeEnvelope, SecurityContext,
+};
 pub use endpoint::{Endpoint, PollingConsumer};
 pub use producer::ProducerContext;
 pub use registrar::ComponentRegistrar;

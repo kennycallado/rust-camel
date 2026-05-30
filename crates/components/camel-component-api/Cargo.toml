@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true
+camel-auth.workspace = true
 camel-language-api.workspace = true
 camel-endpoint.workspace = true
 async-trait.workspace = true
@@ -20,6 +21,9 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

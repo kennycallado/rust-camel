@@ -140,6 +140,8 @@ fn helper_functions_cover_non_async_branches() {
         in_flight: None,
         aggregate_split: None,
         agg_service: None,
+        security_policy: None,
+        security_authenticator: None,
     };
 
     assert_eq!(inferred_lifecycle_label(&managed), "Stopped");

@@ -342,6 +342,10 @@ async fn run(
 
     tracing::info!("camel-cli: loading routes from patterns: {:?}", patterns);
 
+    let security_compile_context =
+        camel_cli::build_security_compile_context_from_config(&camel_config, ctx.registry_arc())
+            .await?;
+
     // Define register_bundle! macro — looks up config key in ComponentsConfig::raw,
     // falling back to an empty table so bundles always register with their serde defaults.
     // Uses UFCS to invoke ComponentBundle methods without requiring trait in scope
@@ -485,7 +489,11 @@ async fn run(
     ctx.register_language("xpath", Box::new(XPathLanguage::new()))?;
 
     // 5. Discover and load initial routes
-    match camel_dsl::discover_routes(&patterns) {
+    match camel_dsl::discover_routes_with_threshold_and_security(
+        &patterns,
+        camel_config.stream_caching.threshold,
+        security_compile_context.clone(),
+    ) {
         Ok(defs) => {
             for def in defs {
                 let id = def.route_id().to_string();
@@ -517,6 +525,7 @@ async fn run(
     if watch_enabled {
         let ctrl = ctx.runtime_execution_handle();
         let watch_patterns = patterns.clone();
+        let watch_security_compile_context = security_compile_context.clone();
         let drain_timeout = std::time::Duration::from_millis(camel_config.drain_timeout_ms);
         let debounce = std::time::Duration::from_millis(camel_config.watch_debounce_ms);
         let watcher_token = watcher_shutdown.clone();
@@ -526,8 +535,12 @@ async fn run(
                 watch_dirs,
                 ctrl,
                 move || {
-                    camel_dsl::discover_routes(&watch_patterns)
-                        .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
+                    camel_dsl::discover_routes_with_threshold_and_security(
+                        &watch_patterns,
+                        camel_config.stream_caching.threshold,
+                        watch_security_compile_context.clone(),
+                    )
+                    .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
                 },
                 Some(watcher_token),
                 drain_timeout,

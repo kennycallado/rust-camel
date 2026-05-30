@@ -63,6 +63,11 @@ pub use error_handler::{
     ErrorHandlerConfig, ExceptionPolicy, ExceptionPolicyBuilder, HEADER_REDELIVERED,
     HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER, RedeliveryPolicy,
 };
+pub use security_policy::{
+    AuthorizationDecision, PRINCIPAL_AUDIENCE_KEY, PRINCIPAL_CLAIMS_KEY, PRINCIPAL_ISSUER_KEY,
+    PRINCIPAL_KEY, PRINCIPAL_ROLES_KEY, PRINCIPAL_SCOPES_KEY, PRINCIPAL_SUBJECT_KEY, Principal,
+    SecurityPolicy, SecurityPolicyConfig, store_principal_properties,
+};
 // Backwards compatibility re-export (deprecated)
 #[allow(deprecated)]
 pub use error_handler::ExponentialBackoff;
@@ -98,7 +103,6 @@ pub use runtime::{
     RuntimeQuery, RuntimeQueryBus, RuntimeQueryResult, canonical_contract_rejection_reason,
     canonical_contract_supports_step,
 };
-pub use security_policy::Principal;
 pub use splitter::{
     AggregationStrategy, SplitExpression, SplitterConfig, split_body, split_body_json_array,
     split_body_lines,

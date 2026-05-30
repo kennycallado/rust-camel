@@ -16,6 +16,7 @@ fn declarative_route_compiles_literal_steps_and_route_metadata() {
         concurrency: Some(DeclarativeConcurrency::Sequential),
         error_handler: None,
         circuit_breaker: None,
+        security_policy: None,
         unit_of_work: None,
         steps: vec![
             DeclarativeStep::Log(LogStepDef::info("hello")),
@@ -41,6 +42,7 @@ fn declarative_script_compiles_to_dedicated_runtime_step() {
         concurrency: None,
         error_handler: None,
         circuit_breaker: None,
+        security_policy: None,
         unit_of_work: None,
         steps: vec![DeclarativeStep::Script(ScriptStepDef {
             expression: LanguageExpressionDef {
@@ -68,6 +70,7 @@ fn declarative_language_steps_are_deferred_to_runtime_registry() {
         concurrency: None,
         error_handler: None,
         circuit_breaker: None,
+        security_policy: None,
         unit_of_work: None,
         steps: vec![
             DeclarativeStep::SetHeader(SetHeaderStepDef {

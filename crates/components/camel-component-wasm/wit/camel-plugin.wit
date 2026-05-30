@@ -1,3 +1,8 @@
+// TODO(WIT-001): This file is a canonical source; camel-all.wit duplicates its content.
+// TODO(WIT-006): WIT interface versioning strategy is not yet defined. When the
+// WIT tooling supports it, add `@since(version = X.Y.Z)` annotations to each
+// interface and world definition to enable compatibility checks.
+
 package camel:plugin;
 
 /// Simplified exchange types crossing the WASM boundary.
@@ -33,6 +38,8 @@ interface types {
         properties: list<tuple<string, string>>,
         pattern: wasm-pattern,
         correlation-id: string,
+        route-id: option<string>,
+        message-id: option<string>,
     }
 
     /// Error variants from guest processing.
@@ -53,6 +60,7 @@ interface host {
 
     /// Invoke any Camel endpoint synchronously.
     /// Returns the response body as a string (JSON-encoded for structured data).
+    /// TODO(WIT-009): Only string payloads are supported; binary/bytes support is deferred.
     camel-call: func(uri: string, payload: string) -> result<string, wasm-error>;
 
     /// Read a property from the host Exchange.
@@ -84,4 +92,25 @@ world plugin {
 
     /// Initialization hook. Called once when the WASM module is instantiated.
     export init: func() -> result<_, string>;
+}
+
+/// Guest authorization-policy world — authorization only.
+///
+/// The host validates JWT and populates camel.auth.* properties
+/// BEFORE calling evaluate(). The guest reads auth context via
+/// get-property("camel.auth.roles") etc. and returns:
+///   - Ok(None)         → access granted
+///   - Ok(Some(reason)) → access denied
+///   - Err(wasm-error)  → processing error
+world authorization-policy {
+    import host;
+
+    use types.{wasm-exchange, wasm-error};
+
+    /// Evaluate the exchange and return an authorization decision.
+    /// None = Granted, Some(reason) = Denied.
+    export evaluate: func(exchange: wasm-exchange) -> result<option<string>, wasm-error>;
+
+    /// Initialization hook with config from registration.
+    export init: func(config: list<tuple<string, string>>) -> result<_, string>;
 }

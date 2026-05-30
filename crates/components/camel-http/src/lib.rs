@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod bundle;
 pub mod config;
 pub mod health;
@@ -15,10 +16,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::sync::{OnceCell, RwLock};
+use tower::Layer;
 use tower::Service;
 use tracing::debug;
 
 use axum::body::BodyDataStream;
+use camel_auth::bearer_token_layer::BearerTokenLayer;
+use camel_auth::oauth2::TokenProvider;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, StreamBody, StreamMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
@@ -99,6 +103,7 @@ pub struct HttpEndpointConfig {
     pub read_timeout_ms: u64,
     pub max_response_bytes: usize,
     pub auth: HttpAuth,
+    pub token_provider: Option<Arc<dyn TokenProvider>>,
     pub user_agent: Option<String>,
     pub cookie_handling: CookieHandling,
     pub bridge_endpoint: bool,
@@ -314,6 +319,7 @@ impl UriConfig for HttpEndpointConfig {
             read_timeout_ms,
             max_response_bytes,
             auth,
+            token_provider: None,
             user_agent,
             cookie_handling,
             bridge_endpoint,
@@ -1138,6 +1144,22 @@ impl Consumer for HttpConsumer {
                                     body: HttpReplyBody::Bytes(bytes::Bytes::new()),
                                 }
                             }
+                            Err(CamelError::Unauthenticated(msg)) => {
+                                tracing::warn!(error = %msg, path = %path_clone, "Authentication failed");
+                                HttpReply {
+                                    status: 401,
+                                    headers: vec![("WWW-Authenticate".to_string(), "Bearer".to_string())],
+                                    body: HttpReplyBody::Bytes(bytes::Bytes::from("Unauthorized")),
+                                }
+                            }
+                            Err(CamelError::Unauthorized(msg)) => {
+                                tracing::warn!(error = %msg, path = %path_clone, "Authorization failed");
+                                HttpReply {
+                                    status: 403,
+                                    headers: vec![],
+                                    body: HttpReplyBody::Bytes(bytes::Bytes::from("Forbidden")),
+                                }
+                            }
                             Err(e) => {
                                 tracing::error!(error = %e, path = %path_clone, "Pipeline error processing HTTP request");
                                 HttpReply {
@@ -1364,10 +1386,16 @@ impl Endpoint for HttpEndpoint {
     }
 
     fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
-        Ok(BoxProcessor::new(HttpProducer {
+        let producer = HttpProducer {
             config: Arc::new(self.config.clone()),
             client: self.client.clone(),
-        }))
+        };
+        if let Some(ref provider) = self.config.token_provider {
+            let layer = BearerTokenLayer::new(Arc::clone(provider));
+            Ok(BoxProcessor::new(layer.layer(producer)))
+        } else {
+            Ok(BoxProcessor::new(producer))
+        }
     }
 }
 
@@ -1981,6 +2009,72 @@ mod tests {
     // -----------------------------------------------------------------------
     // Producer tests
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_producer_with_token_provider() {
+        use camel_auth::oauth2::TokenProvider;
+        use tower::ServiceExt;
+
+        let captured_auth: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let captured_clone = Arc::clone(&captured_auth);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let _handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let auth = request
+                    .lines()
+                    .find(|l| l.to_lowercase().starts_with("authorization:"))
+                    .map(|l| {
+                        l.split(':')
+                            .nth(1)
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_default()
+                    });
+                *captured_clone.lock().unwrap() = auth;
+                let body = r#"{"echo":"ok"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        #[derive(Debug)]
+        struct StaticProvider;
+        #[async_trait::async_trait]
+        impl TokenProvider for StaticProvider {
+            async fn get_token(&self) -> Result<String, camel_auth::types::AuthError> {
+                Ok("injected-token".into())
+            }
+        }
+
+        let uri = format!("http://127.0.0.1:{}/api?allowPrivateIps=true", port);
+        let ctx = test_producer_ctx();
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component.create_endpoint(&uri, &endpoint_ctx).unwrap();
+        let producer = endpoint.create_producer(&ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("hello"));
+
+        let layer = BearerTokenLayer::new(Arc::new(StaticProvider));
+        let mut layered = layer.layer(producer);
+        let result = layered.ready().await.unwrap().call(exchange).await;
+        assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let auth = captured_auth.lock().unwrap().take();
+        assert_eq!(auth.as_deref(), Some("Bearer injected-token"));
+    }
 
     async fn start_test_server() -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

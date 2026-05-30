@@ -1,0 +1,21 @@
+[package]
+name = "security-keycloak"
+description = "Keycloak-style security example — native auth pipeline with role-based access"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-builder.workspace = true
+camel-component-timer.workspace = true
+camel-component-log.workspace = true
+camel-auth.workspace = true
+camel-core.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

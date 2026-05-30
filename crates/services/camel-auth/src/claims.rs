@@ -1,10 +1,8 @@
-use async_trait::async_trait;
 use camel_api::security_policy::Principal;
 use serde::{Deserialize, Serialize};
 
 use crate::types::AuthError;
 
-#[async_trait]
 pub trait ClaimsMapper: Send + Sync {
     fn to_principal(&self, claims: &serde_json::Value) -> Result<Principal, AuthError>;
 }
@@ -37,9 +35,10 @@ impl ClaimsMapper for JsonPointerClaimsMapper {
         let subject = claims
             .pointer(&self.subject_path)
             .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| {
                 AuthError::TokenInvalid(format!(
-                    "missing subject at JSON pointer {}",
+                    "missing or empty subject at JSON pointer {}",
                     self.subject_path
                 ))
             })?
@@ -57,12 +56,37 @@ impl ClaimsMapper for JsonPointerClaimsMapper {
         let scopes = self
             .scope_path
             .as_ref()
-            .and_then(|p| claims.pointer(p).and_then(|v| v.as_str()))
-            .map(|s| s.split_whitespace().map(String::from).collect())
+            .and_then(|p| claims.pointer(p))
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.split_whitespace().map(String::from).collect(),
+                serde_json::Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                _ => Vec::new(),
+            })
             .unwrap_or_default();
 
         Ok(Principal {
             subject,
+            issuer: claims
+                .pointer("/iss")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            audience: claims
+                .pointer("/aud")
+                .and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(vec![s.clone()]),
+                    serde_json::Value::Array(arr) => Some(
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(String::from)
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default(),
             roles,
             scopes,
             claims: claims.clone(),
@@ -97,6 +121,13 @@ mod tests {
     #[test]
     fn missing_subject_returns_error() {
         let claims = json!({"no_sub": "x"});
+        let result = mapper(default_paths()).to_principal(&claims);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_subject_returns_error() {
+        let claims = json!({"sub": ""});
         let result = mapper(default_paths()).to_principal(&claims);
         assert!(result.is_err());
     }
@@ -150,6 +181,18 @@ mod tests {
         let claims = json!({"sub": "u", "scope": "read write"});
         let principal = mapper(paths).to_principal(&claims).unwrap();
         assert_eq!(principal.scopes, vec!["read", "write"]);
+    }
+
+    #[test]
+    fn extracts_scopes_from_array() {
+        let paths = ClaimPaths {
+            subject: "/sub".into(),
+            roles: vec![],
+            scopes: Some("/scope".into()),
+        };
+        let claims = json!({"sub": "u", "scope": ["read", "write", "admin"]});
+        let principal = mapper(paths).to_principal(&claims).unwrap();
+        assert_eq!(principal.scopes, vec!["read", "write", "admin"]);
     }
 
     #[test]

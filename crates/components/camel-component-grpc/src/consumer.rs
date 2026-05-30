@@ -6,8 +6,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::BytesMut;
-use camel_api::{Body, CamelError, Exchange, Message, Value};
-use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext, ExchangeEnvelope};
+use camel_api::store_principal_properties;
+use camel_api::{AuthorizationDecision, Body, CamelError, Exchange, Message, Value};
+use camel_component_api::{
+    ConcurrencyModel, Consumer, ConsumerContext, ExchangeEnvelope, SecurityContext,
+};
 use camel_proto_compiler::ProtoCache;
 use prost::Message as _;
 use prost_reflect::{DynamicMessage, MessageDescriptor};
@@ -114,21 +117,25 @@ pub(crate) enum GrpcRequestEnvelope {
         metadata: tonic::metadata::MetadataMap,
         body: Vec<u8>,
         reply_tx: tokio::sync::oneshot::Sender<GrpcReply>,
+        principal: Option<camel_api::security_policy::Principal>,
     },
     ServerStreaming {
         metadata: tonic::metadata::MetadataMap,
         body: Vec<u8>,
         reply_tx: mpsc::Sender<GrpcStreamItem>,
+        principal: Option<camel_api::security_policy::Principal>,
     },
     ClientStreaming {
         metadata: tonic::metadata::MetadataMap,
         body_rx: mpsc::Receiver<Vec<u8>>,
         reply_tx: tokio::sync::oneshot::Sender<GrpcReply>,
+        principal: Option<camel_api::security_policy::Principal>,
     },
     Bidi {
         metadata: tonic::metadata::MetadataMap,
         body_rx: mpsc::Receiver<Vec<u8>>,
         reply_tx: mpsc::Sender<GrpcStreamItem>,
+        principal: Option<camel_api::security_policy::Principal>,
     },
 }
 
@@ -254,6 +261,7 @@ pub struct GrpcConsumer {
     service_name: String,
     method_name: String,
     mode: GrpcMode,
+    security_ctx: Option<SecurityContext>,
 }
 
 impl GrpcConsumer {
@@ -274,6 +282,7 @@ impl GrpcConsumer {
             service_name,
             method_name,
             mode,
+            security_ctx: None,
         }
     }
 
@@ -340,7 +349,11 @@ impl GrpcConsumer {
                     self.path
                 )));
             }
-            table.insert(self.path.clone(), (env_tx, mode));
+            let authenticator = self
+                .security_ctx
+                .as_ref()
+                .map(|ctx| ctx.authenticator.clone());
+            table.insert(self.path.clone(), (env_tx, mode, authenticator));
         }
 
         let path = self.path.clone();
@@ -381,6 +394,7 @@ impl GrpcConsumer {
                     let sender = sender.clone();
                     let correlation_id = next_observer_id();
                     let path_for_log = path.clone();
+                    let policy = self.security_ctx.as_ref().map(|ctx| ctx.policy.clone());
 
                     debug!(
                         path = %path_for_log,
@@ -391,13 +405,34 @@ impl GrpcConsumer {
                     join_set.spawn(async move {
                         let _permit = permit;
                         match envelope {
-                            GrpcRequestEnvelope::Unary { metadata, body, reply_tx } => {
+                            GrpcRequestEnvelope::Unary { metadata, body, reply_tx, principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
                                     size = body.len(),
                                     "grpc consumer processing unary request"
                                 );
+
+                                if let (Some(principal), Some(policy)) = (&principal, &policy) {
+                                    let mut exchange = Exchange::new(Message::new(Body::Empty));
+                                    store_principal_properties(&mut exchange, principal);
+                                    match policy.evaluate(&mut exchange).await {
+                                        Ok(AuthorizationDecision::Granted { .. }) => {
+                                            tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
+                                        }
+                                        Ok(AuthorizationDecision::Denied { reason, .. }) => {
+                                            tracing::warn!(path = %path_for_log, reason = %reason, "gRPC request denied");
+                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::permission_denied(reason)));
+                                            return;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
+                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::internal(format!("authorization error: {e}"))));
+                                            return;
+                                        }
+                                    }
+                                }
+
                                 let result = process_unary_request(
                                     body, metadata, req_desc, resp_desc, sender,
                                 ).await;
@@ -407,33 +442,96 @@ impl GrpcConsumer {
                                 };
                                 let _ = reply_tx.send(reply);
                             }
-                            GrpcRequestEnvelope::ServerStreaming { metadata, body, reply_tx } => {
+                            GrpcRequestEnvelope::ServerStreaming { metadata, body, reply_tx, principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
                                     size = body.len(),
                                     "grpc consumer processing server streaming request"
                                 );
+
+                                if let (Some(principal), Some(policy)) = (&principal, &policy) {
+                                    let mut exchange = Exchange::new(Message::new(Body::Empty));
+                                    store_principal_properties(&mut exchange, principal);
+                                    match policy.evaluate(&mut exchange).await {
+                                        Ok(AuthorizationDecision::Granted { .. }) => {
+                                            tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
+                                        }
+                                        Ok(AuthorizationDecision::Denied { reason, .. }) => {
+                                            tracing::warn!(path = %path_for_log, reason = %reason, "gRPC request denied");
+                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::permission_denied(reason))).await;
+                                            return;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
+                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::internal(format!("authorization error: {e}")))).await;
+                                            return;
+                                        }
+                                    }
+                                }
+
                                 process_server_streaming_request(
                                     body, metadata, req_desc, resp_desc, sender, reply_tx,
                                 ).await;
                             }
-                            GrpcRequestEnvelope::ClientStreaming { metadata, body_rx, reply_tx } => {
+                            GrpcRequestEnvelope::ClientStreaming { metadata, body_rx, reply_tx, principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
                                     "grpc consumer processing client streaming request"
                                 );
+
+                                if let (Some(principal), Some(policy)) = (&principal, &policy) {
+                                    let mut exchange = Exchange::new(Message::new(Body::Empty));
+                                    store_principal_properties(&mut exchange, principal);
+                                    match policy.evaluate(&mut exchange).await {
+                                        Ok(AuthorizationDecision::Granted { .. }) => {
+                                            tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
+                                        }
+                                        Ok(AuthorizationDecision::Denied { reason, .. }) => {
+                                            tracing::warn!(path = %path_for_log, reason = %reason, "gRPC request denied");
+                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::permission_denied(reason)));
+                                            return;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
+                                            let _ = reply_tx.send(GrpcReply::Err(tonic::Status::internal(format!("authorization error: {e}"))));
+                                            return;
+                                        }
+                                    }
+                                }
+
                                 process_client_streaming_request(
                                     body_rx, metadata, req_desc, resp_desc, sender, reply_tx,
                                 ).await;
                             }
-                            GrpcRequestEnvelope::Bidi { metadata, body_rx, reply_tx } => {
+                            GrpcRequestEnvelope::Bidi { metadata, body_rx, reply_tx, principal } => {
                                 debug!(
                                     path = %path_for_log,
                                     correlation_id = %correlation_id,
                                     "grpc consumer processing bidi streaming request"
                                 );
+
+                                if let (Some(principal), Some(policy)) = (&principal, &policy) {
+                                    let mut exchange = Exchange::new(Message::new(Body::Empty));
+                                    store_principal_properties(&mut exchange, principal);
+                                    match policy.evaluate(&mut exchange).await {
+                                        Ok(AuthorizationDecision::Granted { .. }) => {
+                                            tracing::debug!(path = %path_for_log, subject = %principal.subject, "gRPC request authorized");
+                                        }
+                                        Ok(AuthorizationDecision::Denied { reason, .. }) => {
+                                            tracing::warn!(path = %path_for_log, reason = %reason, "gRPC request denied");
+                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::permission_denied(reason))).await;
+                                            return;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
+                                            let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::internal(format!("authorization error: {e}")))).await;
+                                            return;
+                                        }
+                                    }
+                                }
+
                                 process_bidi_request(
                                     body_rx, metadata, req_desc, resp_desc, sender, reply_tx,
                                 ).await;
@@ -492,6 +590,10 @@ impl Consumer for GrpcConsumer {
 
     fn concurrency_model(&self) -> ConcurrencyModel {
         ConcurrencyModel::Concurrent { max: None }
+    }
+
+    fn set_security_context(&mut self, ctx: SecurityContext) {
+        self.security_ctx = Some(ctx);
     }
 }
 

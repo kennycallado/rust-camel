@@ -1,3 +1,4 @@
+pub mod authorization_policy;
 pub mod bean;
 pub mod embedded;
 pub mod processor;

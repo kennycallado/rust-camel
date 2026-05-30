@@ -171,6 +171,7 @@ fn declarative_step_convert_body_to_json_compiles_correctly() {
         concurrency: None,
         error_handler: None,
         circuit_breaker: None,
+        security_policy: None,
         unit_of_work: None,
         steps: vec![DeclarativeStep::ConvertBodyTo(BodyTypeDef::Json)],
     };
@@ -203,6 +204,7 @@ fn declarative_step_convert_body_to_all_types_compile() {
             concurrency: None,
             error_handler: None,
             circuit_breaker: None,
+            security_policy: None,
             unit_of_work: None,
             steps: vec![DeclarativeStep::ConvertBodyTo(body_type_def)],
         };

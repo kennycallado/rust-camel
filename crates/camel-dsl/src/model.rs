@@ -1,5 +1,43 @@
 pub use camel_api::{LanguageExpressionDef, ValueSourceDef};
 
+#[derive(Default)]
+pub struct SecurityCompileContext {
+    pub authenticator: Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
+    pub registry: Option<std::sync::Arc<camel_auth::SecurityPolicyRegistry>>,
+    pub evaluator_registry: Option<std::sync::Arc<camel_auth::PermissionEvaluatorRegistry>>,
+}
+
+impl Clone for SecurityCompileContext {
+    fn clone(&self) -> Self {
+        Self {
+            authenticator: self.authenticator.clone(),
+            registry: self.registry.clone(),
+            evaluator_registry: self.evaluator_registry.clone(),
+        }
+    }
+}
+
+impl SecurityCompileContext {
+    pub fn new(
+        authenticator: Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
+        registry: Option<std::sync::Arc<camel_auth::SecurityPolicyRegistry>>,
+    ) -> Self {
+        Self {
+            authenticator,
+            registry,
+            evaluator_registry: None,
+        }
+    }
+
+    pub fn with_evaluator_registry(
+        mut self,
+        registry: std::sync::Arc<camel_auth::PermissionEvaluatorRegistry>,
+    ) -> Self {
+        self.evaluator_registry = Some(registry);
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeclarativeConcurrency {
     Sequential,
@@ -10,6 +48,34 @@ pub enum DeclarativeConcurrency {
 pub struct DeclarativeCircuitBreaker {
     pub failure_threshold: u32,
     pub open_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeclarativeSecurityPolicy {
+    Roles {
+        roles: Vec<String>,
+        all_required: bool,
+    },
+    Scopes {
+        scopes: Vec<String>,
+        all_required: bool,
+    },
+    Ref {
+        name: String,
+    },
+    Wasm {
+        path: String,
+        config: std::collections::HashMap<String, String>,
+    },
+    Permission {
+        policy: String,
+        resource: camel_auth::PermissionValueSource,
+        action: camel_auth::PermissionValueSource,
+        scopes: Vec<String>,
+        context: camel_auth::PermissionContextConfig,
+        cache_ttl_secs: Option<u64>,
+        cache_negative_ttl_secs: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +113,7 @@ pub struct DeclarativeRoute {
     pub concurrency: Option<DeclarativeConcurrency>,
     pub error_handler: Option<DeclarativeErrorHandler>,
     pub circuit_breaker: Option<DeclarativeCircuitBreaker>,
+    pub security_policy: Option<DeclarativeSecurityPolicy>,
     pub unit_of_work: Option<camel_api::UnitOfWorkConfig>,
     pub steps: Vec<DeclarativeStep>,
 }

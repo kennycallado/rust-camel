@@ -12,9 +12,14 @@ pub mod yaml;
 
 pub use config::{
     CamelConfig, ComponentsConfig, HealthCamelConfig, JournalConfig, JournalDurability,
-    ObservabilityConfig, OtelCamelConfig, StreamCachingConfig, SupervisionCamelConfig,
+    KeycloakIntrospectionConfig, KeycloakJwksConfig, KeycloakSecurityConfig,
+    KeycloakValidationConfig, ObservabilityConfig, OtelCamelConfig, SecurityConfig,
+    StreamCachingConfig, SupervisionCamelConfig,
 };
-pub use discovery::{DiscoveryError, discover_routes, discover_routes_with_threshold};
+pub use discovery::{
+    DiscoveryError, discover_routes, discover_routes_with_threshold,
+    discover_routes_with_threshold_and_security,
+};
 pub use properties::{PropertiesResolver, ResolveError};
 pub use yaml::{
     YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_canonical,

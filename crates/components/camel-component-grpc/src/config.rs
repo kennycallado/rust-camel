@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use camel_api::error::CamelError;
+use camel_auth::oauth2::TokenProvider;
 use serde::Deserialize;
+use serde::de::{self, MapAccess, Visitor};
 
 // ── TLS configuration (GRPC-006) ──────────────────────────────────────────
 
@@ -28,7 +31,7 @@ pub struct TlsConfig {
 // ── Auth configuration (GRPC-007) ─────────────────────────────────────────
 
 /// Authentication configuration for gRPC channels.
-#[derive(Clone, Default, Deserialize)]
+#[derive(Default)]
 #[non_exhaustive]
 pub enum AuthConfig {
     /// No authentication.
@@ -40,6 +43,89 @@ pub enum AuthConfig {
     ///
     /// /// TODO(GRPC-007): Google service account token refresh not yet implemented
     GoogleServiceAccount { json_path: String },
+    /// OAuth2 token provider for dynamic token injection.
+    OAuth2 {
+        token_provider: Arc<dyn TokenProvider>,
+    },
+}
+
+impl<'de> Deserialize<'de> for AuthConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct AuthConfigVisitor;
+
+        impl<'de> Visitor<'de> for AuthConfigVisitor {
+            type Value = AuthConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an AuthConfig variant")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match v {
+                    "None" => Ok(AuthConfig::None),
+                    "OAuth2" => Err(de::Error::custom(
+                        "OAuth2 variant cannot be deserialized; construct programmatically",
+                    )),
+                    other => Err(de::Error::unknown_variant(
+                        other,
+                        &["None", "Bearer", "GoogleServiceAccount", "OAuth2"],
+                    )),
+                }
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let variant = map
+                    .next_key::<String>()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                match variant.as_str() {
+                    "None" => Ok(AuthConfig::None),
+                    "Bearer" => {
+                        let mut token = None;
+                        while let Some(key) = map.next_key::<String>()? {
+                            if key == "token" {
+                                token = Some(map.next_value()?);
+                            } else {
+                                let _: de::IgnoredAny = map.next_value()?;
+                            }
+                        }
+                        let token = token.ok_or_else(|| de::Error::missing_field("token"))?;
+                        Ok(AuthConfig::Bearer { token })
+                    }
+                    "GoogleServiceAccount" => {
+                        let mut json_path = None;
+                        while let Some(key) = map.next_key::<String>()? {
+                            if key == "json_path" {
+                                json_path = Some(map.next_value()?);
+                            } else {
+                                let _: de::IgnoredAny = map.next_value()?;
+                            }
+                        }
+                        let json_path =
+                            json_path.ok_or_else(|| de::Error::missing_field("json_path"))?;
+                        Ok(AuthConfig::GoogleServiceAccount { json_path })
+                    }
+                    "OAuth2" => Err(de::Error::custom(
+                        "OAuth2 variant cannot be deserialized; construct programmatically",
+                    )),
+                    other => Err(de::Error::unknown_variant(
+                        other,
+                        &["None", "Bearer", "GoogleServiceAccount"],
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(AuthConfigVisitor)
+    }
 }
 
 impl fmt::Debug for AuthConfig {
@@ -48,8 +134,26 @@ impl fmt::Debug for AuthConfig {
             AuthConfig::None => write!(f, "None"), // allow-secret
             AuthConfig::Bearer { .. } => write!(f, "Bearer {{ token: \"[REDACTED]\" }}"), // allow-secret
             AuthConfig::GoogleServiceAccount { .. } => {
-                write!(f, "GoogleServiceAccount {{ json_path: \"[REDACTED]\" }}")
+                write!(f, "GoogleServiceAccount {{ json_path: \"[REDACTED]\" }}") // allow-secret
             }
+            AuthConfig::OAuth2 { .. } => write!(f, "OAuth2 {{ token_provider: \"[REDACTED]\" }}"), // allow-secret
+        }
+    }
+}
+
+impl Clone for AuthConfig {
+    fn clone(&self) -> Self {
+        match self {
+            AuthConfig::None => AuthConfig::None,
+            AuthConfig::Bearer { token } => AuthConfig::Bearer {
+                token: token.clone(),
+            },
+            AuthConfig::GoogleServiceAccount { json_path } => AuthConfig::GoogleServiceAccount {
+                json_path: json_path.clone(),
+            },
+            AuthConfig::OAuth2 { token_provider } => AuthConfig::OAuth2 {
+                token_provider: Arc::clone(token_provider),
+            },
         }
     }
 }
@@ -363,7 +467,14 @@ pub fn apply_config_metadata<T>(config: &GrpcConfig, request: &mut tonic::Reques
 }
 
 /// Apply auth headers from `AuthConfig` to a tonic request (GRPC-007).
-pub fn apply_auth_metadata<T>(auth: &AuthConfig, request: &mut tonic::Request<T>) {
+///
+/// Returns `Err` if auth is configured but cannot be applied (e.g. OAuth2
+/// token acquisition fails). Fail-closed: callers that configured auth
+/// expect authenticated requests.
+pub async fn apply_auth_metadata<T>(
+    auth: &AuthConfig,
+    request: &mut tonic::Request<T>,
+) -> Result<(), camel_api::CamelError> {
     match auth {
         AuthConfig::Bearer { token } => {
             if let Ok(name) = tonic::metadata::MetadataKey::from_bytes("authorization".as_bytes()) {
@@ -372,14 +483,27 @@ pub fn apply_auth_metadata<T>(auth: &AuthConfig, request: &mut tonic::Request<T>
                     request.metadata_mut().insert(name, meta_val);
                     tracing::debug!("applied bearer auth to gRPC request");
                 } else {
-                    tracing::warn!(
-                        "bearer token contains invalid characters; auth header not applied"
-                    );
+                    return Err(camel_api::CamelError::ProcessorError(
+                        "bearer token contains invalid characters".into(),
+                    ));
+                }
+            }
+        }
+        AuthConfig::OAuth2 { token_provider } => {
+            let token = token_provider.get_token().await.map_err(|e| {
+                let message = format!("failed to acquire OAuth2 token for gRPC producer: {e}"); // allow-secret
+                camel_api::CamelError::ProcessorError(message)
+            })?;
+            if let Ok(name) = tonic::metadata::MetadataKey::from_bytes("authorization".as_bytes()) {
+                let value = format!("Bearer {token}"); // allow-secret
+                if let Ok(meta_val) = tonic::metadata::MetadataValue::try_from(value.as_str()) {
+                    request.metadata_mut().insert(name, meta_val);
                 }
             }
         }
         AuthConfig::None | AuthConfig::GoogleServiceAccount { .. } => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -738,13 +862,13 @@ mod tests {
         assert!(matches!(auth, AuthConfig::None));
     }
 
-    #[test]
-    fn test_auth_config_bearer_applies_metadata() {
+    #[tokio::test]
+    async fn test_auth_config_bearer_applies_metadata() {
         let auth = AuthConfig::Bearer {
             token: "my-secret-token".to_string(),
         };
         let mut request = tonic::Request::new(());
-        apply_auth_metadata(&auth, &mut request);
+        apply_auth_metadata(&auth, &mut request).await.unwrap();
         let val = request
             .metadata()
             .get("authorization")
@@ -754,21 +878,61 @@ mod tests {
         assert_eq!(val, "Bearer my-secret-token");
     }
 
-    #[test]
-    fn test_auth_config_none_no_metadata() {
+    #[tokio::test]
+    async fn test_auth_config_none_no_metadata() {
         let auth = AuthConfig::None;
         let mut request = tonic::Request::new(());
-        apply_auth_metadata(&auth, &mut request);
+        apply_auth_metadata(&auth, &mut request).await.unwrap();
         assert!(request.metadata().get("authorization").is_none());
     }
 
-    #[test]
-    fn test_auth_config_google_scaffold_no_metadata() {
+    #[tokio::test]
+    async fn test_auth_config_google_scaffold_no_metadata() {
         let auth = AuthConfig::GoogleServiceAccount {
             json_path: "/path/to/sa.json".to_string(),
         };
         let mut request = tonic::Request::new(());
-        apply_auth_metadata(&auth, &mut request);
+        apply_auth_metadata(&auth, &mut request).await.unwrap();
+        assert!(request.metadata().get("authorization").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_auth_config_oauth2_sets_bearer() {
+        #[derive(Debug)]
+        struct MockProvider;
+        #[async_trait::async_trait]
+        impl camel_auth::TokenProvider for MockProvider {
+            async fn get_token(&self) -> Result<String, camel_auth::AuthError> {
+                Ok("mock-oauth2-token".to_string())
+            }
+        }
+        let auth = AuthConfig::OAuth2 {
+            token_provider: std::sync::Arc::new(MockProvider),
+        };
+        let mut request = tonic::Request::new(());
+        apply_auth_metadata(&auth, &mut request).await.unwrap();
+        let auth_header = request.metadata().get("authorization").unwrap();
+        assert_eq!(auth_header, "Bearer mock-oauth2-token");
+    }
+
+    #[tokio::test]
+    async fn test_auth_config_oauth2_failure_returns_error() {
+        #[derive(Debug)]
+        struct FailingProvider;
+        #[async_trait::async_trait]
+        impl camel_auth::TokenProvider for FailingProvider {
+            async fn get_token(&self) -> Result<String, camel_auth::AuthError> {
+                Err(camel_auth::AuthError::ProviderUnavailable(
+                    "mock failure".into(),
+                ))
+            }
+        }
+        let auth = AuthConfig::OAuth2 {
+            token_provider: std::sync::Arc::new(FailingProvider),
+        };
+        let mut request = tonic::Request::new(());
+        let result = apply_auth_metadata(&auth, &mut request).await;
+        assert!(result.is_err());
         assert!(request.metadata().get("authorization").is_none());
     }
 

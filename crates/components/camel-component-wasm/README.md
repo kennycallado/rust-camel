@@ -392,6 +392,97 @@ impl BeanPlugin for AuthBean {
 export_bean!(AuthBean);
 ```
 
+## Security Policy Support
+
+The WASM component can serve as a security policy backend, delegating authorization decisions to a guest module. Two host types are provided, both backed by the shared `WasmPluginContext`.
+
+### Exchange-Level: `WasmSecurityPolicy`
+
+Implements the `SecurityPolicy` trait. Called during route processing with the full `Exchange` (including `camel.auth.*` properties populated by the authentication layer). The guest module's `evaluate()` function returns:
+
+- `Ok(None)` -- access granted, the exchange continues
+- `Ok(Some(reason))` -- access denied with a reason string
+- `Err(...)` -- processing error, propagated as `CamelError`
+
+```rust
+use camel_component_wasm::security_policy::WasmSecurityPolicy;
+
+let policy = WasmSecurityPolicy::new(
+    "plugins/auth-policy.wasm",
+    WasmConfig::default(),
+    registry,
+    init_config,
+).await?;
+```
+
+### Permission-Level: `WasmAuthorizationPolicyEvaluator`
+
+Implements the `PermissionEvaluator` trait. Called by the `PermissionEvaluatorRegistry` with a `PermissionRequest` (principal, resource, action, scopes). The host builds a synthetic `Exchange` from the request and delegates to the same guest `evaluate()` function. Returns `PermissionDecision::Granted` or `PermissionDecision::Denied { reason }`.
+
+Registered as a permission provider in `Camel.toml`:
+
+```toml
+[security.permission-providers.rbac]
+provider = "wasm"
+path = "plugins/rbac-policy.wasm"
+
+[security.permission-providers.rbac.config]
+default-role = "viewer"
+```
+
+### Shared Context: `WasmPluginContext`
+
+Both `WasmSecurityPolicy` and `WasmAuthorizationPolicyEvaluator` are thin wrappers around `WasmPluginContext`, which owns:
+
+- `Engine` and `Linker` -- shared WASM runtime
+- `Component` -- the compiled guest module
+- `Registry` -- for host function callbacks
+- `StateStore` -- persistent key-value state
+- `EpochTicker` -- epoch-based timeout enforcement
+
+Each call to `evaluate()` creates a fresh `Store` from this shared context, so concurrent evaluations are isolated.
+
+## Authorization Policy WIT World
+
+Guest modules implementing security policies must target the `authorization-policy` world defined in `wit/camel-plugin.wit`. This world imports the same host functions as the `plugin` world and exports two functions:
+
+```wit
+world authorization-policy {
+    import host;
+
+    use types.{wasm-exchange, wasm-error};
+
+    /// Evaluate the exchange and return an authorization decision.
+    /// None = Granted, Some(reason) = Denied.
+    export evaluate: func(exchange: wasm-exchange) -> result<option<string>, wasm-error>;
+
+    /// Initialization hook with config from registration.
+    export init: func(config: list<tuple<string, string>>) -> result<_, string>;
+}
+```
+
+Key differences from the `plugin` world:
+
+- `evaluate` replaces `process` -- returns `option<string>` (deny reason) instead of a full exchange
+- `init` receives key-value config from the provider registration in `Camel.toml`
+- Guest reads auth context via `get-property("camel.auth.roles")`, `get-property("camel.auth.principal")`, etc.
+
+### Route Example
+
+```yaml
+routes:
+  - id: "secured-api"
+    from: "http:0.0.0.0:8080/api"
+    steps:
+      - security-policy:
+          ref: "wasm"
+          config:
+            path: "plugins/authz-policy.wasm"
+      - to: "log:secured"
+```
+
+The `security_policy: wasm` form registers a `WasmSecurityPolicy` that evaluates every exchange against the guest module before passing it downstream.
+
 ## Documentation
 
 - [API Documentation](https://docs.rs/camel-component-wasm)

@@ -21,6 +21,7 @@ use axum::extract::{FromRequest, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::{Router, serve};
+use camel_api::security_policy::AuthorizationDecision;
 use camel_api::{BackoffConfig, BackoffState};
 use camel_component_api::{
     Body as CamelBody, BoxProcessor, CamelError, Exchange, Message as CamelMessage,
@@ -42,12 +43,12 @@ use tokio_tungstenite::tungstenite::protocol::Message as ClientWsMessage;
 use tower::Service;
 
 #[derive(Clone)]
-struct WsPathConfig {
-    max_connections: u32,
-    max_message_size: u32,
-    heartbeat_interval: std::time::Duration,
-    idle_timeout: std::time::Duration,
-    allow_origin: String,
+pub struct WsPathConfig {
+    pub max_connections: u32,
+    pub max_message_size: u32,
+    pub heartbeat_interval: std::time::Duration,
+    pub idle_timeout: std::time::Duration,
+    pub allow_origin: String,
 }
 
 impl Default for WsPathConfig {
@@ -64,9 +65,9 @@ impl Default for WsPathConfig {
 }
 
 #[derive(Clone)]
-struct WsTlsConfig {
-    cert_path: String,
-    key_path: String,
+pub struct WsTlsConfig {
+    pub cert_path: String,
+    pub key_path: String,
 }
 
 type DispatchTable = Arc<RwLock<HashMap<String, mpsc::Sender<ExchangeEnvelope>>>>;
@@ -94,7 +95,7 @@ impl ServerRegistry {
         })
     }
 
-    pub(crate) async fn get_or_spawn(
+    pub async fn get_or_spawn(
         &'static self,
         host: &str,
         port: u16,
@@ -168,10 +169,12 @@ async fn spawn_server(
     let addr = format!("{host}:{port}");
     let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
     let path_configs = Arc::new(DashMap::new());
+    let path_policies = Arc::new(DashMap::new());
     let server_error = new_atomic_false();
     let state = WsAppState {
         dispatch: Arc::clone(&dispatch),
         path_configs: Arc::clone(&path_configs),
+        path_policies: Arc::clone(&path_policies),
         server_error: Arc::clone(&server_error),
     };
     let app = Router::new()
@@ -229,10 +232,11 @@ async fn spawn_server(
 }
 
 #[derive(Clone)]
-struct WsAppState {
-    dispatch: DispatchTable,
-    path_configs: Arc<DashMap<String, WsPathConfig>>,
-    server_error: Arc<AtomicBool>,
+pub struct WsAppState {
+    pub dispatch: DispatchTable,
+    pub path_configs: Arc<DashMap<String, WsPathConfig>>,
+    pub path_policies: Arc<DashMap<String, camel_component_api::SecurityContext>>,
+    pub server_error: Arc<AtomicBool>,
 }
 
 pub struct WsConnectionRegistry {
@@ -287,7 +291,7 @@ impl WsConnectionRegistry {
     }
 }
 
-async fn dispatch_handler(
+pub async fn dispatch_handler(
     State(state): State<WsAppState>,
     req: Request<Body>,
 ) -> impl IntoResponse {
@@ -321,6 +325,79 @@ async fn dispatch_handler(
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
 
+    let mut principal_opt: Option<camel_api::security_policy::Principal> = None;
+    if let Some(sec_ctx) = state.path_policies.get(&path) {
+        let extracted =
+            camel_auth::extract_token_multi(req.headers(), req.uri(), &sec_ctx.credential_sources);
+
+        match extracted {
+            Some(extracted) => {
+                if matches!(
+                    extracted.source,
+                    camel_auth::CredentialSource::QueryParam { .. }
+                ) {
+                    let redacted =
+                        camel_auth::redact_query_params(req.uri(), &["access_token", "token"]);
+                    tracing::debug!(path = %redacted, "WS upgrade with query token (redacted)");
+                }
+                match sec_ctx
+                    .authenticator
+                    .authenticate_bearer(&extracted.token)
+                    .await
+                {
+                    Ok(principal) => {
+                        let mut exchange = camel_api::Exchange::new(camel_api::Message::new(
+                            camel_api::Body::Empty,
+                        ));
+                        camel_api::store_principal_properties(&mut exchange, &principal);
+                        match sec_ctx.policy.evaluate(&mut exchange).await {
+                            Ok(AuthorizationDecision::Granted { principal: _p }) => {
+                                tracing::debug!(path = %path, subject = %principal.subject, "WS upgrade authorized");
+                                principal_opt = Some(principal);
+                            }
+                            Ok(AuthorizationDecision::Denied { reason, .. }) => {
+                                tracing::warn!(path = %path, reason = %reason, "WS upgrade denied");
+                                return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+                            }
+                            Err(e) => {
+                                tracing::error!(path = %path, error = %e, "Policy evaluation error during WS upgrade");
+                                return (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "Internal Server Error",
+                                )
+                                    .into_response();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let (status, body) = match &e {
+                            camel_api::CamelError::Unauthenticated(_) => {
+                                (StatusCode::UNAUTHORIZED, "Unauthorized")
+                            }
+                            camel_api::CamelError::ProcessorError(msg)
+                                if msg.contains("auth provider unavailable") =>
+                            {
+                                (StatusCode::SERVICE_UNAVAILABLE, "Service Unavailable")
+                            }
+                            _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
+                        };
+                        tracing::warn!(path = %path, error = %e, "WS upgrade authentication failed");
+                        return (status, body).into_response();
+                    }
+                }
+            }
+            None => {
+                tracing::warn!(path = %path, "WS upgrade rejected: no credential found in any source");
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [("WWW-Authenticate", "Bearer".to_string())],
+                    "Unauthorized",
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let upgrade_headers: HashMap<String, String> = req
         .headers()
         .iter()
@@ -334,8 +411,17 @@ async fn dispatch_handler(
         }
     };
 
-    ws.on_upgrade(move |socket| ws_handler(socket, state, path, remote_addr, upgrade_headers))
-        .into_response()
+    ws.on_upgrade(move |socket| {
+        ws_handler(
+            socket,
+            state,
+            path,
+            remote_addr,
+            upgrade_headers,
+            principal_opt,
+        )
+    })
+    .into_response()
 }
 
 #[allow(unused_variables)]
@@ -345,6 +431,7 @@ async fn ws_handler(
     path: String,
     remote_addr: String,
     upgrade_headers: HashMap<String, String>,
+    principal: Option<camel_api::security_policy::Principal>,
 ) {
     let connection_key = uuid::Uuid::new_v4().to_string();
     let path_config = state
@@ -513,6 +600,9 @@ async fn ws_handler(
 
                 #[allow(unused_mut)]
                 let mut exchange = Exchange::new(message);
+                if let Some(ref p) = principal {
+                    camel_api::store_principal_properties(&mut exchange, p);
+                }
                 #[cfg(feature = "otel")]
                 {
                     camel_otel::extract_into_exchange(&mut exchange, &upgrade_headers);
@@ -554,6 +644,9 @@ async fn ws_handler(
 
                 #[allow(unused_mut)]
                 let mut exchange = Exchange::new(message);
+                if let Some(ref p) = principal {
+                    camel_api::store_principal_properties(&mut exchange, p);
+                }
                 #[cfg(feature = "otel")]
                 {
                     camel_otel::extract_into_exchange(&mut exchange, &upgrade_headers);
@@ -778,6 +871,7 @@ pub struct WsConsumer {
     server_state: Option<WsAppState>,
     registry_key: Option<(String, u16, String)>,
     forward_task: Option<JoinHandle<Result<(), CamelError>>>,
+    security_ctx: Option<camel_component_api::SecurityContext>,
 }
 
 impl WsConsumer {
@@ -788,6 +882,7 @@ impl WsConsumer {
             server_state: None,
             registry_key: None,
             forward_task: None,
+            security_ctx: None,
         }
     }
 }
@@ -846,6 +941,11 @@ impl Consumer for WsConsumer {
             },
         );
 
+        if let Some(ref sec_ctx) = self.security_ctx {
+            let path = self.cfg.inner.path.clone();
+            state.path_policies.insert(path, sec_ctx.clone());
+        }
+
         let registry_key = (
             self.cfg.inner.canonical_host(),
             self.cfg.inner.port,
@@ -889,6 +989,7 @@ impl Consumer for WsConsumer {
 
         if let Some(state) = self.server_state.take() {
             had_server_error = state.server_error.load(Ordering::Relaxed);
+            state.path_policies.remove(&self.cfg.inner.path);
             let mut table = state.dispatch.write().await;
             table.remove(&self.cfg.inner.path);
             state.path_configs.remove(&self.cfg.inner.path);
@@ -933,6 +1034,10 @@ impl Consumer for WsConsumer {
 
     fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {
         self.forward_task.take()
+    }
+
+    fn set_security_context(&mut self, ctx: camel_component_api::SecurityContext) {
+        self.security_ctx = Some(ctx);
     }
 }
 
@@ -2425,6 +2530,7 @@ mod tests {
         let state = WsAppState {
             dispatch: Arc::new(RwLock::new(HashMap::new())),
             path_configs: Arc::new(DashMap::new()),
+            path_policies: Arc::new(DashMap::new()),
             server_error: new_atomic_false(),
         };
         assert!(
@@ -2438,6 +2544,7 @@ mod tests {
         let state = WsAppState {
             dispatch: Arc::new(RwLock::new(HashMap::new())),
             path_configs: Arc::new(DashMap::new()),
+            path_policies: Arc::new(DashMap::new()),
             server_error: new_atomic_false(),
         };
         assert!(!state.server_error.load(Ordering::Relaxed));

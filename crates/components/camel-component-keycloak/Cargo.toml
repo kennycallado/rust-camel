@@ -1,0 +1,34 @@
+[package]
+name = "camel-component-keycloak"
+description = "Keycloak integration for rust-camel — claim presets, URL builders (Admin API and event consumer in future phases)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-auth.workspace = true
+camel-component-api.workspace = true
+camel-endpoint.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tower.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+indexmap.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+base64.workspace = true
+
+[lints]
+workspace = true

@@ -21,6 +21,7 @@ If you're building custom components or processors for rust-camel, you'll need t
 - **Route control**: Route controller traits for lifecycle management
 - **Streaming**: Lazy `Body::Stream` variant with `materialize()`, `into_bytes()`, and `into_async_read()` for zero-copy I/O
 - **Health monitoring**: Service health status tracking and Kubernetes-ready endpoints
+- **Security Policy**: Authorization abstractions — `Principal`, `AuthorizationDecision`, `SecurityPolicy` trait, and exchange property helpers
 - **Canonical Route Spec**: Serializable cross-language route IR (`CanonicalRouteSpec`) with JSON Schema (schemars) and TypeScript type generation (ts-rs). All `Canonical*` types support `Serialize`/`Deserialize`/`JsonSchema`/`TS` derives.
 
 ## Unit of Work (UoW)
@@ -201,6 +202,84 @@ impl ReadinessGate for MyReadinessGate {
 ### Local and test defaults
 
 `NoopPlatformService`, `NoopLeadershipService`, and `NoopReadinessGate` are provided for local development and tests.
+
+## Security Policy
+
+The security policy module provides authorization abstractions for evaluating access control decisions during exchange processing.
+
+### Core Types
+
+| Type | Description |
+|------|-------------|
+| `Principal` | Authenticated identity with subject, issuer, audience, scopes, roles, and claims |
+| `AuthorizationDecision` | Result of policy evaluation — `Granted { principal }` or `Denied { reason, required, actual }` |
+| `SecurityPolicy` | Async trait for evaluating an exchange and producing an `AuthorizationDecision` |
+| `SecurityPolicyConfig` | Newtype wrapper holding an `Arc<dyn SecurityPolicy>`, with `new()` and `from_arc()` constructors |
+
+### Principal
+
+```rust
+use camel_api::security_policy::Principal;
+
+let principal = Principal {
+    subject: "alice".into(),
+    issuer: "keycloak".into(),
+    audience: vec!["api".into()],
+    scopes: vec!["read".into(), "write".into()],
+    roles: vec!["admin".into()],
+    claims: serde_json::json!({}),
+};
+
+assert!(principal.has_role("admin"));
+assert!(principal.has_scope("read"));
+```
+
+### SecurityPolicy Trait
+
+```rust
+use camel_api::security_policy::{SecurityPolicy, AuthorizationDecision};
+use camel_api::{Exchange, CamelError};
+use async_trait::async_trait;
+
+struct RequireRole {
+    role: String,
+}
+
+#[async_trait]
+impl SecurityPolicy for RequireRole {
+    async fn evaluate(&self, exchange: &mut Exchange) -> Result<AuthorizationDecision, CamelError> {
+        // inspect exchange properties/headers and return Granted or Denied
+        Ok(AuthorizationDecision::Denied {
+            reason: "not implemented".into(),
+            required: vec![self.role.clone()],
+            actual: vec![],
+        })
+    }
+}
+```
+
+### Exchange Property Helpers
+
+`store_principal_properties` writes a `Principal` to well-known exchange property keys. `principal_from_exchange` reconstructs it.
+
+```rust
+use camel_api::security_policy::{
+    store_principal_properties, principal_from_exchange,
+    PRINCIPAL_SUBJECT_KEY, PRINCIPAL_ROLES_KEY, PRINCIPAL_SCOPES_KEY,
+    PRINCIPAL_ISSUER_KEY, PRINCIPAL_CLAIMS_KEY, PRINCIPAL_AUDIENCE_KEY,
+    PRINCIPAL_KEY,
+};
+```
+
+| Constant | Key | Value |
+|----------|-----|-------|
+| `PRINCIPAL_SUBJECT_KEY` | `camel.auth.subject` | Subject string |
+| `PRINCIPAL_ROLES_KEY` | `camel.auth.roles` | JSON array of roles |
+| `PRINCIPAL_SCOPES_KEY` | `camel.auth.scopes` | JSON array of scopes |
+| `PRINCIPAL_ISSUER_KEY` | `camel.auth.issuer` | Issuer string |
+| `PRINCIPAL_CLAIMS_KEY` | `camel.auth.claims` | JSON object of raw claims |
+| `PRINCIPAL_AUDIENCE_KEY` | `camel.auth.audience` | JSON array of audience values |
+| `PRINCIPAL_KEY` | `camel.auth.principal` | Full serialized `Principal` |
 
 ## Installation
 

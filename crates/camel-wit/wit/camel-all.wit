@@ -102,3 +102,24 @@ world bean {
     export methods: func() -> list<string>;
     export init: func(config: list<tuple<string, string>>) -> result<_, string>;
 }
+
+/// Guest authorization-policy world — authorization only.
+///
+/// The host validates JWT and populates camel.auth.* properties
+/// BEFORE calling evaluate(). The guest reads auth context via
+/// get-property("camel.auth.roles") etc. and returns:
+///   - Ok(None)         → access granted
+///   - Ok(Some(reason)) → access denied
+///   - Err(wasm-error)  → processing error
+world authorization-policy {
+    import host;
+
+    use types.{wasm-exchange, wasm-error};
+
+    /// Evaluate the exchange and return an authorization decision.
+    /// None = Granted, Some(reason) = Denied.
+    export evaluate: func(exchange: wasm-exchange) -> result<option<string>, wasm-error>;
+
+    /// Initialization hook with config from registration.
+    export init: func(config: list<tuple<string, string>>) -> result<_, string>;
+}

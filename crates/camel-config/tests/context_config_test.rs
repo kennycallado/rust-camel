@@ -1,5 +1,7 @@
 use camel_api::{CanonicalRouteSpec, RuntimeCommand};
-use camel_config::config::{CamelConfig, JournalConfig, PlatformCamelConfig, StreamCachingConfig};
+use camel_config::config::{
+    CamelConfig, JournalConfig, PlatformCamelConfig, SecurityConfig, StreamCachingConfig,
+};
 #[cfg(feature = "otel")]
 use camel_config::config::{ObservabilityConfig, OtelCamelConfig};
 use std::collections::HashMap;
@@ -97,6 +99,7 @@ async fn test_configure_context_with_supervision() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        security: SecurityConfig::default(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -123,6 +126,7 @@ async fn test_configure_context_sets_shutdown_timeout() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        security: SecurityConfig::default(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -153,6 +157,7 @@ async fn test_configure_context_with_valid_log_level() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        security: SecurityConfig::default(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -179,6 +184,7 @@ async fn test_configure_context_with_invalid_log_level() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        security: SecurityConfig::default(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -215,6 +221,7 @@ async fn test_configure_context_with_otel_enabled_registers_lifecycle() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        security: SecurityConfig::default(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -247,6 +254,7 @@ async fn test_configure_context_without_otel_no_lifecycle() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        security: SecurityConfig::default(),
         _extra: HashMap::<String, Value>::new(),
     };
 
@@ -285,6 +293,7 @@ async fn test_configure_context_uses_runtime_journal_from_config() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: StreamCachingConfig::default(),
         beans: HashMap::new(),
+        security: SecurityConfig::default(),
         _extra: HashMap::<String, Value>::new(),
     };
 

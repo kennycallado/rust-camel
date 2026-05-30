@@ -24,6 +24,7 @@ camel-language-rhai = { workspace = true, optional = true }
 camel-language-jsonpath = { workspace = true, optional = true }
 camel-language-xpath = { workspace = true, optional = true }
 camel-bean.workspace = true
+camel-auth.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -14,6 +14,7 @@ categories.workspace = true
 [dependencies]
 camel-api.workspace = true
 camel-component-api.workspace = true
+camel-auth.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tower.workspace = true

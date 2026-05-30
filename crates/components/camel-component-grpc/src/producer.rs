@@ -233,7 +233,7 @@ impl GrpcProducer {
             let buf = json_to_protobuf(json, req_df)?;
             let mut request = Request::new(buf);
             Self::inject_headers(&exchange, &mut request);
-            apply_auth_metadata(&auth, &mut request);
+            apply_auth_metadata(&auth, &mut request).await?;
             if let Some(ref metadata_str) = config_metadata {
                 for pair in metadata_str.split(',') {
                     let pair = pair.trim();
@@ -286,7 +286,7 @@ impl GrpcProducer {
             let buf = json_to_protobuf(json, req_df)?;
             let mut request = Request::new(buf);
             Self::inject_headers(&exchange, &mut request);
-            apply_auth_metadata(&auth, &mut request);
+            apply_auth_metadata(&auth, &mut request).await?;
             if let Some(ref metadata_str) = config_metadata {
                 for pair in metadata_str.split(',') {
                     let pair = pair.trim();
@@ -358,7 +358,7 @@ impl GrpcProducer {
 
             let mut request = Request::new(stream);
             Self::inject_headers(&exchange, &mut request);
-            apply_auth_metadata(&auth, &mut request);
+            apply_auth_metadata(&auth, &mut request).await?;
             if let Some(ref metadata_str) = config_metadata {
                 for pair in metadata_str.split(',') {
                     let pair = pair.trim();
@@ -423,7 +423,7 @@ impl GrpcProducer {
 
             let mut request = Request::new(stream);
             Self::inject_headers(&exchange, &mut request);
-            apply_auth_metadata(&auth, &mut request);
+            apply_auth_metadata(&auth, &mut request).await?;
             if let Some(ref metadata_str) = config_metadata {
                 for pair in metadata_str.split(',') {
                     let pair = pair.trim();

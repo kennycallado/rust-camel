@@ -33,21 +33,150 @@ use crate::model::{
     DeclarativeRedeliveryPolicy, DeclarativeRoute, DeclarativeStep, DelayStepDef,
     DynamicRouterStepDef, FunctionStepDef, LanguageExpressionDef, LoadBalanceStepDef,
     LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
-    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef, SetBodyStepDef,
-    SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef, SplitStepDef,
-    ThrottleStepDef, ThrottleStrategyDef, ToStepDef, ValueSourceDef, WireTapStepDef,
+    MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, ScriptStepDef,
+    SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
+    SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef,
+    ToStepDef, ValueSourceDef, WireTapStepDef,
 };
+
+fn require_authenticator(
+    ctx: &SecurityCompileContext,
+    mode: &str,
+) -> Result<std::sync::Arc<dyn camel_auth::TokenAuthenticator>, CamelError> {
+    ctx.authenticator.clone().ok_or_else(|| {
+        CamelError::RouteError(format!(
+            "security_policy with {} requires a JWT authenticator (configure [security] in Camel.toml)",
+            mode
+        ))
+    })
+}
+
+fn compile_security_policy(
+    def: crate::model::DeclarativeSecurityPolicy,
+    ctx: &SecurityCompileContext,
+) -> Result<
+    (
+        camel_api::security_policy::SecurityPolicyConfig,
+        Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
+    ),
+    CamelError,
+> {
+    match def {
+        crate::model::DeclarativeSecurityPolicy::Roles {
+            roles,
+            all_required,
+        } => {
+            let auth = require_authenticator(ctx, "roles")?;
+            let policy =
+                camel_auth::RolePolicy::new(roles, all_required, std::sync::Arc::clone(&auth));
+            Ok((
+                camel_api::security_policy::SecurityPolicyConfig::new(policy),
+                Some(auth),
+            ))
+        }
+        crate::model::DeclarativeSecurityPolicy::Scopes {
+            scopes,
+            all_required,
+        } => {
+            let auth = require_authenticator(ctx, "scopes")?;
+            let policy =
+                camel_auth::ScopePolicy::new(scopes, all_required, std::sync::Arc::clone(&auth));
+            Ok((
+                camel_api::security_policy::SecurityPolicyConfig::new(policy),
+                Some(auth),
+            ))
+        }
+        crate::model::DeclarativeSecurityPolicy::Ref { name } => {
+            let registry = ctx.registry.as_ref().ok_or_else(|| {
+                CamelError::RouteError(
+                    "security_policy with ref requires a SecurityPolicyRegistry".into(),
+                )
+            })?;
+            let policy = registry.get(&name).ok_or_else(|| {
+                CamelError::RouteError(format!(
+                    "security_policy ref '{}' not found in SecurityPolicyRegistry",
+                    name
+                ))
+            })?;
+            Ok((
+                camel_api::security_policy::SecurityPolicyConfig::from_arc(policy),
+                None,
+            ))
+        }
+        crate::model::DeclarativeSecurityPolicy::Wasm { path, config: _ } => {
+            let registry = ctx.registry.as_ref().ok_or_else(|| {
+                CamelError::RouteError(
+                    "security_policy with wasm requires a SecurityPolicyRegistry".into(),
+                )
+            })?;
+            let policy = registry.get(&path).ok_or_else(|| {
+                CamelError::RouteError(format!(
+                    "security_policy with wasm: '{}' not found in registry",
+                    path
+                ))
+            })?;
+            Ok((
+                camel_api::security_policy::SecurityPolicyConfig::from_arc(policy),
+                None,
+            ))
+        }
+        crate::model::DeclarativeSecurityPolicy::Permission {
+            policy,
+            resource,
+            action,
+            scopes,
+            context,
+            cache_ttl_secs,
+            cache_negative_ttl_secs,
+        } => {
+            let eval_reg = ctx.evaluator_registry.as_ref().ok_or_else(|| {
+                CamelError::RouteError(
+                    "security_policy with permission requires a PermissionEvaluatorRegistry".into(),
+                )
+            })?;
+            let evaluator_arc = eval_reg.get(&policy).ok_or_else(|| {
+                CamelError::RouteError(format!(
+                    "security_policy permission policy '{}' not found in PermissionEvaluatorRegistry",
+                    policy
+                ))
+            })?;
+            let mut cache_opts = camel_auth::PermissionCacheOptions::default();
+            if let Some(ttl) = cache_ttl_secs {
+                cache_opts.positive_ttl = Duration::from_secs(ttl);
+            }
+            if let Some(ttl) = cache_negative_ttl_secs {
+                cache_opts.negative_ttl = Duration::from_secs(ttl);
+            }
+            let cached = camel_auth::CachingPermissionEvaluator::new(evaluator_arc, cache_opts);
+            let policy = camel_auth::PermissionPolicy::new(
+                std::sync::Arc::new(cached),
+                resource,
+                action,
+                scopes,
+                context,
+            );
+            Ok((
+                camel_api::security_policy::SecurityPolicyConfig::from_arc(std::sync::Arc::new(
+                    policy,
+                )),
+                None,
+            ))
+        }
+    }
+}
 
 pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinition, CamelError> {
     compile_declarative_route_with_stream_cache_threshold(
         route,
         camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD,
+        SecurityCompileContext::default(),
     )
 }
 
 pub fn compile_declarative_route_with_stream_cache_threshold(
     route: DeclarativeRoute,
     stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
 ) -> Result<RouteDefinition, CamelError> {
     validate_route(&route)?;
     let steps = compile_declarative_steps(route.steps, stream_cache_threshold)?;
@@ -76,6 +205,14 @@ pub fn compile_declarative_route_with_stream_cache_threshold(
         definition = definition.with_circuit_breaker(compile_circuit_breaker(circuit_breaker));
     }
 
+    if let Some(sp) = route.security_policy {
+        let (config, authenticator) = compile_security_policy(sp, &security_ctx)?;
+        definition = definition.with_security_policy(config);
+        if let Some(auth) = authenticator {
+            definition = definition.with_security_authenticator(auth);
+        }
+    }
+
     if let Some(uow) = route.unit_of_work {
         definition = definition.with_unit_of_work(uow);
     }
@@ -87,6 +224,11 @@ pub fn compile_declarative_route_to_canonical(
     route: DeclarativeRoute,
 ) -> Result<CanonicalRouteSpec, CamelError> {
     validate_route(&route)?;
+    if route.security_policy.is_some() {
+        return Err(CamelError::RouteError(
+            "routes with security_policy cannot use the canonical/hot-reload path (not yet supported)".into(),
+        ));
+    }
     let circuit_breaker = route.circuit_breaker.map(|cb| CanonicalCircuitBreakerSpec {
         failure_threshold: cb.failure_threshold,
         open_duration_ms: cb.open_duration_ms,
@@ -1349,14 +1491,15 @@ mod tests {
     use crate::model::{
         AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
         DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
-        DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute, DelayStepDef,
-        DynamicRouterStepDef, FilterStepDef, LanguageExpressionDef, LoadBalanceStepDef,
-        LoadBalanceStrategyDef, LogLevelDef, LogStepDef, LoopStepDef, MulticastAggregationDef,
-        MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, SetBodyStepDef,
-        SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef,
-        SplitStepDef, StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
-        ValueSourceDef, WhenStepDef, WireTapStepDef,
+        DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
+        DeclarativeSecurityPolicy, DelayStepDef, DynamicRouterStepDef, FilterStepDef,
+        LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef,
+        LoopStepDef, MulticastAggregationDef, MulticastStepDef, RecipientListStepDef,
+        RoutingSlipStepDef, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
+        SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrottleStepDef,
+        ThrottleStrategyDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
     };
+    use async_trait::async_trait;
     use serde_json::Value;
 
     fn make_predicate(simple_src: &str) -> LanguageExpressionDef {
@@ -2523,6 +2666,7 @@ mod tests {
             concurrency: None,
             error_handler: None,
             circuit_breaker: None,
+            security_policy: None,
             unit_of_work: None,
             steps: vec![DeclarativeStep::Stop],
         };
@@ -2544,6 +2688,7 @@ mod tests {
                 on_exceptions: None,
             }),
             circuit_breaker: None,
+            security_policy: None,
             unit_of_work: None,
             steps: vec![],
         };
@@ -2564,6 +2709,7 @@ mod tests {
                 failure_threshold: 3,
                 open_duration_ms: 5000,
             }),
+            security_policy: None,
             unit_of_work: None,
             steps: vec![DeclarativeStep::To(ToStepDef::new("log:out"))],
         };
@@ -2788,6 +2934,7 @@ mod tests {
             concurrency: None,
             error_handler: None,
             circuit_breaker: None,
+            security_policy: None,
             unit_of_work: None,
             steps,
         }
@@ -3031,5 +3178,262 @@ mod tests {
             ],
         );
         assert!(compile_declarative_route(route).is_ok());
+    }
+
+    struct TestAuthenticator;
+
+    #[async_trait]
+    impl camel_auth::TokenAuthenticator for TestAuthenticator {
+        async fn authenticate_bearer(
+            &self,
+            _token: &str,
+        ) -> Result<camel_api::security_policy::Principal, CamelError> {
+            Ok(camel_api::security_policy::Principal {
+                subject: "test-user".into(),
+                issuer: "test-issuer".into(),
+                audience: vec![],
+                scopes: vec!["read:api".into()],
+                roles: vec!["admin".into()],
+                claims: serde_json::Value::Null,
+            })
+        }
+    }
+
+    struct TestPolicy;
+
+    #[async_trait]
+    impl camel_api::security_policy::SecurityPolicy for TestPolicy {
+        async fn evaluate(
+            &self,
+            _exchange: &mut camel_api::Exchange,
+        ) -> Result<camel_api::security_policy::AuthorizationDecision, CamelError> {
+            Ok(camel_api::security_policy::AuthorizationDecision::Granted {
+                principal: camel_api::security_policy::Principal {
+                    subject: "test".into(),
+                    issuer: "test".into(),
+                    audience: vec![],
+                    scopes: vec![],
+                    roles: vec![],
+                    claims: serde_json::Value::Null,
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn compile_security_policy_roles() {
+        let auth = std::sync::Arc::new(TestAuthenticator);
+        let ctx = SecurityCompileContext::new(Some(auth), None);
+        let def = DeclarativeSecurityPolicy::Roles {
+            roles: vec!["admin".into()],
+            all_required: true,
+        };
+        let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
+        assert!(returned_auth.is_some());
+    }
+
+    #[test]
+    fn compile_security_policy_scopes() {
+        let auth = std::sync::Arc::new(TestAuthenticator);
+        let ctx = SecurityCompileContext::new(Some(auth), None);
+        let def = DeclarativeSecurityPolicy::Scopes {
+            scopes: vec!["read".into()],
+            all_required: false,
+        };
+        let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
+        assert!(returned_auth.is_some());
+    }
+
+    #[test]
+    fn compile_security_policy_roles_without_authenticator_fails() {
+        let ctx = SecurityCompileContext::default();
+        let def = DeclarativeSecurityPolicy::Roles {
+            roles: vec!["admin".into()],
+            all_required: true,
+        };
+        let result = compile_security_policy(def, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_security_policy_ref_from_registry() {
+        let registry = std::sync::Arc::new(camel_auth::SecurityPolicyRegistry::new());
+        registry.register("my-policy", std::sync::Arc::new(TestPolicy));
+        let ctx = SecurityCompileContext::new(None, Some(registry));
+        let def = DeclarativeSecurityPolicy::Ref {
+            name: "my-policy".into(),
+        };
+        let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
+        assert!(returned_auth.is_none());
+    }
+
+    #[test]
+    fn compile_security_policy_ref_missing_from_registry() {
+        let registry = std::sync::Arc::new(camel_auth::SecurityPolicyRegistry::new());
+        let ctx = SecurityCompileContext::new(None, Some(registry));
+        let def = DeclarativeSecurityPolicy::Ref {
+            name: "nonexistent".into(),
+        };
+        let result = compile_security_policy(def, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_security_policy_ref_without_registry_fails() {
+        let ctx = SecurityCompileContext::default();
+        let def = DeclarativeSecurityPolicy::Ref {
+            name: "my-policy".into(),
+        };
+        let result = compile_security_policy(def, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_security_policy_wasm_resolves_from_registry() {
+        let registry = std::sync::Arc::new(camel_auth::SecurityPolicyRegistry::new());
+        registry.register("plugin.wasm", std::sync::Arc::new(TestPolicy));
+        let ctx = SecurityCompileContext::new(None, Some(registry));
+        let def = DeclarativeSecurityPolicy::Wasm {
+            path: "plugin.wasm".into(),
+            config: Default::default(),
+        };
+        let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
+        assert!(returned_auth.is_none());
+    }
+
+    #[test]
+    fn compile_security_policy_wasm_missing_registry_returns_error() {
+        let ctx = SecurityCompileContext::default();
+        let def = DeclarativeSecurityPolicy::Wasm {
+            path: "plugin.wasm".into(),
+            config: Default::default(),
+        };
+        let result = compile_security_policy(def, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_security_policy_wasm_not_in_registry_returns_error() {
+        let registry = std::sync::Arc::new(camel_auth::SecurityPolicyRegistry::new());
+        let ctx = SecurityCompileContext::new(None, Some(registry));
+        let def = DeclarativeSecurityPolicy::Wasm {
+            path: "missing.wasm".into(),
+            config: Default::default(),
+        };
+        let result = compile_security_policy(def, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_security_policy_permission_from_registry() {
+        use camel_auth::{PermissionDecision, PermissionEvaluator, PermissionRequest};
+
+        struct GrantEvaluator;
+        #[async_trait::async_trait]
+        impl PermissionEvaluator for GrantEvaluator {
+            async fn evaluate(
+                &self,
+                _request: PermissionRequest,
+            ) -> Result<PermissionDecision, camel_auth::AuthError> {
+                Ok(PermissionDecision::Granted)
+            }
+        }
+
+        let eval_reg = std::sync::Arc::new(camel_auth::PermissionEvaluatorRegistry::new());
+        eval_reg.register("keycloak-uma", std::sync::Arc::new(GrantEvaluator));
+        let ctx = SecurityCompileContext::default().with_evaluator_registry(eval_reg);
+        let def = DeclarativeSecurityPolicy::Permission {
+            policy: "keycloak-uma".into(),
+            resource: camel_auth::PermissionValueSource::Header("x-resource".into()),
+            action: camel_auth::PermissionValueSource::Header("x-action".into()),
+            scopes: vec![],
+            context: camel_auth::PermissionContextConfig::default(),
+            cache_ttl_secs: Some(60),
+            cache_negative_ttl_secs: None,
+        };
+        let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
+        assert!(returned_auth.is_none());
+    }
+
+    #[test]
+    fn compile_security_policy_permission_missing_from_registry() {
+        let eval_reg = std::sync::Arc::new(camel_auth::PermissionEvaluatorRegistry::new());
+        let ctx = SecurityCompileContext::default().with_evaluator_registry(eval_reg);
+        let def = DeclarativeSecurityPolicy::Permission {
+            policy: "nonexistent".into(),
+            resource: camel_auth::PermissionValueSource::Header("x-resource".into()),
+            action: camel_auth::PermissionValueSource::Header("x-action".into()),
+            scopes: vec![],
+            context: camel_auth::PermissionContextConfig::default(),
+            cache_ttl_secs: None,
+            cache_negative_ttl_secs: None,
+        };
+        let result = compile_security_policy(def, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_security_policy_permission_without_registry_fails() {
+        let ctx = SecurityCompileContext::default();
+        let def = DeclarativeSecurityPolicy::Permission {
+            policy: "keycloak-uma".into(),
+            resource: camel_auth::PermissionValueSource::Header("x-resource".into()),
+            action: camel_auth::PermissionValueSource::Header("x-action".into()),
+            scopes: vec![],
+            context: camel_auth::PermissionContextConfig::default(),
+            cache_ttl_secs: None,
+            cache_negative_ttl_secs: None,
+        };
+        let result = compile_security_policy(def, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_security_policy_sets_both_policy_and_authenticator() {
+        let auth = std::sync::Arc::new(TestAuthenticator);
+        let ctx = SecurityCompileContext::new(Some(auth), None);
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "test".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: None,
+            error_handler: None,
+            circuit_breaker: None,
+            security_policy: Some(DeclarativeSecurityPolicy::Roles {
+                roles: vec!["admin".into()],
+                all_required: true,
+            }),
+            unit_of_work: None,
+            steps: vec![DeclarativeStep::To(ToStepDef {
+                uri: "log:info".into(),
+            })],
+        };
+        let def = compile_declarative_route_with_stream_cache_threshold(route, 1024, ctx).unwrap();
+        assert!(def.security_policy_config().is_some());
+        assert!(def.security_authenticator().is_some());
+    }
+
+    #[test]
+    fn compile_declarative_route_to_canonical_rejects_security_policy() {
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "test".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: None,
+            error_handler: None,
+            circuit_breaker: None,
+            security_policy: Some(DeclarativeSecurityPolicy::Roles {
+                roles: vec!["admin".into()],
+                all_required: true,
+            }),
+            unit_of_work: None,
+            steps: vec![DeclarativeStep::To(ToStepDef {
+                uri: "log:info".into(),
+            })],
+        };
+        let result = compile_declarative_route_to_canonical(route);
+        assert!(result.is_err());
     }
 }

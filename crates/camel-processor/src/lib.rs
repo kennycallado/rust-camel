@@ -19,6 +19,7 @@ pub mod multicast;
 pub mod recipient_list;
 pub mod routing_slip;
 pub mod script_mutator;
+pub mod security_policy_layer;
 pub mod set_body;
 pub mod set_header;
 pub mod set_property;
@@ -49,6 +50,7 @@ pub use multicast::{CAMEL_MULTICAST_COMPLETE, CAMEL_MULTICAST_INDEX, MulticastSe
 pub use recipient_list::RecipientListService;
 pub use routing_slip::RoutingSlipService;
 pub use script_mutator::ScriptMutator;
+pub use security_policy_layer::{SecurityPolicyLayer, SecurityPolicyService};
 pub use set_body::{SetBody, SetBodyLayer};
 pub use set_header::{SetHeader, SetHeaderLayer};
 pub use set_property::{SetProperty, SetPropertyLayer};

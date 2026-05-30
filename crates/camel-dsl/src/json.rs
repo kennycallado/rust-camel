@@ -19,6 +19,7 @@ use crate::compile::{
     compile_declarative_route, compile_declarative_route_to_canonical,
     compile_declarative_route_with_stream_cache_threshold,
 };
+use crate::model::SecurityCompileContext;
 use crate::yaml::{YamlRoutes, yaml_route_to_declarative_route};
 
 /// Convenience alias — not a stable SDK contract. Target [`CanonicalRouteSpec`] instead.
@@ -57,17 +58,41 @@ pub fn parse_json_with_threshold(
     json: &str,
     stream_cache_threshold: usize,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_json_with_threshold_and_security(
+        json,
+        stream_cache_threshold,
+        SecurityCompileContext::default(),
+    )
+}
+
+pub fn parse_json_with_threshold_and_security(
+    json: &str,
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+) -> Result<Vec<RouteDefinition>, CamelError> {
     parse_json_to_declarative(json)?
         .into_iter()
         .map(|route| {
-            compile_declarative_route_with_stream_cache_threshold(route, stream_cache_threshold)
+            compile_declarative_route_with_stream_cache_threshold(
+                route,
+                stream_cache_threshold,
+                security_ctx.clone(),
+            )
         })
         .collect()
 }
 
 /// Parse a JSON string into canonical route specs.
 pub fn parse_json_to_canonical(json: &str) -> Result<Vec<CanonicalRouteSpec>, CamelError> {
-    parse_json_to_declarative(json)?
+    let routes = parse_json_to_declarative(json)?;
+    for route in &routes {
+        if route.security_policy.is_some() {
+            return Err(CamelError::RouteError(
+                "routes with security_policy cannot use the canonical/hot-reload path (not yet supported)".into(),
+            ));
+        }
+    }
+    routes
         .into_iter()
         .map(compile_declarative_route_to_canonical)
         .collect()
@@ -483,5 +508,19 @@ mod tests {
             }
             other => panic!("expected SetProperty, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_json_to_canonical_rejects_security_policy() {
+        let json = r#"{
+            "routes": [{
+                "id": "r-sec",
+                "from": "direct:start",
+                "security_policy": { "roles": ["admin"] },
+                "steps": [{ "to": "log:info" }]
+            }]
+        }"#;
+        let result = parse_json_to_canonical(json);
+        assert!(result.is_err());
     }
 }

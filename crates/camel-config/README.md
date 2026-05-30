@@ -287,6 +287,149 @@ port = 9090
 - Profile propagation: if a profile is active, included files are processed with the same profile (using lenient mode — flat files without profile sections are accepted as-is).
 - All include errors are fatal; there is no partial-config fallback.
 
+## Security Configuration
+
+The `[security]` section configures authentication and authorization for the runtime. All sub-sections are optional -- enable only the providers you need.
+
+### `[security.oidc]` -- OpenID Connect
+
+Validates JWT tokens against an OIDC issuer.
+
+```toml
+[security.oidc]
+issuer = "https://auth.example.com/realms/my-realm"
+jwks_uri = "https://auth.example.com/realms/my-realm/protocol/openid-connect/certs"
+audience = ["my-service"]
+client_id = "my-service"
+client_secret = "{{env:OIDC_CLIENT_SECRET}}"   # resolved from env
+token_endpoint = "https://auth.example.com/realms/my-realm/protocol/openid-connect/token"
+introspection_endpoint = "https://auth.example.com/realms/my-realm/protocol/openid-connect/token/introspect"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `issuer` | string | yes | OIDC issuer URL |
+| `jwks_uri` | string | no | Override JWKS endpoint (auto-discovered from issuer if omitted) |
+| `audience` | [string] | no | Accepted `aud` claim values |
+| `client_id` | string | no | OAuth2 client ID |
+| `client_secret` | string | no | OAuth2 client secret (redacted in debug output) |
+| `token_endpoint` | string | no | Override token endpoint |
+| `introspection_endpoint` | string | no | Override introspection endpoint |
+
+### `[security.native]` -- Native / Static Authentication
+
+Static credentials and optional built-in token issuer for development or trusted-network deployments.
+
+```toml
+[security.native]
+subject = "system"
+issuer = "rust-camel-native"
+bearer_token = "{{env:SYSTEM_BEARER_TOKEN}}"
+roles = ["admin", "operator"]
+scopes = ["read", "write"]
+
+# Optional: built-in JWT issuer for machine-to-machine tokens
+[security.native.token_issuer]
+issuer = "rust-camel-internal"
+audience = ["internal"]
+token_ttl_secs = 900
+signing_key_env = "SIGNING_KEY"    # env var holding the HMAC or RSA key
+
+# Optional: pre-registered M2M clients
+[[security.native.clients]]
+client_id = "svc-orders"
+client_secret_env = "ORDERS_SECRET"
+roles = ["service"]
+scopes = ["read:orders", "write:orders"]
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `subject` | string | yes | Static subject identity |
+| `issuer` | string | no | Issuer claim for the native identity |
+| `bearer_token` | string | no | Static bearer token (redacted in debug output) |
+| `api_key` | string | no | Static API key (redacted in debug output) |
+| `roles` | [string] | no | Granted roles |
+| `scopes` | [string] | no | Granted OAuth scopes |
+| `token_issuer` | table | no | Built-in JWT issuer config (`NativeIssuerConfig`) |
+| `clients` | [table] | no | M2M client registrations (`NativeM2mClientConfig`) |
+
+### `[security.keycloak]` -- Keycloak Integration
+
+Full Keycloak integration with local JWT validation, introspection caching, and optional UMA authorization.
+
+```toml
+[security.keycloak]
+server_url = "https://keycloak.example.com"
+realm = "my-realm"
+client_id = "my-service"
+client_secret = "{{env:KEYCLOAK_CLIENT_SECRET}}"    # redacted in debug output
+
+[security.keycloak.validation]
+method = "local"               # "local" (default) or "introspection"
+audience = ["my-service"]
+clock_skew_secs = 30
+
+[security.keycloak.jwks]
+cache_ttl_secs = 3600          # JWKS cache TTL (default: 3600)
+refresh_skew_secs = 60         # Refresh before expiry (default: 60)
+
+[security.keycloak.introspection]
+max_entries = 10000            # LRU cache size (default: 10000)
+default_ttl_secs = 60          # Positive cache TTL (default: 60)
+negative_ttl_secs = 5          # Negative cache TTL (default: 5)
+
+# Optional: Keycloak UMA (User-Managed Access) authorization
+[security.keycloak.uma]
+provider = "keycloak-uma"
+
+[security.keycloak.uma.cache]
+positive_ttl_secs = 30         # default: 30
+negative_ttl_secs = 5          # default: 5
+max_entries = 10000            # default: 10000
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `server_url` | string | yes | Keycloak base URL |
+| `realm` | string | yes | Realm name |
+| `client_id` | string | yes | OAuth2 client ID |
+| `client_secret` | string | yes | OAuth2 client secret (redacted in debug output) |
+| `validation.method` | string | no | `"local"` (default) or `"introspection"` |
+| `validation.audience` | [string] | no | Accepted audience values |
+| `validation.clock_skew_secs` | u64 | no | Allowed clock skew (default: 30) |
+| `jwks.cache_ttl_secs` | u64 | no | JWKS cache TTL (default: 3600) |
+| `jwks.refresh_skew_secs` | u64 | no | Pre-expiry refresh window (default: 60) |
+| `introspection.max_entries` | usize | no | Cache capacity (default: 10000) |
+| `introspection.default_ttl_secs` | u64 | no | Positive cache TTL (default: 60) |
+| `introspection.negative_ttl_secs` | u64 | no | Negative cache TTL (default: 5) |
+| `uma.provider` | string | no | UMA provider name (e.g. `"keycloak-uma"`) |
+| `uma.cache.*` | table | no | Permission cache tuning (same fields as `PermissionCacheConfig`) |
+
+### `[security.permissions]` -- Permission Providers
+
+Named permission evaluator configurations. Each entry registers a provider with its own cache settings.
+
+```toml
+[security.permissions.resource-access]
+provider = "keycloak-uma"
+path = "/resource-check"
+
+[security.permissions.resource-access.cache]
+positive_ttl_secs = 30
+negative_ttl_secs = 5
+max_entries = 10000
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | yes | Provider implementation name |
+| `path` | string | no | Provider-specific path or endpoint |
+| `config` | map | no | Extra key-value provider config |
+| `cache.positive_ttl_secs` | u64 | no | Positive cache TTL (default: 30) |
+| `cache.negative_ttl_secs` | u64 | no | Negative cache TTL (default: 5) |
+| `cache.max_entries` | usize | no | LRU cache capacity (default: 10000) |
+
 ## Profile Selection
 
 Set the active profile via the `CAMEL_PROFILE` environment variable:

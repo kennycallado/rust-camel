@@ -260,6 +260,40 @@ mod tests {
     }
 
     #[test]
+    fn test_plugin_wit_contains_authorization_policy_world() {
+        assert!(
+            PLUGIN_WIT.contains("world authorization-policy"),
+            "PLUGIN_WIT should contain 'world authorization-policy'"
+        );
+    }
+
+    #[test]
+    fn test_plugin_wit_authorization_policy_has_evaluate() {
+        assert!(
+            PLUGIN_WIT.contains("export evaluate: func(exchange: wasm-exchange) -> result<option<string>, wasm-error>"),
+            "PLUGIN_WIT should contain evaluate export"
+        );
+    }
+
+    #[test]
+    fn test_plugin_wit_authorization_policy_has_init_with_config() {
+        assert!(
+            PLUGIN_WIT.contains(
+                "export init: func(config: list<tuple<string, string>>) -> result<_, string>"
+            ),
+            "PLUGIN_WIT should contain init with config parameter"
+        );
+    }
+
+    #[test]
+    fn test_full_wit_contains_authorization_policy_world() {
+        assert!(
+            FULL_WIT.contains("world authorization-policy"),
+            "FULL_WIT should contain 'world authorization-policy'"
+        );
+    }
+
+    #[test]
     fn test_content_type_constants_compile() {
         // Verifies the exported constants are accessible and have expected values.
         assert_eq!(APPLICATION_JSON, "application/json");

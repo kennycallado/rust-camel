@@ -306,6 +306,8 @@ pub struct RouteBuilder {
     error_handler: Option<ErrorHandlerConfig>,
     error_handler_mode: ErrorHandlerMode,
     circuit_breaker_config: Option<CircuitBreakerConfig>,
+    security_policy_config: Option<camel_api::security_policy::SecurityPolicyConfig>,
+    security_authenticator: Option<std::sync::Arc<dyn camel_auth::TokenAuthenticator>>,
     concurrency: Option<ConcurrencyModel>,
     route_id: Option<String>,
     auto_startup: Option<bool>,
@@ -340,6 +342,8 @@ impl RouteBuilder {
             error_handler: None,
             error_handler_mode: ErrorHandlerMode::None,
             circuit_breaker_config: None,
+            security_policy_config: None,
+            security_authenticator: None,
             concurrency: None,
             route_id: None,
             auto_startup: None,
@@ -440,6 +444,22 @@ impl RouteBuilder {
     /// Set a circuit breaker for this route.
     pub fn circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
         self.circuit_breaker_config = Some(config);
+        self
+    }
+
+    pub fn security_policy(
+        mut self,
+        config: camel_api::security_policy::SecurityPolicyConfig,
+    ) -> Self {
+        self.security_policy_config = Some(config);
+        self
+    }
+
+    pub fn security_authenticator(
+        mut self,
+        auth: std::sync::Arc<dyn camel_auth::TokenAuthenticator>,
+    ) -> Self {
+        self.security_authenticator = Some(auth);
         self
     }
 
@@ -686,6 +706,16 @@ impl RouteBuilder {
         } else {
             definition
         };
+        let definition = if let Some(sp) = self.security_policy_config {
+            definition.with_security_policy(sp)
+        } else {
+            definition
+        };
+        let definition = if let Some(auth) = self.security_authenticator {
+            definition.with_security_authenticator(auth)
+        } else {
+            definition
+        };
         let definition = if let Some(concurrency) = self.concurrency {
             definition.with_concurrency(concurrency)
         } else {
@@ -722,6 +752,13 @@ impl RouteBuilder {
         let circuit_breaker = self
             .circuit_breaker_config
             .map(canonicalize_circuit_breaker);
+
+        if self.security_policy_config.is_some() {
+            return Err(CamelError::RouteError(
+                "routes with security_policy cannot use the canonical/hot-reload path (not yet supported)"
+                    .into(),
+            ));
+        }
 
         let spec = CanonicalRouteSpec {
             route_id,

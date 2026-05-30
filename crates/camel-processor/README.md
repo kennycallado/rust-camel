@@ -25,6 +25,7 @@
 - **Script**: Execute mutating expressions via `ScriptMutator`; changes to headers, properties, and body propagate back with atomic rollback on error
 - **Delayer**: Delay message processing with fixed or dynamic (header-based) duration
 - **Stream Handling**: Processors that consume streams replace the body with a JSON placeholder `{"placeholder": true}`
+- **Security Policy Layer**: Tower middleware that enforces authorization before forwarding to the inner service
 - **Marshal / Unmarshal**: Serialize/deserialize message bodies using pluggable data formats (JSON, XML)
 
 ## Installation
@@ -113,6 +114,52 @@ let route = RouteBuilder::from("timer:tick")
 | `DelayerService` | Delay message processing by a fixed or dynamic duration |
 | `RecipientListService` | Dynamic recipient list — resolve endpoints from expression at runtime |
 | `DynamicRouterService` | Dynamic router — resolve destination at runtime via closure; detects same-destination loops |
+| `SecurityPolicyLayer` | Tower Layer that wraps a `SecurityPolicy` for authorization checks |
+| `SecurityPolicyService` | Tower Service produced by `SecurityPolicyLayer`; evaluates the policy per exchange |
+
+## Security Policy Layer
+
+`SecurityPolicyLayer` is a Tower `Layer` that intercepts every `Exchange` and evaluates a `SecurityPolicy` before forwarding to the inner service. It is the standard way to add authorization to any Camel pipeline.
+
+### How it works
+
+The layer produces a `SecurityPolicyService` that calls `policy.evaluate(&mut exchange)` for each exchange and branches on the `AuthorizationDecision`:
+
+| Decision | Behavior |
+|----------|----------|
+| `Granted { principal }` | Stores principal properties on the exchange (subject, issuer, audience, scopes, roles, claims) and forwards to the inner service |
+| `Denied { reason, required, actual }` | Returns `CamelError::Unauthorized` with a message containing reason, required, and actual roles/scopes |
+| `Err(e)` | Propagates the error (e.g., `CamelError::Unauthenticated`) |
+
+### Usage
+
+```rust
+use std::sync::Arc;
+use camel_processor::SecurityPolicyLayer;
+use camel_api::security_policy::SecurityPolicy;
+
+// Suppose you have a SecurityPolicy implementation:
+let policy: Arc<dyn SecurityPolicy> = Arc::new(MyPolicy);
+
+// Wrap it as a Tower layer:
+let layer = SecurityPolicyLayer::new(policy);
+
+// Compose in a Tower pipeline:
+let service = layer.layer(my_inner_service);
+```
+
+When composed with other processors, the security check runs before the inner service sees the exchange:
+
+```rust
+use tower::ServiceBuilder;
+use camel_processor::{SecurityPolicyLayer, LogProcessor};
+
+let service = ServiceBuilder::new()
+    .layer(SecurityPolicyLayer::new(my_policy))
+    .service(LogProcessor::new(LogLevel::Info, "Authorized request".into()));
+```
+
+Exchanges that are denied or encounter an evaluation error never reach the inner service.
 
 ## Data Formats
 

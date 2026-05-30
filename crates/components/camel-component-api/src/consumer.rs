@@ -1,9 +1,13 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use camel_api::security_policy::SecurityPolicy;
 use camel_api::{CamelError, Exchange};
+use camel_auth::{CredentialSource, TokenAuthenticator};
 
 /// A message sent from a consumer to the route pipeline.
 ///
@@ -84,6 +88,66 @@ impl ConsumerContext {
             .await
             .map_err(|_| CamelError::ChannelClosed)?;
         reply_rx.await.map_err(|_| CamelError::ChannelClosed)?
+    }
+}
+
+/// Security context passed to a consumer before `start()`.
+///
+/// Carries the `SecurityPolicy` and `TokenAuthenticator` from the route
+/// controller so consumers (e.g. WebSocket) can register auth state
+/// before accepting connections.
+pub struct SecurityContext {
+    pub policy: Arc<dyn SecurityPolicy>,
+    pub authenticator: Arc<dyn TokenAuthenticator>,
+    pub credential_sources: Vec<CredentialSource>,
+}
+
+impl SecurityContext {
+    pub fn new(
+        policy: impl SecurityPolicy + 'static,
+        authenticator: Arc<dyn TokenAuthenticator>,
+    ) -> Self {
+        Self {
+            policy: Arc::new(policy),
+            authenticator,
+            credential_sources: vec![CredentialSource::AuthorizationHeader],
+        }
+    }
+
+    pub fn from_arc(
+        policy: Arc<dyn SecurityPolicy>,
+        authenticator: Arc<dyn TokenAuthenticator>,
+    ) -> Self {
+        Self {
+            policy,
+            authenticator,
+            credential_sources: vec![CredentialSource::AuthorizationHeader],
+        }
+    }
+
+    pub fn with_credential_sources(mut self, sources: Vec<CredentialSource>) -> Self {
+        self.credential_sources = sources;
+        self
+    }
+}
+
+impl Clone for SecurityContext {
+    fn clone(&self) -> Self {
+        Self {
+            policy: Arc::clone(&self.policy),
+            authenticator: Arc::clone(&self.authenticator),
+            credential_sources: self.credential_sources.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for SecurityContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityContext")
+            .field("policy", &"<SecurityPolicy>")
+            .field("authenticator", &"<TokenAuthenticator>")
+            .field("credential_sources", &self.credential_sources)
+            .finish()
     }
 }
 
@@ -173,6 +237,14 @@ pub trait Consumer: Send + Sync {
     fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {
         None
     }
+
+    /// Set the security context for this consumer.
+    ///
+    /// Called by the route controller before `start()` so the consumer
+    /// can register auth state (e.g. WebSocket auth in `WsAppState`).
+    ///
+    /// Default: no-op, returns `Ok(())`.
+    fn set_security_context(&mut self, _ctx: SecurityContext) {}
 }
 
 #[cfg(test)]
@@ -254,5 +326,105 @@ mod tests {
         let consumer = DummyConsumer;
         assert!(consumer.suspend().await.is_ok());
         assert!(consumer.resume().await.is_ok());
+    }
+
+    // --- SecurityContext tests ---
+
+    struct StubPolicy;
+
+    #[async_trait::async_trait]
+    impl SecurityPolicy for StubPolicy {
+        async fn evaluate(
+            &self,
+            _exchange: &mut Exchange,
+        ) -> Result<camel_api::security_policy::AuthorizationDecision, CamelError> {
+            Ok(camel_api::security_policy::AuthorizationDecision::Granted {
+                principal: camel_api::security_policy::Principal {
+                    subject: "stub".into(),
+                    issuer: "stub".into(),
+                    audience: vec![],
+                    scopes: vec![],
+                    roles: vec![],
+                    claims: serde_json::json!({}),
+                },
+            })
+        }
+    }
+
+    struct StubAuthenticator;
+
+    #[async_trait::async_trait]
+    impl camel_auth::TokenAuthenticator for StubAuthenticator {
+        async fn authenticate_bearer(
+            &self,
+            _token: &str,
+        ) -> Result<camel_api::security_policy::Principal, CamelError> {
+            Ok(camel_api::security_policy::Principal {
+                subject: "stub".into(),
+                issuer: "stub".into(),
+                audience: vec![],
+                scopes: vec![],
+                roles: vec![],
+                claims: serde_json::json!({}),
+            })
+        }
+    }
+
+    #[test]
+    fn test_security_context_new() {
+        let ctx = SecurityContext::new(StubPolicy, Arc::new(StubAuthenticator));
+        assert!(Arc::strong_count(&ctx.policy) == 1);
+        assert!(Arc::strong_count(&ctx.authenticator) == 1);
+        assert_eq!(
+            ctx.credential_sources,
+            vec![camel_auth::CredentialSource::AuthorizationHeader]
+        );
+    }
+
+    #[test]
+    fn test_security_context_from_arc() {
+        let policy: Arc<dyn SecurityPolicy> = Arc::new(StubPolicy);
+        let authenticator: Arc<dyn camel_auth::TokenAuthenticator> = Arc::new(StubAuthenticator);
+        let ctx = SecurityContext::from_arc(Arc::clone(&policy), Arc::clone(&authenticator));
+        assert!(Arc::ptr_eq(&ctx.policy, &policy));
+        assert!(Arc::ptr_eq(&ctx.authenticator, &authenticator));
+        assert_eq!(
+            ctx.credential_sources,
+            vec![camel_auth::CredentialSource::AuthorizationHeader]
+        );
+    }
+
+    #[test]
+    fn test_security_context_clone_independent() {
+        let ctx = SecurityContext::new(StubPolicy, Arc::new(StubAuthenticator));
+        let cloned = ctx.clone();
+        assert!(Arc::ptr_eq(&ctx.policy, &cloned.policy));
+        assert!(Arc::ptr_eq(&ctx.authenticator, &cloned.authenticator));
+        assert_eq!(ctx.credential_sources, cloned.credential_sources);
+    }
+
+    #[test]
+    fn test_security_context_debug_redacts_traits() {
+        let ctx = SecurityContext::new(StubPolicy, Arc::new(StubAuthenticator));
+        let debug_str = format!("{ctx:?}");
+        assert!(debug_str.contains("<SecurityPolicy>"));
+        assert!(debug_str.contains("<TokenAuthenticator>"));
+        assert!(debug_str.contains("credential_sources"));
+    }
+
+    #[test]
+    fn test_security_context_with_credential_sources() {
+        let ctx = SecurityContext::new(StubPolicy, Arc::new(StubAuthenticator))
+            .with_credential_sources(vec![
+                camel_auth::CredentialSource::Cookie {
+                    name: "session".into(),
+                },
+                camel_auth::CredentialSource::AuthorizationHeader,
+            ]);
+        assert_eq!(ctx.credential_sources.len(), 2);
+        assert!(matches!(
+            &ctx.credential_sources[0],
+            camel_auth::CredentialSource::Cookie { .. }
+        ));
     }
 }

@@ -15,7 +15,7 @@ use camel_component_log::LogComponent;
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
 use camel_config::CamelConfig;
-use camel_config::config::{KubernetesPlatformCamelConfig, PlatformCamelConfig};
+use camel_config::config::{KubernetesPlatformCamelConfig, PlatformCamelConfig, SecurityConfig};
 use camel_core::CamelContext;
 use camel_master::MasterBundle;
 use camel_platform_kubernetes::{
@@ -205,6 +205,7 @@ async fn master_route_uses_kubernetes_platform_from_config() {
         }),
         stream_caching: Default::default(),
         beans: Default::default(),
+        security: SecurityConfig::default(),
         _extra: Default::default(),
     };
 

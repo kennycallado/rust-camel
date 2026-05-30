@@ -59,7 +59,7 @@ async fn tracer_disabled_zero_overhead() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tracer_file_output_invalid_path_returns_error() {
     use camel_config::config::{
-        CamelConfig, ComponentsConfig, ObservabilityConfig, PlatformCamelConfig,
+        CamelConfig, ComponentsConfig, ObservabilityConfig, PlatformCamelConfig, SecurityConfig,
     };
     use camel_core::{
         DetailLevel, FileOutput, OutputFormat, StdoutOutput, TracerConfig, TracerOutputs,
@@ -101,6 +101,7 @@ async fn tracer_file_output_invalid_path_returns_error() {
         platform: PlatformCamelConfig::Noop,
         stream_caching: Default::default(),
         beans: Default::default(),
+        security: SecurityConfig::default(),
         _extra: HashMap::new(),
     };
 

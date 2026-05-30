@@ -74,6 +74,26 @@ impl CamelConfig {
             .map_err(|e| CamelError::Config(e.to_string()))
     }
 
+    /// Load routes from config file with a security compile context, returning them
+    /// without adding to context yet. This allows permission evaluator registries
+    /// to be wired before route resolution.
+    pub fn load_routes_with_security(
+        path: &str,
+        security_ctx: camel_dsl::SecurityCompileContext,
+    ) -> Result<Vec<RouteDefinition>, CamelError> {
+        let config = Self::from_file_with_profile_and_env(path, None)
+            .map_err(|e| CamelError::Config(e.to_string()))?;
+        if config.routes.is_empty() {
+            return Ok(Vec::new());
+        }
+        crate::discovery::discover_routes_with_threshold_and_security(
+            &config.routes,
+            config.stream_caching.threshold,
+            security_ctx,
+        )
+        .map_err(|e| CamelError::Config(e.to_string()))
+    }
+
     /// Create a CamelContext configured from this CamelConfig.
     ///
     /// Always installs a unified tracing subscriber (Layers 1–4).

@@ -254,6 +254,8 @@ fn serde_bridge_json_fallback_to_text_on_invalid_json_string() {
         properties: vec![],
         pattern: camel_component_wasm::bindings::camel::plugin::types::WasmPattern::InOnly,
         correlation_id: "cid".to_string(),
+        route_id: None,
+        message_id: None,
     };
     let mut out = Exchange::new(Message::default());
     wasm_to_exchange(wasm, &mut out);

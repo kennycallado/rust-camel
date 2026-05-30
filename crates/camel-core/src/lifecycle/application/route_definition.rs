@@ -1,11 +1,15 @@
 // lifecycle/application/route_definition.rs
 // Route definition and builder-step types. Route (compiled artifact) lives in adapters.
 
+use std::sync::Arc;
+
 use camel_api::UnitOfWorkConfig;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::loop_eip::LoopConfig;
+use camel_api::security_policy::SecurityPolicyConfig;
 use camel_api::{AggregatorConfig, BoxProcessor, FilterPredicate, MulticastConfig, SplitterConfig};
+use camel_auth::TokenAuthenticator;
 use camel_component_api::ConcurrencyModel;
 
 /// An unresolved when-clause: predicate + nested steps for the sub-pipeline.
@@ -333,6 +337,9 @@ pub struct RouteDefinition {
     pub(crate) error_handler: Option<ErrorHandlerConfig>,
     /// Optional circuit breaker config. Applied between error handler and step pipeline.
     pub(crate) circuit_breaker: Option<CircuitBreakerConfig>,
+    pub(crate) security_policy: Option<SecurityPolicyConfig>,
+    /// Optional token authenticator for validating JWT/OAuth tokens.
+    pub(crate) security_authenticator: Option<Arc<dyn TokenAuthenticator>>,
     /// Optional Unit of Work config for in-flight tracking and completion hooks.
     pub(crate) unit_of_work: Option<UnitOfWorkConfig>,
     /// User override for the consumer's concurrency model. `None` means
@@ -355,6 +362,8 @@ impl RouteDefinition {
             steps,
             error_handler: None,
             circuit_breaker: None,
+            security_policy: None,
+            security_authenticator: None,
             unit_of_work: None,
             concurrency: None,
             route_id: String::new(), // Will be set by with_route_id()
@@ -391,6 +400,21 @@ impl RouteDefinition {
         self
     }
 
+    /// Set a security policy for this route.
+    pub fn with_security_policy(mut self, config: SecurityPolicyConfig) -> Self {
+        self.security_policy = Some(config);
+        self
+    }
+
+    /// Set a token authenticator for this route.
+    pub fn with_security_authenticator(
+        mut self,
+        authenticator: Arc<dyn TokenAuthenticator>,
+    ) -> Self {
+        self.security_authenticator = Some(authenticator);
+        self
+    }
+
     /// Set a unit of work config for this route.
     pub fn with_unit_of_work(mut self, config: UnitOfWorkConfig) -> Self {
         self.unit_of_work = Some(config);
@@ -405,6 +429,14 @@ impl RouteDefinition {
     /// Get the circuit breaker config, if set.
     pub fn circuit_breaker_config(&self) -> Option<&CircuitBreakerConfig> {
         self.circuit_breaker.as_ref()
+    }
+
+    pub fn security_policy_config(&self) -> Option<&SecurityPolicyConfig> {
+        self.security_policy.as_ref()
+    }
+
+    pub fn security_authenticator(&self) -> Option<&Arc<dyn TokenAuthenticator>> {
+        self.security_authenticator.as_ref()
     }
 
     /// User-specified concurrency override, if any.
@@ -729,5 +761,74 @@ mod tests {
 
         let def_no_uow = RouteDefinition::new("direct:test", vec![]).with_route_id("no-uow");
         assert!(def_no_uow.unit_of_work_config().is_none());
+    }
+
+    #[test]
+    fn test_route_definition_security_policy_accessor() {
+        use async_trait::async_trait;
+        use camel_api::CamelError;
+        use camel_api::Exchange;
+        use camel_api::security_policy::{
+            AuthorizationDecision, Principal, SecurityPolicy, SecurityPolicyConfig,
+        };
+
+        struct StubPolicy;
+        #[async_trait]
+        impl SecurityPolicy for StubPolicy {
+            async fn evaluate(
+                &self,
+                _exchange: &mut Exchange,
+            ) -> Result<AuthorizationDecision, CamelError> {
+                Ok(AuthorizationDecision::Granted {
+                    principal: Principal {
+                        subject: "test".into(),
+                        issuer: "test".into(),
+                        audience: vec![],
+                        scopes: vec![],
+                        roles: vec![],
+                        claims: serde_json::Value::Null,
+                    },
+                })
+            }
+        }
+
+        let def_no_sp = RouteDefinition::new("direct:test", vec![]).with_route_id("no-sp");
+        assert!(def_no_sp.security_policy_config().is_none());
+
+        let def = RouteDefinition::new("direct:test", vec![])
+            .with_route_id("sp-test")
+            .with_security_policy(SecurityPolicyConfig::new(StubPolicy));
+        assert!(def.security_policy_config().is_some());
+    }
+
+    #[test]
+    fn test_route_definition_security_authenticator_accessor() {
+        use camel_api::security_policy::Principal;
+
+        struct TestAuth;
+        #[async_trait::async_trait]
+        impl TokenAuthenticator for TestAuth {
+            async fn authenticate_bearer(
+                &self,
+                _token: &str,
+            ) -> Result<Principal, camel_api::CamelError> {
+                Ok(Principal {
+                    subject: "test".into(),
+                    issuer: "test".into(),
+                    audience: vec![],
+                    scopes: vec![],
+                    roles: vec![],
+                    claims: serde_json::Value::Null,
+                })
+            }
+        }
+
+        let def_no_auth = RouteDefinition::new("direct:test".to_string(), vec![]);
+        assert!(def_no_auth.security_authenticator().is_none());
+
+        let auth = Arc::new(TestAuth);
+        let def = RouteDefinition::new("direct:test".to_string(), vec![])
+            .with_security_authenticator(auth);
+        assert!(def.security_authenticator().is_some());
     }
 }

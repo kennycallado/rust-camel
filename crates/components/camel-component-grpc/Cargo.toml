@@ -10,6 +10,7 @@ homepage.workspace = true
 [dependencies]
 camel-component-api.workspace = true
 camel-api.workspace = true
+camel-auth.workspace = true
 camel-proto-compiler.workspace = true
 camel-dataformat-protobuf.workspace = true
 tonic.workspace = true

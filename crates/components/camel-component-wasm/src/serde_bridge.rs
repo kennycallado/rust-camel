@@ -11,6 +11,11 @@ use crate::bean_bindings::camel::plugin::types::{
     WasmPattern as BeanWasmPattern,
 };
 
+use crate::security_policy_bindings::camel::plugin::types::{
+    WasmBody as SpWasmBody, WasmExchange as SpWasmExchange, WasmMessage as SpWasmMessage,
+    WasmPattern as SpWasmPattern,
+};
+
 impl From<WasmExchange> for BeanWasmExchange {
     fn from(v: WasmExchange) -> Self {
         BeanWasmExchange {
@@ -19,6 +24,8 @@ impl From<WasmExchange> for BeanWasmExchange {
             properties: v.properties,
             pattern: v.pattern.into(),
             correlation_id: v.correlation_id,
+            route_id: v.route_id,
+            message_id: v.message_id,
         }
     }
 }
@@ -31,6 +38,8 @@ impl From<BeanWasmExchange> for WasmExchange {
             properties: v.properties,
             pattern: v.pattern.into(),
             correlation_id: v.correlation_id,
+            route_id: v.route_id,
+            message_id: v.message_id,
         }
     }
 }
@@ -95,6 +104,50 @@ impl From<BeanWasmPattern> for WasmPattern {
     }
 }
 
+impl From<WasmExchange> for SpWasmExchange {
+    fn from(v: WasmExchange) -> Self {
+        SpWasmExchange {
+            input: v.input.into(),
+            output: v.output.map(Into::into),
+            properties: v.properties,
+            pattern: v.pattern.into(),
+            correlation_id: v.correlation_id,
+            route_id: v.route_id,
+            message_id: v.message_id,
+        }
+    }
+}
+
+impl From<WasmMessage> for SpWasmMessage {
+    fn from(v: WasmMessage) -> Self {
+        SpWasmMessage {
+            headers: v.headers,
+            body: v.body.into(),
+        }
+    }
+}
+
+impl From<WasmBody> for SpWasmBody {
+    fn from(v: WasmBody) -> Self {
+        match v {
+            WasmBody::Empty => SpWasmBody::Empty,
+            WasmBody::Text(s) => SpWasmBody::Text(s),
+            WasmBody::Bytes(b) => SpWasmBody::Bytes(b),
+            WasmBody::Json(s) => SpWasmBody::Json(s),
+            WasmBody::Xml(s) => SpWasmBody::Xml(s),
+        }
+    }
+}
+
+impl From<WasmPattern> for SpWasmPattern {
+    fn from(v: WasmPattern) -> Self {
+        match v {
+            WasmPattern::InOnly => SpWasmPattern::InOnly,
+            WasmPattern::InOut => SpWasmPattern::InOut,
+        }
+    }
+}
+
 pub fn exchange_to_wasm(exchange: &Exchange) -> Result<WasmExchange, CamelError> {
     let input = message_to_wasm(&exchange.input)?;
     let output = exchange.output.as_ref().map(message_to_wasm).transpose()?;
@@ -112,6 +165,8 @@ pub fn exchange_to_wasm(exchange: &Exchange) -> Result<WasmExchange, CamelError>
         properties,
         pattern,
         correlation_id: exchange.correlation_id.clone(),
+        route_id: None,
+        message_id: None,
     })
 }
 

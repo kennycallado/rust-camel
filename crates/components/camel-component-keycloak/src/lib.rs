@@ -1,0 +1,527 @@
+//! Keycloak integration for rust-camel.
+//!
+//! Provides Keycloak-specific claim presets, realm URL construction,
+//! role extraction, and Admin API producer (Phase 7).
+//! Event consumer will be added in Phase 8.
+
+pub mod admin_endpoint_config;
+pub mod admin_operation;
+pub mod admin_types;
+pub mod event_types;
+pub mod events_endpoint_config;
+pub mod keycloak_consumer;
+pub mod keycloak_endpoint;
+pub mod keycloak_producer;
+pub mod uma;
+
+use std::fmt;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use camel_api::CamelError;
+use camel_auth::claims::ClaimPaths;
+use camel_auth::oauth2::{ClientCredentialsProvider, TokenProvider};
+use camel_auth::permission::PermissionEvaluator;
+use camel_auth::types::AuthError;
+use camel_component_api::{Component, ComponentContext, Endpoint};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct KeycloakRealmConfig {
+    server_url: String,
+    realm: String,
+    client_id: String,
+    #[serde(skip_serializing)]
+    client_secret: Option<String>,
+}
+
+impl fmt::Debug for KeycloakRealmConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secret_display = if self.client_secret.is_some() {
+            "REDACTED"
+        } else {
+            "None"
+        };
+        f.debug_struct("KeycloakRealmConfig")
+            .field("server_url", &self.server_url)
+            .field("realm", &self.realm)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &secret_display)
+            .finish()
+    }
+}
+
+fn escape_json_pointer(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '~' => out.push_str("~0"),
+            '/' => out.push_str("~1"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+impl KeycloakRealmConfig {
+    pub fn new(server_url: String, realm: String, client_id: String) -> Self {
+        Self {
+            server_url,
+            realm,
+            client_id,
+            client_secret: None,
+        }
+    }
+
+    pub fn with_client_secret(mut self, secret: String) -> Self {
+        self.client_secret = Some(secret);
+        self
+    }
+
+    pub fn realm_url(&self) -> String {
+        let url = format!(
+            "{}/realms/{}",
+            self.server_url.trim_end_matches('/'),
+            self.realm
+        ); // allow-secret
+        url
+    }
+
+    pub fn jwks_uri(&self) -> String {
+        format!("{}/protocol/openid-connect/certs", self.realm_url()) // allow-secret
+    }
+
+    pub fn token_endpoint(&self) -> String {
+        format!("{}/protocol/openid-connect/token", self.realm_url()) // allow-secret
+    }
+
+    pub fn introspection_endpoint(&self) -> String {
+        self.realm_url() + "/protocol/openid-connect/token/introspect"
+    }
+
+    pub fn admin_url(&self) -> String {
+        format!(
+            "{}/admin/realms/{}",
+            self.server_url.trim_end_matches('/'),
+            self.realm
+        )
+    }
+
+    pub fn server_url(&self) -> &str {
+        &self.server_url
+    }
+
+    pub fn realm(&self) -> &str {
+        &self.realm
+    }
+
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    pub fn client_secret(&self) -> Option<&str> {
+        self.client_secret.as_deref()
+    }
+
+    pub fn introspection_authenticator(
+        &self,
+        options: camel_auth::IntrospectionCacheOptions,
+    ) -> Result<camel_auth::IntrospectionAuthenticator, CamelError> {
+        use camel_auth::IntrospectionAuthenticator;
+        use camel_auth::claims::{ClaimsMapper, JsonPointerClaimsMapper};
+
+        let secret = self
+            .client_secret()
+            .ok_or_else(|| CamelError::Config("introspection requires client_secret".into()))?;
+        let introspector = camel_auth::CachingTokenIntrospector::new(
+            self.introspection_endpoint(),
+            self.client_id().to_string(),
+            secret.to_string(),
+            options,
+        )
+        .map_err(|e| CamelError::Config(e.to_string()))?;
+        let mapper: Arc<dyn ClaimsMapper> = Arc::new(JsonPointerClaimsMapper::new(
+            keycloak_claim_paths(self.client_id()),
+        ));
+        Ok(IntrospectionAuthenticator::new(
+            Arc::new(introspector),
+            mapper,
+        ))
+    }
+
+    pub fn uma_evaluator(&self) -> Result<Arc<dyn PermissionEvaluator>, AuthError> {
+        let secret = self
+            .client_secret
+            .as_ref()
+            .ok_or_else(|| AuthError::ConfigError("client_secret required for UMA".into()))?;
+        let evaluator = KeycloakUmaEvaluator::new(
+            self.server_url.clone(),
+            self.realm.clone(),
+            self.client_id.clone(),
+            secret.clone(),
+        )?;
+        Ok(Arc::new(evaluator))
+    }
+}
+
+impl fmt::Display for KeycloakRealmConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "KeycloakRealmConfig(server={}, realm={}, client={})",
+            self.server_url, self.realm, self.client_id
+        )
+    }
+}
+
+pub fn keycloak_claim_paths(client_id: &str) -> ClaimPaths {
+    ClaimPaths {
+        subject: "/sub".into(),
+        roles: vec![
+            "/realm_access/roles".into(),
+            format!("/resource_access/{}/roles", escape_json_pointer(client_id)),
+        ],
+        scopes: Some("/scope".into()),
+    }
+}
+
+pub use admin_endpoint_config::AdminEndpointConfig;
+pub use admin_operation::AdminOperation;
+pub use events_endpoint_config::EventsEndpointConfig;
+pub use keycloak_consumer::KeycloakEventConsumer;
+pub use keycloak_endpoint::{KeycloakEndpoint, KeycloakEndpointConfig, KeycloakEndpointKind};
+pub use keycloak_producer::KeycloakAdminProducer;
+pub use uma::KeycloakUmaEvaluator;
+
+pub struct KeycloakComponent {
+    server_url: String,
+    token_provider: Arc<dyn TokenProvider>,
+    http: reqwest::Client,
+}
+
+impl KeycloakComponent {
+    pub fn new(config: &KeycloakRealmConfig) -> Result<Self, CamelError> {
+        let secret = config.client_secret().ok_or_else(|| {
+            CamelError::EndpointCreationFailed("keycloak component requires client_secret".into())
+        })?;
+        let token_provider = Arc::new(ClientCredentialsProvider::new(
+            config.token_endpoint(),
+            config.client_id().to_string(),
+            secret.to_string(),
+            None,
+            None,
+        ));
+        Ok(Self {
+            server_url: config.server_url().to_string(),
+            token_provider,
+            http: reqwest::Client::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl Component for KeycloakComponent {
+    fn scheme(&self) -> &str {
+        "keycloak"
+    }
+
+    fn create_endpoint(
+        &self,
+        uri: &str,
+        _ctx: &dyn ComponentContext,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        let config = KeycloakEndpointConfig::from_uri(
+            uri,
+            &self.server_url,
+            Arc::clone(&self.token_provider),
+            self.http.clone(),
+        )?;
+        Ok(Box::new(KeycloakEndpoint::new(uri.to_string(), config)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camel_auth::IntrospectionCacheOptions;
+    use camel_auth::claims::{ClaimsMapper, JsonPointerClaimsMapper};
+    use camel_component_api::NoOpComponentContext;
+    use serde_json::json;
+
+    #[test]
+    fn keycloak_claim_paths_contains_both_role_paths() {
+        let paths = keycloak_claim_paths("my-client");
+        assert_eq!(paths.subject, "/sub");
+        assert!(paths.roles.contains(&"/realm_access/roles".into()));
+        assert!(
+            paths
+                .roles
+                .contains(&"/resource_access/my-client/roles".into())
+        );
+        assert_eq!(paths.scopes, Some("/scope".into()));
+    }
+
+    #[test]
+    fn claim_paths_escapes_client_id() {
+        let paths = keycloak_claim_paths("my/client");
+        assert!(
+            paths
+                .roles
+                .iter()
+                .any(|p| p == "/resource_access/my~1client/roles")
+        );
+    }
+
+    #[test]
+    fn claim_paths_escapes_tilde_in_client_id() {
+        let paths = keycloak_claim_paths("my~client");
+        assert!(
+            paths
+                .roles
+                .iter()
+                .any(|p| p == "/resource_access/my~0client/roles")
+        );
+    }
+
+    #[test]
+    fn claim_paths_produces_valid_principal_via_mapper() {
+        let paths = keycloak_claim_paths("my-client");
+        let mapper = JsonPointerClaimsMapper::new(paths);
+        let claims = json!({
+            "sub": "user-1",
+            "iss": "https://kc.example.com/realms/test",
+            "aud": "my-api",
+            "realm_access": { "roles": ["admin"] },
+            "resource_access": {
+                "my-client": { "roles": ["client-role"] }
+            },
+            "scope": "read write",
+        });
+        let principal = mapper.to_principal(&claims).unwrap();
+        assert_eq!(principal.subject, "user-1");
+        assert!(principal.has_role("admin"));
+        assert!(principal.has_role("client-role"));
+        assert_eq!(principal.scopes, vec!["read", "write"]);
+    }
+
+    #[test]
+    fn realm_url() {
+        let config = KeycloakRealmConfig::new(
+            "http://localhost:8080".into(),
+            "my-realm".into(),
+            "my-client".into(),
+        );
+        assert_eq!(config.realm_url(), "http://localhost:8080/realms/my-realm");
+    }
+
+    #[test]
+    fn jwks_uri() {
+        let config = KeycloakRealmConfig::new(
+            "http://localhost:8080".into(),
+            "my-realm".into(),
+            "my-client".into(),
+        );
+        assert_eq!(
+            config.jwks_uri(),
+            "http://localhost:8080/realms/my-realm/protocol/openid-connect/certs"
+        );
+    }
+
+    #[test]
+    fn token_endpoint() {
+        let config = KeycloakRealmConfig::new(
+            "http://localhost:8080".into(),
+            "my-realm".into(),
+            "my-client".into(),
+        );
+        assert_eq!(
+            config.token_endpoint(),
+            "http://localhost:8080/realms/my-realm/protocol/openid-connect/token"
+        );
+    }
+
+    #[test]
+    fn trailing_slash_handling() {
+        let config = KeycloakRealmConfig::new(
+            "http://localhost:8080/".into(),
+            "test".into(),
+            "client".into(),
+        );
+        assert_eq!(config.realm_url(), "http://localhost:8080/realms/test");
+    }
+
+    #[test]
+    fn debug_redacts_client_secret() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "myrealm".into(),
+            "myclient".into(),
+        )
+        .with_client_secret("super-secret".into());
+        let debug_str = format!("{config:?}");
+        assert!(!debug_str.contains("super-secret"));
+        assert!(debug_str.contains("REDACTED"));
+    }
+
+    #[test]
+    fn empty_client_id_produces_malformed_resource_path() {
+        let paths = keycloak_claim_paths("");
+        assert!(
+            paths.roles.iter().any(|p| p == "/resource_access//roles"),
+            "empty client_id should produce /resource_access//roles — caller must validate"
+        );
+    }
+
+    #[test]
+    fn keycloak_config_client_secret_accessor_with_secret() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "myrealm".into(),
+            "myclient".into(),
+        )
+        .with_client_secret("secret-123".into());
+        assert_eq!(config.client_secret(), Some("secret-123"));
+    }
+
+    #[test]
+    fn keycloak_config_client_secret_accessor_without_secret() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "myrealm".into(),
+            "myclient".into(),
+        );
+        assert!(config.client_secret().is_none());
+    }
+
+    #[test]
+    fn keycloak_component_scheme() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "myrealm".into(),
+            "myclient".into(),
+        )
+        .with_client_secret("secret".into());
+        let component = KeycloakComponent::new(&config).unwrap();
+        assert_eq!(component.scheme(), "keycloak");
+    }
+
+    #[test]
+    fn keycloak_component_create_endpoint_valid() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "myrealm".into(),
+            "myclient".into(),
+        )
+        .with_client_secret("secret".into());
+        let component = KeycloakComponent::new(&config).unwrap();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                "keycloak:admin?operation=getUser&realm=myrealm&userId=user-1",
+                &ctx,
+            )
+            .unwrap();
+        assert_eq!(
+            endpoint.uri(),
+            "keycloak:admin?operation=getUser&realm=myrealm&userId=user-1"
+        );
+    }
+
+    #[test]
+    fn keycloak_component_create_endpoint_invalid() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "myrealm".into(),
+            "myclient".into(),
+        )
+        .with_client_secret("secret".into());
+        let component = KeycloakComponent::new(&config).unwrap();
+        let ctx = NoOpComponentContext;
+        let result = component.create_endpoint("keycloak:badpath", &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn introspection_authenticator_builder_derives_endpoint() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "test-realm".into(),
+            "my-client".into(),
+        )
+        .with_client_secret("secret".into());
+
+        let opts = IntrospectionCacheOptions::default();
+        let result = config.introspection_authenticator(opts);
+        assert!(result.is_ok(), "builder should succeed with client_secret");
+    }
+
+    #[test]
+    fn introspection_authenticator_builder_requires_client_secret() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "test-realm".into(),
+            "my-client".into(),
+        );
+
+        let opts = IntrospectionCacheOptions::default();
+        let result = config.introspection_authenticator(opts);
+        assert!(result.is_err(), "builder should fail without client_secret");
+        let err = result.unwrap_err();
+        match err {
+            CamelError::Config(msg) => assert!(msg.contains("client_secret")),
+            other => panic!("expected Config error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn introspection_authenticator_maps_keycloak_roles() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "test-realm".into(),
+            "svc".into(),
+        )
+        .with_client_secret("s".into());
+
+        let opts = IntrospectionCacheOptions::default();
+        let _auth = config.introspection_authenticator(opts).unwrap();
+
+        let claims = json!({
+            "active": true,
+            "sub": "user-1",
+            "realm_access": {"roles": ["admin"]},
+            "resource_access": {"svc": {"roles": ["svc-role"]}},
+            "scope": "read"
+        });
+
+        let mapper = JsonPointerClaimsMapper::new(keycloak_claim_paths("svc"));
+        let principal = mapper.to_principal(&claims).unwrap();
+        assert!(principal.has_role("admin"));
+        assert!(principal.has_role("svc-role"));
+        assert_eq!(principal.scopes, vec!["read"]);
+    }
+
+    #[test]
+    fn uma_evaluator_builder_returns_evaluator() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "test".into(),
+            "authz-client".into(),
+        )
+        .with_client_secret("secret".into());
+        let evaluator = config.uma_evaluator();
+        assert!(evaluator.is_ok());
+        let eval = evaluator.unwrap();
+        let _arc: Arc<dyn PermissionEvaluator> = eval;
+    }
+
+    #[test]
+    fn uma_evaluator_fails_without_client_secret() {
+        let config = KeycloakRealmConfig::new(
+            "https://kc.example.com".into(),
+            "test".into(),
+            "authz-client".into(),
+        );
+        let result = config.uma_evaluator();
+        assert!(result.is_err());
+    }
+}

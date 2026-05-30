@@ -249,6 +249,8 @@ mod tests {
             in_flight: None,
             aggregate_split: None,
             agg_service: None,
+            security_policy: None,
+            security_authenticator: None,
         }
     }
 

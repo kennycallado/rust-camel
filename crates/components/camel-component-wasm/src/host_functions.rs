@@ -149,6 +149,60 @@ impl BeanHost for WasmHostState {
     }
 }
 
+pub fn add_security_policy_to_linker(
+    linker: &mut Linker<WasmHostState>,
+) -> Result<(), wasmtime::Error> {
+    crate::security_policy_bindings::camel::plugin::host::add_to_linker::<_, HasSelf<_>>(
+        linker,
+        |state| state,
+    )
+}
+
+use crate::security_policy_bindings::camel::plugin::host::Host as SecurityPolicyHost;
+use crate::security_policy_bindings::camel::plugin::types::WasmError as SecurityPolicyWasmError;
+
+impl SecurityPolicyHost for WasmHostState {
+    fn camel_call(
+        &mut self,
+        uri: String,
+        payload: String,
+    ) -> Result<String, SecurityPolicyWasmError> {
+        let host = self as &mut dyn Host;
+        host.camel_call(uri, payload).map_err(|e| match e {
+            WasmError::ProcessorError(s) => SecurityPolicyWasmError::ProcessorError(s),
+            WasmError::TypeConversion(s) => SecurityPolicyWasmError::TypeConversion(s),
+            WasmError::Io(s) => SecurityPolicyWasmError::Io(s),
+            WasmError::Timeout => SecurityPolicyWasmError::Timeout,
+        })
+    }
+
+    fn get_property(&mut self, key: String) -> Option<String> {
+        let host = self as &mut dyn Host;
+        host.get_property(key)
+    }
+
+    fn set_property(&mut self, key: String, value: String) {
+        let host = self as &mut dyn Host;
+        host.set_property(key, value)
+    }
+
+    fn host_store(&mut self, key: String, value: String) -> Result<(), SecurityPolicyWasmError> {
+        let host = self as &mut dyn Host;
+        host.host_store(key, value).map_err(|e| match e {
+            WasmError::Io(s) => SecurityPolicyWasmError::Io(s),
+            other => SecurityPolicyWasmError::Io(other.to_string()),
+        })
+    }
+
+    fn host_load(&mut self, key: String) -> Result<Option<String>, SecurityPolicyWasmError> {
+        let host = self as &mut dyn Host;
+        host.host_load(key).map_err(|e| match e {
+            WasmError::Io(s) => SecurityPolicyWasmError::Io(s),
+            other => SecurityPolicyWasmError::Io(other.to_string()),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

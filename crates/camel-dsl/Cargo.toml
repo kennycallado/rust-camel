@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true
+camel-auth.workspace = true
 camel-core.workspace = true
 camel-processor.workspace = true
 camel-dataformat-protobuf = { workspace = true, optional = true }
@@ -31,6 +32,7 @@ regex.workspace = true
 protobuf = ["dep:camel-dataformat-protobuf", "dep:camel-proto-compiler"]
 
 [dev-dependencies]
+async-trait.workspace = true
 criterion.workspace = true
 tempfile = "3"
 

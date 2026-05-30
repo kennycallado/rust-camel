@@ -34,6 +34,8 @@ If a subagent needs ULTRATHINK instructions are in .opencode/instructions/ultrat
     cargo clippy --workspace --all-features \
       --exclude camel-cli \
       --exclude camel-component-kafka \
+      --exclude security-keycloak \
+      --exclude security-wasm-policy \
       -- -D warnings
     cargo clippy -p camel-component-kafka -- -D warnings
     cargo clippy -p camel-cli -- -D warnings

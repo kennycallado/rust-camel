@@ -484,6 +484,109 @@ routes:
       - log: "processing"
 ```
 
+## Security Policy
+
+The `security_policy` directive controls per-route authorization. It is a route-level setting, not a step -- it is evaluated before any step in the pipeline runs.
+
+### `roles:` -- Role-Based Access Control
+
+Require one or more roles. By default the user must have **all** listed roles; set `all_required: false` to accept any one.
+
+```yaml
+routes:
+  - id: "admin-route"
+    from: "direct:admin"
+    security_policy:
+      roles: ["admin", "operator"]
+      all_required: true
+    steps:
+      - log: "Admin access granted"
+```
+
+### `scopes:` -- OAuth Scope Check
+
+Require one or more OAuth scopes. Same `all_required` semantics as roles.
+
+```yaml
+routes:
+  - id: "scoped-route"
+    from: "direct:api"
+    security_policy:
+      scopes: ["read:orders", "write:orders"]
+      all_required: false
+    steps:
+      - to: "log:info"
+```
+
+### `ref:` -- Named Policy Reference
+
+Reference a security policy registered in the `SecurityPolicyRegistry` by name.
+
+```yaml
+routes:
+  - id: "ref-route"
+    from: "direct:secure"
+    security_policy:
+      ref: "admin-only"
+    steps:
+      - log: "Referenced policy applied"
+```
+
+### `wasm:` -- WASM Policy Evaluator
+
+Delegate authorization to a WASM module.
+
+```yaml
+routes:
+  - id: "wasm-policy-route"
+    from: "direct:check"
+    security_policy:
+      wasm:
+        path: "policies/auth_policy.wasm"
+        config:
+          allowed_roles: "admin,editor"
+    steps:
+      - to: "log:info"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | yes | Path to the WASM module |
+| `config` | map | no | Key-value config passed to the module |
+
+### `permission:` -- Attribute-Based Access Control (ABAC)
+
+Evaluate a permission request against a registered `PermissionEvaluator` (e.g. Keycloak UMA).
+
+```yaml
+routes:
+  - id: "uma-route"
+    from: "direct:resource"
+    security_policy:
+      permission:
+        policy: "resource-access"
+        resource: "${header.resource-id}"
+        action: "read"
+        scopes: ["view"]
+        cache_ttl_secs: 60
+        cache_negative_ttl_secs: 5
+    steps:
+      - to: "log:info"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `policy` | string | yes | Name of the registered permission provider |
+| `resource` | string or expression | yes | Resource identifier (supports `${header.*}` expressions) |
+| `action` | string or expression | yes | Requested action (supports `${header.*}` expressions) |
+| `scopes` | [string] | no | Additional permission scopes |
+| `cache_ttl_secs` | u64 | no | Override positive cache TTL |
+| `cache_negative_ttl_secs` | u64 | no | Override negative cache TTL |
+
+### Limitations
+
+Routes that declare `security_policy` cannot currently use the canonical/hot-reload path. They must be loaded through the standard YAML/JSON DSL loader.
+
 ## Documentation
 - [API Documentation](https://docs.rs/camel-dsl)
 - [Examples](https://github.com/kennycallado/rust-camel/tree/main/examples)

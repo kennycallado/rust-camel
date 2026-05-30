@@ -5,6 +5,7 @@ use config::{Config, ConfigError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +56,9 @@ pub struct CamelConfig {
 
     #[serde(default)]
     pub beans: HashMap<String, BeanConfig>,
+
+    #[serde(default)]
+    pub security: SecurityConfig,
 
     /// Catch-all for extra keys injected by config sources (e.g. CAMEL_* env vars)
     /// or unknown fields in TOML. Nested structs use `deny_unknown_fields` to
@@ -120,7 +124,8 @@ impl CamelConfigBuilder {
             platform: defaults.platform,
             stream_caching: defaults.stream_caching,
             beans: defaults.beans,
-            _extra: HashMap::new(),
+            security: defaults.security,
+            _extra: defaults._extra,
         }
     }
 }
@@ -141,6 +146,7 @@ impl Default for CamelConfig {
             platform: PlatformCamelConfig::default(),
             stream_caching: StreamCachingConfig::default(),
             beans: HashMap::new(),
+            security: SecurityConfig::default(),
             _extra: HashMap::new(),
         }
     }
@@ -467,6 +473,319 @@ pub struct BeanConfig {
     pub plugin: String,
     #[serde(default)]
     pub config: HashMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
+// Security configuration (Keycloak etc.)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityConfig {
+    #[serde(default)]
+    pub oidc: Option<OidcSecurityConfig>,
+    #[serde(default)]
+    pub native: Option<NativeAuthConfig>,
+    #[serde(default)]
+    pub keycloak: Option<KeycloakSecurityConfig>,
+    #[serde(default)]
+    pub permissions: Option<HashMap<String, PermissionProviderConfig>>,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OidcSecurityConfig {
+    pub issuer: String,
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
+    #[serde(default)]
+    pub audience: Vec<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing)]
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    #[serde(default)]
+    pub token_endpoint: Option<String>,
+    #[serde(default)]
+    pub introspection_endpoint: Option<String>,
+}
+
+impl fmt::Debug for OidcSecurityConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcSecurityConfig")
+            .field("issuer", &self.issuer)
+            .field("jwks_uri", &self.jwks_uri)
+            .field("audience", &self.audience)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("token_endpoint", &self.token_endpoint)
+            .field("introspection_endpoint", &self.introspection_endpoint)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct NativeIssuerConfig {
+    pub issuer: String,
+    #[serde(default)]
+    pub audience: Vec<String>,
+    #[serde(default = "default_token_ttl")]
+    pub token_ttl_secs: u64,
+    pub signing_key_env: String,
+}
+
+fn default_token_ttl() -> u64 {
+    900
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[non_exhaustive]
+#[serde(deny_unknown_fields)]
+pub struct NativeM2mClientConfig {
+    pub client_id: String,
+    pub client_secret_env: String,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
+impl fmt::Debug for NativeM2mClientConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeM2mClientConfig")
+            .field("client_id", &self.client_id)
+            .field("client_secret_env", &"[REDACTED]")
+            .field("roles", &self.roles)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAuthConfig {
+    pub subject: String,
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default)]
+    pub bearer_token: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub token_issuer: Option<NativeIssuerConfig>,
+    #[serde(default)]
+    pub clients: Vec<NativeM2mClientConfig>,
+}
+
+impl fmt::Debug for NativeAuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeAuthConfig")
+            .field("subject", &self.subject)
+            .field("issuer", &self.issuer)
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("roles", &self.roles)
+            .field("scopes", &self.scopes)
+            .field("token_issuer", &self.token_issuer)
+            .field("clients", &self.clients)
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KeycloakSecurityConfig {
+    pub server_url: String,
+    pub realm: String,
+    pub client_id: String,
+    #[serde(skip_serializing)]
+    pub client_secret: String,
+    #[serde(default)]
+    pub validation: KeycloakValidationConfig,
+    #[serde(default)]
+    pub jwks: KeycloakJwksConfig,
+    #[serde(default)]
+    pub introspection: KeycloakIntrospectionConfig,
+    #[serde(default)]
+    pub uma: Option<KeycloakUmaConfig>,
+}
+
+impl fmt::Debug for KeycloakSecurityConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeycloakSecurityConfig")
+            .field("server_url", &self.server_url)
+            .field("realm", &self.realm)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("validation", &self.validation)
+            .field("jwks", &self.jwks)
+            .field("introspection", &self.introspection)
+            .field("uma", &self.uma)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KeycloakValidationConfig {
+    #[serde(default = "default_validation_method")]
+    pub method: String,
+    #[serde(default)]
+    pub audience: Vec<String>,
+    #[serde(default = "default_clock_skew")]
+    pub clock_skew_secs: u64,
+}
+
+impl Default for KeycloakValidationConfig {
+    fn default() -> Self {
+        Self {
+            method: default_validation_method(),
+            audience: Vec::new(),
+            clock_skew_secs: default_clock_skew(),
+        }
+    }
+}
+
+fn default_validation_method() -> String {
+    "local".into()
+}
+
+fn default_clock_skew() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KeycloakJwksConfig {
+    #[serde(default = "default_cache_ttl")]
+    pub cache_ttl_secs: u64,
+    #[serde(default = "default_refresh_skew")]
+    pub refresh_skew_secs: u64,
+}
+
+impl Default for KeycloakJwksConfig {
+    fn default() -> Self {
+        Self {
+            cache_ttl_secs: default_cache_ttl(),
+            refresh_skew_secs: default_refresh_skew(),
+        }
+    }
+}
+
+fn default_cache_ttl() -> u64 {
+    3600
+}
+
+fn default_refresh_skew() -> u64 {
+    60
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KeycloakIntrospectionConfig {
+    #[serde(default = "default_introspection_max_entries")]
+    pub max_entries: usize,
+    #[serde(default = "default_introspection_ttl")]
+    pub default_ttl_secs: u64,
+    #[serde(default = "default_introspection_negative_ttl")]
+    pub negative_ttl_secs: u64,
+}
+
+impl Default for KeycloakIntrospectionConfig {
+    fn default() -> Self {
+        Self {
+            max_entries: default_introspection_max_entries(),
+            default_ttl_secs: default_introspection_ttl(),
+            negative_ttl_secs: default_introspection_negative_ttl(),
+        }
+    }
+}
+
+fn default_introspection_max_entries() -> usize {
+    10_000
+}
+
+fn default_introspection_ttl() -> u64 {
+    60
+}
+
+fn default_introspection_negative_ttl() -> u64 {
+    5
+}
+
+// ---------------------------------------------------------------------------
+// Keycloak UMA (User-Managed Access) configuration
+// ---------------------------------------------------------------------------
+
+/// Cache configuration for permission evaluators.
+/// Default positive TTL is 30s (shorter than token introspection's 60s)
+/// because authorization decisions can change faster than identity claims.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionCacheConfig {
+    #[serde(default = "default_positive_ttl_secs")]
+    pub positive_ttl_secs: u64,
+    #[serde(default = "default_negative_ttl_secs")]
+    pub negative_ttl_secs: u64,
+    #[serde(default = "default_max_entries")]
+    pub max_entries: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionProviderConfig {
+    pub provider: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub config: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub cache: PermissionCacheConfig,
+}
+
+fn default_positive_ttl_secs() -> u64 {
+    30
+}
+fn default_negative_ttl_secs() -> u64 {
+    5
+}
+fn default_max_entries() -> usize {
+    10_000
+}
+
+impl Default for PermissionCacheConfig {
+    fn default() -> Self {
+        Self {
+            positive_ttl_secs: default_positive_ttl_secs(),
+            negative_ttl_secs: default_negative_ttl_secs(),
+            max_entries: default_max_entries(),
+        }
+    }
+}
+
+/// Configuration for Keycloak UMA (User-Managed Access) authorization.
+///
+/// Inherits `server_url`, `realm`, `client_id`, `client_secret` from the parent
+/// [`KeycloakSecurityConfig`]; only provider selection and cache tuning live here.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KeycloakUmaConfig {
+    pub provider: String,
+    #[serde(default)]
+    pub cache: PermissionCacheConfig,
 }
 
 impl From<&JournalConfig> for camel_core::RedbJournalOptions {
@@ -1879,6 +2198,286 @@ mod config_validation_tests {
             ..CamelConfig::default()
         };
         assert!(config.validate().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod security_config_tests {
+    use super::*;
+
+    #[test]
+    fn parse_security_config() {
+        let toml_str = r#"
+[security.keycloak]
+server_url = "http://localhost:8080"
+realm = "test-realm"
+client_id = "my-client"
+client_secret = "my-secret"
+
+[security.keycloak.validation]
+method = "local"
+audience = ["my-api"]
+clock_skew_secs = 30
+
+[security.keycloak.jwks]
+cache_ttl_secs = 3600
+refresh_skew_secs = 60
+"#;
+        let config: CamelConfig = toml::from_str(toml_str).unwrap();
+        let kc = config.security.keycloak.unwrap();
+        assert_eq!(kc.server_url, "http://localhost:8080");
+        assert_eq!(kc.realm, "test-realm");
+        assert_eq!(kc.client_id, "my-client");
+        assert_eq!(kc.validation.method, "local");
+        assert_eq!(kc.validation.audience, vec!["my-api"]);
+    }
+
+    #[test]
+    fn security_config_defaults_when_absent() {
+        let config: CamelConfig = toml::from_str("").unwrap();
+        assert!(config.security.oidc.is_none());
+        assert!(config.security.native.is_none());
+        assert!(config.security.keycloak.is_none());
+        assert!(config.security.permissions.is_none());
+    }
+
+    #[test]
+    fn parse_security_oidc_and_native_config() {
+        let toml_str = r#"
+[security.oidc]
+issuer = "https://issuer.example.com/realms/test"
+jwks_uri = "https://issuer.example.com/realms/test/protocol/openid-connect/certs"
+audience = ["api", "backend"]
+client_id = "svc-client"
+client_secret = "svc-secret"
+token_endpoint = "https://issuer.example.com/realms/test/protocol/openid-connect/token"
+
+[security.native]
+subject = "native-user"
+issuer = "native"
+bearer_token = "token-123"
+api_key = "key-123"
+roles = ["admin"]
+scopes = ["read", "write"]
+"#;
+        let config: CamelConfig = toml::from_str(toml_str).unwrap();
+
+        let oidc = config.security.oidc.unwrap();
+        assert_eq!(oidc.issuer, "https://issuer.example.com/realms/test");
+        assert_eq!(oidc.audience, vec!["api", "backend"]);
+        assert_eq!(oidc.client_id.as_deref(), Some("svc-client"));
+        assert_eq!(oidc.client_secret.as_deref(), Some("svc-secret"));
+
+        let native = config.security.native.unwrap();
+        assert_eq!(native.subject, "native-user");
+        assert_eq!(native.issuer.as_deref(), Some("native"));
+        assert_eq!(native.roles, vec!["admin"]);
+        assert_eq!(native.scopes, vec!["read", "write"]);
+    }
+
+    #[test]
+    fn native_auth_debug_redacts_secrets() {
+        let native = NativeAuthConfig {
+            subject: "native-user".into(),
+            issuer: Some("native".into()),
+            bearer_token: Some("super-secret-token".into()),
+            api_key: Some("super-secret-key".into()),
+            roles: vec!["admin".into()],
+            scopes: vec!["read".into()],
+            token_issuer: None,
+            clients: Vec::new(),
+        };
+
+        let debug = format!("{native:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("super-secret-token"));
+        assert!(!debug.contains("super-secret-key"));
+    }
+
+    #[test]
+    fn parse_native_issuer_and_clients() {
+        let toml = r#"
+[security]
+[security.native]
+subject = "m2m-system"
+[security.native.token_issuer]
+issuer = "https://orders.local"
+audience = ["orders-api"]
+token_ttl_secs = 900
+signing_key_env = "CAMEL_NATIVE_ISSUER_KEY_PEM"
+
+[[security.native.clients]]
+client_id = "billing-worker"
+client_secret_env = "BILLING_CLIENT_SECRET"
+roles = ["billing"]
+scopes = ["orders:read", "orders:write"]
+
+[[security.native.clients]]
+client_id = "reporting-worker"
+client_secret_env = "REPORTING_CLIENT_SECRET"
+roles = ["reporting"]
+scopes = ["orders:read"]
+"#;
+        let config: CamelConfig = toml::from_str(toml).unwrap();
+        let native = config.security.native.as_ref().unwrap();
+        let issuer = native.token_issuer.as_ref().unwrap();
+        assert_eq!(issuer.issuer, "https://orders.local");
+        assert_eq!(issuer.audience, vec!["orders-api"]);
+        assert_eq!(issuer.token_ttl_secs, 900);
+        assert_eq!(issuer.signing_key_env, "CAMEL_NATIVE_ISSUER_KEY_PEM");
+        assert_eq!(native.clients.len(), 2);
+        assert_eq!(native.clients[0].client_id, "billing-worker");
+        assert_eq!(
+            native.clients[0].scopes,
+            vec!["orders:read", "orders:write"]
+        );
+    }
+
+    #[test]
+    fn parse_native_issuer_defaults() {
+        let toml = r#"
+[security]
+[security.native]
+subject = "m2m-system"
+[security.native.token_issuer]
+issuer = "https://test.local"
+signing_key_env = "KEY"
+"#;
+        let config: CamelConfig = toml::from_str(toml).unwrap();
+        let issuer = config.security.native.unwrap().token_issuer.unwrap();
+        assert_eq!(issuer.token_ttl_secs, 900);
+        assert!(issuer.audience.is_empty());
+    }
+
+    #[test]
+    fn parse_native_debug_redacts_client_secret_env() {
+        let toml = r#"
+[security]
+[security.native]
+subject = "m2m-system"
+[[security.native.clients]]
+client_id = "test-worker"
+client_secret_env = "MY_SECRET"
+"#;
+        let config: CamelConfig = toml::from_str(toml).unwrap();
+        let debug = format!("{:?}", config.security.native.unwrap());
+        assert!(!debug.contains("MY_SECRET"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn keycloak_validation_defaults() {
+        let defaults = KeycloakValidationConfig::default();
+        assert_eq!(defaults.method, "local");
+        assert!(defaults.audience.is_empty());
+        assert_eq!(defaults.clock_skew_secs, 30);
+    }
+
+    #[test]
+    fn keycloak_jwks_defaults() {
+        let defaults = KeycloakJwksConfig::default();
+        assert_eq!(defaults.cache_ttl_secs, 3600);
+        assert_eq!(defaults.refresh_skew_secs, 60);
+    }
+
+    #[test]
+    fn keycloak_introspection_defaults() {
+        let defaults = KeycloakIntrospectionConfig::default();
+        assert_eq!(defaults.max_entries, 10_000);
+        assert_eq!(defaults.default_ttl_secs, 60);
+        assert_eq!(defaults.negative_ttl_secs, 5);
+    }
+
+    #[test]
+    fn keycloak_introspection_config_parses_from_toml() {
+        let toml = r#"
+            server_url = "https://kc.example.com"
+            realm = "test"
+            client_id = "my-client"
+            client_secret = "secret"
+
+            [introspection]
+            max_entries = 5000
+            default_ttl_secs = 120
+            negative_ttl_secs = 10
+        "#;
+        let config: KeycloakSecurityConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.introspection.max_entries, 5000);
+        assert_eq!(config.introspection.default_ttl_secs, 120);
+        assert_eq!(config.introspection.negative_ttl_secs, 10);
+    }
+
+    #[test]
+    fn keycloak_introspection_config_uses_defaults_when_omitted() {
+        let toml = r#"
+            server_url = "https://kc.example.com"
+            realm = "test"
+            client_id = "my-client"
+            client_secret = "secret"
+        "#;
+        let config: KeycloakSecurityConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.introspection.max_entries, 10_000);
+        assert_eq!(config.introspection.default_ttl_secs, 60);
+        assert_eq!(config.introspection.negative_ttl_secs, 5);
+    }
+
+    #[test]
+    fn parse_security_permission_wasm_full_config() {
+        let toml = r#"
+[security.permissions.invoice-policy]
+provider = "wasm"
+path = "./policies/invoice-policy.wasm"
+
+[security.permissions.invoice-policy.config]
+tenant_header = "CamelTenantId"
+mode = "enforce"
+
+[security.permissions.invoice-policy.cache]
+positive_ttl_secs = 60
+negative_ttl_secs = 10
+max_entries = 5000
+"#;
+
+        let config: CamelConfig = toml::from_str(toml).unwrap();
+        let permissions = config.security.permissions.unwrap();
+        let policy = permissions.get("invoice-policy").unwrap();
+
+        assert_eq!(policy.provider, "wasm");
+        assert_eq!(
+            policy.path.as_deref(),
+            Some("./policies/invoice-policy.wasm")
+        );
+        let cfg = policy.config.as_ref().unwrap();
+        assert_eq!(cfg.get("tenant_header").unwrap(), "CamelTenantId");
+        assert_eq!(cfg.get("mode").unwrap(), "enforce");
+        assert_eq!(policy.cache.positive_ttl_secs, 60);
+        assert_eq!(policy.cache.negative_ttl_secs, 10);
+        assert_eq!(policy.cache.max_entries, 5000);
+    }
+
+    #[test]
+    fn parse_security_permission_minimal_provider_uses_cache_defaults() {
+        let toml = r#"
+[security.permissions.invoice-policy]
+provider = "wasm"
+"#;
+
+        let config: CamelConfig = toml::from_str(toml).unwrap();
+        let permissions = config.security.permissions.unwrap();
+        let policy = permissions.get("invoice-policy").unwrap();
+
+        assert_eq!(policy.provider, "wasm");
+        assert_eq!(policy.path, None);
+        assert_eq!(policy.config, None);
+        assert_eq!(policy.cache.positive_ttl_secs, 30);
+        assert_eq!(policy.cache.negative_ttl_secs, 5);
+        assert_eq!(policy.cache.max_entries, 10_000);
+    }
+
+    #[test]
+    fn security_permissions_absent_by_default() {
+        let config = SecurityConfig::default();
+        assert!(config.permissions.is_none());
     }
 }
 

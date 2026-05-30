@@ -45,6 +45,24 @@ pub fn discover_routes_with_threshold(
         .map_err(DiscoveryError::from)
 }
 
+/// Discovers routes with a custom stream-cache threshold and security compile context.
+///
+/// Same as [`discover_routes_with_threshold`] but also passes a
+/// [`camel_dsl::SecurityCompileContext`] through to route compilation, allowing
+/// permission evaluator registries to be resolved during DSL compilation.
+pub fn discover_routes_with_threshold_and_security(
+    patterns: &[String],
+    stream_cache_threshold: usize,
+    security_ctx: camel_dsl::SecurityCompileContext,
+) -> Result<Vec<RouteDefinition>, DiscoveryError> {
+    camel_dsl::discover_routes_with_threshold_and_security(
+        patterns,
+        stream_cache_threshold,
+        security_ctx,
+    )
+    .map_err(DiscoveryError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
