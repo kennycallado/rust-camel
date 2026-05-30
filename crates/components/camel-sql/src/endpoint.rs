@@ -50,10 +50,13 @@ impl Endpoint for SqlEndpoint {
     }
 
     fn body_contract(&self) -> Option<BodyType> {
-        if self.config.use_message_body_for_sql {
-            Some(BodyType::Text)
+        if !self.config.use_message_body_for_sql {
+            return None;
+        }
+        if self.config.batch {
+            Some(BodyType::Json)
         } else {
-            None
+            Some(BodyType::Text)
         }
     }
 }
@@ -65,24 +68,37 @@ mod tests {
     use camel_component_api::Endpoint;
     use camel_component_api::UriConfig;
 
-    fn make_endpoint(use_body: bool) -> SqlEndpoint {
+    fn make_endpoint(use_body: bool, batch: bool) -> SqlEndpoint {
         let mut config =
             SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test")
                 .expect("valid SQL endpoint config");
         config.use_message_body_for_sql = use_body;
+        config.batch = batch;
 
         SqlEndpoint::new("sql:select 1".to_string(), config)
     }
 
     #[test]
-    fn body_contract_returns_some_text_when_body_mode_enabled() {
-        let endpoint = make_endpoint(true);
+    fn body_contract_returns_some_text_when_body_mode_enabled_no_batch() {
+        let endpoint = make_endpoint(true, false);
         assert_eq!(endpoint.body_contract(), Some(BodyType::Text));
     }
 
     #[test]
+    fn body_contract_returns_some_json_when_batch_mode_enabled() {
+        let endpoint = make_endpoint(true, true);
+        assert_eq!(endpoint.body_contract(), Some(BodyType::Json));
+    }
+
+    #[test]
     fn body_contract_returns_none_when_body_mode_disabled() {
-        let endpoint = make_endpoint(false);
+        let endpoint = make_endpoint(false, false);
+        assert_eq!(endpoint.body_contract(), None);
+    }
+
+    #[test]
+    fn body_contract_returns_none_when_batch_without_body_mode() {
+        let endpoint = make_endpoint(false, true);
         assert_eq!(endpoint.body_contract(), None);
     }
 
@@ -97,13 +113,13 @@ mod tests {
 
     #[test]
     fn uri_returns_stored_uri() {
-        let endpoint = make_endpoint(false);
+        let endpoint = make_endpoint(false, false);
         assert_eq!(endpoint.uri(), "sql:select 1");
     }
 
     #[test]
     fn create_producer_returns_ok() {
-        let endpoint = make_endpoint(false);
+        let endpoint = make_endpoint(false, false);
         let ctx = ProducerContext::new();
         let result = endpoint.create_producer(&ctx);
         assert!(result.is_ok());
@@ -111,7 +127,7 @@ mod tests {
 
     #[test]
     fn create_consumer_returns_ok() {
-        let endpoint = make_endpoint(false);
+        let endpoint = make_endpoint(false, false);
         let result = endpoint.create_consumer();
         assert!(result.is_ok());
     }
