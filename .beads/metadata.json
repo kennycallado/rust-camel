@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "rust_camel",
+  "project_id": "640ab433-4237-45f2-ae8e-0c428a86e896"
+}

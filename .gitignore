@@ -8,3 +8,12 @@ bridges/*/build/
 bridges/*/.gradle/
 bridges/*/.gradle-docker-cache/
 **/.pi-lens/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/*
+!.beads/config.yaml
+!.beads/metadata.json
+!.beads/.gitignore
