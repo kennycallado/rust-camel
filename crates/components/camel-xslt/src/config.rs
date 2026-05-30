@@ -1,3 +1,4 @@
+use camel_bridge::spec::XML_BRIDGE;
 use camel_component_api::CamelError;
 use std::path::PathBuf;
 
@@ -16,7 +17,7 @@ impl Default for XsltComponentConfig {
             bridge_binary_path: None,
             bridge_start_timeout_ms: 30_000,
             bridge_version: crate::BRIDGE_VERSION.to_string(),
-            bridge_cache_dir: camel_bridge::download::default_cache_dir(),
+            bridge_cache_dir: camel_bridge::download::default_cache_dir_for_spec(&XML_BRIDGE),
             max_retries: 1,
         }
     }
@@ -188,5 +189,19 @@ mod tests {
     fn fail_on_null_body_defaults_false() {
         let cfg = XsltEndpointConfig::from_uri("xslt:/tmp/a.xslt").unwrap();
         assert!(!cfg.fail_on_null_body);
+    }
+
+    #[test]
+    fn default_component_cache_dir_uses_xml_bridge() {
+        let cfg = XsltComponentConfig::default();
+        assert!(
+            cfg.bridge_cache_dir.ends_with("xml-bridge"),
+            "expected xml bridge cache dir, got {}",
+            cfg.bridge_cache_dir.display()
+        );
+        assert!(
+            !cfg.bridge_cache_dir.ends_with("jms-bridge"),
+            "XSLT must not use JMS bridge cache dir"
+        );
     }
 }

@@ -34,7 +34,7 @@ impl Default for XjComponentConfig {
             bridge_binary_path: None,
             bridge_start_timeout_ms: 30_000,
             bridge_version: camel_xslt::BRIDGE_VERSION.to_string(),
-            bridge_cache_dir: camel_bridge::download::default_cache_dir(),
+            bridge_cache_dir: camel_bridge::download::default_cache_dir_for_spec(&XML_BRIDGE),
         }
     }
 }
@@ -459,5 +459,19 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn default_component_cache_dir_uses_xml_bridge() {
+        let cfg = XjComponentConfig::default();
+        assert!(
+            cfg.bridge_cache_dir.ends_with("xml-bridge"),
+            "expected xml bridge cache dir, got {}",
+            cfg.bridge_cache_dir.display()
+        );
+        assert!(
+            !cfg.bridge_cache_dir.ends_with("jms-bridge"),
+            "XJ must not use JMS bridge cache dir"
+        );
     }
 }
