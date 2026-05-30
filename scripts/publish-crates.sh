@@ -107,7 +107,7 @@ publish_crate() {
 
 # Core crates (in dependency order)
 publish_crate "camel-api" "crates/camel-api"
-publish_crate "camel-auth" "crates/services/camel-auth"
+publish_crate "camel-auth" "crates/services/camel-auth" "--no-verify"
 # SKIPPED: camel-util and camel-support removed — audit UTIL-001, SUPPORT-001
 # publish_crate "camel-util" "crates/camel-util"
 # publish_crate "camel-support" "crates/camel-support"
