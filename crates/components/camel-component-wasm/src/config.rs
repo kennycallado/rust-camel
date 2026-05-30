@@ -1,5 +1,6 @@
 //! WASM plugin configuration: timeouts, memory limits, epoch settings.
 
+use std::path::Path;
 use std::time::Duration;
 
 /// Default execution timeout in seconds.
@@ -101,6 +102,33 @@ impl WasmConfig {
     /// Returns the configured epoch interval in milliseconds.
     pub fn epoch_interval_millis(&self) -> u64 {
         EPOCH_INTERVAL_MILLIS
+    }
+
+    pub fn classify_error(
+        &self,
+        plugin_path: &Path,
+        e: wasmtime::Error,
+    ) -> crate::error::WasmError {
+        use crate::error::{TrapReason, WasmError};
+        let name = plugin_path.display().to_string();
+        if let Some(trap) = e.downcast_ref::<wasmtime::Trap>() {
+            match WasmError::classify_trap(trap) {
+                TrapReason::Timeout => WasmError::Timeout {
+                    plugin: name,
+                    timeout_secs: self.timeout_secs,
+                },
+                TrapReason::OutOfMemory => WasmError::OutOfMemory {
+                    plugin: name,
+                    max_memory_bytes: self.max_memory_bytes,
+                },
+                other => WasmError::Trap {
+                    plugin: name,
+                    reason: other,
+                },
+            }
+        } else {
+            WasmError::GuestPanic(e.to_string())
+        }
     }
 }
 

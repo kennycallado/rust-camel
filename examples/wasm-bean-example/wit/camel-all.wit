@@ -33,6 +33,8 @@ interface types {
         properties: list<tuple<string, string>>,
         pattern: wasm-pattern,
         correlation-id: string,
+        route-id: option<string>,
+        message-id: option<string>,
     }
 
     /// Error variants from guest processing.
@@ -52,6 +54,7 @@ interface host {
     use types.{wasm-error};
 
     /// Invoke any Camel endpoint synchronously.
+    /// Returns the response body as a string (JSON-encoded for structured data).
     camel-call: func(uri: string, payload: string) -> result<string, wasm-error>;
 
     /// Read a property from the host Exchange.
@@ -61,6 +64,8 @@ interface host {
     set-property: func(key: string, value: string);
 
     /// Store a value that persists across process() calls for this route endpoint.
+    /// State is scoped per endpoint — different routes using the same plugin
+    /// get independent state stores.
     host-store: func(key: string, value: string) -> result<_, wasm-error>;
 
     /// Load a previously stored value. Returns none if the key has not been stored.
@@ -76,7 +81,10 @@ world plugin {
 
     use types.{wasm-exchange, wasm-error};
 
+    /// Process an exchange. Called for each message passing through the route.
     export process: func(exchange: wasm-exchange) -> result<wasm-exchange, wasm-error>;
+
+    /// Initialization hook. Called once when the WASM module is instantiated.
     export init: func() -> result<_, string>;
 }
 
@@ -91,5 +99,26 @@ world bean {
 
     export invoke: func(method: string, exchange: wasm-exchange) -> result<wasm-exchange, wasm-error>;
     export methods: func() -> list<string>;
+    export init: func(config: list<tuple<string, string>>) -> result<_, string>;
+}
+
+/// Guest authorization-policy world — authorization only.
+///
+/// The host validates JWT and populates camel.auth.* properties
+/// BEFORE calling evaluate(). The guest reads auth context via
+/// get-property("camel.auth.roles") etc. and returns:
+///   - Ok(None)         → access granted
+///   - Ok(Some(reason)) → access denied
+///   - Err(wasm-error)  → processing error
+world authorization-policy {
+    import host;
+
+    use types.{wasm-exchange, wasm-error};
+
+    /// Evaluate the exchange and return an authorization decision.
+    /// None = Granted, Some(reason) = Denied.
+    export evaluate: func(exchange: wasm-exchange) -> result<option<string>, wasm-error>;
+
+    /// Initialization hook with config from registration.
     export init: func(config: list<tuple<string, string>>) -> result<_, string>;
 }

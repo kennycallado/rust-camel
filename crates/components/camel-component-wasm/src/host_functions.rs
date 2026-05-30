@@ -104,50 +104,80 @@ pub fn add_to_linker(linker: &mut Linker<WasmHostState>) -> Result<(), wasmtime:
     crate::bindings::camel::plugin::host::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
 }
 
+macro_rules! impl_host_for_binding {
+    ($bindings_mod:ident) => {
+        impl crate::$bindings_mod::camel::plugin::host::Host for WasmHostState {
+            fn camel_call(
+                &mut self,
+                uri: String,
+                payload: String,
+            ) -> Result<String, crate::$bindings_mod::camel::plugin::types::WasmError> {
+                let host = self as &mut dyn Host;
+                host.camel_call(uri, payload).map_err(|e| match e {
+                    WasmError::ProcessorError(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::ProcessorError(s)
+                    }
+                    WasmError::TypeConversion(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::TypeConversion(s)
+                    }
+                    WasmError::Io(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::Io(s)
+                    }
+                    WasmError::Timeout => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::Timeout
+                    }
+                })
+            }
+
+            fn get_property(&mut self, key: String) -> Option<String> {
+                let host = self as &mut dyn Host;
+                host.get_property(key)
+            }
+
+            fn set_property(&mut self, key: String, value: String) {
+                let host = self as &mut dyn Host;
+                host.set_property(key, value)
+            }
+
+            fn host_store(
+                &mut self,
+                key: String,
+                value: String,
+            ) -> Result<(), crate::$bindings_mod::camel::plugin::types::WasmError> {
+                let host = self as &mut dyn Host;
+                host.host_store(key, value).map_err(|e| match e {
+                    WasmError::Io(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::Io(s)
+                    }
+                    other => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::Io(other.to_string())
+                    }
+                })
+            }
+
+            fn host_load(
+                &mut self,
+                key: String,
+            ) -> Result<Option<String>, crate::$bindings_mod::camel::plugin::types::WasmError> {
+                let host = self as &mut dyn Host;
+                host.host_load(key).map_err(|e| match e {
+                    WasmError::Io(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::Io(s)
+                    }
+                    other => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::Io(other.to_string())
+                    }
+                })
+            }
+        }
+    };
+}
+
 pub fn add_bean_to_linker(linker: &mut Linker<WasmHostState>) -> Result<(), wasmtime::Error> {
     crate::bean_bindings::camel::plugin::host::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
 }
 
-use crate::bean_bindings::camel::plugin::host::Host as BeanHost;
-use crate::bean_bindings::camel::plugin::types::WasmError as BeanWasmError;
-
-impl BeanHost for WasmHostState {
-    fn camel_call(&mut self, uri: String, payload: String) -> Result<String, BeanWasmError> {
-        let host = self as &mut dyn Host;
-        host.camel_call(uri, payload).map_err(|e| match e {
-            WasmError::ProcessorError(s) => BeanWasmError::ProcessorError(s),
-            WasmError::TypeConversion(s) => BeanWasmError::TypeConversion(s),
-            WasmError::Io(s) => BeanWasmError::Io(s),
-            WasmError::Timeout => BeanWasmError::Timeout,
-        })
-    }
-
-    fn get_property(&mut self, key: String) -> Option<String> {
-        let host = self as &mut dyn Host;
-        host.get_property(key)
-    }
-
-    fn set_property(&mut self, key: String, value: String) {
-        let host = self as &mut dyn Host;
-        host.set_property(key, value)
-    }
-
-    fn host_store(&mut self, key: String, value: String) -> Result<(), BeanWasmError> {
-        let host = self as &mut dyn Host;
-        host.host_store(key, value).map_err(|e| match e {
-            WasmError::Io(s) => BeanWasmError::Io(s),
-            other => BeanWasmError::Io(other.to_string()),
-        })
-    }
-
-    fn host_load(&mut self, key: String) -> Result<Option<String>, BeanWasmError> {
-        let host = self as &mut dyn Host;
-        host.host_load(key).map_err(|e| match e {
-            WasmError::Io(s) => BeanWasmError::Io(s),
-            other => BeanWasmError::Io(other.to_string()),
-        })
-    }
-}
+impl_host_for_binding!(bean_bindings);
 
 pub fn add_security_policy_to_linker(
     linker: &mut Linker<WasmHostState>,
@@ -158,50 +188,7 @@ pub fn add_security_policy_to_linker(
     )
 }
 
-use crate::security_policy_bindings::camel::plugin::host::Host as SecurityPolicyHost;
-use crate::security_policy_bindings::camel::plugin::types::WasmError as SecurityPolicyWasmError;
-
-impl SecurityPolicyHost for WasmHostState {
-    fn camel_call(
-        &mut self,
-        uri: String,
-        payload: String,
-    ) -> Result<String, SecurityPolicyWasmError> {
-        let host = self as &mut dyn Host;
-        host.camel_call(uri, payload).map_err(|e| match e {
-            WasmError::ProcessorError(s) => SecurityPolicyWasmError::ProcessorError(s),
-            WasmError::TypeConversion(s) => SecurityPolicyWasmError::TypeConversion(s),
-            WasmError::Io(s) => SecurityPolicyWasmError::Io(s),
-            WasmError::Timeout => SecurityPolicyWasmError::Timeout,
-        })
-    }
-
-    fn get_property(&mut self, key: String) -> Option<String> {
-        let host = self as &mut dyn Host;
-        host.get_property(key)
-    }
-
-    fn set_property(&mut self, key: String, value: String) {
-        let host = self as &mut dyn Host;
-        host.set_property(key, value)
-    }
-
-    fn host_store(&mut self, key: String, value: String) -> Result<(), SecurityPolicyWasmError> {
-        let host = self as &mut dyn Host;
-        host.host_store(key, value).map_err(|e| match e {
-            WasmError::Io(s) => SecurityPolicyWasmError::Io(s),
-            other => SecurityPolicyWasmError::Io(other.to_string()),
-        })
-    }
-
-    fn host_load(&mut self, key: String) -> Result<Option<String>, SecurityPolicyWasmError> {
-        let host = self as &mut dyn Host;
-        host.host_load(key).map_err(|e| match e {
-            WasmError::Io(s) => SecurityPolicyWasmError::Io(s),
-            other => SecurityPolicyWasmError::Io(other.to_string()),
-        })
-    }
-}
+impl_host_for_binding!(security_policy_bindings);
 
 #[cfg(test)]
 mod tests {

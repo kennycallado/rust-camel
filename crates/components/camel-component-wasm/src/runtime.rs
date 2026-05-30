@@ -110,26 +110,7 @@ impl WasmRuntime {
     /// Downcasts to `wasmtime::Trap` first — if successful, routes to
     /// Timeout/OutOfMemory/Trap variants. Otherwise falls back to GuestPanic.
     fn classify_error(&self, e: wasmtime::Error) -> WasmError {
-        let plugin_name = self.module_path.display().to_string();
-        if let Some(trap) = e.downcast_ref::<wasmtime::Trap>() {
-            let reason = WasmError::classify_trap(trap);
-            match reason {
-                crate::error::TrapReason::Timeout => WasmError::Timeout {
-                    plugin: plugin_name,
-                    timeout_secs: self.config.timeout_secs,
-                },
-                crate::error::TrapReason::OutOfMemory => WasmError::OutOfMemory {
-                    plugin: plugin_name,
-                    max_memory_bytes: self.config.max_memory_bytes,
-                },
-                other => WasmError::Trap {
-                    plugin: plugin_name,
-                    reason: other,
-                },
-            }
-        } else {
-            WasmError::GuestPanic(e.to_string())
-        }
+        self.config.classify_error(&self.module_path, e)
     }
 
     pub async fn call_init_once(

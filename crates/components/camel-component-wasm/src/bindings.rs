@@ -1,5 +1,5 @@
 wasmtime::component::bindgen!({
-    path: "wit/camel-plugin.wit",
+    path: "wit",
     world: "plugin",
     exports: {
         default: async,

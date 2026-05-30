@@ -1,4 +1,4 @@
-use super::TemplateFile;
+use super::{TemplateFile, cargo_toml, gitignore, plugin_toml, readme_md};
 
 pub fn processor_files(plugin_name: &str) -> Vec<TemplateFile> {
     vec![
@@ -12,11 +12,11 @@ pub fn processor_files(plugin_name: &str) -> Vec<TemplateFile> {
         },
         TemplateFile {
             path: "Camel.plugin.toml".to_string(),
-            content: plugin_toml(plugin_name),
+            content: plugin_toml(plugin_name, "processor"),
         },
         TemplateFile {
             path: "README.md".to_string(),
-            content: readme_md(plugin_name),
+            content: readme_md(plugin_name, "processor"),
         },
         TemplateFile {
             path: ".gitignore".to_string(),
@@ -29,30 +29,8 @@ pub fn processor_files(plugin_name: &str) -> Vec<TemplateFile> {
     ]
 }
 
-fn cargo_toml(plugin_name: &str) -> String {
-    format!(
-        "[package]\nname = \"{plugin_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwit-bindgen = \"0.57\"\n"
-    )
-}
-
 fn lib_rs() -> &'static str {
-    "use bindings::camel::plugin::types::{WasmBody, WasmError, WasmExchange};\nuse bindings::Guest;\n\n#[allow(clippy::too_many_arguments)]\nmod bindings {\n    wit_bindgen::generate!({\n        world: \"plugin\",\n        path: \"../wit\",\n    });\n}\n\nstruct Processor;\n\nimpl Guest for Processor {\n    fn init() -> Result<(), String> {\n        Ok(())\n    }\n\n    fn process(mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {\n        exchange.input.body = match &exchange.input.body {\n            WasmBody::Text(s) => WasmBody::Text(format!(\"processed: {s}\")),\n            other => other.clone(),\n        };\n        Ok(exchange);\n    }\n}\n\nbindings::export!(Processor with_types_in bindings);\n"
-}
-
-fn plugin_toml(plugin_name: &str) -> String {
-    format!(
-        "name = \"{plugin_name}\"\nversion = \"0.1.0\"\ntype = \"processor\"\nentry = \"{plugin_name}.wasm\"\n"
-    )
-}
-
-fn readme_md(plugin_name: &str) -> String {
-    format!(
-        "# {plugin_name}\n\nWASM processor plugin for Camel.\n\n## Build\n\n```bash\ncamel plugin build\n```\n\n## Files\n\n- `src/lib.rs`: plugin entrypoint implementing Guest\n- `Camel.plugin.toml`: plugin metadata for Camel\n"
-    )
-}
-
-fn gitignore() -> &'static str {
-    "target\nplugins/\n"
+    "use bindings::camel::plugin::types::{WasmBody, WasmError, WasmExchange};\nuse bindings::Guest;\n\n#[allow(clippy::too_many_arguments)]\nmod bindings {\n    wit_bindgen::generate!({\n        world: \"plugin\",\n        path: \"../wit\",\n    });\n}\n\nstruct Processor;\n\nimpl Guest for Processor {\n    fn init() -> Result<(), String> {\n        Ok(())\n    }\n\n    fn process(mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {\n        exchange.input.body = match &exchange.input.body {\n            WasmBody::Text(s) => WasmBody::Text(format!(\"processed: {s}\")),\n            other => other.clone(),\n        };\n        Ok(exchange)\n    }\n}\n\nbindings::export!(Processor with_types_in bindings);\n"
 }
 
 #[cfg(test)]
@@ -99,7 +77,7 @@ mod tests {
 
     #[test]
     fn plugin_toml_contains_expected_keys() {
-        let plugin = plugin_toml("acme-processor");
+        let plugin = plugin_toml("acme-processor", "processor");
 
         assert!(plugin.contains("type = \"processor\""));
         assert!(plugin.contains("entry = \"acme-processor.wasm\""));

@@ -1,4 +1,4 @@
-use super::TemplateFile;
+use super::{TemplateFile, cargo_toml, gitignore, plugin_toml, readme_md, to_pascal_case};
 
 pub fn bean_files(plugin_name: &str) -> Vec<TemplateFile> {
     vec![
@@ -12,11 +12,11 @@ pub fn bean_files(plugin_name: &str) -> Vec<TemplateFile> {
         },
         TemplateFile {
             path: "Camel.plugin.toml".to_string(),
-            content: plugin_toml(plugin_name),
+            content: plugin_toml(plugin_name, "bean"),
         },
         TemplateFile {
             path: "README.md".to_string(),
-            content: readme_md(plugin_name),
+            content: readme_md(plugin_name, "bean"),
         },
         TemplateFile {
             path: ".gitignore".to_string(),
@@ -33,33 +33,11 @@ pub fn bean_files(plugin_name: &str) -> Vec<TemplateFile> {
     ]
 }
 
-fn cargo_toml(plugin_name: &str) -> String {
-    format!(
-        "[package]\nname = \"{plugin_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\nwit-bindgen = \"0.57\"\n"
-    )
-}
-
 fn lib_rs(plugin_name: &str) -> String {
     let plugin_type = to_pascal_case(plugin_name);
     format!(
         "use bindings::camel::plugin::types::{{WasmBody, WasmError, WasmExchange}};\nuse bindings::Guest;\n\nmod bindings {{\n    wit_bindgen::generate!({{\n        world: \"bean\",\n        path: \"../wit\",\n    }});\n}}\n\nstruct {plugin_type};\n\nimpl Guest for {plugin_type} {{\n    fn init() -> Result<(), String> {{\n        Ok(())\n    }}\n\n    fn methods() -> Vec<String> {{\n        vec![\"hello\".into()]\n    }}\n\n    fn invoke(method: String, mut exchange: WasmExchange) -> Result<WasmExchange, WasmError> {{\n        match method.as_str() {{\n            \"hello\" => {{\n                let text = match &exchange.input.body {{\n                    WasmBody::Text(s) => s.clone(),\n                    _ => String::new(),\n                }};\n                exchange.input.body = WasmBody::Text(format!(\"Hello from {plugin_name}: {{text}}\"));\n                Ok(exchange)\n            }}\n            _ => Err(WasmError::ProcessorError(format!(\"unknown method: {{method}}\"))),\n        }}\n    }}\n}}\n\nbindings::export!({plugin_type} with_types_in bindings);\n"
     )
-}
-
-fn plugin_toml(plugin_name: &str) -> String {
-    format!(
-        "name = \"{plugin_name}\"\nversion = \"0.1.0\"\ntype = \"bean\"\nentry = \"{plugin_name}.wasm\"\n"
-    )
-}
-
-fn readme_md(plugin_name: &str) -> String {
-    format!(
-        "# {plugin_name}\n\nWASM bean plugin for Camel.\n\n## Build\n\n```bash\ncamel plugin build\n```\n\n## Files\n\n- `src/lib.rs`: plugin entrypoint implementing bean Guest methods\n- `wit/`: WIT definitions used for guest bindings generation\n- `Camel.plugin.toml`: plugin metadata for Camel\n"
-    )
-}
-
-fn gitignore() -> &'static str {
-    "target\nplugins/\n"
 }
 
 fn camel_bean_wit() -> &'static str {
@@ -68,21 +46,6 @@ fn camel_bean_wit() -> &'static str {
 
 fn camel_plugin_wit() -> &'static str {
     camel_wit::PLUGIN_WIT
-}
-
-fn to_pascal_case(name: &str) -> String {
-    name.split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut chars = part.chars();
-            let mut out = String::new();
-            if let Some(first) = chars.next() {
-                out.extend(first.to_uppercase());
-                out.extend(chars.flat_map(|c| c.to_lowercase()));
-            }
-            out
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -132,7 +95,7 @@ mod tests {
 
     #[test]
     fn plugin_toml_contains_expected_keys() {
-        let plugin = plugin_toml("acme-bean");
+        let plugin = plugin_toml("acme-bean", "bean");
 
         assert!(plugin.contains("type = \"bean\""));
         assert!(plugin.contains("entry = \"acme-bean.wasm\""));

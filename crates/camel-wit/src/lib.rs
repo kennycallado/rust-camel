@@ -293,6 +293,109 @@ mod tests {
         );
     }
 
+    fn strip_comments(wit: &str) -> String {
+        wit.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn test_example_bean_wit_matches_canonical() {
+        let example_dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/wasm-bean-example/wit"
+        ));
+        if !example_dir.exists() {
+            return;
+        }
+        let example_bean = std::fs::read_to_string(example_dir.join("camel-bean.wit"))
+            .expect("read example bean wit");
+        let canonical_stripped = strip_comments(BEAN_WIT);
+        let example_stripped = strip_comments(&example_bean);
+        assert_eq!(
+            canonical_stripped, example_stripped,
+            "examples/wasm-bean-example/wit/camel-bean.wit must match canonical without comments"
+        );
+    }
+
+    #[test]
+    fn test_example_plugin_wit_has_route_id_and_message_id() {
+        let example_dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/wasm-bean-example/wit"
+        ));
+        if !example_dir.exists() {
+            return;
+        }
+        let example_plugin = std::fs::read_to_string(example_dir.join("camel-plugin.wit"))
+            .expect("read example plugin wit");
+        assert!(
+            example_plugin.contains("route-id"),
+            "example camel-plugin.wit must contain route-id"
+        );
+        assert!(
+            example_plugin.contains("message-id"),
+            "example camel-plugin.wit must contain message-id"
+        );
+        assert!(
+            example_plugin.contains("world authorization-policy"),
+            "example camel-plugin.wit must contain authorization-policy world"
+        );
+        assert!(
+            example_plugin.contains(
+                "export init: func(config: list<tuple<string, string>>) -> result<_, string>"
+            ),
+            "example camel-plugin.wit must contain init(config) in bean world"
+        );
+    }
+
+    #[test]
+    fn test_example_all_wit_has_all_worlds() {
+        let example_dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/wasm-bean-example/wit"
+        ));
+        if !example_dir.exists() {
+            return;
+        }
+        let example_all = std::fs::read_to_string(example_dir.join("camel-all.wit"))
+            .expect("read example all wit");
+        assert!(
+            example_all.contains("world plugin"),
+            "camel-all.wit must contain plugin world"
+        );
+        assert!(
+            example_all.contains("world bean"),
+            "camel-all.wit must contain bean world"
+        );
+        assert!(
+            example_all.contains("world authorization-policy"),
+            "camel-all.wit must contain authorization-policy world"
+        );
+    }
+
+    #[test]
+    fn test_host_wit_matches_canonical() {
+        let host_wit_dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../components/camel-component-wasm/wit"
+        ));
+        if !host_wit_dir.exists() {
+            return;
+        }
+        let host_plugin = std::fs::read_to_string(host_wit_dir.join("camel-plugin.wit"))
+            .expect("read host plugin wit");
+        let canonical_stripped = strip_comments(PLUGIN_WIT);
+        let host_stripped = strip_comments(&host_plugin);
+        assert_eq!(
+            canonical_stripped, host_stripped,
+            "camel-component-wasm/wit/camel-plugin.wit must match canonical without comments"
+        );
+    }
+
     #[test]
     fn test_content_type_constants_compile() {
         // Verifies the exported constants are accessible and have expected values.
