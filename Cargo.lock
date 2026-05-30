@@ -786,7 +786,6 @@ dependencies = [
  "async-trait",
  "base64",
  "camel-api",
- "camel-builder",
  "camel-component-mock",
  "chrono",
  "dashmap",

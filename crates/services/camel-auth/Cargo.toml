@@ -35,7 +35,6 @@ serde_urlencoded = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 wiremock.workspace = true
-camel-builder.workspace = true
 camel-component-mock.workspace = true
 
 [lints]
