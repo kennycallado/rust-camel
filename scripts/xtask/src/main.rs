@@ -68,6 +68,14 @@ enum Commands {
     /// Exits non-zero if any violations are found.
     /// Escape hatch: append `// allow-secret` to the line.
     LintSecrets,
+    /// Compute the correct publish order for workspace crates by performing
+    /// a topological sort over normal (non-dev) internal dependencies.
+    /// Outputs shell commands suitable for publish-crates.sh.
+    PublishOrder {
+        /// Output as publish_crate lines for scripts/publish-crates.sh
+        #[arg(long)]
+        shell: bool,
+    },
 }
 
 fn main() {
@@ -158,6 +166,19 @@ fn main() {
                     eprintln!("lint-secrets error: {e}");
                     std::process::exit(1);
                 }
+            }
+        }
+        Commands::PublishOrder { shell } => {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let workspace_root = find_workspace_root_from(&manifest_dir)
+                .ok_or_else(|| "Cannot locate workspace root".to_string())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            if let Err(e) = publish_order(&workspace_root, shell) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
             }
         }
     }
@@ -1095,6 +1116,214 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
     violations.retain(|v| seen.insert((v.file.clone(), v.line)));
 
     Ok(violations)
+}
+
+/// Represents a workspace crate with its publish-relevant metadata.
+struct WorkspaceCrate {
+    name: String,
+    path: String,
+    normal_deps: Vec<String>,
+    publish: bool,
+}
+
+fn publish_order(workspace_root: &Path, shell: bool) -> Result<(), String> {
+    let mut crates: Vec<WorkspaceCrate> = Vec::new();
+
+    // Walk all Cargo.toml files under crates/
+    let crates_dir = workspace_root.join("crates");
+    for entry in walkdir::WalkDir::new(&crates_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.file_name() != Some(std::ffi::OsStr::new("Cargo.toml")) {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+
+        let name = extract_toml_name(&content)
+            .ok_or_else(|| format!("No name in {}", path.display()))?;
+
+        // Skip non-camel crates (e.g. examples, test fixtures)
+        if !name.starts_with("camel-") {
+            continue;
+        }
+
+        let publish = !content.contains("publish = false");
+        let normal_deps = extract_normal_camel_deps(&content);
+        let rel_path = path
+            .parent()
+            .unwrap()
+            .strip_prefix(workspace_root)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        crates.push(WorkspaceCrate {
+            name,
+            path: rel_path,
+            normal_deps,
+            publish,
+        });
+    }
+
+    // Build name → index map
+    let name_map: std::collections::HashMap<String, usize> = crates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.name.clone(), i))
+        .collect();
+
+    // Topological sort (Kahn's algorithm) over publishable crates only
+    let publishable: Vec<usize> = crates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.publish)
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut in_degree: Vec<usize> = vec![0; crates.len()];
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); crates.len()];
+
+    for &ci in &publishable {
+        for dep_name in &crates[ci].normal_deps {
+            if let Some(&di) = name_map.get(dep_name)
+                && crates[di].publish {
+                    in_degree[ci] += 1;
+                    adj[di].push(ci);
+                }
+        }
+    }
+
+    let mut queue: std::collections::VecDeque<usize> = publishable
+        .iter()
+        .filter(|&&i| in_degree[i] == 0)
+        .copied()
+        .collect();
+
+    let mut sorted: Vec<usize> = Vec::new();
+    while let Some(ci) = queue.pop_front() {
+        sorted.push(ci);
+        for &dependent in &adj[ci] {
+            in_degree[dependent] -= 1;
+            if in_degree[dependent] == 0 {
+                queue.push_back(dependent);
+            }
+        }
+    }
+
+    if sorted.len() != publishable.len() {
+        let sorted_set: std::collections::HashSet<usize> = sorted.iter().copied().collect();
+        eprintln!("⚠️  CYCLE! Only sorted {} of {} publishable crates.", sorted.len(), publishable.len());
+        for &ci in &publishable {
+            if !sorted_set.contains(&ci) {
+                eprintln!("  {} (in-degree: {})", crates[ci].name, in_degree[ci]);
+            }
+        }
+        return Err("Cannot compute publish order due to dependency cycles".to_string());
+    }
+
+    if shell {
+        for &ci in &sorted {
+            println!("publish_crate \"{}\" \"{}\"", crates[ci].name, crates[ci].path);
+        }
+    } else {
+        println!("Publish order ({} crates):", sorted.len());
+        println!();
+        for (i, &ci) in sorted.iter().enumerate() {
+            let c = &crates[ci];
+            if c.normal_deps.is_empty() {
+                println!("{:3}. {:<42} (no deps)", i + 1, c.name);
+            } else {
+                let deps_str = c.normal_deps.join(", ");
+                println!("{:3}. {:<42} ← {}", i + 1, c.name, deps_str);
+            }
+        }
+        let skipped: Vec<&WorkspaceCrate> = crates.iter().filter(|c| !c.publish).collect();
+        if !skipped.is_empty() {
+            println!();
+            println!("Skipped (publish = false):");
+            for c in &skipped {
+                println!("  - {}", c.name);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract `name = "..."` from a Cargo.toml [package] section.
+fn extract_toml_name(content: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == "[package]" {
+            in_package = true;
+            continue;
+        }
+        // Any other section header ends [package]
+        if trimmed.starts_with('[') {
+            if in_package {
+                break;
+            }
+            continue;
+        }
+        if in_package && trimmed.starts_with("name = ") {
+            let val = trimmed
+                .strip_prefix("name = ")?
+                .trim()
+                .trim_matches('"');
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
+/// Extract camel-* dependencies from [dependencies] section only.
+fn extract_normal_camel_deps(content: &str) -> Vec<String> {
+    let mut deps = Vec::new();
+    let mut section = "";
+    let mut seen = std::collections::HashSet::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            section = trimmed;
+            continue;
+        }
+        if section != "[dependencies]" {
+            continue;
+        }
+        if let Some(dep) = extract_camel_dep_name(trimmed)
+            && seen.insert(dep.clone()) {
+                deps.push(dep);
+            }
+    }
+    deps
+}
+
+fn extract_camel_dep_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if !line.starts_with("camel-") {
+        return None;
+    }
+    let end = line
+        .find(['.', '=', ' '])
+        .unwrap_or(line.len());
+    let name = &line[..end];
+    if name.starts_with("camel-") && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        Some(name.to_string())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
