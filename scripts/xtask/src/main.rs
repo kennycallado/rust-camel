@@ -1148,9 +1148,7 @@ struct WorkspaceCrate {
 }
 
 /// Discover workspace crates and compute topological publish order.
-fn resolve_publish_order(
-    workspace_root: &Path,
-) -> Result<Vec<WorkspaceCrate>, String> {
+fn resolve_publish_order(workspace_root: &Path) -> Result<Vec<WorkspaceCrate>, String> {
     let mut crates: Vec<WorkspaceCrate> = Vec::new();
 
     let crates_dir = workspace_root.join("crates");
@@ -1166,8 +1164,8 @@ fn resolve_publish_order(
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
 
-        let name = extract_toml_name(&content)
-            .ok_or_else(|| format!("No name in {}", path.display()))?;
+        let name =
+            extract_toml_name(&content).ok_or_else(|| format!("No name in {}", path.display()))?;
 
         if !name.starts_with("camel-") {
             continue;
@@ -1308,7 +1306,9 @@ fn crate_exists_on_crates_io(name: &str, version: &str) -> Result<bool, String> 
     match ureq::get(&url).call() {
         Ok(_) => Ok(true),
         Err(ureq::Error::StatusCode(404)) => Ok(false),
-        Err(e) => Err(format!("Failed to check {name}@{version} on crates.io: {e}")),
+        Err(e) => Err(format!(
+            "Failed to check {name}@{version} on crates.io: {e}"
+        )),
     }
 }
 
@@ -1335,7 +1335,9 @@ fn wait_for_crate_index(name: &str, version: &str) -> Result<(), String> {
         }
     }
 
-    Err(format!("Timed out waiting for {name}@{version} in Cargo registry index"))
+    Err(format!(
+        "Timed out waiting for {name}@{version} in Cargo registry index"
+    ))
 }
 
 /// Publish all workspace crates to crates.io in topological order.
@@ -1356,13 +1358,19 @@ fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
         // Check if already published
         match crate_exists_on_crates_io(&c.name, &version) {
             Ok(true) => {
-                println!("⚠️  {}@{version} already exists on crates.io, skipping...", c.name);
+                println!(
+                    "⚠️  {}@{version} already exists on crates.io, skipping...",
+                    c.name
+                );
                 skipped += 1;
                 continue;
             }
             Ok(false) => {}
             Err(e) => {
-                eprintln!("⚠️  Could not check crates.io for {}@{version}: {e}", c.name);
+                eprintln!(
+                    "⚠️  Could not check crates.io for {}@{version}: {e}",
+                    c.name
+                );
                 // Continue anyway — the publish itself will fail if it exists
             }
         }
@@ -1376,10 +1384,7 @@ fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
         }
 
         let output = std::process::Command::new("cargo")
-            .args([
-                "publish",
-                "--allow-dirty",
-            ])
+            .args(["publish", "--allow-dirty"])
             .current_dir(workspace_root.join(&c.path))
             .output()
             .map_err(|e| format!("Failed to run cargo publish for {}: {e}", c.name))?;
@@ -1390,7 +1395,10 @@ fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
 
         if !output.status.success() {
             if combined.contains("already exists") {
-                println!("⚠️  {}@{version} already exists (race), skipping...", c.name);
+                println!(
+                    "⚠️  {}@{version} already exists (race), skipping...",
+                    c.name
+                );
                 skipped += 1;
                 continue;
             }
@@ -1408,7 +1416,11 @@ fn publish_crates(workspace_root: &Path, dry_run: bool) -> Result<(), String> {
 
     println!();
     if dry_run {
-        println!("🔍 DRY RUN complete: {} crates would be published, {} skipped", sorted.len() - skipped, skipped);
+        println!(
+            "🔍 DRY RUN complete: {} crates would be published, {} skipped",
+            sorted.len() - skipped,
+            skipped
+        );
     } else {
         println!("✅ Published {published} crates, skipped {skipped} (already existed)");
     }
@@ -1436,10 +1448,7 @@ fn extract_toml_name(content: &str) -> Option<String> {
             continue;
         }
         if in_package && trimmed.starts_with("name = ") {
-            let val = trimmed
-                .strip_prefix("name = ")?
-                .trim()
-                .trim_matches('"');
+            let val = trimmed.strip_prefix("name = ")?.trim().trim_matches('"');
             return Some(val.to_string());
         }
     }
@@ -1465,9 +1474,10 @@ fn extract_normal_camel_deps(content: &str) -> Vec<String> {
             continue;
         }
         if let Some(dep) = extract_camel_dep_name(trimmed)
-            && seen.insert(dep.clone()) {
-                deps.push(dep);
-            }
+            && seen.insert(dep.clone())
+        {
+            deps.push(dep);
+        }
     }
     deps
 }
@@ -1477,9 +1487,7 @@ fn extract_camel_dep_name(line: &str) -> Option<String> {
     if !line.starts_with("camel-") {
         return None;
     }
-    let end = line
-        .find(['.', '=', ' '])
-        .unwrap_or(line.len());
+    let end = line.find(['.', '=', ' ']).unwrap_or(line.len());
     let name = &line[..end];
     if name.starts_with("camel-") && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         Some(name.to_string())
