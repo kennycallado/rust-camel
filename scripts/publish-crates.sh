@@ -176,10 +176,11 @@ publish_crate "camel-component-grpc" "crates/components/camel-component-grpc"
 # WIT definitions (no dependencies)
 publish_crate "camel-wit" "crates/camel-wit"
 
-# WASM component (depends on camel-api/camel-core)
-publish_crate "camel-component-wasm" "crates/components/camel-component-wasm"
+# camel-config (depends on camel-otel, camel-prometheus, camel-health, etc.)
+publish_crate "camel-config" "crates/camel-config"
 
-# Component crates (needed by camel-config which has optional deps on most of them)
+# WASM component (depends on camel-api, camel-core, camel-config)
+publish_crate "camel-component-wasm" "crates/components/camel-component-wasm"
 publish_crate "camel-component-file" "crates/components/camel-file"
 publish_crate "camel-component-http" "crates/components/camel-http"
 publish_crate "camel-component-redis" "crates/components/camel-redis"
@@ -197,8 +198,6 @@ publish_crate "camel-component-opensearch" "crates/components/camel-opensearch"
 publish_crate "camel-component-keycloak" "crates/components/camel-component-keycloak"
 
 # camel-config depends on camel-otel, camel-prometheus and many component crates
-publish_crate "camel-config" "crates/camel-config"
-
 # Test utilities
 publish_crate "camel-test" "crates/camel-test"
 
