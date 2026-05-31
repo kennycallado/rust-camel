@@ -1025,7 +1025,9 @@ mod tests {
             .await
             .expect("poll must succeed");
 
-        let exchange = rx.await.expect("StreamList should emit exchange even for empty results");
+        let exchange = rx
+            .await
+            .expect("StreamList should emit exchange even for empty results");
 
         match exchange.input.body {
             Body::Stream(ref stream_body) => {
