@@ -2,16 +2,10 @@ pub mod auth;
 pub mod bundle;
 pub mod config;
 pub mod health;
-pub mod registry;
-pub mod static_config;
-pub mod static_endpoint;
 use crate::config::parse_ok_status_code_range;
-use crate::registry::HttpRouteRegistry;
 pub use bundle::HttpBundle;
-pub use bundle::HttpStaticBundle;
 pub use config::HttpConfig;
 pub use health::HttpHealthCheck;
-pub use static_endpoint::HttpStaticComponent;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -21,7 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, RwLock};
 use tower::Layer;
 use tower::Service;
 use tracing::debug;
@@ -32,6 +26,7 @@ use camel_auth::oauth2::TokenProvider;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, StreamBody, StreamMetadata};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext};
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
+use futures::TryStreamExt;
 use futures::stream::BoxStream;
 
 // ---------------------------------------------------------------------------
@@ -558,14 +553,18 @@ pub(crate) struct HttpReply {
 }
 
 // ---------------------------------------------------------------------------
-// HttpRouteRegistry / ServerRegistry
+// DispatchTable / ServerRegistry
 // ---------------------------------------------------------------------------
+
+/// Maps URL path → channel sender for the consumer that owns that path.
+pub(crate) type DispatchTable =
+    Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<RequestEnvelope>>>>;
 
 type ServerKey = (String, u16);
 
 /// Handle to a running Axum server on one interface/port.
 struct ServerHandle {
-    registry: HttpRouteRegistry,
+    dispatch: DispatchTable,
     max_request_body: usize,
     max_response_body: usize,
     max_inflight_requests: usize,
@@ -585,7 +584,7 @@ impl ServerRegistry {
         })
     }
 
-    /// Returns the `HttpRouteRegistry` for `port`, spawning a new Axum server if
+    /// Returns the `DispatchTable` for `port`, spawning a new Axum server if
     /// none is running on that port yet.
     pub(crate) async fn get_or_spawn(
         &'static self,
@@ -594,7 +593,7 @@ impl ServerRegistry {
         max_request_body: usize,
         max_response_body: usize,
         max_inflight_requests: usize,
-    ) -> Result<HttpRouteRegistry, CamelError> {
+    ) -> Result<DispatchTable, CamelError> {
         let host_owned = host.to_string();
 
         let cell = {
@@ -641,11 +640,11 @@ impl ServerRegistry {
                 let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
                     CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
                 })?;
-                let registry = HttpRouteRegistry::new();
+                let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
                 let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
                 let task = tokio::spawn(run_axum_server(
                     listener,
-                    registry.clone(),
+                    Arc::clone(&dispatch),
                     max_request_body,
                     max_response_body,
                     Arc::clone(&inflight),
@@ -653,7 +652,7 @@ impl ServerRegistry {
                 let addr_for_monitor = format!("{host_owned}:{port}");
                 tokio::spawn(monitor_axum_task(task, addr_for_monitor));
                 Ok::<ServerHandle, CamelError>(ServerHandle {
-                    registry,
+                    dispatch,
                     max_request_body,
                     max_response_body,
                     max_inflight_requests,
@@ -661,20 +660,22 @@ impl ServerRegistry {
             })
             .await?;
 
-        Ok(handle.registry.clone())
+        Ok(Arc::clone(&handle.dispatch))
     }
 
     /// Reset the global registry — **test-only**.
     ///
     /// Clears all registered server handles so that tests can start from a clean
-    /// state. This is a process-global operation and resetting it would break
-    /// running servers. Only use in test code.
+    /// state. This is intentionally `#[cfg(test)]` because the registry is a
+    /// process-global singleton in production and resetting it would break
+    /// running servers.
+    #[cfg(test)]
     pub fn reset() {
         let instance = Self::global();
         let mut guard = instance
             .inner
             .lock()
-            .expect("ServerRegistry lock poisoned during test reset"); // allow-unwrap
+            .expect("ServerRegistry lock poisoned during test reset");
         guard.clear();
     }
 }
@@ -687,13 +688,13 @@ use axum::{
     Router,
     body::Body as AxumBody,
     extract::{Request, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    http::{Response, StatusCode},
+    response::IntoResponse,
 };
 
 #[derive(Clone)]
 struct AppState {
-    registry: HttpRouteRegistry,
+    dispatch: DispatchTable,
     max_request_body: usize,
     max_response_body: usize,
     inflight: Arc<tokio::sync::Semaphore>,
@@ -701,13 +702,13 @@ struct AppState {
 
 async fn run_axum_server(
     listener: tokio::net::TcpListener,
-    registry: HttpRouteRegistry,
+    dispatch: DispatchTable,
     max_request_body: usize,
     max_response_body: usize,
     inflight: Arc<tokio::sync::Semaphore>,
 ) {
     let state = AppState {
-        registry,
+        dispatch,
         max_request_body,
         max_response_body,
         inflight,
@@ -742,11 +743,13 @@ async fn monitor_axum_task(handle: tokio::task::JoinHandle<()>, addr: String) {
 }
 
 async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl IntoResponse {
-    let path = req.uri().path().to_owned();
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or("").to_string();
+    let headers = req.headers().clone();
 
-    // Check Content-Length against limit BEFORE any route lookup
-    let content_length: Option<u64> = req
-        .headers()
+    // Check Content-Length against limit BEFORE opening the stream
+    let content_length: Option<u64> = headers
         .get(http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok());
@@ -757,7 +760,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         return Response::builder()
             .status(StatusCode::PAYLOAD_TOO_LARGE)
             .body(AxumBody::from("Request body exceeds configured limit"))
-            .expect("infallible"); // allow-unwrap // allow-unwrap
+            .expect("infallible"); // allow-unwrap
     }
 
     let _permit = match Arc::clone(&state.inflight).try_acquire_owned() {
@@ -766,231 +769,103 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
             return Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .body(AxumBody::from("Service Unavailable"))
-                .expect("infallible"); // allow-unwrap // allow-unwrap
-        }
-    };
-
-    // 1. API match — lookup by path, only consume body if matched
-    let api_sender = {
-        let inner = state.registry.inner.read().await;
-        inner.api_routes.get(&path).cloned()
-    }; // lock released BEFORE any IO
-
-    if let Some(sender) = api_sender {
-        // Inline API request handling
-        let method = req.method().to_string();
-        let query = req.uri().query().unwrap_or("").to_string();
-        let headers = req.headers().clone();
-        let content_type = headers
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let content_length: Option<u64> = headers
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok());
-        let data_stream: BodyDataStream = req.into_body().into_data_stream();
-        let mapped_stream =
-            futures::TryStreamExt::map_err(data_stream, |e| CamelError::Io(e.to_string()));
-        let boxed: BoxStream<'static, Result<bytes::Bytes, CamelError>> = Box::pin(mapped_stream);
-        let stream_body = StreamBody {
-            stream: Arc::new(tokio::sync::Mutex::new(Some(boxed))),
-            metadata: StreamMetadata {
-                size_hint: content_length,
-                content_type,
-                origin: None,
-            },
-        };
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<HttpReply>();
-        let envelope = RequestEnvelope {
-            method,
-            path,
-            query,
-            headers,
-            body: stream_body,
-            reply_tx,
-        };
-        if sender.send(envelope).await.is_err() {
-            return Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(AxumBody::from("Consumer unavailable"))
                 .expect("infallible"); // allow-unwrap
         }
-        match reply_rx.await {
-            Ok(reply) => {
-                let reply = match reply.body {
-                    HttpReplyBody::Bytes(b)
-                        if exceeds_max_response_body(b.len(), state.max_response_body) =>
-                    {
-                        HttpReply {
-                            status: 500,
-                            headers: vec![],
-                            body: HttpReplyBody::Bytes(bytes::Bytes::from(
-                                "Response body exceeds configured limit",
-                            )),
-                        }
-                    }
-                    _ => reply,
-                };
-                let status =
-                    StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                let mut builder = Response::builder().status(status);
-                for (k, v) in &reply.headers {
-                    builder = builder.header(k.as_str(), v.as_str());
-                }
-                return match reply.body {
-                    HttpReplyBody::Bytes(b) => {
-                        builder.body(AxumBody::from(b)).unwrap_or_else(|_| {
-                            Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .body(AxumBody::from("Invalid response headers from consumer"))
-                                .expect("infallible") // allow-unwrap
-                        })
-                    }
-                    HttpReplyBody::Stream(stream) => builder
-                        .body(AxumBody::from_stream(stream))
-                        .unwrap_or_else(|_| {
-                            Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .body(AxumBody::from("Invalid response headers from consumer"))
-                                .expect("infallible") // allow-unwrap
-                        }),
-                };
-            }
-            Err(_) => {
-                return Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(AxumBody::from("Pipeline error"))
-                    .expect("infallible"); // allow-unwrap
-            }
-        }
-    }
-
-    // 2. Static file match
-    {
-        let inner = state.registry.inner.read().await;
-        let relative = path.trim_start_matches('/');
-        let mut found = None;
-        for mount in &inner.static_mounts {
-            let candidate = mount.dir.join(relative);
-            let _resolved = match std::fs::canonicalize(&candidate) {
-                Ok(r) if r.starts_with(&mount.dir) && r.is_file() => r,
-                _ => continue,
-            };
-            found = Some((mount.serve_dir.clone(), mount.cache_control.clone()));
-            break;
-        }
-        drop(inner);
-        if let Some((serve_dir, cache_control)) = found {
-            use tower::ServiceExt;
-            let static_req = axum::http::Request::builder()
-                .method(http::Method::GET)
-                .uri(format!("/{relative}"))
-                .body(AxumBody::empty())
-                .expect("valid request"); // allow-unwrap
-            let res = serve_dir.oneshot(static_req).await.unwrap(); // allow-unwrap
-            let (parts, body) = res.into_parts();
-            let body = AxumBody::from_stream(http_body_util::BodyExt::into_data_stream(body));
-            if parts.status.is_success() {
-                let mut res = Response::from_parts(parts, body);
-                if let Ok(hv) = http::HeaderValue::from_str(&cache_control) {
-                    res.headers_mut().insert(http::header::CACHE_CONTROL, hv);
-                }
-                return res;
-            }
-            return Response::from_parts(parts, body);
-        }
-    }
-
-    // 3. SPA fallback
-    let spa_qualified = {
-        let method = req.method();
-        (method == http::Method::GET || method == http::Method::HEAD)
-            && {
-                let accept = req
-                    .headers()
-                    .get(http::header::ACCEPT)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("");
-                accept.contains("text/html") || accept.contains("*/*")
-            }
-            && std::path::Path::new(req.uri().path()).extension().is_none()
     };
-    if spa_qualified {
-        let spa = {
-            let inner = state.registry.inner.read().await;
-            inner
-                .spa_mount
-                .as_ref()
-                .map(|m| (m.serve_dir.clone(), m.cache_control.clone()))
-        };
-        if let Some((serve_dir, cache_control)) = spa {
-            use tower::ServiceExt;
-            let rewrite = axum::http::Request::builder()
-                .method(http::Method::GET)
-                .uri("/")
-                .body(AxumBody::empty())
-                .expect("valid request"); // allow-unwrap
-            let res = serve_dir.oneshot(rewrite).await.unwrap(); // allow-unwrap
-            let (parts, body) = res.into_parts();
-            let body = AxumBody::from_stream(http_body_util::BodyExt::into_data_stream(body));
-            if parts.status.is_success() {
-                let mut res = Response::from_parts(parts, body);
-                if let Ok(hv) = http::HeaderValue::from_str(&cache_control) {
-                    res.headers_mut().insert(http::header::CACHE_CONTROL, hv);
-                }
-                return res;
-            }
-            return Response::from_parts(parts, body);
-        }
+
+    // Build StreamBody from Axum body WITHOUT materializing
+    let content_type = headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let data_stream: BodyDataStream = req.into_body().into_data_stream();
+    let mapped_stream = data_stream.map_err(|e| CamelError::Io(e.to_string()));
+    let boxed: BoxStream<'static, Result<bytes::Bytes, CamelError>> = Box::pin(mapped_stream);
+
+    let stream_body = StreamBody {
+        stream: Arc::new(tokio::sync::Mutex::new(Some(boxed))),
+        metadata: StreamMetadata {
+            size_hint: content_length,
+            content_type,
+            origin: None,
+        },
+    };
+
+    // Look up handler for this path
+    let sender = {
+        let table = state.dispatch.read().await;
+        table.get(&path).cloned()
+    };
+    let Some(sender) = sender else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(AxumBody::from("No consumer registered for this path"))
+            .expect("infallible"); // allow-unwrap
+    };
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<HttpReply>();
+    let envelope = RequestEnvelope {
+        method,
+        path,
+        query,
+        headers,
+        body: stream_body,
+        reply_tx,
+    };
+
+    if sender.send(envelope).await.is_err() {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(AxumBody::from("Consumer unavailable"))
+            .expect("infallible"); // allow-unwrap
     }
 
-    // 4. Error page resolution
-    {
-        let code = StatusCode::NOT_FOUND.as_u16();
-        let inner = state.registry.inner.read().await;
-        let error_page = inner
-            .static_mounts
-            .iter()
-            .find_map(|m| {
-                m.error_pages
-                    .get(&code)
-                    .map(|p| (p.clone(), m.serve_dir.clone(), m.cache_control.clone()))
-            })
-            .or_else(|| {
-                inner.spa_mount.as_ref().and_then(|m| {
-                    m.error_pages
-                        .get(&code)
-                        .map(|p| (p.clone(), m.serve_dir.clone(), m.cache_control.clone()))
-                })
-            });
-        drop(inner);
-        if let Some((error_path, serve_dir, cache_control)) = error_page {
-            use tower::ServiceExt;
-            let error_req = axum::http::Request::builder()
-                .method(http::Method::GET)
-                .uri(format!("/{}", error_path.to_string_lossy()))
-                .body(AxumBody::empty())
-                .expect("valid request"); // allow-unwrap
-            let res = serve_dir.oneshot(error_req).await.unwrap(); // allow-unwrap
-            let (parts, body) = res.into_parts();
-            let body = AxumBody::from_stream(http_body_util::BodyExt::into_data_stream(body));
-            if parts.status.is_success() {
-                let mut res = Response::from_parts(parts, body);
-                if let Ok(hv) = http::HeaderValue::from_str(&cache_control) {
-                    res.headers_mut().insert(http::header::CACHE_CONTROL, hv);
+    match reply_rx.await {
+        Ok(reply) => {
+            let reply = match reply.body {
+                HttpReplyBody::Bytes(b)
+                    if exceeds_max_response_body(b.len(), state.max_response_body) =>
+                {
+                    HttpReply {
+                        status: 500,
+                        headers: vec![],
+                        body: HttpReplyBody::Bytes(bytes::Bytes::from(
+                            "Response body exceeds configured limit",
+                        )),
+                    }
                 }
-                return res;
-            }
-            return Response::from_parts(parts, body);
-        }
-    }
+                _ => reply,
+            };
 
-    // 5. Plain text fallback
-    Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .body(AxumBody::from("Not Found"))
-        .expect("infallible") // allow-unwrap
+            let status =
+                StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut builder = Response::builder().status(status);
+            for (k, v) in &reply.headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            match reply.body {
+                HttpReplyBody::Bytes(b) => builder.body(AxumBody::from(b)).unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(AxumBody::from("Invalid response headers from consumer"))
+                        .expect("infallible") // allow-unwrap
+                }),
+                HttpReplyBody::Stream(stream) => builder
+                    .body(AxumBody::from_stream(stream))
+                    .unwrap_or_else(|_| {
+                        Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(AxumBody::from("Invalid response headers from consumer"))
+                            .expect("infallible") // allow-unwrap
+                    }),
+            }
+        }
+        Err(_) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(AxumBody::from("Pipeline error"))
+            .expect("Response::builder() with a known-valid status code and body is infallible"), // allow-unwrap
+    }
 }
 
 fn exceeds_max_response_body(len: usize, max: usize) -> bool {
@@ -1029,7 +904,7 @@ impl Consumer for HttpConsumer {
     async fn start(&mut self, ctx: camel_component_api::ConsumerContext) -> Result<(), CamelError> {
         use camel_component_api::{Body, Exchange, Message};
 
-        let registry = ServerRegistry::global()
+        let dispatch = ServerRegistry::global()
             .get_or_spawn(
                 &self.config.host,
                 self.config.port,
@@ -1041,9 +916,10 @@ impl Consumer for HttpConsumer {
 
         // Create a channel for this path and register it
         let (env_tx, mut env_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(64);
-        registry
-            .register_api_route(self.config.path.clone(), env_tx)
-            .await;
+        {
+            let mut table = dispatch.write().await;
+            table.insert(self.config.path.clone(), env_tx);
+        }
 
         let path = self.config.path.clone();
         let cancel_token = ctx.cancel_token();
@@ -1302,7 +1178,10 @@ impl Consumer for HttpConsumer {
         }
 
         // Deregister this path
-        registry.unregister_api_route(&path).await;
+        {
+            let mut table = dispatch.write().await;
+            table.remove(&path);
+        }
 
         Ok(())
     }
@@ -2140,7 +2019,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(None));
         let captured_clone = Arc::clone(&captured_auth);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
         let _handle = tokio::spawn(async move {
@@ -2185,7 +2064,7 @@ mod tests {
         let endpoint = component.create_endpoint(&uri, &endpoint_ctx).unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
-        let exchange = Exchange::new(Message::new("hello"));
+        let mut exchange = Exchange::new(Message::new("hello"));
 
         let layer = BearerTokenLayer::new(Arc::new(StaticProvider));
         let mut layered = layer.layer(producer);
@@ -2198,7 +2077,7 @@ mod tests {
     }
 
     async fn start_test_server() -> (String, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://127.0.0.1:{}", addr.port());
 
@@ -2229,7 +2108,7 @@ mod tests {
     }
 
     async fn start_status_server(status: u16) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://127.0.0.1:{}", addr.port());
 
@@ -2282,7 +2161,7 @@ mod tests {
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
 
         let status = result
             .input
@@ -2312,7 +2191,7 @@ mod tests {
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::new("request body"));
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
 
         let status = result
             .input
@@ -2342,7 +2221,7 @@ mod tests {
             serde_json::Value::String("DELETE".to_string()),
         );
 
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
         let status = result
             .input
             .header("CamelHttpResponseCode")
@@ -2369,7 +2248,7 @@ mod tests {
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
 
         let status = result
             .input
@@ -2426,7 +2305,7 @@ mod tests {
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
 
         let status = result
             .input
@@ -2459,7 +2338,7 @@ mod tests {
             serde_json::Value::String(format!("{url}/api")),
         );
 
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
         let status = result
             .input
             .header("CamelHttpResponseCode")
@@ -2483,7 +2362,7 @@ mod tests {
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
 
         assert!(
             result.input.header("Content-Type").is_some(),
@@ -2497,7 +2376,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     async fn start_redirect_server() -> (String, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://127.0.0.1:{}", addr.port());
 
@@ -2551,7 +2430,7 @@ mod tests {
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
 
         // Should get 302, NOT follow redirect to 200
         let status = result
@@ -2581,7 +2460,7 @@ mod tests {
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
 
         // Should follow redirect and get 200
         let status = result
@@ -2614,7 +2493,7 @@ mod tests {
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
 
         // The test server returns the request info in response
         // We just verify it succeeds (the query param was sent)
@@ -2671,7 +2550,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     async fn start_slow_server(delay_ms: u64) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://127.0.0.1:{}", addr.port());
 
@@ -2746,7 +2625,7 @@ mod tests {
         let producer = endpoint.create_producer(&ctx).unwrap();
 
         let exchange = Exchange::new(Message::default());
-        let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+        let result = producer.oneshot(exchange).await.unwrap();
 
         let status = result
             .input
@@ -2992,44 +2871,42 @@ mod tests {
         assert!(std::ptr::eq(r1 as *const _, r2 as *const _));
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn test_concurrent_get_or_spawn_returns_same_registry() {
+    async fn test_concurrent_get_or_spawn_returns_same_dispatch() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let results: Arc<std::sync::Mutex<Vec<HttpRouteRegistry>>> =
+        let results: Arc<std::sync::Mutex<Vec<DispatchTable>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let mut handles = Vec::new();
         for _ in 0..4 {
             let results = results.clone();
             handles.push(tokio::spawn(async move {
-                let registry = ServerRegistry::global()
+                let dispatch = ServerRegistry::global()
                     .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
                     .await
                     .unwrap();
-                results.lock().unwrap().push(registry);
+                results.lock().unwrap().push(dispatch);
             }));
         }
 
         for h in handles {
-            h.await.unwrap(); // allow-unwrap
+            h.await.unwrap();
         }
 
-        let registries = results.lock().unwrap();
-        assert_eq!(registries.len(), 4);
-        for i in 1..registries.len() {
+        let dispatches = results.lock().unwrap();
+        assert_eq!(dispatches.len(), 4);
+        for i in 1..dispatches.len() {
             assert!(
-                Arc::ptr_eq(&registries[0].inner, &registries[i].inner),
-                "all concurrent callers should get the same registry"
+                Arc::ptr_eq(&dispatches[0], &dispatches[i]),
+                "all concurrent callers should get the same dispatch table"
             );
         }
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[test]
     fn test_server_registry_distinguishes_host_and_port() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
@@ -3047,17 +2924,10 @@ mod tests {
                 .await;
             assert!(d1.is_ok());
             assert!(d2.is_ok());
-            // Different host+port combos get different registries
-            let r1 = d1.unwrap();
-            let r2 = d2.unwrap();
-            assert!(
-                !Arc::ptr_eq(&r1.inner, &r2.inner),
-                "different host+port should get different registries"
-            );
+            assert!(!Arc::ptr_eq(&d1.unwrap(), &d2.unwrap()));
         });
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_shared_server_max_request_body_policy_is_deterministic() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
@@ -3074,18 +2944,14 @@ mod tests {
             .get_or_spawn("127.0.0.1", 9991, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
             .await;
         assert!(d2.is_err());
-        let err_msg = match d2 {
-            Err(e) => e.to_string(),
-            Ok(_) => panic!("expected error"),
-        };
+        let err = d2.unwrap_err();
         assert!(
-            err_msg.contains("maxRequestBody") || err_msg.contains("incompatible"),
+            err.to_string().contains("maxRequestBody") || err.to_string().contains("incompatible"),
             "Expected incompatible maxRequestBody error, got: {}",
-            err_msg
+            err
         );
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[test]
     fn test_server_registry_reset_clears_entries() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
@@ -3121,13 +2987,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_handler_returns_404_for_unknown_path() {
-        let registry = HttpRouteRegistry::new();
-        // Nothing registered in the registry
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
+        // Nothing registered in the dispatch table
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(run_axum_server(
             listener,
-            registry,
+            dispatch,
             2 * 1024 * 1024,
             10 * 1024 * 1024,
             Arc::new(tokio::sync::Semaphore::new(1024)),
@@ -3151,7 +3017,7 @@ mod tests {
         use camel_component_api::ConsumerContext;
 
         // Get an OS-assigned free port
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener); // Release port — ServerRegistry will rebind it
 
@@ -3170,7 +3036,7 @@ mod tests {
         let ctx = ConsumerContext::new(tx, token.clone());
 
         tokio::spawn(async move {
-            consumer.start(ctx).await.unwrap(); // allow-unwrap
+            consumer.start(ctx).await.unwrap();
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -3204,7 +3070,7 @@ mod tests {
     async fn test_http_consumer_returns_503_when_inflight_limit_reached() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -3258,7 +3124,7 @@ mod tests {
         };
 
         let first_handle = tokio::spawn(first_req);
-        first_seen_rx.await.unwrap(); // allow-unwrap
+        first_seen_rx.await.unwrap();
 
         let second_resp = client
             .get(format!("http://127.0.0.1:{port}/saturation"))
@@ -3269,7 +3135,7 @@ mod tests {
         assert_eq!(second_resp.status().as_u16(), 503);
 
         let _ = unblock_first_tx.send(());
-        let first_resp = first_handle.await.unwrap(); // allow-unwrap
+        let first_resp = first_handle.await.unwrap();
         assert_eq!(first_resp.status().as_u16(), 200);
 
         token.cancel();
@@ -3279,7 +3145,7 @@ mod tests {
     async fn test_http_consumer_enforces_max_response_body_for_bytes() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -3316,7 +3182,7 @@ mod tests {
 
         let resp = http_result.unwrap();
         assert_eq!(resp.status().as_u16(), 500);
-        let body = resp.text().await.unwrap(); // allow-unwrap
+        let body = resp.text().await.unwrap();
         assert_eq!(body, "Response body exceeds configured limit");
         token.cancel();
     }
@@ -3325,7 +3191,7 @@ mod tests {
     async fn test_http_consumer_enforces_max_response_body_for_json() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -3363,7 +3229,7 @@ mod tests {
 
         let resp = http_result.unwrap();
         assert_eq!(resp.status().as_u16(), 500);
-        let body = resp.text().await.unwrap(); // allow-unwrap
+        let body = resp.text().await.unwrap();
         assert_eq!(body, "Response body exceeds configured limit");
         token.cancel();
     }
@@ -3372,7 +3238,7 @@ mod tests {
     async fn test_http_consumer_enforces_max_response_body_for_xml() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -3410,7 +3276,7 @@ mod tests {
 
         let resp = http_result.unwrap();
         assert_eq!(resp.status().as_u16(), 500);
-        let body = resp.text().await.unwrap(); // allow-unwrap
+        let body = resp.text().await.unwrap();
         assert_eq!(body, "Response body exceeds configured limit");
         token.cancel();
     }
@@ -3422,7 +3288,7 @@ mod tests {
         };
         use futures::stream;
 
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -3468,7 +3334,7 @@ mod tests {
 
         let resp = http_result.unwrap();
         assert_eq!(resp.status().as_u16(), 200);
-        let body = resp.bytes().await.unwrap(); // allow-unwrap
+        let body = resp.bytes().await.unwrap();
         assert_eq!(body.len(), 32);
         token.cancel();
     }
@@ -3482,7 +3348,7 @@ mod tests {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
         // Get an OS-assigned free port (ephemeral)
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener); // Release — ServerRegistry will rebind
 
@@ -3526,7 +3392,7 @@ mod tests {
 
         let resp = http_result.unwrap();
         assert_eq!(resp.status().as_u16(), 200);
-        let body = resp.text().await.unwrap(); // allow-unwrap
+        let body = resp.text().await.unwrap();
         assert_eq!(body, "pong");
 
         token.cancel();
@@ -3537,7 +3403,7 @@ mod tests {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
         // Get an OS-assigned free port (ephemeral)
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -3594,8 +3460,8 @@ mod tests {
             }
         });
 
-        let body_a = resp_hello.unwrap().text().await.unwrap(); // allow-unwrap
-        let body_b = resp_world.unwrap().text().await.unwrap(); // allow-unwrap
+        let body_a = resp_hello.unwrap().text().await.unwrap();
+        let body_b = resp_world.unwrap().text().await.unwrap();
 
         assert_eq!(body_a, "hello-response");
         assert_eq!(body_b, "world-response");
@@ -3609,7 +3475,7 @@ mod tests {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
         // Get an OS-assigned free port (ephemeral)
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -3726,7 +3592,7 @@ mod tests {
             );
             camel_otel::extract_into_exchange(&mut exchange, &headers);
 
-            let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+            let result = producer.oneshot(exchange).await.unwrap();
 
             // Verify request succeeded
             let status = result
@@ -3761,7 +3627,7 @@ mod tests {
             use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
             // Get an OS-assigned free port
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             drop(listener);
 
@@ -3827,7 +3693,7 @@ mod tests {
             use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
             // Get an OS-assigned free port
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             drop(listener);
 
@@ -3904,7 +3770,7 @@ mod tests {
             let exchange = Exchange::new(Message::default());
 
             // Should succeed without panic
-            let result = producer.oneshot(exchange).await.unwrap(); // allow-unwrap
+            let result = producer.oneshot(exchange).await.unwrap();
 
             // Verify request succeeded
             let status = result
@@ -3917,7 +3783,7 @@ mod tests {
 
         /// Test server that captures and echoes back the traceparent header
         async fn start_test_server_with_header_capture() -> (String, tokio::task::JoinHandle<()>) {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let url = format!("http://127.0.0.1:{}", addr.port());
 
@@ -3973,7 +3839,7 @@ mod tests {
         use camel_component_api::Body;
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -4043,7 +3909,7 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::Mutex;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -4082,7 +3948,7 @@ mod tests {
 
         let resp = http_result.unwrap();
         assert_eq!(resp.status().as_u16(), 200);
-        let body = resp.text().await.unwrap(); // allow-unwrap
+        let body = resp.text().await.unwrap();
         assert_eq!(body, "chunk1chunk2");
 
         token.cancel();
@@ -4096,7 +3962,7 @@ mod tests {
     async fn test_413_when_content_length_exceeds_limit() {
         use camel_component_api::ConsumerContext;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -4142,7 +4008,7 @@ mod tests {
         use camel_component_api::ConsumerContext;
         use futures::stream;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -4327,7 +4193,7 @@ mod tests {
     ) {
         use camel_component_api::ConsumerContext;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
@@ -4375,7 +4241,7 @@ mod tests {
             .get("content-type")
             .expect("Content-Type header should be present");
         assert_eq!(ct, "application/json");
-        let body = resp.text().await.unwrap(); // allow-unwrap
+        let body = resp.text().await.unwrap();
         assert_eq!(body, r#"{"message":"hello"}"#);
 
         token.cancel();
@@ -4405,7 +4271,7 @@ mod tests {
             .get("content-type")
             .expect("Content-Type header should be present");
         assert_eq!(ct, "text/plain; charset=utf-8");
-        let body = resp.text().await.unwrap(); // allow-unwrap
+        let body = resp.text().await.unwrap();
         assert_eq!(body, "plain text response");
 
         token.cancel();
@@ -4435,7 +4301,7 @@ mod tests {
             .get("content-type")
             .expect("Content-Type header should be present");
         assert_eq!(ct, "application/xml");
-        let body = resp.text().await.unwrap(); // allow-unwrap
+        let body = resp.text().await.unwrap();
         assert_eq!(body, "<root><item>value</item></root>");
 
         token.cancel();
@@ -4532,7 +4398,7 @@ mod tests {
             .get("content-type")
             .expect("Content-Type header should be present");
         assert_eq!(ct, "audio/mpeg");
-        let body = resp.text().await.unwrap(); // allow-unwrap
+        let body = resp.text().await.unwrap();
         assert_eq!(body, "audio data");
 
         token.cancel();

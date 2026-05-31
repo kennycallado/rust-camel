@@ -127,8 +127,6 @@ dirs = "6"
 regex = "1"
 redb = "4"
 axum = { version = "0.8" }
-tower-http = { version = "0.6", features = ["fs", "compression-br", "compression-gzip"] }
-http-body-util = "0.1"
 http = "1"
 url = "2"
 libc = "0.2"

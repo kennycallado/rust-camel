@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use camel_component_api::{CamelError, ComponentBundle, ComponentRegistrar};
 
-use crate::static_config::HttpStaticConfig;
-use crate::static_endpoint::HttpStaticComponent;
 use crate::{HttpComponent, HttpsComponent, config::HttpConfig};
 
 pub struct HttpBundle {
@@ -25,28 +23,6 @@ impl ComponentBundle for HttpBundle {
     fn register_all(self, ctx: &mut dyn ComponentRegistrar) {
         ctx.register_component_dyn(Arc::new(HttpComponent::with_config(self.config.clone())));
         ctx.register_component_dyn(Arc::new(HttpsComponent::with_config(self.config)));
-    }
-}
-
-/// Bundle for `http-static:` component, loaded from `[default.components.http-static]`.
-pub struct HttpStaticBundle {
-    config: HttpStaticConfig,
-}
-
-impl ComponentBundle for HttpStaticBundle {
-    fn config_key() -> &'static str {
-        "http-static"
-    }
-
-    fn from_toml(value: toml::Value) -> Result<Self, CamelError> {
-        let config: HttpStaticConfig = value
-            .try_into()
-            .map_err(|e: toml::de::Error| CamelError::Config(e.to_string()))?;
-        Ok(Self { config })
-    }
-
-    fn register_all(self, ctx: &mut dyn ComponentRegistrar) {
-        ctx.register_component_dyn(Arc::new(HttpStaticComponent::with_config(self.config)));
     }
 }
 
@@ -113,35 +89,5 @@ mod tests {
         bundle.register_all(&mut registrar);
 
         assert_eq!(registrar.schemes, vec!["http", "https"]);
-    }
-
-    #[test]
-    fn http_static_bundle_config_key() {
-        assert_eq!(HttpStaticBundle::config_key(), "http-static");
-    }
-
-    #[test]
-    fn http_static_bundle_from_toml() {
-        let toml_str = r#"
-dir = "/tmp"
-port = 3000
-spaFallback = true
-cacheControl = "public, max-age=3600"
-"#;
-        let value: toml::Value = toml::from_str(toml_str).unwrap();
-        let bundle = HttpStaticBundle::from_toml(value).unwrap();
-        assert_eq!(bundle.config.port, 3000);
-        assert!(bundle.config.spa_fallback);
-        assert_eq!(bundle.config.cache_control, "public, max-age=3600");
-    }
-
-    #[test]
-    fn http_static_bundle_registers_scheme() {
-        let toml_str = r#"dir = "/tmp""#;
-        let value: toml::Value = toml::from_str(toml_str).unwrap();
-        let bundle = HttpStaticBundle::from_toml(value).unwrap();
-        let mut registrar = TestRegistrar { schemes: vec![] };
-        bundle.register_all(&mut registrar);
-        assert_eq!(registrar.schemes, vec!["http-static"]);
     }
 }
