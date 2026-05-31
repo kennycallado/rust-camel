@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use camel_component_api::{Component, ConsumerContext, NoOpComponentContext};
-use camel_component_http::{HttpComponent, HttpStaticComponent, ServerRegistry};
+use camel_component_http::{HttpStaticComponent, ServerRegistry};
 
 fn make_temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("http-static-integ-{name}"));
@@ -41,26 +41,27 @@ async fn free_port() -> u16 {
 async fn test_shared_port_api_and_static() {
     reset_registry();
     let dir = make_temp_dir("shared-port");
-    fs::write(dir.join("style.css"), "body { color: red; }").unwrap();
+    fs::write(dir.join("hello.txt"), "Hello from static!").unwrap();
 
     let port = free_port().await;
 
-    // Start http-static consumer
-    let uri = format!("http-static:{}?port={port}", dir.display());
+    // Start HttpStaticConsumer first — creates the Axum server on the port
+    // Note: HttpStaticConfig defaults to host "0.0.0.0"
+    let uri = format!("http-static:{}?port={port}&host=127.0.0.1", dir.display());
     let component = HttpStaticComponent::new();
     let endpoint = component
         .create_endpoint(&uri, &NoOpComponentContext)
         .unwrap();
-    let mut consumer = endpoint.create_consumer().unwrap();
+    let mut static_consumer = endpoint.create_consumer().unwrap();
 
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let token = tokio_util::sync::CancellationToken::new();
     let ctx = ConsumerContext::new(tx, token.clone());
-    let static_handle = tokio::spawn(async move { consumer.start(ctx).await });
+    let static_handle = tokio::spawn(async move { static_consumer.start(ctx).await });
 
-    // Start http API consumer on same port
-    let api_component = HttpComponent::new();
-    let api_uri = format!("http://127.0.0.1:{port}/api/hello");
+    // Start HttpConsumer (API) on same port with matching host
+    let api_component = camel_component_http::HttpComponent::new();
+    let api_uri = format!("http://127.0.0.1:{port}/api/hello?maxInflightRequests=100");
     let api_endpoint = api_component
         .create_endpoint(&api_uri, &NoOpComponentContext)
         .unwrap();
@@ -70,32 +71,47 @@ async fn test_shared_port_api_and_static() {
     let api_token = tokio_util::sync::CancellationToken::new();
     let api_ctx = ConsumerContext::new(api_tx, api_token.clone());
     let api_handle = tokio::spawn(async move {
-        // Simple echo consumer
         let _ = api_consumer.start(api_ctx).await;
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Spawn a responder to handle API requests (simulates pipeline)
+    let responder = tokio::spawn(async move {
+        while let Some(mut envelope) = api_rx.recv().await {
+            envelope.exchange.input.set_header(
+                "CamelHttpResponseCode",
+                serde_json::Value::Number(200.into()),
+            );
+            envelope.exchange.input.body = camel_component_api::Body::Text("API response".into());
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
 
-    // Test static file serving
-    let resp = reqwest::get(format!("http://127.0.0.1:{port}/style.css"))
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Test 1: Static file serving works
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/hello.txt"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("color: red"));
+    assert_eq!(body, "Hello from static!");
 
-    // Test API route returns 404 (no pipeline connected, but route is registered)
+    // Test 2: API route is registered and reachable on same port
     let resp = reqwest::get(format!("http://127.0.0.1:{port}/api/hello"))
         .await
         .unwrap();
-    // The API route is registered but no pipeline responds, so it times out or returns 503
-    assert!(resp.status().is_server_error() || resp.status() == 503 || resp.status() == 404);
+    assert_eq!(resp.status(), 200, "API route should return 200");
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "API response");
 
     // Cleanup
     token.cancel();
     api_token.cancel();
     let _ = static_handle.await;
     let _ = api_handle.await;
+    let _ = responder.await;
     cleanup(&dir);
     reset_registry();
 }

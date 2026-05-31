@@ -2185,7 +2185,7 @@ mod tests {
         let endpoint = component.create_endpoint(&uri, &endpoint_ctx).unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
-        let mut exchange = Exchange::new(Message::new("hello"));
+        let exchange = Exchange::new(Message::new("hello"));
 
         let layer = BearerTokenLayer::new(Arc::new(StaticProvider));
         let mut layered = layer.layer(producer);
@@ -2992,6 +2992,7 @@ mod tests {
         assert!(std::ptr::eq(r1 as *const _, r2 as *const _));
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_concurrent_get_or_spawn_returns_same_registry() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
@@ -3028,6 +3029,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[test]
     fn test_server_registry_distinguishes_host_and_port() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
@@ -3055,6 +3057,7 @@ mod tests {
         });
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_shared_server_max_request_body_policy_is_deterministic() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
@@ -3082,6 +3085,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[test]
     fn test_server_registry_reset_clears_entries() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();

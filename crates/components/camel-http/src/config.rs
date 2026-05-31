@@ -283,36 +283,46 @@ mod tests {
 
     #[test]
     fn test_rejects_max_redirects_over_limit() {
-        let mut cfg = HttpConfig::default();
-        cfg.max_redirects = Some(21);
+        let cfg = HttpConfig {
+            max_redirects: Some(21),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_accepts_valid_max_redirects() {
-        let mut cfg = HttpConfig::default();
-        cfg.max_redirects = Some(10);
+        let cfg = HttpConfig {
+            max_redirects: Some(10),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn test_rejects_malformed_status_range() {
-        let mut cfg = HttpConfig::default();
-        cfg.ok_status_code_range = Some("abc-xyz".into());
+        let cfg = HttpConfig {
+            ok_status_code_range: Some("abc-xyz".into()),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_accepts_valid_status_range() {
-        let mut cfg = HttpConfig::default();
-        cfg.ok_status_code_range = Some("200-299".into());
+        let cfg = HttpConfig {
+            ok_status_code_range: Some("200-299".into()),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_ok());
     }
 
     #[test]
     fn test_rejects_invalid_proxy_url() {
-        let mut cfg = HttpConfig::default();
-        cfg.proxy_url = Some("::not-a-proxy::".into());
+        let cfg = HttpConfig {
+            proxy_url: Some("::not-a-proxy::".into()),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 }
