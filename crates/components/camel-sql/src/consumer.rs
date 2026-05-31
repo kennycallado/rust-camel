@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures::TryStreamExt;
 use serde_json::Value as JsonValue;
 use sqlx::AnyPool;
 use sqlx::any::AnyPoolOptions;
@@ -9,12 +11,12 @@ use sqlx::any::AnyRow;
 use tokio::sync::OnceCell;
 use tracing::{debug, error, info, warn};
 
-use camel_component_api::{Body, CamelError, Exchange, Message};
+use camel_component_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
 use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 
 use crate::config::{
-    PollStrategy, ProcessingStrategy, SqlEndpointConfig, TransactionMode, enrich_db_url_with_ssl,
-    redact_db_url,
+    PollStrategy, ProcessingStrategy, SqlEndpointConfig, SqlOutputType, TransactionMode,
+    enrich_db_url_with_ssl, redact_db_url,
 };
 use crate::headers;
 use crate::query::{QueryTemplate, parse_query_template, resolve_params};
@@ -48,8 +50,12 @@ impl SqlConsumer {
         // Resolve parameters
         let prepared = resolve_params(template, &empty_exchange, &self.config.in_separator)?;
 
-        // Build and execute the query
         debug!(query = %prepared.sql, "executing SQL consumer poll");
+
+        if self.config.output_type == SqlOutputType::StreamList {
+            return self.poll_database_stream(pool, context, &prepared).await;
+        }
+
         let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
         let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
             warn!(error = %e, "SQL consumer poll query failed");
@@ -58,12 +64,10 @@ impl SqlConsumer {
 
         debug!(rows = rows.len(), "SQL consumer poll completed");
 
-        // Check for empty result set
         if rows.is_empty() && !self.config.route_empty_result_set {
             return Ok(());
         }
 
-        // Apply max_messages_per_poll limit
         let rows_to_process: Vec<AnyRow> = if let Some(max) = self.config.max_messages_per_poll {
             if max > 0 {
                 rows.into_iter().take(max as usize).collect()
@@ -156,6 +160,53 @@ impl SqlConsumer {
             error!(error = %e, "onConsumeBatchComplete query failed");
         }
 
+        Ok(())
+    }
+
+    async fn poll_database_stream(
+        &self,
+        pool: &AnyPool,
+        context: &ConsumerContext,
+        prepared: &crate::query::PreparedQuery,
+    ) -> Result<(), CamelError> {
+        let pool_clone = pool.clone();
+        let sql_str = prepared.sql.clone();
+        let bindings = prepared.bindings.clone();
+
+        let byte_stream = async_stream::try_stream! {
+            let mut q = sqlx::query(&sql_str);
+            q = bind_json_values(q, &bindings);
+            let mut rows = q.fetch(&pool_clone);
+            while let Some(row) = rows.try_next().await.map_err(|e| {
+                CamelError::ProcessorError(format!("Query execution failed: {}", e))
+            })? {
+                let json_val = row_to_json(&row).map_err(|e| {
+                    CamelError::ProcessorError(format!("JSON serialization failed: {}", e))
+                })?;
+                let mut bytes = serde_json::to_vec(&json_val)
+                    .map_err(|e| CamelError::ProcessorError(format!("JSON serialization failed: {}", e)))?;
+                bytes.push(b'\n');
+                yield Bytes::from(bytes);
+            }
+        };
+
+        let msg = Message::new(Body::Stream(StreamBody {
+            stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(byte_stream)))),
+            metadata: StreamMetadata {
+                content_type: Some("application/x-ndjson".to_string()),
+                size_hint: None,
+                origin: None,
+            },
+        }));
+
+        let exchange = Exchange::new(msg);
+        let result = context.send_and_wait(exchange).await;
+        if let Err(e) = result {
+            error!(error = %e, "StreamList consumer downstream processing failed");
+            return Err(e);
+        }
+
+        debug!("StreamList: consumer poll completed (lazy stream emitted)");
         Ok(())
     }
 
@@ -312,6 +363,17 @@ impl Consumer for SqlConsumer {
         }
         if self.config.poll_strategy == PollStrategy::Burst {
             debug!("Poll strategy: Burst (rapid successive polls)");
+        }
+
+        if self.config.output_type == SqlOutputType::StreamList
+            && (self.config.on_consume.is_some()
+                || self.config.on_consume_failed.is_some()
+                || self.config.on_consume_batch_complete.is_some())
+        {
+            warn!(
+                "onConsume/onConsumeFailed/onConsumeBatchComplete are not executed in StreamList mode \
+                 (rows are consumed lazily downstream)"
+            );
         }
 
         // Warn if no onConsume configured
@@ -847,5 +909,141 @@ mod tests {
             .bridge_poll_error(&ctx, CamelError::ProcessorError("poll failed".into()))
             .await
             .expect("bridging should succeed");
+    }
+
+    #[tokio::test]
+    async fn stream_list_consumer_emits_ndjson_body() {
+        let pool = sqlite_pool().await;
+        sqlx::query("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+            .execute(&pool)
+            .await
+            .expect("create table");
+        sqlx::query("INSERT INTO items (id, name) VALUES (1, 'alpha'), (2, 'beta'), (3, 'gamma')")
+            .execute(&pool)
+            .await
+            .expect("seed rows");
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, name from items order by id?db_url=sqlite::memory:&outputType=StreamList&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        let (tx, rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Exchange>();
+        tokio::spawn(async move {
+            let mut rx = rx;
+            if let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange.clone()));
+                }
+                let _ = result_tx.send(env.exchange);
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+        consumer
+            .poll_database(&pool, &ctx, &template)
+            .await
+            .expect("poll must succeed");
+
+        let exchange = result_rx.await.expect("should have received one exchange");
+
+        match exchange.input.body {
+            Body::Stream(ref stream_body) => {
+                let stream = stream_body.stream.clone();
+                let mut guard = stream.lock().await;
+                let stream_opt = guard.take();
+                assert!(stream_opt.is_some(), "stream should be present");
+
+                use futures::StreamExt;
+                let mut collected = Vec::new();
+                let mut stream = stream_opt.unwrap();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.expect("stream chunk should not error");
+                    collected.extend_from_slice(&chunk);
+                }
+
+                let ndjson = String::from_utf8(collected).expect("valid utf8");
+                let lines: Vec<&str> = ndjson.trim().lines().collect();
+                assert_eq!(lines.len(), 3, "should have 3 NDJSON lines");
+
+                let row0: serde_json::Value =
+                    serde_json::from_str(lines[0]).expect("valid json line 0");
+                assert_eq!(row0["id"], 1);
+                assert_eq!(row0["name"], "alpha");
+
+                let row1: serde_json::Value =
+                    serde_json::from_str(lines[1]).expect("valid json line 1");
+                assert_eq!(row1["id"], 2);
+                assert_eq!(row1["name"], "beta");
+
+                let row2: serde_json::Value =
+                    serde_json::from_str(lines[2]).expect("valid json line 2");
+                assert_eq!(row2["id"], 3);
+                assert_eq!(row2["name"], "gamma");
+            }
+            ref other => panic!("expected Body::Stream, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_list_consumer_empty_result_set_emits_empty_stream() {
+        let pool = sqlite_pool().await;
+        sqlx::query("CREATE TABLE empty_items (id INTEGER PRIMARY KEY, name TEXT)")
+            .execute(&pool)
+            .await
+            .expect("create table");
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, name from empty_items?db_url=sqlite::memory:&outputType=StreamList&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = mpsc_rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange.clone()));
+                }
+                let _ = tx.send(env.exchange);
+                break;
+            }
+        });
+        let ctx = ConsumerContext::new(mpsc_tx, CancellationToken::new());
+
+        consumer
+            .poll_database(&pool, &ctx, &template)
+            .await
+            .expect("poll must succeed");
+
+        let exchange = rx.await.expect("StreamList should emit exchange even for empty results");
+
+        match exchange.input.body {
+            Body::Stream(ref stream_body) => {
+                let stream = stream_body.stream.clone();
+                let mut guard = stream.lock().await;
+                let stream_opt = guard.take();
+
+                use futures::StreamExt;
+                let mut count = 0;
+                if let Some(mut stream) = stream_opt {
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk.expect("stream chunk should not error");
+                        count += chunk.len();
+                    }
+                }
+                assert_eq!(count, 0, "empty table should produce zero stream bytes");
+            }
+            ref other => panic!("expected Body::Stream, got {:?}", other),
+        }
     }
 }
