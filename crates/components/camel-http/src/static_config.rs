@@ -3,8 +3,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use camel_component_api::{CamelError, UriComponents, UriConfig, parse_uri};
-use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::Deserialize;
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 
 /// Configuration for an `http-static:` server endpoint.
 ///
@@ -38,7 +38,11 @@ pub struct HttpStaticConfig {
     pub cache_control: String,
 
     /// Custom error pages mapped by HTTP status code.
-    #[serde(rename = "errorPages", default, deserialize_with = "deserialize_error_pages")]
+    #[serde(
+        rename = "errorPages",
+        default,
+        deserialize_with = "deserialize_error_pages"
+    )]
     pub error_pages: HashMap<u16, PathBuf>,
 
     /// URL path prefix this mount serves on (e.g. "/assets").
@@ -146,7 +150,8 @@ impl UriConfig for HttpStaticConfig {
             // point, not the directory. Require explicit dir when serving from root.
             return Err(CamelError::InvalidUri(
                 "http-static:/ requires a dir query parameter when mount_path is root \
-                 (e.g. http-static:/?dir=/var/www)".to_string(),
+                 (e.g. http-static:/?dir=/var/www)"
+                    .to_string(),
             ));
         } else {
             // Old style (backward compat): URI path = directory, mount_path = "/"
