@@ -117,6 +117,7 @@
             pkg-config
             libxml2
             libclang
+            pkgsUnstable.beads # agents memory
             pkgsUnstable.rdkafka
           ];
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
