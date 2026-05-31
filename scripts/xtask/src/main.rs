@@ -1173,11 +1173,17 @@ fn resolve_publish_order(workspace_root: &Path) -> Result<Vec<WorkspaceCrate>, S
 
         let publish = !content.contains("publish = false");
         let normal_deps = extract_normal_camel_deps(&content);
-        let rel_path = path
+        let crate_dir = path
             .parent()
-            .unwrap()
+            .ok_or_else(|| format!("Cargo.toml has no parent directory: {}", path.display()))?;
+        let rel_path = crate_dir
             .strip_prefix(workspace_root)
-            .unwrap()
+            .map_err(|e| {
+                format!(
+                    "Failed to make {} relative to workspace root: {e}",
+                    crate_dir.display()
+                )
+            })?
             .to_string_lossy()
             .to_string();
 
@@ -1288,13 +1294,8 @@ fn workspace_version(workspace_root: &Path) -> Result<String, String> {
         .map_err(|e| format!("Failed to read root Cargo.toml: {e}"))?;
     for line in cargo_toml.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("version = ") {
-            return Ok(trimmed
-                .strip_prefix("version = ")
-                .unwrap()
-                .trim()
-                .trim_matches('"')
-                .to_string());
+        if let Some(version) = trimmed.strip_prefix("version = ") {
+            return Ok(version.trim().trim_matches('"').to_string());
         }
     }
     Err("No version found in root Cargo.toml".to_string())

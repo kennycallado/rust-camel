@@ -872,9 +872,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
             Err(_) => Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(AxumBody::from("Pipeline error"))
-                .expect(
-                    "Response::builder() with a known-valid status code and body is infallible",
-                ), // allow-unwrap
+                .expect("infallible"), // allow-unwrap
         }
     } else {
         // No API route matched — try static mounts
