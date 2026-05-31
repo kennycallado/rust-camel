@@ -75,7 +75,7 @@ tempfile = "3"
 serde_json.workspace = true
 
 [features]
-default = ["otel", "grpc", "wasm"]
+default = ["otel", "grpc", "wasm", "http-static"]
 otel = ["camel-component-http/otel", "camel-component-ws/otel"]
 # kafka activates the kafka component code only — linking strategy is orthogonal.
 # Use `kafka` alone (rdkafka will build from source via cmake by default),
@@ -89,6 +89,7 @@ grpc = [
   "camel-dsl/protobuf",
 ]
 wasm = ["dep:camel-component-wasm"]
+http-static = []
 cmake-build = ["camel-component-kafka/cmake-build"]
 dynamic-linking = ["camel-component-kafka/dynamic-linking"]
 kafka-static = ["dep:camel-component-kafka", "cmake-build"]

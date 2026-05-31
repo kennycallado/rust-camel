@@ -399,6 +399,8 @@ async fn run(
 
     // Register HTTP, WS, File, Container (always-on in camel-cli, no feature flag)
     register_bundle!(ctx, camel_config, camel_component_http::HttpBundle);
+    #[cfg(feature = "http-static")]
+    register_bundle!(ctx, camel_config, camel_component_http::HttpStaticBundle);
     register_bundle!(ctx, camel_config, camel_component_ws::WsBundle);
     register_bundle!(ctx, camel_config, camel_component_file::FileBundle);
     register_bundle!(

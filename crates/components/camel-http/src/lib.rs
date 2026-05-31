@@ -2,10 +2,18 @@ pub mod auth;
 pub mod bundle;
 pub mod config;
 pub mod health;
+pub mod registry;
+pub mod static_config;
+pub mod static_dispatch;
+pub mod static_endpoint;
 use crate::config::parse_ok_status_code_range;
 pub use bundle::HttpBundle;
+pub use bundle::HttpStaticBundle;
 pub use config::HttpConfig;
 pub use health::HttpHealthCheck;
+pub use registry::HttpRouteRegistry;
+pub use static_config::HttpStaticConfig;
+pub use static_endpoint::{HttpStaticComponent, HttpStaticConsumer, HttpStaticEndpoint};
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -15,7 +23,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::OnceCell;
 use tower::Layer;
 use tower::Service;
 use tracing::debug;
@@ -528,43 +536,45 @@ impl HttpServerConfig {
 // RequestEnvelope / HttpReply
 // ---------------------------------------------------------------------------
 
-/// Body de la respuesta HTTP: bytes ya materializados o stream lazy.
-pub(crate) enum HttpReplyBody {
+/// Body of the HTTP response: already-materialized bytes or a lazy stream.
+///
+/// **Internal plumbing** — subject to change without notice.
+pub enum HttpReplyBody {
     Bytes(bytes::Bytes),
     Stream(BoxStream<'static, Result<bytes::Bytes, CamelError>>),
 }
 
 /// An inbound HTTP request sent from the Axum dispatch handler to an
 /// `HttpConsumer` receive loop.
-pub(crate) struct RequestEnvelope {
-    pub(crate) method: String,
-    pub(crate) path: String,
-    pub(crate) query: String,
-    pub(crate) headers: http::HeaderMap,
-    pub(crate) body: StreamBody,
-    pub(crate) reply_tx: tokio::sync::oneshot::Sender<HttpReply>,
+///
+/// **Internal plumbing** — subject to change without notice.
+pub struct RequestEnvelope {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: http::HeaderMap,
+    pub body: StreamBody,
+    pub reply_tx: tokio::sync::oneshot::Sender<HttpReply>,
 }
 
 /// The HTTP response that `HttpConsumer` sends back to the Axum handler.
-pub(crate) struct HttpReply {
-    pub(crate) status: u16,
-    pub(crate) headers: Vec<(String, String)>,
-    pub(crate) body: HttpReplyBody,
+///
+/// **Internal plumbing** — subject to change without notice.
+pub struct HttpReply {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: HttpReplyBody,
 }
 
 // ---------------------------------------------------------------------------
-// DispatchTable / ServerRegistry
+// HttpRouteRegistry / ServerRegistry
 // ---------------------------------------------------------------------------
-
-/// Maps URL path → channel sender for the consumer that owns that path.
-pub(crate) type DispatchTable =
-    Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<RequestEnvelope>>>>;
 
 type ServerKey = (String, u16);
 
 /// Handle to a running Axum server on one interface/port.
 struct ServerHandle {
-    dispatch: DispatchTable,
+    registry: HttpRouteRegistry,
     max_request_body: usize,
     max_response_body: usize,
     max_inflight_requests: usize,
@@ -584,16 +594,16 @@ impl ServerRegistry {
         })
     }
 
-    /// Returns the `DispatchTable` for `port`, spawning a new Axum server if
+    /// Returns route registry for `port`, spawning new Axum server if
     /// none is running on that port yet.
-    pub(crate) async fn get_or_spawn(
+    pub async fn get_or_spawn(
         &'static self,
         host: &str,
         port: u16,
         max_request_body: usize,
         max_response_body: usize,
         max_inflight_requests: usize,
-    ) -> Result<DispatchTable, CamelError> {
+    ) -> Result<HttpRouteRegistry, CamelError> {
         let host_owned = host.to_string();
 
         let cell = {
@@ -640,11 +650,11 @@ impl ServerRegistry {
                 let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
                     CamelError::EndpointCreationFailed(format!("Failed to bind {addr}: {e}"))
                 })?;
-                let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
+                let registry = HttpRouteRegistry::new();
                 let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
                 let task = tokio::spawn(run_axum_server(
                     listener,
-                    Arc::clone(&dispatch),
+                    registry.clone(),
                     max_request_body,
                     max_response_body,
                     Arc::clone(&inflight),
@@ -652,7 +662,7 @@ impl ServerRegistry {
                 let addr_for_monitor = format!("{host_owned}:{port}");
                 tokio::spawn(monitor_axum_task(task, addr_for_monitor));
                 Ok::<ServerHandle, CamelError>(ServerHandle {
-                    dispatch,
+                    registry,
                     max_request_body,
                     max_response_body,
                     max_inflight_requests,
@@ -660,7 +670,7 @@ impl ServerRegistry {
             })
             .await?;
 
-        Ok(Arc::clone(&handle.dispatch))
+        Ok(handle.registry.clone())
     }
 
     /// Reset the global registry — **test-only**.
@@ -693,8 +703,8 @@ use axum::{
 };
 
 #[derive(Clone)]
-struct AppState {
-    dispatch: DispatchTable,
+pub(crate) struct AppState {
+    registry: HttpRouteRegistry,
     max_request_body: usize,
     max_response_body: usize,
     inflight: Arc<tokio::sync::Semaphore>,
@@ -702,13 +712,13 @@ struct AppState {
 
 async fn run_axum_server(
     listener: tokio::net::TcpListener,
-    dispatch: DispatchTable,
+    registry: HttpRouteRegistry,
     max_request_body: usize,
     max_response_body: usize,
     inflight: Arc<tokio::sync::Semaphore>,
 ) {
     let state = AppState {
-        dispatch,
+        registry,
         max_request_body,
         max_response_body,
         inflight,
@@ -743,128 +753,132 @@ async fn monitor_axum_task(handle: tokio::task::JoinHandle<()>, addr: String) {
 }
 
 async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl IntoResponse {
-    let method = req.method().to_string();
-    let path = req.uri().path().to_string();
-    let query = req.uri().query().unwrap_or("").to_string();
-    let headers = req.headers().clone();
+    let path = req.uri().path().to_owned();
 
-    // Check Content-Length against limit BEFORE opening the stream
-    let content_length: Option<u64> = headers
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok());
+    // 1. API match — lookup by path, only consume body if matched
+    let api_sender = {
+        let inner = state.registry.inner.read().await;
+        inner.api_routes.get(&path).cloned()
+    }; // lock released BEFORE any IO
 
-    if let Some(len) = content_length
-        && len > state.max_request_body as u64
-    {
-        return Response::builder()
-            .status(StatusCode::PAYLOAD_TOO_LARGE)
-            .body(AxumBody::from("Request body exceeds configured limit"))
-            .expect("infallible"); // allow-unwrap
-    }
+    if let Some(sender) = api_sender {
+        let method = req.method().to_string();
+        let query = req.uri().query().unwrap_or("").to_string();
+        let headers = req.headers().clone();
 
-    let _permit = match Arc::clone(&state.inflight).try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
+        // Check Content-Length against limit BEFORE opening the stream
+        let content_length: Option<u64> = headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok());
+
+        if let Some(len) = content_length
+            && len > state.max_request_body as u64
+        {
             return Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .body(AxumBody::from("Service Unavailable"))
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .body(AxumBody::from("Request body exceeds configured limit"))
                 .expect("infallible"); // allow-unwrap
         }
-    };
 
-    // Build StreamBody from Axum body WITHOUT materializing
-    let content_type = headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let data_stream: BodyDataStream = req.into_body().into_data_stream();
-    let mapped_stream = data_stream.map_err(|e| CamelError::Io(e.to_string()));
-    let boxed: BoxStream<'static, Result<bytes::Bytes, CamelError>> = Box::pin(mapped_stream);
-
-    let stream_body = StreamBody {
-        stream: Arc::new(tokio::sync::Mutex::new(Some(boxed))),
-        metadata: StreamMetadata {
-            size_hint: content_length,
-            content_type,
-            origin: None,
-        },
-    };
-
-    // Look up handler for this path
-    let sender = {
-        let table = state.dispatch.read().await;
-        table.get(&path).cloned()
-    };
-    let Some(sender) = sender else {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(AxumBody::from("No consumer registered for this path"))
-            .expect("infallible"); // allow-unwrap
-    };
-
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<HttpReply>();
-    let envelope = RequestEnvelope {
-        method,
-        path,
-        query,
-        headers,
-        body: stream_body,
-        reply_tx,
-    };
-
-    if sender.send(envelope).await.is_err() {
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(AxumBody::from("Consumer unavailable"))
-            .expect("infallible"); // allow-unwrap
-    }
-
-    match reply_rx.await {
-        Ok(reply) => {
-            let reply = match reply.body {
-                HttpReplyBody::Bytes(b)
-                    if exceeds_max_response_body(b.len(), state.max_response_body) =>
-                {
-                    HttpReply {
-                        status: 500,
-                        headers: vec![],
-                        body: HttpReplyBody::Bytes(bytes::Bytes::from(
-                            "Response body exceeds configured limit",
-                        )),
-                    }
-                }
-                _ => reply,
-            };
-
-            let status =
-                StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let mut builder = Response::builder().status(status);
-            for (k, v) in &reply.headers {
-                builder = builder.header(k.as_str(), v.as_str());
+        let _permit = match Arc::clone(&state.inflight).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .body(AxumBody::from("Service Unavailable"))
+                    .expect("infallible"); // allow-unwrap
             }
-            match reply.body {
-                HttpReplyBody::Bytes(b) => builder.body(AxumBody::from(b)).unwrap_or_else(|_| {
-                    Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(AxumBody::from("Invalid response headers from consumer"))
-                        .expect("infallible") // allow-unwrap
-                }),
-                HttpReplyBody::Stream(stream) => builder
-                    .body(AxumBody::from_stream(stream))
-                    .unwrap_or_else(|_| {
-                        Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(AxumBody::from("Invalid response headers from consumer"))
-                            .expect("infallible") // allow-unwrap
-                    }),
-            }
+        };
+
+        // Build StreamBody from Axum body WITHOUT materializing
+        let content_type = headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let data_stream: BodyDataStream = req.into_body().into_data_stream();
+        let mapped_stream = data_stream.map_err(|e| CamelError::Io(e.to_string()));
+        let boxed: BoxStream<'static, Result<bytes::Bytes, CamelError>> = Box::pin(mapped_stream);
+
+        let stream_body = StreamBody {
+            stream: Arc::new(tokio::sync::Mutex::new(Some(boxed))),
+            metadata: StreamMetadata {
+                size_hint: content_length,
+                content_type,
+                origin: None,
+            },
+        };
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<HttpReply>();
+        let envelope = RequestEnvelope {
+            method,
+            path,
+            query,
+            headers,
+            body: stream_body,
+            reply_tx,
+        };
+
+        if sender.send(envelope).await.is_err() {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(AxumBody::from("Consumer unavailable"))
+                .expect("infallible"); // allow-unwrap
         }
-        Err(_) => Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(AxumBody::from("Pipeline error"))
-            .expect("Response::builder() with a known-valid status code and body is infallible"), // allow-unwrap
+
+        match reply_rx.await {
+            Ok(reply) => {
+                let reply = match reply.body {
+                    HttpReplyBody::Bytes(b)
+                        if exceeds_max_response_body(b.len(), state.max_response_body) =>
+                    {
+                        HttpReply {
+                            status: 500,
+                            headers: vec![],
+                            body: HttpReplyBody::Bytes(bytes::Bytes::from(
+                                "Response body exceeds configured limit",
+                            )),
+                        }
+                    }
+                    _ => reply,
+                };
+
+                let status =
+                    StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let mut builder = Response::builder().status(status);
+                for (k, v) in &reply.headers {
+                    builder = builder.header(k.as_str(), v.as_str());
+                }
+                match reply.body {
+                    HttpReplyBody::Bytes(b) => {
+                        builder.body(AxumBody::from(b)).unwrap_or_else(|_| {
+                            Response::builder()
+                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                .body(AxumBody::from("Invalid response headers from consumer"))
+                                .expect("infallible") // allow-unwrap
+                        })
+                    }
+                    HttpReplyBody::Stream(stream) => builder
+                        .body(AxumBody::from_stream(stream))
+                        .unwrap_or_else(|_| {
+                            Response::builder()
+                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                .body(AxumBody::from("Invalid response headers from consumer"))
+                                .expect("infallible") // allow-unwrap
+                        }),
+                }
+            }
+            Err(_) => Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(AxumBody::from("Pipeline error"))
+                .expect(
+                    "Response::builder() with a known-valid status code and body is infallible",
+                ), // allow-unwrap
+        }
+    } else {
+        // No API route matched — try static mounts
+        static_dispatch::dispatch_static(&state, req, &path).await
     }
 }
 
@@ -904,7 +918,7 @@ impl Consumer for HttpConsumer {
     async fn start(&mut self, ctx: camel_component_api::ConsumerContext) -> Result<(), CamelError> {
         use camel_component_api::{Body, Exchange, Message};
 
-        let dispatch = ServerRegistry::global()
+        let registry = ServerRegistry::global()
             .get_or_spawn(
                 &self.config.host,
                 self.config.port,
@@ -914,14 +928,14 @@ impl Consumer for HttpConsumer {
             )
             .await?;
 
-        // Create a channel for this path and register it
+        // Create channel for this path and register it
         let (env_tx, mut env_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(64);
-        {
-            let mut table = dispatch.write().await;
-            table.insert(self.config.path.clone(), env_tx);
-        }
+        registry
+            .register_api_route(self.config.path.clone(), env_tx)
+            .await;
 
         let path = self.config.path.clone();
+        let registry_for_cleanup = registry.clone();
         let cancel_token = ctx.cancel_token();
         loop {
             tokio::select! {
@@ -1178,10 +1192,7 @@ impl Consumer for HttpConsumer {
         }
 
         // Deregister this path
-        {
-            let mut table = dispatch.write().await;
-            table.remove(&path);
-        }
+        registry_for_cleanup.unregister_api_route(&path).await;
 
         Ok(())
     }
@@ -1825,6 +1836,18 @@ impl Service<Exchange> for HttpProducer {
     }
 }
 
+/// Serializes tests that mutate or depend on the global `ServerRegistry`.
+///
+/// `ServerRegistry::global()` is a process-wide singleton that persists
+/// across tests. `ServerRegistry::reset()` clears ALL entries; if it races
+/// with another test that has a live server on a fixed port (e.g. 9991),
+/// the registry entry is removed while the OS socket is still bound, so
+/// the next `get_or_spawn` call on that port fails with "Address already
+/// in use". Holding this mutex for the full body of each affected test
+/// prevents the race without requiring `--test-threads=1`.
+#[cfg(test)]
+pub(crate) static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2064,7 +2087,7 @@ mod tests {
         let endpoint = component.create_endpoint(&uri, &endpoint_ctx).unwrap();
         let producer = endpoint.create_producer(&ctx).unwrap();
 
-        let mut exchange = Exchange::new(Message::new("hello"));
+        let exchange = Exchange::new(Message::new("hello"));
 
         let layer = BearerTokenLayer::new(Arc::new(StaticProvider));
         let mut layered = layer.layer(producer);
@@ -2853,17 +2876,6 @@ mod tests {
     // ServerRegistry tests
     // -----------------------------------------------------------------------
 
-    /// Serializes tests that mutate or depend on the global `ServerRegistry`.
-    ///
-    /// `ServerRegistry::global()` is a process-wide singleton that persists
-    /// across tests. `ServerRegistry::reset()` clears ALL entries; if it races
-    /// with another test that has a live server on a fixed port (e.g. 9991),
-    /// the registry entry is removed while the OS socket is still bound, so
-    /// the next `get_or_spawn` call on that port fails with "Address already
-    /// in use". Holding this mutex for the full body of each affected test
-    /// prevents the race without requiring `--test-threads=1`.
-    static REGISTRY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn test_server_registry_global_is_singleton() {
         let r1 = ServerRegistry::global();
@@ -2871,25 +2883,26 @@ mod tests {
         assert!(std::ptr::eq(r1 as *const _, r2 as *const _));
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn test_concurrent_get_or_spawn_returns_same_dispatch() {
+    async fn test_concurrent_get_or_spawn_returns_same_registry() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let results: Arc<std::sync::Mutex<Vec<DispatchTable>>> =
+        let results: Arc<std::sync::Mutex<Vec<HttpRouteRegistry>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let mut handles = Vec::new();
         for _ in 0..4 {
             let results = results.clone();
             handles.push(tokio::spawn(async move {
-                let dispatch = ServerRegistry::global()
+                let registry = ServerRegistry::global()
                     .get_or_spawn("127.0.0.1", port, 2 * 1024 * 1024, 10 * 1024 * 1024, 1024)
                     .await
                     .unwrap();
-                results.lock().unwrap().push(dispatch);
+                results.lock().unwrap().push(registry);
             }));
         }
 
@@ -2897,12 +2910,12 @@ mod tests {
             h.await.unwrap();
         }
 
-        let dispatches = results.lock().unwrap();
-        assert_eq!(dispatches.len(), 4);
-        for i in 1..dispatches.len() {
+        let registries = results.lock().unwrap();
+        assert_eq!(registries.len(), 4);
+        for i in 1..registries.len() {
             assert!(
-                Arc::ptr_eq(&dispatches[0], &dispatches[i]),
-                "all concurrent callers should get the same dispatch table"
+                Arc::ptr_eq(&registries[0].inner, &registries[i].inner),
+                "all concurrent callers should get same route registry"
             );
         }
     }
@@ -2924,10 +2937,11 @@ mod tests {
                 .await;
             assert!(d1.is_ok());
             assert!(d2.is_ok());
-            assert!(!Arc::ptr_eq(&d1.unwrap(), &d2.unwrap()));
+            assert!(!Arc::ptr_eq(&d1.unwrap().inner, &d2.unwrap().inner));
         });
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_shared_server_max_request_body_policy_is_deterministic() {
         let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
@@ -2987,13 +3001,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_handler_returns_404_for_unknown_path() {
-        let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
-        // Nothing registered in the dispatch table
+        let registry = HttpRouteRegistry::new();
+        // Nothing registered in route registry
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(run_axum_server(
             listener,
-            dispatch,
+            registry,
             2 * 1024 * 1024,
             10 * 1024 * 1024,
             Arc::new(tokio::sync::Semaphore::new(1024)),
@@ -4548,5 +4562,243 @@ mod tests {
             !debug.contains("secret123"),
             "password must be redacted in HttpEndpointConfig debug: {debug}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Static file serving tests (Task 5)
+    // -----------------------------------------------------------------------
+
+    use crate::registry::{HttpRouteRegistry, MountMode, StaticMount};
+    use tower_http::services::ServeDir;
+
+    fn make_test_registry() -> HttpRouteRegistry {
+        HttpRouteRegistry::new()
+    }
+
+    fn make_test_state(registry: HttpRouteRegistry) -> AppState {
+        AppState {
+            registry,
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
+            inflight: Arc::new(tokio::sync::Semaphore::new(1024)),
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_static_file_serving_serves_file_contents() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+
+        // Create temp dir with test files
+        let temp_dir =
+            std::env::temp_dir().join(format!("http_static_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("hello.txt"), "Hello, static world!").unwrap();
+        std::fs::write(temp_dir.join("style.css"), "body { color: red; }").unwrap();
+
+        let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+
+        let registry = make_test_registry();
+        let serve_dir = ServeDir::new(&canonical_dir)
+            .precompressed_gzip()
+            .precompressed_br()
+            .append_index_html_on_directories(true);
+
+        let mount = StaticMount {
+            mount_path: "/".to_string(),
+            mode: MountMode::Static,
+            dir: canonical_dir.clone(),
+            cache_control: "public, max-age=3600".to_string(),
+            error_pages: std::collections::HashMap::new(),
+            serve_dir,
+        };
+        registry.register_static_mount(mount).await.unwrap();
+
+        let state = make_test_state(registry);
+
+        // Test serving hello.txt
+        let req = Request::builder()
+            .uri("/hello.txt")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/hello.txt").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"Hello, static world!");
+
+        // Test serving style.css
+        let req = Request::builder()
+            .uri("/style.css")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/style.css").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"body { color: red; }");
+
+        // Test 404 for non-existent file
+        let req = Request::builder()
+            .uri("/missing.txt")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/missing.txt").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_spa_fallback_serves_index_for_unknown_paths() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+
+        let temp_dir = std::env::temp_dir().join(format!("http_spa_test_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("index.html"), "<h1>SPA App</h1>").unwrap();
+        std::fs::write(temp_dir.join("app.js"), "console.log('app')").unwrap();
+
+        let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+
+        let registry = make_test_registry();
+        let serve_dir = ServeDir::new(&canonical_dir)
+            .precompressed_gzip()
+            .precompressed_br()
+            .append_index_html_on_directories(true);
+
+        let mount = StaticMount {
+            mount_path: "/".to_string(),
+            mode: MountMode::Spa,
+            dir: canonical_dir.clone(),
+            cache_control: "public, max-age=0".to_string(),
+            error_pages: std::collections::HashMap::new(),
+            serve_dir,
+        };
+        // Register as SPA mount
+        registry.register_static_mount(mount).await.unwrap();
+
+        let state = make_test_state(registry);
+
+        // SPA fallback: GET /dashboard with Accept: text/html → index.html
+        let req = Request::builder()
+            .method("GET")
+            .uri("/dashboard")
+            .header("Accept", "text/html")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/dashboard").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"<h1>SPA App</h1>");
+
+        // Static file still works: GET /app.js
+        let req = Request::builder()
+            .method("GET")
+            .uri("/app.js")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/app.js").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"console.log('app')");
+
+        // No SPA fallback for JSON accept → 404
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/data")
+            .header("Accept", "application/json")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/api/data").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // No SPA fallback for file extensions → 404
+        let req = Request::builder()
+            .method("GET")
+            .uri("/style.css")
+            .header("Accept", "text/html")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/style.css").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_error_page_mapping_serves_custom_404() {
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+        ServerRegistry::reset();
+
+        let temp_dir = std::env::temp_dir().join(format!("http_error_test_{}", std::process::id()));
+        let errors_dir = temp_dir.join("errors");
+        std::fs::create_dir_all(&errors_dir).unwrap();
+        std::fs::write(temp_dir.join("index.html"), "<h1>Home</h1>").unwrap();
+        std::fs::write(errors_dir.join("404.html"), "<h1>Custom 404</h1>").unwrap();
+
+        let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+        let canonical_404 = std::fs::canonicalize(errors_dir.join("404.html")).unwrap();
+
+        let registry = make_test_registry();
+        let serve_dir = ServeDir::new(&canonical_dir)
+            .precompressed_gzip()
+            .precompressed_br()
+            .append_index_html_on_directories(true);
+
+        let mut error_pages = std::collections::HashMap::new();
+        error_pages.insert(404, canonical_404);
+
+        let mount = StaticMount {
+            mount_path: "/".to_string(),
+            mode: MountMode::Static,
+            dir: canonical_dir.clone(),
+            cache_control: "public, max-age=0".to_string(),
+            error_pages,
+            serve_dir,
+        };
+        registry.register_static_mount(mount).await.unwrap();
+
+        let state = make_test_state(registry);
+
+        // Request non-existent file → custom 404 page
+        let req = Request::builder()
+            .method("GET")
+            .uri("/missing.html")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/missing.html").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"<h1>Custom 404</h1>");
+
+        // Existing file still works
+        let req = Request::builder()
+            .method("GET")
+            .uri("/index.html")
+            .body(AxumBody::empty())
+            .unwrap();
+        let resp = static_dispatch::dispatch_static(&state, req, "/index.html").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"<h1>Home</h1>");
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).ok();
     }
 }

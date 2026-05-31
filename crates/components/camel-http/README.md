@@ -352,6 +352,70 @@ port = 8080
 - [API Documentation](https://docs.rs/camel-component-http)
 - [Repository](https://github.com/kennycallado/rust-camel)
 
+## http-static: Static File Serving & SPA Fallback
+
+### Overview
+
+The `http-static` scheme serves static files with optional SPA fallback, custom error pages, and port sharing with API routes. It co-hosts on the same port as `http:` API routes, using longest-prefix routing to dispatch requests.
+
+### URI Format
+
+```
+http-static:<mount-path>?dir=/path/to/files&options
+```
+
+**Examples:**
+- `http-static:/?dir=/var/www` — serve on root
+- `http-static:/assets?dir=/var/www/assets` — serve on `/assets` prefix
+- `http-static:/app?dir=/var/www/spa&spaFallback=true` — SPA mode
+
+### Consumer Options
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `dir` | (required) | Root directory to serve static files from |
+| `port` | `8080` | TCP port |
+| `host` | `0.0.0.0` | Bind address |
+| `spaFallback` | `false` | Enable SPA mode (serve index.html for unmatched paths) |
+| `cacheControl` | `public, max-age=0` | Cache-Control header value |
+| `errorPages` | (none) | JSON map of status code → file path, e.g. `{"404":"404.html"}` |
+
+### Features
+
+- **Co-hosting**: Shares port with `http:` API routes
+- **Mount path prefix**: URI path derived prefix, longest prefix wins
+- **SPA fallback**: GET/HEAD + `Accept: text/html` + no file extension → index.html
+- **Custom error pages**: Per-mount error pages for 404, 500, etc.
+- **Precompressed serving**: gzip, brotli (`ServeDir`)
+- **Cache-Control headers**: Configurable per mount
+- **Path traversal prevention**: `..` segments are rejected
+- **Directory index**: `index.html` appended for directory requests
+
+### TOML Configuration (Camel.toml)
+
+```toml
+[default.components.http-static]
+dir = "/var/www"
+port = 8080
+spaFallback = true
+cacheControl = "public, max-age=3600"
+```
+
+Error pages are configured as a table:
+
+```toml
+[default.components.http-static]
+dir = "/var/www"
+
+[default.components.http-static.errorPages]
+404 = "errors/404.html"
+500 = "errors/500.html"
+```
+
+### Routing Precedence
+
+API exact match → static file (longest prefix) → SPA fallback (if qualified) → custom error page → 404
+
 ## License
 
 Apache-2.0

@@ -13,6 +13,8 @@ members = [
 exclude = [
     "examples/camel-cli-run",
     "examples/cxf-example",
+    "examples/http-static-basic",
+    "examples/http-static-spa",
     "examples/security-wasm-policy/guest",
 ]
 
@@ -99,6 +101,7 @@ tonic-prost-build = { version = "0.14" }
 tonic-prost = { version = "0.14" }
 protoc-bin-vendored = "3"
 tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
 async-trait = "0.1"
 thiserror = "2"
 anyhow = "1"

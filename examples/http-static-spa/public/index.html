@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTTP Static - SPA Example</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            max-width: 640px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            color: #333;
+        }
+        h1 { color: #2a5298; }
+        .card {
+            background: #f0f4ff;
+            border: 1px solid #c4d4f4;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+        code {
+            background: #e8e8e8;
+            padding: 0.2em 0.4em;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <h1>HTTP Static SPA Example</h1>
+
+    <div class="card">
+        <strong>SPA Fallback Active</strong>
+        <p>This page is served by <code>http-static</code> with SPA fallback enabled.
+        Any unmatched client-side route (e.g., <code>/login</code>, <code>/settings</code>)
+        falls back to this <code>index.html</code>.</p>
+    </div>
+
+    <h2>Routing Demo</h2>
+    <ul>
+        <li><a href="/api/hello">/api/hello</a> — API route (handled by <code>http:</code>)</li>
+        <li><a href="/dashboard">/dashboard</a> — SPA fallback → index.html (no file at path)</li>
+        <li><a href="/nonexistent">/nonexistent</a> — SPA fallback → index.html</li>
+        <li>
+            <a href="/missing.css">/missing.css</a> — custom 404 page
+            (file extension blocks SPA fallback, errorPages.404 kicks in)
+        </li>
+    </ul>
+</body>
+</html>

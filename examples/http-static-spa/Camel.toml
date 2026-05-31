@@ -1,0 +1,14 @@
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+
+[default.components.http]
+connect_timeout_ms = 5000
+
+[default.components.http-static]
+dir = "public"
+port = 8080
+spaFallback = true
+
+[default.components.http-static.errorPages]
+404 = "404.html"

@@ -1,0 +1,5 @@
+routes:
+  - id: "api-hello"
+    from: "http://0.0.0.0:8080/api/hello"
+    steps:
+      - log: "message=API hello endpoint called"

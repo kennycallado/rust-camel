@@ -1,0 +1,7 @@
+[default]
+routes = ["routes/*.yaml"]
+log_level = "INFO"
+
+[default.components.http-static]
+dir = "public"
+port = 8080
