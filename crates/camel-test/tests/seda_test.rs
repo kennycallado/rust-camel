@@ -111,7 +111,7 @@ async fn test_seda_fanout_integration() {
         .build()
         .await;
 
-    let route_a = RouteBuilder::from("timer:tick?period=50&repeatCount=3")
+    let route_a = RouteBuilder::from("timer:tick?period=50&delay=100&repeatCount=3")
         .route_id("fanout-producer")
         .to("seda:broadcast?multipleConsumers=true&timeout=3000")
         .build()
@@ -134,11 +134,17 @@ async fn test_seda_fanout_integration() {
     h.add_route(route_c).await.unwrap();
     h.start().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    h.stop().await;
-
     let endpoint_a = h.mock().get_endpoint("result-a").unwrap();
     let endpoint_b = h.mock().get_endpoint("result-b").unwrap();
+    endpoint_a
+        .await_exchanges(3, std::time::Duration::from_secs(3))
+        .await;
+    endpoint_b
+        .await_exchanges(3, std::time::Duration::from_secs(3))
+        .await;
+
+    h.stop().await;
+
     endpoint_a.assert_exchange_count(3).await;
     endpoint_b.assert_exchange_count(3).await;
 }
