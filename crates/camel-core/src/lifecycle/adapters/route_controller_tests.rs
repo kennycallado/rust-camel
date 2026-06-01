@@ -1187,3 +1187,112 @@ fn constructors_and_reload_helpers_cover_accessors() {
     assert_eq!(with_beans.route_count(), 0);
     assert_eq!(with_langs.route_ids().len(), 0);
 }
+
+#[tokio::test]
+async fn aggregate_force_completion_on_stop_emits_pending_bucket_without_timeout() {
+    let mock = Arc::new(camel_component_mock::MockComponent::new());
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("registry lock");
+        guard.register(Arc::new(camel_component_timer::TimerComponent::new()));
+        guard.register(Arc::clone(&mock) as Arc<dyn camel_component_api::Component>);
+    }
+    let mut controller = DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+
+    let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .complete_when_size(10)
+        .force_completion_on_stop(true)
+        .build()
+        .unwrap();
+
+    let route = RouteDefinition::new(
+        "timer:tick?period=10&repeatCount=1",
+        vec![
+            BuilderStep::DeclarativeSetHeader {
+                key: "key".into(),
+                value: camel_api::ValueSourceDef::Literal(camel_api::Value::String(
+                    "order-1".into(),
+                )),
+            },
+            BuilderStep::Aggregate { config: agg_config },
+            BuilderStep::To("mock:sink".into()),
+        ],
+    )
+    .with_route_id("force-agg");
+    controller.add_route(route).await.unwrap();
+    controller.start_route("force-agg").await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    controller.stop_route("force-agg").await.unwrap();
+
+    let sink = mock.get_endpoint("sink").expect("mock sink endpoint");
+    sink.await_exchanges(1, Duration::from_secs(2)).await;
+    let received = sink.get_received_exchanges().await;
+    assert_eq!(
+        received.len(),
+        1,
+        "expected 1 force-completed exchange, got {}",
+        received.len()
+    );
+    assert_eq!(
+        received[0].property("CamelAggregatedCompletionReason"),
+        Some(&serde_json::json!("stop"))
+    );
+}
+
+#[tokio::test]
+async fn aggregate_without_force_completion_on_stop_discards_pending_bucket() {
+    let mock = Arc::new(camel_component_mock::MockComponent::new());
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("registry lock");
+        guard.register(Arc::new(camel_component_timer::TimerComponent::new()));
+        guard.register(Arc::clone(&mock) as Arc<dyn camel_component_api::Component>);
+    }
+    let mut controller = DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+
+    let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .complete_when_size(10)
+        .build()
+        .unwrap();
+
+    let route = RouteDefinition::new(
+        "timer:tick?period=10&repeatCount=1",
+        vec![
+            BuilderStep::DeclarativeSetHeader {
+                key: "key".into(),
+                value: camel_api::ValueSourceDef::Literal(camel_api::Value::String(
+                    "order-1".into(),
+                )),
+            },
+            BuilderStep::Aggregate { config: agg_config },
+            BuilderStep::To("mock:sink".into()),
+        ],
+    )
+    .with_route_id("no-force-agg");
+    controller.add_route(route).await.unwrap();
+    controller.start_route("no-force-agg").await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    controller.stop_route("no-force-agg").await.unwrap();
+
+    let sink = mock.get_endpoint("sink").expect("mock sink endpoint");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let received = sink.get_received_exchanges().await;
+
+    let has_force_complete = received.iter().any(|ex| {
+        ex.property("CamelAggregatedCompletionReason")
+            .map(|v| v == &serde_json::json!("stop"))
+            .unwrap_or(false)
+    });
+    assert!(
+        !has_force_complete,
+        "expected no force-completed exchange, but found one with CompletionReason=stop"
+    );
+}

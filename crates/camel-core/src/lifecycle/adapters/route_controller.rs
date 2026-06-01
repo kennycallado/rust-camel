@@ -161,12 +161,12 @@ fn inferred_lifecycle_label(managed: &ManagedRoute) -> &'static str {
     }
 }
 
-fn find_top_level_aggregate_with_timeout(
+fn find_top_level_aggregate_requiring_split(
     steps: &[BuilderStep],
 ) -> Option<(usize, AggregatorConfig)> {
     for (i, step) in steps.iter().enumerate() {
         if let BuilderStep::Aggregate { config } = step {
-            if has_timeout_condition(&config.completion) {
+            if has_timeout_condition(&config.completion) || config.force_completion_on_stop {
                 return Some((i, config.clone()));
             }
             break;
@@ -654,7 +654,7 @@ impl DefaultRouteController {
         let producer_ctx = self.build_producer_context()?;
 
         let mut aggregate_split: Option<AggregateSplitInfo> = None;
-        let processors_with_contracts = match find_top_level_aggregate_with_timeout(&steps) {
+        let processors_with_contracts = match find_top_level_aggregate_requiring_split(&steps) {
             Some((idx, agg_config)) => {
                 let mut pre_steps = steps;
                 let mut rest = pre_steps.split_off(idx);
