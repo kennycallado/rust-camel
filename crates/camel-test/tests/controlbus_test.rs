@@ -316,8 +316,11 @@ async fn controlbus_stops_route() {
         "Auto route should be Started"
     );
 
-    // Wait for the stop trigger to fire
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Wait until the ControlBus route has completed the stop action.
+    let stop_endpoint = h.mock().get_endpoint("stop-done").unwrap();
+    stop_endpoint
+        .await_exchanges(1, Duration::from_secs(3))
+        .await;
 
     // Now the auto route should be stopped
     let status_after = route_status(&h, "auto-route").await;
@@ -330,7 +333,6 @@ async fn controlbus_stops_route() {
     h.stop().await;
 
     // Verify the stop trigger executed
-    let stop_endpoint = h.mock().get_endpoint("stop-done").unwrap();
     stop_endpoint.assert_exchange_count(1).await;
 }
 
