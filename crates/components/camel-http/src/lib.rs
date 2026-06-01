@@ -3157,6 +3157,8 @@ mod tests {
     async fn test_http_consumer_enforces_max_response_body_for_bytes() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -3202,6 +3204,8 @@ mod tests {
     #[tokio::test]
     async fn test_http_consumer_enforces_max_response_body_for_json() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3249,6 +3253,8 @@ mod tests {
     #[tokio::test]
     async fn test_http_consumer_enforces_max_response_body_for_xml() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3299,6 +3305,8 @@ mod tests {
             CamelError, ConsumerContext, ExchangeEnvelope, StreamBody, StreamMetadata,
         };
         use futures::stream;
+
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
 
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3413,6 +3421,8 @@ mod tests {
     #[tokio::test]
     async fn test_integration_two_consumers_shared_port() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        let _guard = REGISTRY_TEST_MUTEX.lock().unwrap();
 
         // Get an OS-assigned free port (ephemeral)
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
