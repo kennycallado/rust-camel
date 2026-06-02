@@ -1296,3 +1296,57 @@ async fn aggregate_without_force_completion_on_stop_discards_pending_bucket() {
         "expected no force-completed exchange, but found one with CompletionReason=stop"
     );
 }
+
+#[tokio::test]
+async fn aggregate_force_completion_on_natural_consumer_completion_emits_pending_bucket() {
+    let mock = Arc::new(camel_component_mock::MockComponent::new());
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    {
+        let mut guard = registry.lock().expect("registry lock");
+        guard.register(Arc::new(camel_component_timer::TimerComponent::new()));
+        guard.register(Arc::clone(&mock) as Arc<dyn camel_component_api::Component>);
+    }
+    let mut controller = DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    );
+
+    let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .complete_when_size(10)
+        .force_completion_on_stop(true)
+        .build()
+        .unwrap();
+
+    let route = RouteDefinition::new(
+        "timer:tick?period=10&repeatCount=1",
+        vec![
+            BuilderStep::DeclarativeSetHeader {
+                key: "key".into(),
+                value: camel_api::ValueSourceDef::Literal(camel_api::Value::String(
+                    "order-1".into(),
+                )),
+            },
+            BuilderStep::Aggregate { config: agg_config },
+            BuilderStep::To("mock:natural-sink".into()),
+        ],
+    )
+    .with_route_id("natural-force-agg");
+    controller.add_route(route).await.unwrap();
+    controller.start_route("natural-force-agg").await.unwrap();
+
+    let sink = mock
+        .get_endpoint("natural-sink")
+        .expect("mock sink endpoint");
+    sink.await_exchanges(1, Duration::from_secs(2)).await;
+    let received = sink.get_received_exchanges().await;
+    assert_eq!(
+        received.len(),
+        1,
+        "expected natural consumer completion to force-complete 1 exchange, got {}",
+        received.len()
+    );
+    assert_eq!(
+        received[0].property("CamelAggregatedCompletionReason"),
+        Some(&serde_json::json!("stop"))
+    );
+}

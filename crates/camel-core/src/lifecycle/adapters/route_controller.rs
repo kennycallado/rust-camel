@@ -1299,6 +1299,9 @@ impl RouteController for DefaultRouteController {
             );
             let agg = Arc::new(std::sync::Mutex::new(svc));
 
+            let pipeline_cancel_for_monitor = pipeline_cancel.clone();
+            let agg_for_monitor = Arc::clone(&agg);
+
             managed.agg_service = Some(Arc::clone(&agg));
 
             let late_rx = Arc::new(tokio::sync::Mutex::new(late_rx));
@@ -1396,6 +1399,21 @@ impl RouteController for DefaultRouteController {
                 runtime_for_consumer,
                 false,
             );
+
+            // Extend the stored consumer handle through aggregate force-completion.
+            // While this monitor drains pending buckets, handle_is_running still reports
+            // the Route as running because forced exchanges may still be in post-pipeline.
+            let consumer_handle = tokio::spawn(async move {
+                let _ = consumer_handle.await;
+                if !pipeline_cancel_for_monitor.is_cancelled() {
+                    let guard = agg_for_monitor
+                        .lock()
+                        .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
+                    guard.force_complete_all();
+                    drop(guard);
+                    pipeline_cancel_for_monitor.cancel();
+                }
+            });
             #[cfg(test)]
             emit_start_route_event("consumer_spawned");
 
