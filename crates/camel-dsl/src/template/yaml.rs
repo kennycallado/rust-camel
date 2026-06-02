@@ -41,16 +41,31 @@ pub fn parse_yaml_templated_routes(
 }
 
 fn yaml_template_to_spec(yt: YamlTemplate) -> Result<RouteTemplateSpec, TemplateError> {
+    if yt.routes.is_empty() {
+        return Err(TemplateError::InvalidBody(format!(
+            "template '{}': routes array is empty",
+            yt.id
+        )));
+    }
+
     let parameters: Vec<TemplateParameterSpec> =
         yt.parameters.into_iter().map(yaml_param_to_spec).collect();
 
-    let route = yaml_value_to_json_value(yt.route)
-        .map_err(|e| TemplateError::InvalidBody(format!("template '{}': {e}", yt.id)))?;
+    let routes: Vec<serde_json::Value> = yt
+        .routes
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            yaml_value_to_json_value(r).map_err(|e| {
+                TemplateError::InvalidBody(format!("template '{}': route[{i}]: {e}", yt.id))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(RouteTemplateSpec {
         id: yt.id,
         parameters,
-        route,
+        routes,
     })
 }
 
@@ -78,11 +93,11 @@ templates:
       - name: path
         default_value: /api
         description: The REST path
-    route:
-      id: "my-route"
-      from: "rest:{{path}}"
-      steps:
-        - to: "log:info"
+    routes:
+      - id: "my-route"
+        from: "rest:{{path}}"
+        steps:
+          - to: "log:info"
 "#;
         let specs = parse_yaml_templates(yaml).unwrap();
         assert_eq!(specs.len(), 1);
@@ -93,8 +108,8 @@ templates:
             specs[0].parameters[0].default_value.as_deref(),
             Some("/api")
         );
-        assert_eq!(specs[0].route["id"], "my-route");
-        assert_eq!(specs[0].route["from"], "rest:{{path}}");
+        assert_eq!(specs[0].routes[0]["id"], "my-route");
+        assert_eq!(specs[0].routes[0]["from"], "rest:{{path}}");
     }
 
     #[test]
@@ -103,15 +118,15 @@ templates:
 routes: []
 templates:
   - id: tpl-a
-    route:
-      id: route-a
-      from: timer:tick
+    routes:
+      - id: route-a
+        from: timer:tick
   - id: tpl-b
     parameters:
       - name: uri
-    route:
-      id: route-b
-      from: "{{uri}}"
+    routes:
+      - id: route-b
+        from: "{{uri}}"
 "#;
         let specs = parse_yaml_templates(yaml).unwrap();
         assert_eq!(specs.len(), 2);
@@ -190,24 +205,35 @@ templates:
     parameters:
       - name: host
       - name: port
-    route:
-      id: complex-route
-      from: "http:{{host}}:{{port}}"
-      steps:
-        - choice:
-            when:
-              - simple: "${header.type} == 'A'"
-                steps:
-                  - to: "mock:a"
-            otherwise:
-              - to: "mock:other"
+    routes:
+      - id: complex-route
+        from: "http:{{host}}:{{port}}"
+        steps:
+          - choice:
+              when:
+                - simple: "${header.type} == 'A'"
+                  steps:
+                    - to: "mock:a"
+              otherwise:
+                - to: "mock:other"
 "#;
         let specs = parse_yaml_templates(yaml).unwrap();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].id, "complex-tpl");
-        // Verify nested structure preserved as JSON
-        let choice = &specs[0].route["steps"][0]["choice"];
+        let choice = &specs[0].routes[0]["steps"][0]["choice"];
         assert!(choice["when"].is_array());
         assert!(choice["otherwise"].is_array());
+    }
+
+    #[test]
+    fn parse_yaml_template_with_empty_routes_returns_error() {
+        let yaml = r#"
+routes: []
+templates:
+  - id: empty-tpl
+    routes: []
+"#;
+        let err = parse_yaml_templates(yaml).unwrap_err();
+        assert!(err.to_string().contains("routes array is empty"));
     }
 }

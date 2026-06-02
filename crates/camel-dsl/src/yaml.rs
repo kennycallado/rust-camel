@@ -2755,18 +2755,18 @@ templates:
     parameters:
       - name: path
         default_value: /api
-    route:
-      id: "my-route"
-      from: "rest:{{path}}"
-      steps:
-        - to: "log:info"
+    routes:
+      - id: "my-route"
+        from: "rest:{{path}}"
+        steps:
+          - to: "log:info"
 "#;
         let specs = parse_yaml_templates(yaml).unwrap();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].id, "http-route");
         assert_eq!(specs[0].parameters.len(), 1);
         assert_eq!(specs[0].parameters[0].name, "path");
-        assert_eq!(specs[0].route["id"], "my-route");
+        assert_eq!(specs[0].routes[0]["id"], "my-route");
     }
 
     #[test]
@@ -2809,18 +2809,20 @@ routes:
         {
             "id": "http-route",
             "parameters": [{"name": "path", "default_value": "/api"}],
-            "route": {
-                "id": "my-route",
-                "from": "rest:{{path}}",
-                "steps": [{"to": "log:info"}]
-            }
+            "routes": [
+                {
+                    "id": "my-route",
+                    "from": "rest:{{path}}",
+                    "steps": [{"to": "log:info"}]
+                }
+            ]
         }
     ]
 }"#;
         let specs = parse_json_templates(json).unwrap();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].id, "http-route");
-        assert_eq!(specs[0].route["id"], "my-route");
+        assert_eq!(specs[0].routes[0]["id"], "my-route");
     }
 
     #[test]
@@ -2861,17 +2863,17 @@ routes:
 routes: []
 templates:
   - id: num-tpl
-    route:
-      id: num-route
-      count: 42
-      ratio: 3.14
-      enabled: true
-      nothing: null
+    routes:
+      - id: num-route
+        count: 42
+        ratio: 3.14
+        enabled: true
+        nothing: null
 "#;
         let specs = parse_yaml_templates(yaml).unwrap();
-        assert_eq!(specs[0].route["count"], 42);
-        assert_eq!(specs[0].route["ratio"], 3.14);
-        assert_eq!(specs[0].route["enabled"], true);
-        assert_eq!(specs[0].route["nothing"], serde_json::Value::Null);
+        assert_eq!(specs[0].routes[0]["count"], 42);
+        assert_eq!(specs[0].routes[0]["ratio"], 3.14);
+        assert_eq!(specs[0].routes[0]["enabled"], true);
+        assert_eq!(specs[0].routes[0]["nothing"], serde_json::Value::Null);
     }
 }

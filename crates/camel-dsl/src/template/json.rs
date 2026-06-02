@@ -43,19 +43,31 @@ pub fn parse_json_templated_routes(
 fn json_template_to_spec(
     yt: crate::yaml_ast::YamlTemplate,
 ) -> Result<RouteTemplateSpec, TemplateError> {
+    if yt.routes.is_empty() {
+        return Err(TemplateError::InvalidBody(format!(
+            "template '{}': routes array is empty",
+            yt.id
+        )));
+    }
+
     let parameters: Vec<TemplateParameterSpec> =
         yt.parameters.into_iter().map(json_param_to_spec).collect();
 
-    // The route body was parsed from JSON via serde_yml::Value (since YamlTemplate
-    // uses serde_yml::Value). We need to convert it back to serde_json::Value.
-    // Since the original source was JSON, the round-trip is lossless.
-    let route = yaml_value_to_json_value(yt.route)
-        .map_err(|e| TemplateError::InvalidBody(format!("template '{}': {e}", yt.id)))?;
+    let routes: Vec<serde_json::Value> = yt
+        .routes
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            yaml_value_to_json_value(r).map_err(|e| {
+                TemplateError::InvalidBody(format!("template '{}': route[{i}]: {e}", yt.id))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(RouteTemplateSpec {
         id: yt.id,
         parameters,
-        route,
+        routes,
     })
 }
 
@@ -88,13 +100,15 @@ mod tests {
                     "description": "The REST path"
                 }
             ],
-            "route": {
-                "id": "my-route",
-                "from": "rest:{{path}}",
-                "steps": [
-                    {"to": "log:info"}
-                ]
-            }
+            "routes": [
+                {
+                    "id": "my-route",
+                    "from": "rest:{{path}}",
+                    "steps": [
+                        {"to": "log:info"}
+                    ]
+                }
+            ]
         }
     ]
 }"#;
@@ -107,8 +121,8 @@ mod tests {
             specs[0].parameters[0].default_value.as_deref(),
             Some("/api")
         );
-        assert_eq!(specs[0].route["id"], "my-route");
-        assert_eq!(specs[0].route["from"], "rest:{{path}}");
+        assert_eq!(specs[0].routes[0]["id"], "my-route");
+        assert_eq!(specs[0].routes[0]["from"], "rest:{{path}}");
     }
 
     #[test]
@@ -119,20 +133,24 @@ mod tests {
     "templates": [
         {
             "id": "tpl-a",
-            "route": {
-                "id": "route-a",
-                "from": "timer:tick"
-            }
+            "routes": [
+                {
+                    "id": "route-a",
+                    "from": "timer:tick"
+                }
+            ]
         },
         {
             "id": "tpl-b",
             "parameters": [
                 {"name": "uri"}
             ],
-            "route": {
-                "id": "route-b",
-                "from": "{{uri}}"
-            }
+            "routes": [
+                {
+                    "id": "route-b",
+                    "from": "{{uri}}"
+                }
+            ]
         }
     ]
 }"#;
@@ -204,30 +222,32 @@ mod tests {
                 {"name": "host"},
                 {"name": "port"}
             ],
-            "route": {
-                "id": "complex-route",
-                "from": "http:{{host}}:{{port}}",
-                "steps": [
-                    {
-                        "choice": {
-                            "when": [
-                                {
-                                    "simple": "${header.type} == 'A'",
-                                    "steps": [{"to": "mock:a"}]
-                                }
-                            ],
-                            "otherwise": [{"to": "mock:other"}]
+            "routes": [
+                {
+                    "id": "complex-route",
+                    "from": "http:{{host}}:{{port}}",
+                    "steps": [
+                        {
+                            "choice": {
+                                "when": [
+                                    {
+                                        "simple": "${header.type} == 'A'",
+                                        "steps": [{"to": "mock:a"}]
+                                    }
+                                ],
+                                "otherwise": [{"to": "mock:other"}]
+                            }
                         }
-                    }
-                ]
-            }
+                    ]
+                }
+            ]
         }
     ]
 }"#;
         let specs = parse_json_templates(json).unwrap();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].id, "complex-tpl");
-        let choice = &specs[0].route["steps"][0]["choice"];
+        let choice = &specs[0].routes[0]["steps"][0]["choice"];
         assert!(choice["when"].is_array());
         assert!(choice["otherwise"].is_array());
     }
@@ -240,21 +260,39 @@ mod tests {
     "templates": [
         {
             "id": "num-tpl",
-            "route": {
-                "id": "num-route",
-                "from": "timer:tick",
-                "count": 42,
-                "ratio": 3.14,
-                "enabled": true,
-                "nothing": null
-            }
+            "routes": [
+                {
+                    "id": "num-route",
+                    "from": "timer:tick",
+                    "count": 42,
+                    "ratio": 3.14,
+                    "enabled": true,
+                    "nothing": null
+                }
+            ]
         }
     ]
 }"#;
         let specs = parse_json_templates(json).unwrap();
-        assert_eq!(specs[0].route["count"], 42);
-        assert_eq!(specs[0].route["ratio"], 3.14);
-        assert_eq!(specs[0].route["enabled"], true);
-        assert_eq!(specs[0].route["nothing"], serde_json::Value::Null);
+        assert_eq!(specs[0].routes[0]["count"], 42);
+        assert_eq!(specs[0].routes[0]["ratio"], 3.14);
+        assert_eq!(specs[0].routes[0]["enabled"], true);
+        assert_eq!(specs[0].routes[0]["nothing"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn parse_json_template_with_empty_routes_returns_error() {
+        let json = r#"
+{
+    "routes": [],
+    "templates": [
+        {
+            "id": "empty-tpl",
+            "routes": []
+        }
+    ]
+}"#;
+        let err = parse_json_templates(json).unwrap_err();
+        assert!(err.to_string().contains("routes array is empty"));
     }
 }

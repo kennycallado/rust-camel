@@ -92,7 +92,7 @@ mod tests {
         RouteTemplateSpec {
             id: id.to_string(),
             parameters: vec![],
-            route: serde_json::json!({"from": {"uri": "timer:tick"}}),
+            routes: vec![serde_json::json!({"from": {"uri": "timer:tick"}})],
         }
     }
 

@@ -105,8 +105,8 @@ fn substitute_json_value(
 }
 
 /// Compute a hash of the template's route body for source-change detection.
-fn compute_source_hash(route: &serde_json::Value) -> u64 {
-    let json_str = serde_json::to_string(route).unwrap_or_default();
+fn compute_source_hash(routes: &[serde_json::Value]) -> u64 {
+    let json_str = serde_json::to_string(routes).unwrap_or_default();
     let mut hasher = DefaultHasher::new();
     json_str.hash(&mut hasher);
     hasher.finish()
@@ -125,20 +125,40 @@ pub fn materialize_template(
     template: &RouteTemplateSpec,
     templated: &TemplatedRouteSpec,
 ) -> Result<Vec<DeclarativeRoute>, CamelError> {
+    if template.routes.is_empty() {
+        return Err(CamelError::Config(
+            TemplateError::InvalidBody("template has empty routes array".to_string()).to_string(),
+        ));
+    }
+
+    if templated.route_id.is_some() && template.routes.len() > 1 {
+        return Err(CamelError::Config(
+            TemplateError::InvalidBody(
+                "route_id override not allowed for multi-route template".to_string(),
+            )
+            .to_string(),
+        ));
+    }
+
     // Step 1: resolve parameters.
     let resolved = resolve_params(template, &templated.parameters)
         .map_err(|e| CamelError::Config(e.to_string()))?;
 
     let declared_names: Vec<String> = template.parameters.iter().map(|p| p.name.clone()).collect();
 
-    // Step 2: substitute placeholders in the template body.
-    let substituted =
-        substitute_strings_in_json(template.route.clone(), &resolved, &declared_names)
-            .map_err(|e| CamelError::Config(e.to_string()))?;
+    // Step 2: substitute placeholders in each route body.
+    let substituted_routes: Vec<serde_json::Value> = template
+        .routes
+        .iter()
+        .map(|r| {
+            substitute_strings_in_json(r.clone(), &resolved, &declared_names)
+                .map_err(|e| CamelError::Config(e.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-    // Step 3: wrap in `{ "routes": [substituted] }`.
+    // Step 3: wrap in `{ "routes": [substituted...] }`.
     let wrapped = serde_json::json!({
-        "routes": [substituted]
+        "routes": substituted_routes
     });
 
     // Step 4: serialize to string.
@@ -168,7 +188,7 @@ pub fn materialize_and_compile(
     template: &RouteTemplateSpec,
     templated: &TemplatedRouteSpec,
 ) -> Result<Vec<CompiledMaterializationResult>, CamelError> {
-    let source_hash = compute_source_hash(&template.route);
+    let source_hash = compute_source_hash(&template.routes);
     let declarative_routes = materialize_template(template, templated)?;
 
     declarative_routes
@@ -193,12 +213,12 @@ mod tests {
     fn make_template(
         id: &str,
         params: Vec<TemplateParameterSpec>,
-        route: serde_json::Value,
+        routes: Vec<serde_json::Value>,
     ) -> RouteTemplateSpec {
         RouteTemplateSpec {
             id: id.into(),
             parameters: params,
-            route,
+            routes,
         }
     }
 
@@ -226,7 +246,7 @@ mod tests {
                     description: None,
                 },
             ],
-            serde_json::json!({}),
+            vec![serde_json::json!({})],
         );
         let provided = [
             ("host".into(), "localhost".into()),
@@ -255,7 +275,7 @@ mod tests {
                     description: None,
                 },
             ],
-            serde_json::json!({}),
+            vec![serde_json::json!({})],
         );
         let provided = BTreeMap::new();
         let resolved = resolve_params(&template, &provided).unwrap();
@@ -272,7 +292,7 @@ mod tests {
                 default_value: Some("localhost".into()),
                 description: None,
             }],
-            serde_json::json!({}),
+            vec![serde_json::json!({})],
         );
         let provided = [("host".into(), "example.com".into())]
             .into_iter()
@@ -290,7 +310,7 @@ mod tests {
                 default_value: None,
                 description: None,
             }],
-            serde_json::json!({}),
+            vec![serde_json::json!({})],
         );
         let provided = BTreeMap::new();
         let err = resolve_params(&template, &provided).unwrap_err();
@@ -306,7 +326,7 @@ mod tests {
                 default_value: None,
                 description: None,
             }],
-            serde_json::json!({}),
+            vec![serde_json::json!({})],
         );
         let mut provided = BTreeMap::new();
         provided.insert("host".into(), "localhost".into());
@@ -336,7 +356,7 @@ mod tests {
                     description: None,
                 },
             ],
-            serde_json::json!({}),
+            vec![serde_json::json!({})],
         );
         let provided = [("port".into(), "9090".into())].into_iter().collect();
         let resolved = resolve_params(&template, &provided).unwrap();
@@ -444,11 +464,11 @@ mod tests {
                 default_value: None,
                 description: None,
             }],
-            serde_json::json!({
+            vec![serde_json::json!({
                 "id": "my-http-route",
                 "from": "rest:{{path}}",
                 "steps": [{"to": "log:info"}]
-            }),
+            })],
         );
         let templated = make_templated(
             "http-route",
@@ -469,11 +489,11 @@ mod tests {
                 default_value: Some("1000".into()),
                 description: None,
             }],
-            serde_json::json!({
+            vec![serde_json::json!({
                 "id": "timer-route",
                 "from": "timer:tick?period={{period}}",
                 "steps": []
-            }),
+            })],
         );
         let templated = make_templated("timer-route", BTreeMap::new());
         let routes = materialize_template(&template, &templated).unwrap();
@@ -490,7 +510,7 @@ mod tests {
                 default_value: None,
                 description: None,
             }],
-            serde_json::json!({}),
+            vec![serde_json::json!({})],
         );
         let templated = make_templated("test", BTreeMap::new());
         let err = materialize_template(&template, &templated).unwrap_err();
@@ -506,7 +526,7 @@ mod tests {
                 default_value: None,
                 description: None,
             }],
-            serde_json::json!({}),
+            vec![serde_json::json!({})],
         );
         let mut params = BTreeMap::new();
         params.insert("bogus".into(), "val".into());
@@ -526,11 +546,11 @@ mod tests {
                 default_value: None,
                 description: None,
             }],
-            serde_json::json!({
+            vec![serde_json::json!({
                 "id": "compiled-route",
                 "from": "{{uri}}",
                 "steps": [{"to": "log:info"}]
-            }),
+            })],
         );
         let templated = make_templated(
             "compile-test",
@@ -550,11 +570,11 @@ mod tests {
         let template = make_template(
             "hash-test",
             vec![],
-            serde_json::json!({
+            vec![serde_json::json!({
                 "id": "hash-route",
                 "from": "timer:tick",
                 "steps": []
-            }),
+            })],
         );
         let templated = make_templated("hash-test", BTreeMap::new());
         let results1 = materialize_and_compile(&template, &templated).unwrap();
@@ -567,24 +587,101 @@ mod tests {
         let template_a = make_template(
             "a",
             vec![],
-            serde_json::json!({
+            vec![serde_json::json!({
                 "id": "route-a",
                 "from": "timer:tick",
                 "steps": []
-            }),
+            })],
         );
         let template_b = make_template(
             "b",
             vec![],
-            serde_json::json!({
+            vec![serde_json::json!({
                 "id": "route-b",
                 "from": "timer:tock",
                 "steps": []
-            }),
+            })],
         );
         let templated = make_templated("a", BTreeMap::new());
         let results_a = materialize_and_compile(&template_a, &templated).unwrap();
         let results_b = materialize_and_compile(&template_b, &templated).unwrap();
         assert_ne!(results_a[0].source_hash, results_b[0].source_hash);
+    }
+
+    #[test]
+    fn materialize_multi_route_template() {
+        let template = make_template(
+            "chain",
+            vec![TemplateParameterSpec {
+                name: "PROV".into(),
+                default_value: None,
+                description: None,
+            }],
+            vec![
+                serde_json::json!({
+                    "id": "step1-{{PROV}}",
+                    "from": "direct:start",
+                    "steps": [{"to": "controlbus:route?routeId=step2-{{PROV}}&action=start"}]
+                }),
+                serde_json::json!({
+                    "id": "step2-{{PROV}}",
+                    "from": "direct:step2",
+                    "steps": [{"to": "log:done"}]
+                }),
+            ],
+        );
+        let templated = make_templated(
+            "chain",
+            [("PROV".into(), "granada".into())].into_iter().collect(),
+        );
+        let routes = materialize_template(&template, &templated).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].route_id, "step1-granada");
+        assert_eq!(routes[1].route_id, "step2-granada");
+    }
+
+    #[test]
+    fn materialize_multi_route_rejects_route_id_override() {
+        let template = make_template(
+            "chain",
+            vec![],
+            vec![
+                serde_json::json!({"id": "r1", "from": "direct:a", "steps": []}),
+                serde_json::json!({"id": "r2", "from": "direct:b", "steps": []}),
+            ],
+        );
+        let templated = TemplatedRouteSpec {
+            route_template_ref: "chain".into(),
+            route_id: Some("override-id".into()),
+            parameters: BTreeMap::new(),
+        };
+        let err = materialize_template(&template, &templated).unwrap_err();
+        assert!(err.to_string().contains("route_id override not allowed"));
+    }
+
+    #[test]
+    fn materialize_empty_routes_returns_error() {
+        let template = make_template("empty", vec![], vec![]);
+        let templated = make_templated("empty", BTreeMap::new());
+        let err = materialize_template(&template, &templated).unwrap_err();
+        assert!(err.to_string().contains("empty routes array"));
+    }
+
+    #[test]
+    fn source_hash_covers_multi_route_array() {
+        let template = make_template(
+            "multi-hash",
+            vec![],
+            vec![
+                serde_json::json!({"id": "r1", "from": "direct:a", "steps": []}),
+                serde_json::json!({"id": "r2", "from": "direct:b", "steps": []}),
+            ],
+        );
+        let templated = make_templated("multi-hash", BTreeMap::new());
+        let results = materialize_and_compile(&template, &templated).unwrap();
+        assert_eq!(results.len(), 2);
+        let expected_hash = compute_source_hash(&template.routes);
+        assert_eq!(results[0].source_hash, Some(expected_hash));
+        assert_eq!(results[1].source_hash, Some(expected_hash));
     }
 }

@@ -688,13 +688,11 @@ fn default_lb_strategy() -> String {
 /// A reusable route template declared in YAML/JSON.
 #[derive(Deserialize, Debug)]
 pub struct YamlTemplate {
-    /// Unique identifier for this template.
     pub id: String,
-    /// Parameters that callers must (or may) supply.
     #[serde(default)]
     pub parameters: Vec<YamlTemplateParameter>,
-    /// The route definition body — kept as a raw YAML value for later conversion.
-    pub route: serde_yml::Value,
+    #[serde(default)]
+    pub routes: Vec<serde_yml::Value>,
 }
 
 /// A single parameter that a route template accepts.
@@ -1021,11 +1019,11 @@ templates:
       - name: path
         default_value: /api
         description: The REST path
-    route:
-      id: "instance-route"
-      from: "rest:{{path}}"
-      steps:
-        - to: "log:info"
+    routes:
+      - id: "instance-route"
+        from: "rest:{{path}}"
+        steps:
+          - to: "log:info"
 templated_routes:
   - route_template_ref: http-route
     route_id: my-http-route
@@ -1074,9 +1072,9 @@ routes:
 routes: []
 templates:
   - id: simple-tpl
-    route:
-      id: simple-route
-      from: timer:tick
+    routes:
+      - id: simple-route
+        from: timer:tick
 "#;
         let parsed: YamlRoutes = serde_yml::from_str(yaml).unwrap();
         assert_eq!(parsed.templates.len(), 1);

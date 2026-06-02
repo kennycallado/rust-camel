@@ -22,8 +22,8 @@ pub struct RouteTemplateSpec {
     pub id: String,
     /// Parameters that callers must (or may) supply.
     pub parameters: Vec<TemplateParameterSpec>,
-    /// The route definition body (YAML/JSON fragment as a generic value).
-    pub route: serde_json::Value,
+    /// Route definition bodies (YAML/JSON fragments as generic values).
+    pub routes: Vec<serde_json::Value>,
 }
 
 /// A request to instantiate a template with concrete parameter values.
@@ -115,7 +115,7 @@ mod tests {
                 default_value: None,
                 description: None,
             }],
-            route: serde_json::json!({"from": {"uri": "rest:{{path}}"}}),
+            routes: vec![serde_json::json!({"from": {"uri": "rest:{{path}}"}})],
         };
         let json = serde_json::to_string(&tpl).unwrap();
         assert!(json.contains("http-route"));

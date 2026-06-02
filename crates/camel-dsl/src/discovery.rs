@@ -738,11 +738,11 @@ templates:
   - id: http-route
     parameters:
       - name: path
-    route:
-      id: "materialized-http"
-      from: "rest:{{path}}"
-      steps:
-        - to: "log:info"
+    routes:
+      - id: "materialized-http"
+        from: "rest:{{path}}"
+        steps:
+          - to: "log:info"
 templated_routes:
   - route_template_ref: http-route
     route_id: "my-http"
@@ -771,11 +771,13 @@ templated_routes:
     {
       "id": "timer-route",
       "parameters": [{"name": "period"}],
-      "route": {
-        "id": "materialized-timer",
-        "from": "timer:tick?period={{period}}",
-        "steps": []
-      }
+      "routes": [
+        {
+          "id": "materialized-timer",
+          "from": "timer:tick?period={{period}}",
+          "steps": []
+        }
+      ]
     }
   ],
   "templated_routes": [
@@ -811,11 +813,11 @@ templates:
   - id: log-route
     parameters:
       - name: level
-    route:
-      id: "materialized-log"
-      from: "direct:log"
-      steps:
-        - to: "log:{{level}}"
+    routes:
+      - id: "materialized-log"
+        from: "direct:log"
+        steps:
+          - to: "log:{{level}}"
 templated_routes:
   - route_template_ref: log-route
     parameters:
@@ -845,11 +847,11 @@ templates:
   - id: shared-http
     parameters:
       - name: path
-    route:
-      id: "shared-route"
-      from: "rest:{{path}}"
-      steps:
-        - to: "log:shared"
+    routes:
+      - id: "shared-route"
+        from: "rest:{{path}}"
+        steps:
+          - to: "log:shared"
 "#,
         )
         .unwrap();
@@ -918,9 +920,9 @@ templated_routes:
 routes: []
 templates:
   - id: dup-tpl
-    route:
-      id: "route-a"
-      from: "direct:a"
+    routes:
+      - id: "route-a"
+        from: "direct:a"
 "#,
         )
         .unwrap();
@@ -933,9 +935,9 @@ templates:
 routes: []
 templates:
   - id: dup-tpl
-    route:
-      id: "route-b"
-      from: "direct:b"
+    routes:
+      - id: "route-b"
+        from: "direct:b"
 "#,
         )
         .unwrap();
@@ -964,10 +966,10 @@ templates:
 routes: []
 templates:
   - id: hash-tpl
-    route:
-      id: "hash-route"
-      from: "direct:hash"
-      steps: []
+    routes:
+      - id: "hash-route"
+        from: "direct:hash"
+        steps: []
 templated_routes:
   - route_template_ref: hash-tpl
     parameters: {}
@@ -987,11 +989,11 @@ templated_routes:
     fn materialized_source_hash_reflects_template_body_not_instance_file() {
         let dir = tempfile::tempdir().unwrap();
 
-        let template_body = serde_json::json!({
+        let template_body = serde_json::json!([{
             "id": "same-route",
             "from": "direct:x",
             "steps": []
-        });
+        }]);
         let template_hash = {
             let s = serde_json::to_string(&template_body).unwrap();
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1007,10 +1009,10 @@ templated_routes:
 routes: []
 templates:
   - id: shared-tpl
-    route:
-      id: "same-route"
-      from: "direct:x"
-      steps: []
+    routes:
+      - id: "same-route"
+        from: "direct:x"
+        steps: []
 templated_routes:
   - route_template_ref: shared-tpl
     route_id: "inst-a"
@@ -1047,11 +1049,11 @@ templates:
   - id: solo-tpl
     parameters:
       - name: target
-    route:
-      id: "solo-{{target}}"
-      from: "direct:start"
-      steps:
-        - to: "{{target}}"
+    routes:
+      - id: "solo-{{target}}"
+        from: "direct:start"
+        steps:
+          - to: "{{target}}"
 templated_routes:
   - route_template_ref: solo-tpl
     parameters:
@@ -1079,10 +1081,10 @@ routes:
     steps: []
 templates:
   - id: tpl
-    route:
-      id: "tpl-route"
-      from: "direct:b"
-      steps: []
+    routes:
+      - id: "tpl-route"
+        from: "direct:b"
+        steps: []
 templated_routes:
   - route_template_ref: tpl
     route_id: "shared-id"
@@ -1107,5 +1109,41 @@ templated_routes:
             }
             other => panic!("expected DuplicateRouteId error, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn discovers_multi_route_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("multi.yaml");
+        fs::write(
+            &file_path,
+            r#"
+routes: []
+templates:
+  - id: chain
+    parameters:
+      - name: PROV
+    routes:
+      - id: "step1-{{PROV}}"
+        from: "direct:start"
+        steps:
+          - to: "controlbus:route?routeId=step2-{{PROV}}&action=start"
+      - id: "step2-{{PROV}}"
+        from: "direct:step2"
+        steps:
+          - to: "log:done"
+templated_routes:
+  - route_template_ref: chain
+    parameters:
+      PROV: granada
+"#,
+        )
+        .unwrap();
+
+        let pattern = file_path.to_string_lossy().to_string();
+        let routes = discover_routes(&[pattern]).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].route_id(), "step1-granada");
+        assert_eq!(routes[1].route_id(), "step2-granada");
     }
 }
