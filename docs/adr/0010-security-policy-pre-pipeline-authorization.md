@@ -6,4 +6,4 @@ The alternative was modeling authorization as an ordinary Pipeline Step. That wo
 
 This choice makes SecurityPolicy part of route lifecycle assembly rather than EIP processing. It is less flexible than arbitrary Step placement, but it gives one clear contract: protected Routes authorize before data-plane processing begins. Policies can still be backed by native role/scope checks, named references, WASM plugins, or permission engines; those choices affect the decision source, not the boundary where enforcement happens.
 
-Current canonical/hot-reload compilation rejects `security_policy` until the canonical route contract carries SecurityPolicyConfig safely.
+Current canonical/hot-reload compilation rejects `security_policy` until the canonical route contract carries SecurityPolicyConfig safely. See [ADR 0011](./0011-canonical-route-spec-minimal-contract.md) for why canonical contracts stay serializable and do not carry trait-object policy implementations.
