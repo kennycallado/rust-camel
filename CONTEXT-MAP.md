@@ -7,7 +7,7 @@
 - [Components](./crates/components/CONTEXT.md) — inbound/outbound adapters (timer, HTTP, Kafka, file, etc.) that feed Exchanges into Routes and send them to external systems
 - [Languages](./crates/languages/CONTEXT.md) — expression and predicate evaluation against Exchanges (JavaScript, JSONPath, XPath, Simple, Rhai)
 - [Functions](./crates/services/camel-function/CONTEXT.md) — out-of-process executable units invoked as pipeline steps; inspired by serverless functions, running in isolated containers
-- [Services](./crates/services/CONTEXT.md) — cross-cutting infrastructure services: observability (OTel, Prometheus) and platform integration (Kubernetes)
+- [Services](./crates/services/CONTEXT.md) — cross-cutting infrastructure services: observability (OTel, Prometheus), auth/security, and platform integration (Kubernetes)
 
 ## Relationships
 
@@ -29,6 +29,10 @@ Cross-cutting decisions that shaped the architecture live in [`docs/adr/`](./doc
 - [0005](./docs/adr/0005-function-out-of-process-staged-reload.md) — `function:` out of process with staged registration
 - [0006](./docs/adr/0006-script-synchronous-boa-async-to-function.md) — `script:` synchronous; async JS delegated to `function:`
 - [0007](./docs/adr/0007-route-supervised-consumer-failure.md) — Route-supervised Consumer failure: route crash → CrashNotification → RuntimeBus FailRoute → route enters Failed state. Consumer::stop() is NOT called on crash.
+- [0008](./docs/adr/0008-route-templates-json-tree-substitution.md) — RouteTemplate expansion via JSON tree substitution before DSL deserialization
+- [0009](./docs/adr/0009-http-co-hosting-api-and-static-routes.md) — HTTP API routes and static file mounts share one server per host/port with deterministic dispatch precedence
+- [0010](./docs/adr/0010-security-policy-pre-pipeline-authorization.md) — Route-level SecurityPolicy authorizes before normal Route Steps run, rather than as a normal Pipeline Step
+- [0011](./docs/adr/0011-canonical-route-spec-minimal-contract.md) — CanonicalRouteSpec v1 is a stable minimal route contract, not a full RouteDefinition mirror
 
 ## Key Terms
 
@@ -40,3 +44,5 @@ Cross-cutting domain terms used across multiple crates. For crate-specific terms
 - **Supervision / ConsumerRestart** — Route-level crash recovery. Consumer task failure sends CrashNotification; RuntimeBus records route as Failed; optional restart policy recreates the whole Route with backoff. Consumers must not self-supervise. (camel-core)
 - **ForcedHealthFailure / HealthCheckRegistry** — When a Consumer crashes (stop() never called), HealthCheckRegistry pins the route's entry to `Unhealthy` via `force_unhealthy_for_route()` until ConsumerRestart replaces it with a live probe. (services)
 - **Degraded / Unhealthy** — Semantic rule for health and readiness: `Degraded` = HTTP 200 on /readyz, pod Ready (component can still process Exchanges). `Unhealthy` = HTTP 503, pod NotReady. Both `Healthy` and `Degraded` map to Ready; only `Unhealthy` maps to NotReady.
+- **SecurityPolicy / Principal / AuthorizationDecision** — DSL declares route-level `security_policy`; Runtime wraps the Route Pipeline with `SecurityPolicyLayer` before normal Route Steps run. Grants store Principal properties on the Exchange; denials return `Unauthorized` into route error handling. (camel-dsl + camel-core + services/camel-auth + wasm)
+- **CanonicalRouteSpec / RouteDefinition** — `CanonicalRouteSpec` is the stable minimal contract used by runtime commands, config tooling, and hot-reload paths. `RouteDefinition` remains the full DSL route model. (camel-api + camel-dsl + camel-core)

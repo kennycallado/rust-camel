@@ -25,6 +25,10 @@ _Avoid_: MEP (use the enum variant names directly)
 A named message-processing pipeline: a source endpoint that emits Exchanges and a sequence of steps that transform or route them.
 _Avoid_: flow, pipeline (when referring to the Route as a whole)
 
+**Suspended Route**:
+Route lifecycle state where Consumer intake is stopped while the Pipeline and route channel remain alive. `resume` recreates the Consumer without rebuilding the whole Route.
+_Avoid_: stopped route, paused pipeline
+
 **Pipeline**:
 The compiled assembly of Processors that processes an Exchange through a Route's data plane.
 _Avoid_: chain, middleware stack

@@ -1,6 +1,6 @@
 # Services
 
-Cross-cutting infrastructure services that hook into the Runtime lifecycle. Covers observability (OpenTelemetry, Prometheus) and platform integration (Kubernetes). Note: `camel-platform-kubernetes` lives in `crates/platforms/` but belongs to this context.
+Cross-cutting infrastructure services that hook into the Runtime lifecycle. Covers observability (OpenTelemetry, Prometheus), auth/security, and platform integration (Kubernetes). Note: `camel-platform-kubernetes` lives in `crates/platforms/` but belongs to this context.
 
 ## Language
 
@@ -78,9 +78,25 @@ ConsumerRestart registers a new live check for the same `route_id`, or when the 
 Prevents the worst-case outcome: a dead Route whose health entry reports `Healthy` by omission.
 _Avoid_: unregister (a ForcedHealthFailure is not removed — it stays Unhealthy until restart)
 
-
-Contract for distributed leader election. Returns a `LeadershipHandle` with a channel for receiving leadership state changes.
+**LeadershipService**:
+Contract for distributed leader election. `start(lock_name)` returns a LeadershipHandle for one leadership attempt.
 _Avoid_: elector, leader lock, master election
+
+**LeadershipHandle**:
+Handle for current leadership attempt; exposes leadership state/events and `step_down()` for bounded release of the leadership loop.
+_Avoid_: lease object, consumer handle
+
+**TokenAuthenticator**:
+Provider-neutral contract that validates bearer/API tokens and returns a Principal.
+_Avoid_: Keycloak client, JWT parser
+
+**ClaimsMapper**:
+Provider-neutral mapping from token/introspection claims into Principal fields (`subject`, roles, scopes, issuer, audience).
+_Avoid_: Keycloak mapping, claim parser
+
+**PermissionEvaluator**:
+Authorization engine for `security_policy.permission`; evaluates resource/action/scope requests and returns a PermissionDecision.
+_Avoid_: SecurityPolicy (SecurityPolicy is route boundary; PermissionEvaluator is one decision source)
 
 ## Example dialogue
 

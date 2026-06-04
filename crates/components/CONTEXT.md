@@ -34,6 +34,38 @@ A trait for a config-backed bundle that owns one TOML configuration key, deseria
 and registers all related Component schemes through a single `register_all` call.
 _Avoid_: plugin bundle, component group
 
+**StaticFileServing** (HTTP component):
+HTTP Endpoint behavior that serves files from disk, optionally with SPA fallback and custom error pages. StaticFileServing returns existing file content; it does not render templates or perform server-side rendering.
+_Avoid_: SSR, template rendering, asset pipeline
+
+**HTTP Co-hosting**:
+HTTP behavior where `http:` API routes and `http-static:` mounts share one server per host/port. Dispatch precedence is API exact path match first, then static mounts by longest prefix, then SPA fallback/error page handling within the winning static mount.
+_Avoid_: shared registry (implementation), separate static server
+
+**StreamList** (SQL component):
+SQL `outputType` that exposes result rows as a lazy NDJSON byte stream (`application/x-ndjson`) instead of materializing the whole result set before continuing.
+_Avoid_: list mode, streaming query (too vague), cursor API
+
+**ComponentBackoff / BackoffConfig**:
+Capped exponential delay used inside networked Components for transient reconnect or poll retry loops. Not Route supervision and not ErrorHandler redelivery.
+_Avoid_: retry policy (ambiguous), redelivery, ConsumerRestart
+
+**Master**:
+Component that runs a delegate Consumer only while this node holds a LeadershipService lock. Losing leadership stops delegate intake and steps down with a drain timeout.
+_Avoid_: load balancer, consumer restart, supervision
+
+**ControlBus**:
+Producer-only Component that sends Route lifecycle commands (`start`, `stop`, `suspend`, `resume`, `restart`, `status`) from one Route to another through the RuntimeBus. Target Route comes from the URI `routeId` parameter or `CamelRouteId` header.
+_Avoid_: command bus, admin API, route controller (unless naming Runtime type)
+
+**SEDA**:
+In-memory asynchronous Endpoint for decoupling Routes with a bounded queue. A Producer sends to `seda:name`; a Consumer on the same name processes later from a background task.
+_Avoid_: direct route call, external queue, channel (too vague)
+
+**SEDA Fanout**:
+SEDA mode enabled by `multipleConsumers=true`; the Producer clones each Exchange to every active subscriber on the same SEDA name. Fanout is fire-and-forget only: waiting for replies is rejected because one request cannot have N valid replies without aggregator semantics.
+_Avoid_: load balancing, competing consumers, broadcast queue
+
 **ComponentContext**:
 Runtime context passed to Components during Endpoint and Consumer/Producer creation. Provides
 access to other components (`resolve_component`), languages (`resolve_language`), metrics
