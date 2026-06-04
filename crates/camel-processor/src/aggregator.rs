@@ -82,6 +82,10 @@ impl AggregatorService {
         }
     }
 
+    pub fn config(&self) -> &AggregatorConfig {
+        &self.config
+    }
+
     pub fn has_timeout(&self) -> bool {
         has_timeout_condition(&self.config.completion)
     }

@@ -1403,6 +1403,11 @@ impl RouteController for DefaultRouteController {
             // Extend the stored consumer handle through aggregate force-completion.
             // While this monitor drains pending buckets, handle_is_running still reports
             // the Route as running because forced exchanges may still be in post-pipeline.
+            let force_on_stop = agg_for_monitor
+                .lock()
+                .expect("mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
+                .config()
+                .force_completion_on_stop;
             let consumer_handle = tokio::spawn(async move {
                 let _ = consumer_handle.await;
                 if !pipeline_cancel_for_monitor.is_cancelled() {
@@ -1411,7 +1416,9 @@ impl RouteController for DefaultRouteController {
                         .expect("mutex poisoned: another thread panicked while holding this lock"); // allow-unwrap
                     guard.force_complete_all();
                     drop(guard);
-                    pipeline_cancel_for_monitor.cancel();
+                    if force_on_stop {
+                        pipeline_cancel_for_monitor.cancel();
+                    }
                 }
             });
             #[cfg(test)]
