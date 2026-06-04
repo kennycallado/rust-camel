@@ -2,7 +2,7 @@
 description: Escalation-only expert. Called when workers are stuck on hard problems.
 mode: subagent
 temperature: 0.2
-model: github-copilot/claude-opus-4.7
+model: github-copilot/claude-opus-4.8
 tools:
   write: true
   edit: true
