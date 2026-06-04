@@ -1144,7 +1144,26 @@ struct WorkspaceCrate {
     name: String,
     path: String,
     normal_deps: Vec<String>,
+    /// Dev and build dependencies (also target-specific variants) that cargo
+    /// embeds in the published Cargo.toml. `cargo publish` resolves these
+    /// against the registry during package verification, so they participate
+    /// in the topological publish order — but they can be broken when they
+    /// form a cycle (the cycle member would need to be published first with
+    /// `cargo publish --no-verify`, or the dev-dep restructured).
+    weak_deps: Vec<String>,
     publish: bool,
+}
+
+/// Edge kind in the publish-order graph. `Normal` edges come from
+/// `[dependencies]` (and target-specific variants); they are hard constraints
+/// that must be satisfied before the dependent can be published. `Weak`
+/// edges come from `[dev-dependencies]` and `[build-dependencies]`; cargo
+/// still resolves them during `cargo publish`, but cycles closed only by
+/// weak edges can be broken by publishing one member first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EdgeKind {
+    Normal,
+    Weak,
 }
 
 /// Discover workspace crates and compute topological publish order.
@@ -1172,7 +1191,7 @@ fn resolve_publish_order(workspace_root: &Path) -> Result<Vec<WorkspaceCrate>, S
         }
 
         let publish = !content.contains("publish = false");
-        let normal_deps = extract_normal_camel_deps(&content);
+        let (normal_deps, weak_deps) = extract_camel_deps_grouped(&content);
         let crate_dir = path
             .parent()
             .ok_or_else(|| format!("Cargo.toml has no parent directory: {}", path.display()))?;
@@ -1191,6 +1210,7 @@ fn resolve_publish_order(workspace_root: &Path) -> Result<Vec<WorkspaceCrate>, S
             name,
             path: rel_path,
             normal_deps,
+            weak_deps,
             publish,
         });
     }
@@ -1208,16 +1228,43 @@ fn resolve_publish_order(workspace_root: &Path) -> Result<Vec<WorkspaceCrate>, S
         .map(|(i, _)| i)
         .collect();
 
+    // Build adjacency with edge-kind tagging. We need to track edges by kind
+    // so we can break weak-only cycles after Kahn's algorithm stalls.
+    let mut adj: Vec<Vec<(usize, EdgeKind)>> = vec![Vec::new(); crates.len()];
     let mut in_degree: Vec<usize> = vec![0; crates.len()];
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); crates.len()];
 
     for &ci in &publishable {
+        let mut seen_normal: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for dep_name in &crates[ci].normal_deps {
+            // Self-references (e.g. `camel-foo = { path = ".", features = ["test-util"] }`
+            // in [dev-dependencies] to enable a test-only feature) are a
+            // standard Rust pattern. cargo resolves them to the crate itself
+            // at publish time, so they do not participate in publish order.
+            if dep_name == &crates[ci].name {
+                continue;
+            }
             if let Some(&di) = name_map.get(dep_name)
                 && crates[di].publish
+                && seen_normal.insert(di)
             {
                 in_degree[ci] += 1;
-                adj[di].push(ci);
+                adj[di].push((ci, EdgeKind::Normal));
+            }
+        }
+        // Weak edges: count toward in-degree, but mark them so we can break
+        // them later if they participate in a cycle.
+        let mut seen_weak: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for dep_name in &crates[ci].weak_deps {
+            if dep_name == &crates[ci].name {
+                continue;
+            }
+            if let Some(&di) = name_map.get(dep_name)
+                && crates[di].publish
+                && !seen_normal.contains(&di)
+                && seen_weak.insert(di)
+            {
+                in_degree[ci] += 1;
+                adj[di].push((ci, EdgeKind::Weak));
             }
         }
     }
@@ -1231,10 +1278,74 @@ fn resolve_publish_order(workspace_root: &Path) -> Result<Vec<WorkspaceCrate>, S
     let mut sorted: Vec<usize> = Vec::new();
     while let Some(ci) = queue.pop_front() {
         sorted.push(ci);
-        for &dependent in &adj[ci] {
+        for &(dependent, _kind) in &adj[ci] {
             in_degree[dependent] -= 1;
             if in_degree[dependent] == 0 {
                 queue.push_back(dependent);
+            }
+        }
+    }
+
+    // If Kahn stalled, try breaking weak edges that participate in cycles.
+    // Each broken weak edge means the dependent must be published with
+    // `cargo publish --no-verify` (or the dev-dep restructured), because
+    // cargo cannot resolve it at publish time.
+    let mut broken_weak_edges: Vec<(String, String)> = Vec::new();
+    while sorted.len() < publishable.len() {
+        let sorted_set: std::collections::HashSet<usize> = sorted.iter().copied().collect();
+
+        // Find an unscheduled crate whose remaining in-degree comes entirely
+        // from weak edges whose source is also unscheduled. Dropping one such
+        // edge breaks at least one cycle.
+        let mut progress = false;
+        for &ci in &publishable {
+            if sorted_set.contains(&ci) || in_degree[ci] == 0 {
+                continue;
+            }
+            // Count how many of ci's remaining unresolved incoming edges are
+            // weak and come from other unscheduled crates.
+            let weak_unresolved: Vec<usize> = adj
+                .iter()
+                .enumerate()
+                .filter_map(|(di, dependents)| {
+                    if sorted_set.contains(&di) {
+                        return None;
+                    }
+                    dependents
+                        .iter()
+                        .any(|&(d, k)| d == ci && k == EdgeKind::Weak)
+                        .then_some(di)
+                })
+                .collect();
+
+            if weak_unresolved.is_empty() {
+                continue;
+            }
+            // Drop the first such weak edge. Pick the source with the smallest
+            // index for deterministic output. `weak_unresolved` is guaranteed
+            // non-empty here because we skipped empty cases above.
+            let di = *weak_unresolved.iter().min().unwrap(); // allow-unwrap
+            adj[di].retain(|&(d, _)| d != ci);
+            in_degree[ci] -= 1;
+            broken_weak_edges.push((crates[di].name.clone(), crates[ci].name.clone()));
+            progress = true;
+            if in_degree[ci] == 0 {
+                queue.push_back(ci);
+            }
+        }
+
+        if !progress {
+            break;
+        }
+
+        // Drain the queue we may have just refilled.
+        while let Some(ci) = queue.pop_front() {
+            sorted.push(ci);
+            for &(dependent, _kind) in &adj[ci] {
+                in_degree[dependent] -= 1;
+                if in_degree[dependent] == 0 {
+                    queue.push_back(dependent);
+                }
             }
         }
     }
@@ -1252,6 +1363,21 @@ fn resolve_publish_order(workspace_root: &Path) -> Result<Vec<WorkspaceCrate>, S
             }
         }
         return Err("Cannot compute publish order due to dependency cycles".to_string());
+    }
+
+    if !broken_weak_edges.is_empty() {
+        eprintln!(
+            "⚠️  Broke {} weak (dev/build) dependency edge(s) to resolve cycles:",
+            broken_weak_edges.len()
+        );
+        for (from, to) in &broken_weak_edges {
+            eprintln!(
+                "  {from} --dev/build-dep--> {to} (publish {to} first; verify it does not need {from} at publish time)"
+            );
+        }
+        eprintln!(
+            "  If `cargo publish` fails for any of these, publish the affected crate manually with --no-verify."
+        );
     }
 
     Ok(sorted.into_iter().map(|i| crates[i].clone()).collect())
@@ -1456,11 +1582,39 @@ fn extract_toml_name(content: &str) -> Option<String> {
     None
 }
 
-/// Extract camel-* dependencies from [dependencies] section only.
+/// Extract camel-* dependencies from all dependency sections that cargo
+/// embeds in the published Cargo.toml and validates against the registry
+/// index during `cargo publish`. This includes `[dependencies]`,
+/// `[dev-dependencies]`, `[build-dependencies]`, and target-specific
+/// variants like `[target.'cfg(...)'.dependencies]`. Workspace-internal
+/// deps referenced in any of these sections must already exist on
+/// crates.io when the crate is published, so they participate in the
+/// topological publish order.
+#[cfg(test)]
 fn extract_normal_camel_deps(content: &str) -> Vec<String> {
-    let mut deps = Vec::new();
+    let (normal, weak) = extract_camel_deps_grouped(content);
+    let mut all = normal;
+    all.extend(weak);
+    all.sort();
+    all.dedup();
+    all
+}
+
+/// Split camel-* dependencies into `(normal, weak)` groups.
+///
+/// `normal` covers `[dependencies]` and `[target.'...'.dependencies]` —
+/// hard constraints that must be satisfied before the dependent ships.
+///
+/// `weak` covers `[dev-dependencies]` and `[build-dependencies]` (plus
+/// their target-specific variants) — cargo still resolves them during
+/// `cargo publish`, but cycles closed only by weak edges can be broken
+/// by publishing one member first.
+fn extract_camel_deps_grouped(content: &str) -> (Vec<String>, Vec<String>) {
+    let mut normal = Vec::new();
+    let mut weak = Vec::new();
+    let mut seen_normal = std::collections::HashSet::new();
+    let mut seen_weak = std::collections::HashSet::new();
     let mut section = "";
-    let mut seen = std::collections::HashSet::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -1471,16 +1625,51 @@ fn extract_normal_camel_deps(content: &str) -> Vec<String> {
             section = trimmed;
             continue;
         }
-        if section != "[dependencies]" {
+        let Some(dep) = extract_camel_dep_name(trimmed) else {
             continue;
-        }
-        if let Some(dep) = extract_camel_dep_name(trimmed)
-            && seen.insert(dep.clone())
-        {
-            deps.push(dep);
+        };
+        if is_weak_dependency_section(section) {
+            if seen_weak.insert(dep.clone()) {
+                weak.push(dep);
+            }
+        } else if is_dependency_section(section) && seen_normal.insert(dep.clone()) {
+            normal.push(dep);
         }
     }
-    deps
+    (normal, weak)
+}
+
+/// Returns true for TOML section headers whose dependencies cargo resolves
+/// when publishing. Covers plain sections (`[dependencies]`,
+/// `[dev-dependencies]`, `[build-dependencies]`) and target-specific variants
+/// (`[target.'cfg(unix)'.dependencies]`, etc.).
+fn is_dependency_section(section: &str) -> bool {
+    let section = section.trim();
+    if !section.starts_with('[') || !section.ends_with(']') {
+        return false;
+    }
+    let inner = &section[1..section.len() - 1];
+    matches!(
+        inner,
+        "dependencies" | "dev-dependencies" | "build-dependencies"
+    ) || inner.ends_with(".dependencies")
+        || inner.ends_with(".dev-dependencies")
+        || inner.ends_with(".build-dependencies")
+}
+
+/// Returns true for `[dev-dependencies]`, `[build-dependencies]` and their
+/// target-specific variants — sections cargo resolves during `cargo publish`
+/// but which are weaker constraints than `[dependencies]` (cycles closed
+/// only by these edges can be broken at publish time).
+fn is_weak_dependency_section(section: &str) -> bool {
+    let section = section.trim();
+    if !section.starts_with('[') || !section.ends_with(']') {
+        return false;
+    }
+    let inner = &section[1..section.len() - 1];
+    matches!(inner, "dev-dependencies" | "build-dependencies")
+        || inner.ends_with(".dev-dependencies")
+        || inner.ends_with(".build-dependencies")
 }
 
 fn extract_camel_dep_name(line: &str) -> Option<String> {
@@ -1811,6 +2000,124 @@ mod tests {
                 "client_secret in format! must be caught: {violations:?}"
             );
             fs::remove_dir_all(&ws).unwrap();
+        }
+    }
+
+    mod dependency_extraction {
+        use super::*;
+
+        #[test]
+        fn includes_dev_dependencies() {
+            // Reproduces the v0.13.0 release failure: camel-platform-kubernetes
+            // only declares camel-core under [dev-dependencies], so the old
+            // extractor missed it and the publish order was wrong.
+            let cargo_toml = r#"
+[package]
+name = "camel-platform-kubernetes"
+
+[dependencies]
+camel-api = { workspace = true }
+
+[dev-dependencies]
+camel-core = { workspace = true }
+"#;
+            let deps = extract_normal_camel_deps(cargo_toml);
+            assert!(deps.contains(&"camel-api".to_string()));
+            assert!(
+                deps.contains(&"camel-core".to_string()),
+                "dev-dependencies must be included in publish order: got {deps:?}"
+            );
+        }
+
+        #[test]
+        fn includes_build_dependencies() {
+            let cargo_toml = r#"
+[package]
+name = "camel-foo"
+
+[dependencies]
+camel-api = { workspace = true }
+
+[build-dependencies]
+camel-bean-macros = { workspace = true }
+"#;
+            let deps = extract_normal_camel_deps(cargo_toml);
+            assert!(deps.contains(&"camel-api".to_string()));
+            assert!(deps.contains(&"camel-bean-macros".to_string()));
+        }
+
+        #[test]
+        fn includes_target_specific_dependencies() {
+            let cargo_toml = r#"
+[package]
+name = "camel-foo"
+
+[target.'cfg(unix)'.dependencies]
+camel-core = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+camel-api = { workspace = true }
+"#;
+            let deps = extract_normal_camel_deps(cargo_toml);
+            assert!(deps.contains(&"camel-core".to_string()));
+            assert!(deps.contains(&"camel-api".to_string()));
+        }
+
+        #[test]
+        fn ignores_unknown_sections() {
+            let cargo_toml = r#"
+[package]
+name = "camel-foo"
+
+[dependencies]
+camel-core = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+default = ["camel-api"]
+"#;
+            let deps = extract_normal_camel_deps(cargo_toml);
+            assert_eq!(deps, vec!["camel-core"]);
+        }
+
+        #[test]
+        fn deduplicates_dependencies() {
+            let cargo_toml = r#"
+[package]
+name = "camel-foo"
+
+[dependencies]
+camel-core = { workspace = true }
+
+[dev-dependencies]
+camel-core = { workspace = true }
+"#;
+            let deps = extract_normal_camel_deps(cargo_toml);
+            assert_eq!(deps.len(), 1);
+            assert_eq!(deps[0], "camel-core");
+        }
+
+        #[test]
+        fn is_dependency_section_classifies_headers() {
+            assert!(is_dependency_section("[dependencies]"));
+            assert!(is_dependency_section("[dev-dependencies]"));
+            assert!(is_dependency_section("[build-dependencies]"));
+            assert!(is_dependency_section("[target.'cfg(unix)'.dependencies]"));
+            assert!(is_dependency_section(
+                "[target.\"cfg(unix)\".dev-dependencies]"
+            ));
+            assert!(is_dependency_section(
+                "[target.x86_64-pc-windows-msvc.build-dependencies]"
+            ));
+
+            assert!(!is_dependency_section("[package]"));
+            assert!(!is_dependency_section("[features]"));
+            assert!(!is_dependency_section("[lints]"));
+            assert!(!is_dependency_section("[target.'cfg(unix)']"));
+            // Bare `[target]` table header (no nested dep section) must not match.
+            assert!(!is_dependency_section("[target]"));
         }
     }
 }
