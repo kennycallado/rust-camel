@@ -704,22 +704,30 @@ impl Service<Exchange> for SedaProducer {
                     };
 
                     if producer_config.block_when_full {
+                        let mut permits: Vec<mpsc::OwnedPermit<ExchangeEnvelope>> =
+                            Vec::with_capacity(sender_list.len());
                         for sender in &sender_list {
-                            let cloned = ExchangeEnvelope {
-                                exchange: original.clone(),
-                                reply_tx: None,
-                            };
                             let result = tokio::time::timeout(
                                 Duration::from_millis(producer_config.timeout_ms),
-                                sender.send(cloned),
+                                sender.clone().reserve_owned(),
                             )
                             .await;
-                            if result.is_err() {
-                                return Err(CamelError::EndpointCreationFailed(format!(
-                                    "SEDA fanout timeout on '{}' ({}ms)",
-                                    state.config.name, producer_config.timeout_ms
-                                )));
+                            match result {
+                                Ok(Ok(permit)) => permits.push(permit),
+                                Ok(Err(_)) => return Err(CamelError::ChannelClosed),
+                                Err(_) => {
+                                    return Err(CamelError::EndpointCreationFailed(format!(
+                                        "SEDA fanout timeout on '{}' ({}ms)",
+                                        state.config.name, producer_config.timeout_ms
+                                    )));
+                                }
                             }
+                        }
+                        for permit in permits {
+                            permit.send(ExchangeEnvelope {
+                                exchange: original.clone(),
+                                reply_tx: None,
+                            });
                         }
                     } else {
                         let mut permits: Vec<mpsc::OwnedPermit<ExchangeEnvelope>> =
@@ -1277,6 +1285,55 @@ mod consumer_producer_tests {
 
         consumer_a.stop().await.unwrap();
         consumer_b.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_seda_fanout_block_when_full_rejects_closed_subscriber_without_partial_delivery() {
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint(
+                "seda:aonblock?multipleConsumers=true&size=2&blockWhenFull=true&timeout=100",
+                &NoOpComponentContext,
+            )
+            .unwrap();
+
+        let mut consumer_a = ep.create_consumer().unwrap();
+        let (tx_a, mut rx_a) = mpsc::channel::<ExchangeEnvelope>(1);
+        let ctx_a = ConsumerContext::new(tx_a, CancellationToken::new());
+        consumer_a.start(ctx_a).await.unwrap();
+
+        let state = comp
+            .endpoints
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("aonblock")
+            .cloned()
+            .unwrap();
+        let (closed_tx, closed_rx) = mpsc::channel::<ExchangeEnvelope>(1);
+        drop(closed_rx);
+        match &state.mode {
+            SedaMode::Fanout { subscribers } => {
+                subscribers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert("closed-subscriber".to_string(), closed_tx);
+            }
+            SedaMode::Single { .. } => panic!("expected fanout mode"),
+        }
+
+        let producer = ep.create_producer(&test_producer_ctx()).unwrap();
+        let result = producer
+            .oneshot(Exchange::new(Message::new("partial")))
+            .await;
+
+        assert!(matches!(result, Err(CamelError::ChannelClosed)));
+        let delivered = tokio::time::timeout(Duration::from_millis(50), rx_a.recv()).await;
+        assert!(
+            delivered.is_err(),
+            "fanout delivered to only one subscriber"
+        );
+
+        consumer_a.stop().await.unwrap();
     }
 
     #[tokio::test]
