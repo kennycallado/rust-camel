@@ -31,6 +31,7 @@ fn default_grpc_config() -> GrpcConfig {
         interceptors: camel_component_grpc::InterceptorConfig::default(),
         consumer_strategy: camel_component_grpc::ConsumerStrategy::default(),
         producer_strategy: camel_component_grpc::ProducerStrategy::default(),
+        retry: camel_component_api::NetworkRetryPolicy::default(),
     }
 }
 

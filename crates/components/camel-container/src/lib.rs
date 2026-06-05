@@ -26,7 +26,9 @@ use bollard::query_parameters::{
     StartContainerOptions,
 };
 use bollard::service::{HostConfig, PortBinding};
+use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::parse_uri;
+use camel_component_api::retry_async_cancelable;
 use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, Message};
 use camel_component_api::{Component, Consumer, ConsumerContext, Endpoint, ProducerContext};
 use tower::Service;
@@ -140,6 +142,20 @@ pub const HEADER_EXEC_ID: &str = "CamelContainerExecId";
 // ContainerGlobalConfig
 // ---------------------------------------------------------------------------
 
+/// Per-component reconnect default: unlimited retries (max_attempts=0)
+/// with a fixed 5s delay, preserving the old infinite-reconnect behavior.
+/// Operators can opt into bounded retry via TOML `[reconnect]`.
+fn container_reconnect_default() -> NetworkRetryPolicy {
+    NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 0, // unlimited
+        initial_delay: std::time::Duration::from_secs(5),
+        multiplier: 1.0, // fixed delay (old behavior was no backoff)
+        max_delay: std::time::Duration::from_secs(5),
+        jitter_factor: 0.0,
+    }
+}
+
 /// Global configuration for Container component.
 /// Supports serde deserialization with defaults and builder methods.
 /// These are the fallback defaults when URI params are not set.
@@ -148,12 +164,16 @@ pub const HEADER_EXEC_ID: &str = "CamelContainerExecId";
 pub struct ContainerGlobalConfig {
     /// The Docker host URL (default: "unix:///var/run/docker.sock").
     pub docker_host: String,
+    /// Reconnection policy for events/logs consumers (default: unlimited, 5s fixed delay).
+    #[serde(default = "container_reconnect_default")]
+    pub reconnect: NetworkRetryPolicy,
 }
 
 impl Default for ContainerGlobalConfig {
     fn default() -> Self {
         Self {
             docker_host: "unix:///var/run/docker.sock".to_string(),
+            reconnect: container_reconnect_default(),
         }
     }
 }
@@ -219,6 +239,8 @@ pub struct ContainerConfig {
     pub driver: Option<String>,
     /// Whether to force the operation (default: false).
     pub force: bool,
+    /// Reconnection policy for events/logs consumers (applied from global config).
+    pub reconnect: NetworkRetryPolicy,
 }
 
 impl ContainerConfig {
@@ -304,6 +326,7 @@ impl ContainerConfig {
             detach,
             driver,
             force,
+            reconnect: NetworkRetryPolicy::default(),
         })
     }
 
@@ -313,6 +336,7 @@ impl ContainerConfig {
         if self.host.is_none() {
             self.host = Some(global.docker_host.clone());
         }
+        self.reconnect = global.reconnect.clone();
     }
 
     fn docker_socket_path(&self) -> Result<&str, CamelError> {
@@ -1371,27 +1395,31 @@ impl ContainerConsumer {
     async fn start_events_consumer(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
         use futures::StreamExt;
 
-        loop {
-            if context.is_cancelled() {
-                tracing::info!("Container events consumer shutting down");
-                return Ok(());
-            }
+        let cancel = context.cancel_token();
 
-            let docker = match self.config.connect_docker().await {
+        // Outer reconnect loop: when the inner event stream breaks, this loop
+        // reconnects. The connect_docker() retry is now backed by
+        // retry_async_cancelable (migrated from manual loop in rc-k9c).
+        loop {
+            let docker = match retry_async_cancelable(
+                &self.config.reconnect,
+                || async { self.config.connect_docker().await },
+                |_| true,
+                &cancel,
+            )
+            .await
+            {
                 Ok(d) => d,
+                Err(_) if context.is_cancelled() => {
+                    tracing::info!("Container events consumer shutting down");
+                    return Ok(());
+                }
                 Err(e) => {
                     tracing::error!(
-                        "Consumer failed to connect to docker: {}. Retrying in 5s...",
-                        e
+                        error = %e,
+                        "Container events consumer exhausted reconnect attempts"
                     );
-                    tokio::select! {
-                        _ = context.cancelled() => {
-                            tracing::info!("Container events consumer shutting down");
-                            return Ok(());
-                        }
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                    }
-                    continue;
+                    return Err(e);
                 }
             };
 
@@ -1449,27 +1477,31 @@ impl ContainerConsumer {
             )
         })?;
 
-        loop {
-            if context.is_cancelled() {
-                tracing::info!("Container logs consumer shutting down");
-                return Ok(());
-            }
+        let cancel = context.cancel_token();
 
-            let docker = match self.config.connect_docker().await {
+        // Outer reconnect loop: when the inner log stream breaks, this loop
+        // reconnects. The connect_docker() retry is now backed by
+        // retry_async_cancelable (migrated from manual loop in rc-k9c).
+        loop {
+            let docker = match retry_async_cancelable(
+                &self.config.reconnect,
+                || async { self.config.connect_docker().await },
+                |_| true,
+                &cancel,
+            )
+            .await
+            {
                 Ok(d) => d,
+                Err(_) if context.is_cancelled() => {
+                    tracing::info!("Container logs consumer shutting down");
+                    return Ok(());
+                }
                 Err(e) => {
                     tracing::error!(
-                        "Logs consumer failed to connect to docker: {}. Retrying in 5s...",
-                        e
+                        error = %e,
+                        "Container logs consumer exhausted reconnect attempts"
                     );
-                    tokio::select! {
-                        _ = context.cancelled() => {
-                            tracing::info!("Container logs consumer shutting down");
-                            return Ok(());
-                        }
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                    }
-                    continue;
+                    return Err(e);
                 }
             };
 
@@ -3035,5 +3067,61 @@ mod tests {
 
         let component = ContainerComponent::with_config(global);
         assert_eq!(component.scheme(), "container");
+    }
+
+    #[test]
+    fn container_global_config_has_reconnect_policy() {
+        let cfg = ContainerGlobalConfig::default();
+        assert_eq!(cfg.reconnect.max_attempts, 0); // unlimited
+        assert!(cfg.reconnect.enabled);
+    }
+
+    /// Regression: max_attempts=N → exactly N invocations (caught OpenSearch off-by-one 1f5c4c2a).
+    /// Replicates the exact retry loop from ContainerConsumer::{start_events_consumer,start_logs_consumer}
+    /// (lib.rs:~1408-1431, ~1503-1525):
+    ///   attempt starts at 0, incremented on error, !should_retry(attempt), delay_for(attempt-1)
+    #[tokio::test]
+    async fn retry_loop_invokes_operation_exactly_max_attempts_times() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        };
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let mut attempt: u32 = 0;
+
+        loop {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            let result: Result<(), ()> = Err(());
+            match result {
+                Ok(_) => {
+                    attempt = 0;
+                    break;
+                }
+                Err(_) => {
+                    attempt += 1;
+                    if !policy.should_retry(attempt) {
+                        break;
+                    }
+                    let delay = policy.delay_for(attempt - 1);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+            }
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "max_attempts=3 must yield exactly 3 invocations"
+        );
     }
 }

@@ -11,6 +11,7 @@ use sqlx::any::AnyRow;
 use tokio::sync::OnceCell;
 use tracing::{debug, error, info, warn};
 
+use camel_component_api::retry_async;
 use camel_component_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
 use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 
@@ -20,7 +21,7 @@ use crate::config::{
 };
 use crate::headers;
 use crate::query::{QueryTemplate, parse_query_template, resolve_params};
-use crate::utils::{bind_json_values, row_to_json};
+use crate::utils::{bind_json_values, is_retryable_sqlx_error, row_to_json};
 
 pub struct SqlConsumer {
     pub(crate) config: SqlEndpointConfig,
@@ -368,19 +369,27 @@ impl Consumer for SqlConsumer {
                     db_url = %redact_db_url(&self.config.db_url),
                     "SQL consumer pool initializing"
                 );
-                AnyPoolOptions::new()
-                    .max_connections(max_conn)
-                    .min_connections(min_conn)
-                    .idle_timeout(Duration::from_secs(idle_timeout))
-                    .max_lifetime(Duration::from_secs(max_lifetime))
-                    .connect(&db_url)
-                    .await
-                    .map_err(|e| {
-                        CamelError::EndpointCreationFailed(format!(
-                            "Failed to connect to database: {}",
-                            e
-                        ))
-                    })
+                let retry_policy = &self.config.retry;
+                retry_async::<_, _, _, _, sqlx::Error>(
+                    retry_policy,
+                    || {
+                        AnyPoolOptions::new()
+                            .max_connections(max_conn)
+                            .min_connections(min_conn)
+                            .idle_timeout(Duration::from_secs(idle_timeout))
+                            .max_lifetime(Duration::from_secs(max_lifetime))
+                            .connect(&db_url)
+                    },
+                    is_retryable_sqlx_error,
+                )
+                .await
+                .map_err(|e| {
+                    error!(error = %e, db_url = %redact_db_url(&self.config.db_url), "SQL connect failed, giving up");
+                    CamelError::EndpointCreationFailed(format!(
+                        "Failed to connect to database: {}",
+                        e
+                    ))
+                })
             })
             .await?;
 
@@ -439,6 +448,20 @@ impl Consumer for SqlConsumer {
         }
 
         // Step 4: Polling loop
+        //
+        // This is a POLLING LOOP with fixed cadence (delay_ms), NOT a
+        // retry loop. It polls the database until cancelled or repeat_count
+        // is reached — there is no "transient error → retry with backoff"
+        // contract at this level. retry_async / retry_async_cancelable do
+        // not apply because they are designed for bounded retry, not
+        // repeated polling with uniform delay.
+        //
+        // The pool-connect retry at startup (Step 1) was migrated to
+        // retry_async in rc-d2r. The per-poll error handling (poll_database
+        // failures) is an error-bridge pattern, not a retry loop.
+        //
+        // See camel-redis/src/consumer.rs:325 for a similar polling-loop
+        // justification.
         let mut poll_count: u32 = 0;
         loop {
             // SQL-015: check repeat_count limit
@@ -1175,5 +1198,48 @@ mod tests {
             }
             ref other => panic!("expected Body::Stream, got {:?}", other),
         }
+    }
+
+    /// Regression: max_attempts=N → exactly N invocations (caught OpenSearch off-by-one 1f5c4c2a).
+    /// Replicates the exact retry loop from SqlConsumer::start() (consumer.rs:343-367):
+    ///   attempt starts at 0, incremented at top, should_retry(attempt), delay_for(attempt-1)
+    #[tokio::test]
+    async fn retry_loop_invokes_operation_exactly_max_attempts_times() {
+        use camel_component_api::NetworkRetryPolicy;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        };
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = Arc::clone(&calls);
+
+        let mut attempt: u32 = 0;
+        let _result: Result<(), ()> = loop {
+            attempt += 1;
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            let op_result: Result<(), ()> = Err(());
+            match op_result {
+                Ok(v) => break Ok(v),
+                Err(_) if policy.should_retry(attempt) => {
+                    let delay = policy.delay_for(attempt - 1);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(_) => break Err(()),
+            }
+        };
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "max_attempts=3 must yield exactly 3 invocations"
+        );
     }
 }

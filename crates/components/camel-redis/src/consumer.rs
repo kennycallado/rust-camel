@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use camel_api::{BackoffConfig, BackoffState};
 use camel_component_api::{Body, CamelError, Exchange, Message};
 use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 use futures_util::StreamExt;
@@ -321,17 +320,23 @@ async fn run_queue_consumer(
 
     info!("Queue consumer started, waiting for items");
 
-    // Blocking pop loop (BLPOP/BRPOP) with capped exponential backoff on errors (REDIS-004)
+    // Blocking pop loop (BLPOP/BRPOP) with capped exponential backoff via NetworkRetryPolicy (REDIS-004)
     let queue_cmd = queue_command_name(pop_command);
-    let mut error_count: u32 = 0;
-    const MAX_RETRIES: u32 = 10;
-    const MAX_BACKOFF: Duration = Duration::from_secs(30);
-    let mut backoff = BackoffState::new(BackoffConfig {
-        initial_delay: Duration::from_millis(100),
-        multiplier: 2.0,
-        max_delay: MAX_BACKOFF,
-    });
+    let mut attempt: u32 = 0;
 
+    // Manual retry loop (not retry_async / retry_async_cancelable) because:
+    // - This is a long-running polling loop, not a bounded retry.
+    //   retry_async is designed for "try N times then fail" patterns; this
+    //   loop polls forever with error backoff, which is a different contract.
+    // - cmd.query_async() borrows &mut conn; the mutable borrow cannot
+    //   be captured by FnMut() -> async move { ... } across retries.
+    // - Timeout is a normal event (resets attempt counter) vs transient
+    //   errors (increment counter) — classification is per-outcome, not
+    //   per-error-type, so retry_async's is_retryable closure doesn't fit.
+    // - Uses tokio::select! with cancel_token.cancelled(); could theoretically
+    //   use retry_async_cancelable but the polling-loop pattern requires
+    //   interleaved cancellation checks between every poll, not just during
+    //   error backoff sleep.
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -348,9 +353,8 @@ async fn run_queue_consumer(
             {
                 match result {
                     Ok(Some((key, value))) => {
-                        // Reset error counter on success
-                        error_count = 0;
-                        backoff.reset();
+                        // Reset retry counter on success
+                        attempt = 0;
                         let exchange = build_exchange_from_blpop(key, value);
                         if let Err(e) = ctx.send(exchange).await {
                             error!("Failed to send exchange to pipeline: {}", e);
@@ -364,26 +368,25 @@ async fn run_queue_consumer(
                     Err(e) => {
                         if e.is_timeout() {
                             // Timeout - continue loop silently
-                            error_count = 0;
-                            backoff.reset();
+                            attempt = 0;
                         } else if is_transient_redis_error(&CamelError::ProcessorError(e.to_string())) {
-                            error_count += 1;
-                            if error_count > MAX_RETRIES {
+                            attempt += 1;
+                            if !config.reconnect.should_retry(attempt) {
                                 error!(
                                     command = %queue_cmd,
-                                    retries = error_count,
-                                    "Max retries exceeded for transient error, terminating"
+                                    attempts = attempt,
+                                    "Max attempts exceeded for transient error, terminating"
                                 );
                                 return Err(CamelError::ProcessorError(format!(
-                                    "{} failed after {} retries: {}",
-                                    queue_cmd, MAX_RETRIES, e
+                                    "{} failed after {} attempts: {}",
+                                    queue_cmd, config.reconnect.max_attempts, e
                                 )));
                             }
-                            let delay = backoff.next_delay();
+                            let delay = config.reconnect.delay_for(attempt - 1);
                             warn!(
                                 command = %queue_cmd,
                                 error = %e,
-                                retry = error_count,
+                                attempt,
                                 delay_ms = delay.as_millis(),
                                 "Transient error, retrying with backoff"
                             );
@@ -467,6 +470,7 @@ mod tests {
             password: None,
             db: 0,
             ssl: Some(false),
+            reconnect: camel_component_api::NetworkRetryPolicy::default(),
         }
     }
 

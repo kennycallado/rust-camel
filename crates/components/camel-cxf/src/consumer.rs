@@ -101,11 +101,6 @@ fn is_bridge_transport_error(err: &CamelError) -> bool {
     msg.contains("transport") || msg.contains("connection") || msg.contains("unavailable")
 }
 
-fn reconnect_delay(attempt: u32) -> Duration {
-    let delay_ms = 500u64.saturating_mul(2u64.saturating_pow(attempt.min(16)));
-    Duration::from_millis(delay_ms.min(30_000))
-}
-
 async fn await_ready_channel(pool: Arc<CxfBridgePool>) -> Result<Channel, CamelError> {
     let key = CxfBridgePool::slot_key();
     let slot = pool
@@ -145,6 +140,14 @@ impl Consumer for CxfConsumer {
         let handle: JoinHandle<Result<(), CamelError>> = tokio::spawn(async move {
             let mut consecutive_transport_failures: u32 = 0;
             let mut reconnect_attempt: u32 = 0;
+            // Manual retry loop (not retry_async) because:
+            // - Retries are embedded inside `tokio::select!` with cancellation
+            //   tokens (ctx.cancelled(), cancel.cancelled()); retry_async's
+            //   tight loop cannot interleave cancellation checks between
+            //   delay and retry.
+            // - Inter-attempt side effects (channel refresh via
+            //   pool.refresh_slot_channel, transport failure counting,
+            //   reconnect_attempt reset on success) must run between retries.
             loop {
                 let channel = tokio::select! {
                     _ = cancel.cancelled() => {
@@ -160,14 +163,18 @@ impl Consumer for CxfConsumer {
                             Ok(channel) => channel,
                             Err(e) => {
                                 warn!(error = %e, "CXF consumer waiting for ready bridge failed");
-                                let delay = reconnect_delay(reconnect_attempt);
-                                reconnect_attempt = reconnect_attempt.saturating_add(1);
-                                tokio::select! {
-                                    _ = cancel.cancelled() => break,
-                                    _ = ctx.cancelled() => break,
-                                    _ = tokio::time::sleep(delay) => {}
+                                if pool.reconnect.should_retry(reconnect_attempt + 1) {
+                                    let delay = pool.reconnect.delay_for(reconnect_attempt);
+                                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+                                    tokio::select! {
+                                        _ = cancel.cancelled() => break,
+                                        _ = ctx.cancelled() => break,
+                                        _ = tokio::time::sleep(delay) => {}
+                                    }
+                                    continue;
                                 }
-                                continue;
+                                warn!("CXF consumer reconnect attempts exhausted");
+                                break;
                             }
                         }
                     }
@@ -206,14 +213,18 @@ impl Consumer for CxfConsumer {
                             consecutive_transport_failures = 0;
                         }
                         warn!(error = %e, "CXF consumer stream open failed; retrying");
-                        let delay = reconnect_delay(reconnect_attempt);
-                        reconnect_attempt = reconnect_attempt.saturating_add(1);
-                        tokio::select! {
-                            _ = cancel.cancelled() => break,
-                            _ = ctx.cancelled() => break,
-                            _ = tokio::time::sleep(delay) => {}
+                        if pool.reconnect.should_retry(reconnect_attempt + 1) {
+                            let delay = pool.reconnect.delay_for(reconnect_attempt);
+                            reconnect_attempt = reconnect_attempt.saturating_add(1);
+                            tokio::select! {
+                                _ = cancel.cancelled() => break,
+                                _ = ctx.cancelled() => break,
+                                _ = tokio::time::sleep(delay) => {}
+                            }
+                            continue;
                         }
-                        continue;
+                        warn!("CXF consumer reconnect attempts exhausted");
+                        break;
                     }
                 };
 
@@ -308,14 +319,17 @@ impl Consumer for CxfConsumer {
                     }
                 }
 
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = ctx.cancelled() => break,
-                    _ = tokio::time::sleep({
-                        let delay = reconnect_delay(reconnect_attempt);
-                        reconnect_attempt = reconnect_attempt.saturating_add(1);
-                        delay
-                    }) => {}
+                if pool.reconnect.should_retry(reconnect_attempt + 1) {
+                    let delay = pool.reconnect.delay_for(reconnect_attempt);
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = ctx.cancelled() => break,
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                } else {
+                    warn!("CXF consumer reconnect attempts exhausted");
+                    break;
                 }
             }
             Ok(())
@@ -356,6 +370,7 @@ impl Consumer for CxfConsumer {
 mod tests {
     use super::*;
     use crate::config::CxfPoolConfig;
+    use camel_component_api::NetworkRetryPolicy;
 
     fn test_pool() -> Arc<CxfBridgePool> {
         let pool_config = CxfPoolConfig {
@@ -366,6 +381,7 @@ mod tests {
             bridge_cache_dir: None,
             version: "0.1.0".to_string(),
             bind_address: None,
+            reconnect: NetworkRetryPolicy::default(),
         };
         Arc::new(CxfBridgePool::from_config(pool_config).unwrap())
     }
@@ -561,18 +577,25 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_delay_sequence_monotonically_increases() {
-        let d0 = reconnect_delay(0);
-        let d1 = reconnect_delay(1);
-        let d2 = reconnect_delay(2);
-        let d3 = reconnect_delay(3);
+    fn reconnect_policy_delay_for_grows_exponentially() {
+        let p = NetworkRetryPolicy {
+            initial_delay: Duration::from_millis(500),
+            multiplier: 2.0,
+            max_delay: Duration::from_secs(30),
+            jitter_factor: 0.0,
+            ..NetworkRetryPolicy::default()
+        };
+        let d0 = p.delay_for(0);
+        let d1 = p.delay_for(1);
+        let d2 = p.delay_for(2);
+        let d3 = p.delay_for(3);
         assert!(d0 < d1, "{d0:?} should be < {d1:?}");
         assert!(d1 < d2, "{d1:?} should be < {d2:?}");
         assert!(d2 < d3, "{d2:?} should be < {d3:?}");
         // Verify cap at 30s for large attempts
-        assert_eq!(reconnect_delay(10), Duration::from_secs(30));
-        assert_eq!(reconnect_delay(20), Duration::from_secs(30));
-        assert_eq!(reconnect_delay(100), Duration::from_secs(30));
+        assert_eq!(p.delay_for(10), Duration::from_secs(30));
+        assert_eq!(p.delay_for(20), Duration::from_secs(30));
+        assert_eq!(p.delay_for(100), Duration::from_secs(30));
     }
 
     #[test]
@@ -612,10 +635,17 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_delay_backoff_caps_at_30s() {
-        assert_eq!(reconnect_delay(0), Duration::from_millis(500));
-        assert_eq!(reconnect_delay(1), Duration::from_secs(1));
-        assert_eq!(reconnect_delay(2), Duration::from_secs(2));
-        assert_eq!(reconnect_delay(10), Duration::from_secs(30));
+    fn reconnect_policy_delay_for_exact_values() {
+        let p = NetworkRetryPolicy {
+            initial_delay: Duration::from_millis(500),
+            multiplier: 2.0,
+            max_delay: Duration::from_secs(30),
+            jitter_factor: 0.0,
+            ..NetworkRetryPolicy::default()
+        };
+        assert_eq!(p.delay_for(0), Duration::from_millis(500));
+        assert_eq!(p.delay_for(1), Duration::from_secs(1));
+        assert_eq!(p.delay_for(2), Duration::from_secs(2));
+        assert_eq!(p.delay_for(10), Duration::from_secs(30));
     }
 }

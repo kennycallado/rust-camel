@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use camel_component_api::{Body, CamelError, Exchange, Message};
-use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
+use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext, NetworkRetryPolicy};
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{
@@ -19,8 +19,6 @@ use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-
-use camel_api::{BackoffConfig, BackoffState};
 
 use crate::config::ResolvedKafkaEndpointConfig;
 use crate::config::apply_security_config;
@@ -342,8 +340,30 @@ async fn run_consumer_loop(
     // when partitions are assigned. No polling loop needed — recv() drives the
     // rebalance protocol automatically.
 
-    let mut backoff = BackoffState::new(BackoffConfig::default());
+    let policy: &NetworkRetryPolicy = &config.reconnect;
+    let mut attempt = 0u32;
+    let max_attempts = policy.max_attempts;
 
+    // ── Kafka event loop ─────────────────────────────────────────────────
+    //
+    // This is an EVENT LOOP processing Kafka messages, NOT a retry loop.
+    // It runs until cancelled via cancel_token — there is no bounded retry
+    // contract. retry_async / retry_async_cancelable do not apply because
+    // they are designed for "try N times then fail" semantics, not "process
+    // messages until shutdown."
+    //
+    // The error-backoff within the recv() arm uses NetworkRetryPolicy
+    // purely for backoff timing; the loop itself is an event loop. See
+    // camel-redis/src/consumer.rs:325 for a similar polling-loop
+    // justification.
+    //
+    // Manual (not retry_async) because:
+    // - consumer.recv() borrows &mut BaseConsumer; the mutable borrow
+    //   cannot be captured by FnMut() -> async move { ... } across
+    //   retry iterations.
+    // - On success we must reset attempt = 0 (retry counter resets after
+    //   a successful recv), which requires inter-attempt state mutation
+    //   that retry_async's "always invoke op" model doesn't support.
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -353,12 +373,18 @@ async fn run_consumer_loop(
             msg_result = consumer.recv() => {
                 match msg_result {
                     Err(e) => {
-                        let delay = backoff.next_delay();
-                        warn!(error = %e, delay_ms = delay.as_millis(), "Kafka consumer error, backing off");
-                        tokio::time::sleep(delay).await;
+                        if policy.should_retry(attempt + 1) {
+                            let delay = policy.delay_for(attempt);
+                            warn!(attempt, max_attempts, error = %e, delay_ms = delay.as_millis(), "Kafka consumer error, backing off");
+                            tokio::time::sleep(delay).await;
+                            attempt += 1;
+                        } else {
+                            error!(attempt, max_attempts, error = %e, "Kafka consumer exhausted reconnect attempts");
+                            break;
+                        }
                     }
                     Ok(msg) => {
-                        backoff.reset();
+                        attempt = 0;
 
                         // Must detach before await point (BorrowedMessage not 'static)
                         let owned = msg.detach();
@@ -442,6 +468,7 @@ async fn run_consumer_loop(
 mod tests {
     use super::*;
     use crate::config::KafkaEndpointConfig;
+    use camel_api::{BackoffConfig, BackoffState};
     use rdkafka::Timestamp;
 
     fn make_resolved_config() -> ResolvedKafkaEndpointConfig {
@@ -838,6 +865,38 @@ mod tests {
         assert_eq!(sequence[18], max_backoff_ms);
     }
 
+    // --- NetworkRetryPolicy backoff verification (new policy path) ---
+
+    #[test]
+    fn test_network_retry_policy_delay_sequence() {
+        use camel_component_api::NetworkRetryPolicy;
+        let policy = NetworkRetryPolicy {
+            initial_delay: std::time::Duration::from_millis(100),
+            multiplier: 2.0,
+            max_delay: std::time::Duration::from_millis(30_000),
+            jitter_factor: 0.0, // deterministic
+            ..NetworkRetryPolicy::default()
+        };
+
+        let mut delays = Vec::new();
+        for i in 0..20u32 {
+            delays.push(policy.delay_for(i).as_millis() as u64);
+        }
+
+        assert_eq!(delays[0], 100);
+        assert_eq!(delays[1], 200);
+        assert_eq!(delays[2], 400);
+        assert_eq!(delays[3], 800);
+        assert_eq!(delays[4], 1600);
+
+        // All delays must be <= max_delay
+        let max_backoff_ms = 30_000u64;
+        assert!(delays.iter().all(|&v| v <= max_backoff_ms));
+
+        // Last delays should have hit the cap
+        assert_eq!(delays[19], max_backoff_ms);
+    }
+
     // --- KAFKA-004: commit drain timeout ---
 
     #[tokio::test]
@@ -1031,5 +1090,47 @@ mod tests {
                 "Span ID should be preserved"
             );
         }
+    }
+
+    /// Regression: max_attempts=N → exactly N invocations (caught OpenSearch off-by-one 1f5c4c2a).
+    /// Replicates the exact retry loop from the Kafka consumer recv() error handler
+    /// (consumer.rs:355-363):
+    ///   attempt starts at 0, should_retry(attempt+1), delay_for(attempt), attempt += 1
+    #[tokio::test]
+    async fn retry_loop_invokes_operation_exactly_max_attempts_times() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        };
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let mut attempt: u32 = 0;
+
+        loop {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            let err: Result<(), ()> = Err(());
+            match err {
+                Ok(_) => unreachable!(),
+                Err(_) if policy.should_retry(attempt + 1) => {
+                    let delay = policy.delay_for(attempt);
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+                Err(_) => break,
+            }
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "max_attempts=3 must yield exactly 3 invocations"
+        );
     }
 }

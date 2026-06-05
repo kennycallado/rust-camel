@@ -2,7 +2,6 @@ use crate::commands;
 use crate::config::{
     RedisCommand, RedisEndpointConfig, is_idempotent_command, is_transient_redis_error,
 };
-use camel_api::{BackoffConfig, BackoffState};
 use camel_component_api::{CamelError, Exchange};
 use redis::aio::MultiplexedConnection;
 use std::future::Future;
@@ -289,7 +288,7 @@ impl Service<Exchange> for RedisProducer {
             // 4. Dispatch to appropriate command handler with retry for transient errors
             let result = Self::dispatch_command(&cmd, &mut connection, &mut exchange).await;
 
-            // 5. On transient error, clear stale connection and retry with bounded exponential backoff
+            // 5. On transient error, clear stale connection and retry with NetworkRetryPolicy
             if let Err(ref e) = result
                 && is_transient_redis_error(e)
                 && is_idempotent_command(&cmd)
@@ -300,22 +299,37 @@ impl Service<Exchange> for RedisProducer {
                     error = %e,
                     "Transient error on idempotent command, reconnecting with bounded retry"
                 );
-                const MAX_RETRIES: u32 = 10;
+                let mut attempt: u32 = 0;
                 let mut last_err = e.clone();
-                let mut backoff = BackoffState::new(BackoffConfig::default());
 
-                for attempt in 0..MAX_RETRIES {
+                // Manual retry loop (not retry_async) because:
+                // - Between attempts we must clear the stale connection
+                //   (*guard = None) and explicitly reconnect via
+                //   get_or_create_connection — side effects that
+                //   retry_async's "always invoke op" model cannot express
+                //   without duplicating the connect logic inside the closure.
+                // - The retried operation (dispatch_command) borrows
+                //   &mut exchange via async move; the resulting Future
+                //   holds the borrow past the FnMut closure boundary,
+                //   which the borrow checker rejects. Workarounds
+                //   (Arc<Mutex<Exchange>>, clone-in-closure) are heavier
+                //   than keeping the manual loop.
+                loop {
+                    attempt += 1;
+                    if !config.reconnect.should_retry(attempt) {
+                        break;
+                    }
                     // Clear stale connection
                     {
                         let mut guard = conn.lock().await;
                         *guard = None;
                     }
 
-                    let delay = backoff.next_delay();
+                    let delay = config.reconnect.delay_for(attempt - 1);
                     debug!(
                         endpoint = %endpoint,
                         command = ?cmd,
-                        attempt = attempt + 1,
+                        attempt,
                         delay_ms = delay.as_millis(),
                         "Waiting before reconnect attempt"
                     );
@@ -334,7 +348,7 @@ impl Service<Exchange> for RedisProducer {
                                         warn!(
                                             endpoint = %endpoint,
                                             command = ?cmd,
-                                            attempt = attempt + 1,
+                                            attempt,
                                             error = %retry_err,
                                             "Retry failed with transient error"
                                         );
@@ -351,7 +365,7 @@ impl Service<Exchange> for RedisProducer {
                             if is_transient_redis_error(&conn_err) {
                                 warn!(
                                     endpoint = %endpoint,
-                                    attempt = attempt + 1,
+                                    attempt,
                                     error = %conn_err,
                                     "Reconnect failed with transient error"
                                 );
@@ -366,8 +380,8 @@ impl Service<Exchange> for RedisProducer {
 
                 // Exhausted all retries
                 return Err(CamelError::ProcessorError(format!(
-                    "Command {:?} failed after {} retries: {}",
-                    cmd, MAX_RETRIES, last_err
+                    "Command {:?} failed after {} attempts: {}",
+                    cmd, config.reconnect.max_attempts, last_err
                 )));
             }
 
@@ -609,5 +623,32 @@ mod tests {
         let producer = RedisProducer::new(config);
         let _clone = producer.clone();
         // Verify the method exists and compiles — actual call requires live Redis
+    }
+
+    #[test]
+    fn test_reconnect_policy_defaults_to_enabled() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        // Default reconnect policy should be enabled with the standard defaults
+        assert!(config.reconnect.enabled);
+        assert_eq!(config.reconnect.max_attempts, 10);
+    }
+
+    #[test]
+    fn test_reconnect_disabled_policy_never_retries() {
+        let mut config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        config.reconnect.enabled = false;
+        // When reconnect is disabled, should_retry returns false even on attempt 0
+        assert!(!config.reconnect.should_retry(0));
+    }
+
+    #[test]
+    fn test_reconnect_policy_respects_max_attempts() {
+        let mut config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        config.reconnect.max_attempts = 3;
+        // Zero-based: 0 = first attempt, 1 = first retry, etc.
+        assert!(config.reconnect.should_retry(0));
+        assert!(config.reconnect.should_retry(1));
+        assert!(config.reconnect.should_retry(2));
+        assert!(!config.reconnect.should_retry(3));
     }
 }

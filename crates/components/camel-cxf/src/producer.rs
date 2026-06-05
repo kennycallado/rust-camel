@@ -130,6 +130,7 @@ impl CxfProducer {
     ) -> Self {
         use crate::config::CxfPoolConfig;
         use crate::pool::{BridgeSlot, BridgeState};
+        use camel_component_api::NetworkRetryPolicy;
         use tokio::sync::watch;
 
         let pool = Arc::new(
@@ -141,6 +142,7 @@ impl CxfProducer {
                 bridge_cache_dir: None,
                 version: crate::BRIDGE_VERSION.to_string(),
                 bind_address: None,
+                reconnect: NetworkRetryPolicy::default(),
             })
             .expect("valid test pool config"), // allow-unwrap
         );
@@ -394,6 +396,7 @@ mod tests {
             bridge_cache_dir: None,
             version: "0.1.0".to_string(),
             bind_address: None,
+            reconnect: Default::default(),
         };
         Arc::new(crate::pool::CxfBridgePool::from_config(pool_config).unwrap())
     }

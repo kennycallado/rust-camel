@@ -14,7 +14,8 @@ use camel_bridge::{
     process::{BridgeProcess, BridgeProcessConfig, BrokerType},
 };
 use camel_component_api::{
-    BoxProcessor, CamelError, Component, Consumer, Endpoint, Exchange, ProducerContext,
+    BoxProcessor, CamelError, Component, Consumer, Endpoint, Exchange, NetworkRetryPolicy,
+    ProducerContext,
 };
 use dashmap::DashMap;
 use tokio::sync::{Mutex, watch};
@@ -81,7 +82,7 @@ pub struct JmsBridgePool {
     pub(crate) slots: DashMap<String, Arc<BridgeSlot>>,
     pub(crate) config: HashMap<String, BrokerConfig>,
     pub(crate) bridge_start_timeout_ms: u64,
-    pub(crate) broker_reconnect_interval_ms: u64,
+    pub(crate) reconnect: NetworkRetryPolicy,
     pub(crate) health_check_interval_ms: u64,
     pub(crate) bridge_version: String,
     pub(crate) bridge_cache_dir: PathBuf,
@@ -95,11 +96,20 @@ pub struct JmsBridgePool {
 impl JmsBridgePool {
     pub fn from_config(pool_config: JmsPoolConfig) -> Result<Self, CamelError> {
         pool_config.validate()?;
+        // Backward compat: broker_reconnect_interval_ms overrides
+        // reconnect.initial_delay when explicitly set (non-default).
+        let mut reconnect = pool_config.reconnect;
+        if pool_config.broker_reconnect_interval_ms
+            != crate::config::default_broker_reconnect_interval_ms()
+        {
+            reconnect.initial_delay =
+                Duration::from_millis(pool_config.broker_reconnect_interval_ms);
+        }
         Ok(Self {
             slots: DashMap::new(),
             config: pool_config.brokers,
             bridge_start_timeout_ms: pool_config.bridge_start_timeout_ms,
-            broker_reconnect_interval_ms: pool_config.broker_reconnect_interval_ms,
+            reconnect,
             health_check_interval_ms: pool_config.health_check_interval_ms,
             bridge_version: crate::BRIDGE_VERSION.to_string(),
             bridge_cache_dir: pool_config.bridge_cache_dir,
@@ -366,10 +376,6 @@ impl JmsBridgePool {
                 errors.join("; ")
             )))
         }
-    }
-
-    pub fn broker_reconnect_interval_ms(&self) -> u64 {
-        self.broker_reconnect_interval_ms
     }
 
     async fn spawn_health_monitor(&self, slot: Arc<BridgeSlot>) {
@@ -704,7 +710,7 @@ impl Endpoint for JmsEndpoint {
             Arc::clone(&self.pool),
             self.broker_name.clone(),
             self.endpoint_config.clone(),
-            self.pool.broker_reconnect_interval_ms(),
+            self.pool.reconnect.clone(),
         )))
     }
 }

@@ -12,6 +12,7 @@ pub mod component;
 pub mod component_context;
 pub mod consumer;
 pub mod endpoint;
+pub mod network_retry;
 pub mod producer;
 pub mod registrar;
 
@@ -22,6 +23,10 @@ pub use consumer::{
     ConcurrencyModel, Consumer, ConsumerContext, ExchangeEnvelope, SecurityContext,
 };
 pub use endpoint::{Endpoint, PollingConsumer};
+pub use network_retry::{
+    NetworkRetryPolicy, is_retryable_camel_error, retry_async, retry_async_cancelable,
+    retry_camel_error,
+};
 pub use producer::ProducerContext;
 pub use registrar::ComponentRegistrar;
 

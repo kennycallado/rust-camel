@@ -1,4 +1,5 @@
 use camel_component_api::CamelError;
+use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::parse_uri;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use std::str::FromStr;
@@ -248,6 +249,9 @@ pub struct RedisConfig {
     pub tls: bool,
     /// Optional path to a CA certificate file for TLS verification. Default: None.
     pub tls_ca_cert: Option<String>,
+    /// Reconnection policy for lost Redis connections.
+    #[serde(default)]
+    pub reconnect: NetworkRetryPolicy,
     /// Cluster node URLs. Empty means single-node mode. Feature-gated behind `cluster`.
     #[cfg(feature = "cluster")]
     pub cluster_nodes: Vec<String>,
@@ -264,7 +268,8 @@ impl std::fmt::Debug for RedisConfig {
             .field("port", &self.port)
             .field("password", &redacted_opt(&self.password))
             .field("tls", &self.tls)
-            .field("tls_ca_cert", &redacted_opt(&self.tls_ca_cert));
+            .field("tls_ca_cert", &redacted_opt(&self.tls_ca_cert))
+            .field("reconnect", &self.reconnect);
         #[cfg(feature = "cluster")]
         s.field("cluster_nodes", &self.cluster_nodes);
         s.finish()
@@ -279,6 +284,7 @@ impl Default for RedisConfig {
             password: None,
             tls: false,
             tls_ca_cert: None,
+            reconnect: NetworkRetryPolicy::default(),
             #[cfg(feature = "cluster")]
             cluster_nodes: Vec::new(),
         }
@@ -308,6 +314,11 @@ impl RedisConfig {
 
     pub fn with_tls_ca_cert(mut self, v: impl Into<String>) -> Self {
         self.tls_ca_cert = Some(v.into());
+        self
+    }
+
+    pub fn with_reconnect(mut self, p: NetworkRetryPolicy) -> Self {
+        self.reconnect = p;
         self
     }
 
@@ -452,6 +463,10 @@ pub struct RedisEndpointConfig {
     /// Filled by `apply_defaults()` from global config TLS setting.
     /// After resolution, use `is_ssl_enabled()` for the effective value.
     pub ssl: Option<bool>,
+
+    /// Reconnection policy for transient Redis errors.
+    /// Filled by `apply_defaults()` from global config.
+    pub reconnect: NetworkRetryPolicy,
 }
 
 impl std::fmt::Debug for RedisEndpointConfig {
@@ -466,6 +481,7 @@ impl std::fmt::Debug for RedisEndpointConfig {
             .field("password", &redacted_opt(&self.password))
             .field("db", &self.db)
             .field("ssl", &self.ssl)
+            .field("reconnect", &self.reconnect)
             .finish()
     }
 }
@@ -588,6 +604,7 @@ impl RedisEndpointConfig {
             password,
             db,
             ssl,
+            reconnect: NetworkRetryPolicy::default(),
         })
     }
 
@@ -607,6 +624,8 @@ impl RedisEndpointConfig {
         if self.ssl.is_none() && defaults.tls {
             self.ssl = Some(true);
         }
+        // Reconnect policy from global config (always applied — URI has no override)
+        self.reconnect = defaults.reconnect.clone();
     }
 
     /// Resolve any remaining `None` fields to hardcoded defaults.
@@ -873,6 +892,7 @@ mod tests {
             password: Some("pass@word".to_string()),
             db: 0,
             ssl: Some(false),
+            reconnect: NetworkRetryPolicy::default(),
         };
         let url = c.redis_url();
         assert!(
@@ -899,6 +919,7 @@ mod tests {
             password: Some("pass:word".to_string()),
             db: 0,
             ssl: Some(false),
+            reconnect: NetworkRetryPolicy::default(),
         };
         let url = c.redis_url();
         assert!(
@@ -920,6 +941,7 @@ mod tests {
             password: Some("pass/word".to_string()),
             db: 0,
             ssl: Some(false),
+            reconnect: NetworkRetryPolicy::default(),
         };
         let url = c.redis_url();
         assert!(
@@ -962,6 +984,7 @@ mod tests {
             password: None,
             db: 0,
             ssl: Some(true),
+            reconnect: NetworkRetryPolicy::default(),
         };
         let url = c.redis_url();
         assert!(
@@ -983,6 +1006,7 @@ mod tests {
             password: None,
             db: 0,
             ssl: Some(false),
+            reconnect: NetworkRetryPolicy::default(),
         };
         let url = c.redis_url();
         assert!(
@@ -1004,6 +1028,7 @@ mod tests {
             password: Some("secret".to_string()),
             db: 0,
             ssl: Some(true),
+            reconnect: NetworkRetryPolicy::default(),
         };
         let safe = c_ssl.redis_url_safe();
         assert!(
@@ -1026,6 +1051,7 @@ mod tests {
             password: Some("secret".to_string()),
             db: 0,
             ssl: Some(false),
+            reconnect: NetworkRetryPolicy::default(),
         };
         let safe = c_no_ssl.redis_url_safe();
         assert!(
@@ -1048,6 +1074,7 @@ mod tests {
             password: Some("supersecret".to_string()),
             db: 2,
             ssl: Some(false),
+            reconnect: NetworkRetryPolicy::default(),
         };
         let endpoint = c.safe_endpoint();
         assert!(
@@ -1076,6 +1103,7 @@ mod tests {
             password: None,
             db: 0,
             ssl: Some(true),
+            reconnect: NetworkRetryPolicy::default(),
         };
         assert!(c_ssl.safe_endpoint().starts_with("rediss://"));
 
@@ -1089,6 +1117,7 @@ mod tests {
             password: None,
             db: 0,
             ssl: Some(false),
+            reconnect: NetworkRetryPolicy::default(),
         };
         assert!(c_plain.safe_endpoint().starts_with("redis://"));
     }
@@ -1579,6 +1608,7 @@ mod tests {
             password: Some("secret123".to_string()),
             db: 0,
             ssl: None,
+            reconnect: NetworkRetryPolicy::default(),
         };
         let debug = format!("{:?}", config);
         assert!(

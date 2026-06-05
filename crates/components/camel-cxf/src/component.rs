@@ -117,6 +117,7 @@ impl Endpoint for CxfEndpoint {
 mod tests {
     use super::*;
     use crate::config::{CxfPoolConfig, CxfProfileConfig};
+    use camel_component_api::NetworkRetryPolicy;
 
     fn test_pool_with_profiles() -> Arc<CxfBridgePool> {
         Arc::new(
@@ -135,6 +136,7 @@ mod tests {
                 bridge_cache_dir: None,
                 version: "0.1.0".to_string(),
                 bind_address: None,
+                reconnect: NetworkRetryPolicy::default(),
             })
             .unwrap(),
         )

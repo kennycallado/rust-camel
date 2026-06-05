@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use camel_api::error::CamelError;
 use camel_auth::oauth2::TokenProvider;
+use camel_component_api::NetworkRetryPolicy;
 use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
 
@@ -272,6 +273,15 @@ pub struct GrpcConfig {
     pub consumer_strategy: ConsumerStrategy,
     #[serde(default)]
     pub producer_strategy: ProducerStrategy,
+
+    /// Transient error retry policy for gRPC producer RPC calls.
+    ///
+    /// Controls how the producer retries `Unavailable`, `DeadlineExceeded`,
+    /// `ResourceExhausted`, `Aborted`, and transport-level errors. Permanent
+    /// codes (`InvalidArgument`, `NotFound`, `PermissionDenied`, etc.) are
+    /// never retried.
+    #[serde(default)]
+    pub retry: NetworkRetryPolicy,
 }
 
 /// Custom Debug that redacts sensitive fields (GRPC-013).
@@ -294,6 +304,7 @@ impl fmt::Debug for GrpcConfig {
             .field("interceptors", &self.interceptors)
             .field("consumer_strategy", &self.consumer_strategy)
             .field("producer_strategy", &self.producer_strategy)
+            .field("retry", &self.retry)
             .finish()
     }
 }
@@ -406,6 +417,7 @@ fn parse_grpc_query_params(
         interceptors: InterceptorConfig::default(),
         consumer_strategy,
         producer_strategy,
+        retry: NetworkRetryPolicy::default(),
     })
 }
 
@@ -1080,6 +1092,38 @@ mod tests {
             AuthConfig::Bearer { ref token } => assert_eq!(token, "my-token"),
             _ => panic!("expected Bearer auth"),
         }
+    }
+
+    // ── retry: NetworkRetryPolicy tests ────────────────────────────────────
+
+    #[test]
+    fn grpc_config_has_retry_policy_toml() {
+        let toml_str = r#"
+            protoFile = "helloworld.proto"
+            service = "Greeter"
+            method = "SayHello"
+            [retry]
+            max_attempts = 3
+            initial_delay_ms = 500
+        "#;
+        let cfg: GrpcConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.retry.max_attempts, 3);
+        assert_eq!(
+            cfg.retry.initial_delay,
+            std::time::Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn grpc_config_retry_defaults_when_not_specified() {
+        let toml_str = r#"
+            protoFile = "helloworld.proto"
+        "#;
+        let cfg: GrpcConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(
+            cfg.retry,
+            camel_component_api::NetworkRetryPolicy::default()
+        );
     }
 
     // ── GRPC-009: Strategy parsed from URI ─────────────────────────────────

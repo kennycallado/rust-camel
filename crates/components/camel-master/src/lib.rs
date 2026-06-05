@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use camel_api::{CamelError, MetricsCollector, PlatformService};
 use camel_component_api::{
     BoxProcessor, Component, ComponentContext, Consumer, ConsumerContext, Endpoint,
-    ExchangeEnvelope, ProducerContext, parse_uri,
+    ExchangeEnvelope, NetworkRetryPolicy, ProducerContext, is_retryable_camel_error, parse_uri,
 };
 use camel_language_api::Language;
 use tokio::task::JoinHandle;
@@ -29,14 +29,24 @@ const DELEGATE_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 
 pub struct MasterComponent {
     drain_timeout_ms: u64,
-    delegate_retry_max_attempts: Option<u32>,
+    /// Structured reconnection policy for delegate retry.
+    reconnect: NetworkRetryPolicy,
 }
 
 impl MasterComponent {
     pub fn new(config: MasterComponentConfig) -> Self {
+        // Bridge backward-compat field: if delegate_retry_max_attempts is set
+        // and the explicit reconnect is still at its default (max_attempts=0),
+        // override reconnect.max_attempts from the legacy field.
+        let mut reconnect = config.reconnect;
+        if let Some(max) = config.delegate_retry_max_attempts
+            && reconnect.max_attempts == 0
+        {
+            reconnect.max_attempts = max;
+        }
         Self {
             drain_timeout_ms: config.drain_timeout_ms,
-            delegate_retry_max_attempts: config.delegate_retry_max_attempts,
+            reconnect,
         }
     }
 }
@@ -72,7 +82,7 @@ impl Component for MasterComponent {
             metrics: ctx.metrics(),
             platform_service: ctx.platform_service(),
             drain_timeout: Duration::from_millis(self.drain_timeout_ms),
-            delegate_retry_max_attempts: self.delegate_retry_max_attempts,
+            reconnect: self.reconnect.clone(),
         }))
     }
 }
@@ -88,7 +98,7 @@ struct MasterEndpoint {
     metrics: Arc<dyn MetricsCollector>,
     platform_service: Arc<dyn PlatformService>,
     drain_timeout: Duration,
-    delegate_retry_max_attempts: Option<u32>,
+    reconnect: NetworkRetryPolicy,
 }
 
 impl Endpoint for MasterEndpoint {
@@ -104,7 +114,7 @@ impl Endpoint for MasterEndpoint {
             Arc::clone(&self.metrics),
             Arc::clone(&self.platform_service),
             self.drain_timeout,
-            self.delegate_retry_max_attempts,
+            self.reconnect.clone(),
         )))
     }
 
@@ -167,7 +177,7 @@ struct MasterConsumer {
     metrics: Arc<dyn MetricsCollector>,
     platform_service: Arc<dyn PlatformService>,
     drain_timeout: Duration,
-    delegate_retry_max_attempts: Option<u32>,
+    reconnect: NetworkRetryPolicy,
     leadership_task: Option<JoinHandle<Result<(), CamelError>>>,
     stop_token: Option<CancellationToken>,
 }
@@ -180,7 +190,7 @@ impl MasterConsumer {
         metrics: Arc<dyn MetricsCollector>,
         platform_service: Arc<dyn PlatformService>,
         drain_timeout: Duration,
-        delegate_retry_max_attempts: Option<u32>,
+        reconnect: NetworkRetryPolicy,
     ) -> Self {
         Self {
             lock_name,
@@ -189,7 +199,7 @@ impl MasterConsumer {
             metrics,
             platform_service,
             drain_timeout,
-            delegate_retry_max_attempts,
+            reconnect,
             leadership_task: None,
             stop_token: None,
         }
@@ -275,16 +285,22 @@ async fn reconcile_event(
             {
                 Ok(endpoint) => endpoint,
                 Err(err) => {
-                    warn!(lock = %ctx.lock_name, "failed to create delegate endpoint: {err}");
-                    return Ok(());
+                    if is_retryable_camel_error(&err) {
+                        warn!(lock = %ctx.lock_name, error = %err, "transient delegate endpoint error (will retry)");
+                        return Ok(()); // swallow transient — retry via next tick
+                    }
+                    return Err(err); // permanent — propagate to retry loop for fail-fast
                 }
             };
 
             let mut consumer = match endpoint.create_consumer() {
                 Ok(consumer) => consumer,
                 Err(err) => {
-                    warn!(lock = %ctx.lock_name, "failed to create delegate consumer: {err}");
-                    return Ok(());
+                    if is_retryable_camel_error(&err) {
+                        warn!(lock = %ctx.lock_name, error = %err, "transient delegate consumer error (will retry)");
+                        return Ok(()); // swallow transient — retry via next tick
+                    }
+                    return Err(err); // permanent — propagate to retry loop for fail-fast
                 }
             };
 
@@ -307,6 +323,9 @@ async fn reconcile_event(
     }
     Ok(())
 }
+
+// Uses camel_component_api::is_retryable_camel_error for transient/permanent
+// classification (rc-7ct consolidation, was master-local in rc-i1z).
 
 #[async_trait]
 impl Consumer for MasterConsumer {
@@ -332,7 +351,7 @@ impl Consumer for MasterConsumer {
         let sender = context.sender();
         let parent_cancel = context.cancel_token();
         let drain_timeout = self.drain_timeout;
-        let delegate_retry_max_attempts = self.delegate_retry_max_attempts;
+        let reconnect = self.reconnect.clone();
         let mut events = handle.events.clone();
 
         let stop_token = CancellationToken::new();
@@ -402,25 +421,61 @@ impl Consumer for MasterConsumer {
                         }
 
                         if is_leading && matches!(state, DelegateState::Inactive) {
-                            if let Some(max) = delegate_retry_max_attempts {
-                                delegate_attempts = delegate_attempts.saturating_add(1);
-                                if delegate_attempts > max {
-                                    warn!(
-                                        lock = %lock_name,
-                                        attempts = max,
-                                        "delegate start exceeded max attempts, stopping consumer"
-                                    );
-                                    break;
+                            // Manual retry loop (not retry_async) because:
+                            // - The retry logic is embedded inside a periodic
+                            //   retry_tick.tick() handler; the outer select! runs
+                            //   every DELEGATE_RETRY_INTERVAL regardless, so the
+                            //   delay is applied as an additive sleep on top of
+                            //   the tick interval, not as a replacement for it.
+                            // - reconcile_event() requires &mut state, and the
+                            //   inter-attempt logic checks handle.is_finished()
+                            //   before retrying — both require state access
+                            //   between iterations that retry_async cannot provide.
+                            // - Classifies errors (rc-i1z): permanent → fail-fast,
+                            //   transient → retry with backoff.
+                            // Use NetworkRetryPolicy for bounded retries.
+                            // delegate_attempts tracks the next zero-based attempt index.
+                            if !reconnect.should_retry(delegate_attempts) {
+                                warn!(
+                                    lock = %lock_name,
+                                    attempts = delegate_attempts,
+                                    "delegate start exceeded max attempts, stopping consumer"
+                                );
+                                break;
+                            }
+                            // Apply backoff delay for retries (skip first attempt).
+                            if delegate_attempts > 0 {
+                                let delay = reconnect.delay_for(delegate_attempts - 1);
+                                if delay > DELEGATE_RETRY_INTERVAL {
+                                    tokio::select! {
+                                        _ = stop_token_loop.cancelled() => break,
+                                        _ = tokio::time::sleep(delay.saturating_sub(DELEGATE_RETRY_INTERVAL)) => {}
+                                    }
                                 }
                             }
+                            delegate_attempts = delegate_attempts.saturating_add(1);
                             if let Err(err) = reconcile_event(
                                 camel_api::LeadershipEvent::StartedLeading,
                                 &mut state,
                                 &rctx,
                             )
                             .await {
-                                error!(lock = %lock_name, "master delegate retry error: {err}");
-                                return Err(err);
+                                if is_retryable_camel_error(&err) {
+                                    error!(
+                                        lock = %lock_name,
+                                        error = %err,
+                                        attempt = delegate_attempts,
+                                        "master delegate transient error, will retry"
+                                    );
+                                    // Don't return — let the next tick attempt retry.
+                                } else {
+                                    error!(
+                                        lock = %lock_name,
+                                        error = %err,
+                                        "master delegate permanent error, terminating"
+                                    );
+                                    return Err(err);
+                                }
                             }
                         }
                     }
@@ -959,6 +1014,16 @@ mod tests {
         start_calls: Arc<AtomicUsize>,
         delegate_retry_max_attempts: Option<u32>,
     ) -> MasterConsumer {
+        let reconnect = match delegate_retry_max_attempts {
+            Some(max) => NetworkRetryPolicy {
+                max_attempts: max,
+                ..NetworkRetryPolicy::default()
+            },
+            None => NetworkRetryPolicy {
+                max_attempts: 0,
+                ..NetworkRetryPolicy::default()
+            },
+        };
         MasterConsumer::new(
             "lock-a".to_string(),
             "fake:delegate".to_string(),
@@ -969,7 +1034,7 @@ mod tests {
             Arc::new(NoOpMetrics),
             platform_service,
             Duration::from_millis(500),
-            delegate_retry_max_attempts,
+            reconnect,
         )
     }
 
@@ -1090,6 +1155,226 @@ mod tests {
         master.stop().await.unwrap();
     }
 
+    // ── rc-i1z test infrastructure ──────────────────────────────────────
+
+    /// Delegate component that returns errors from create_endpoint or create_consumer.
+    /// Configurable: which error to return, and after how many successful calls
+    /// to stop failing.
+    struct ErrorDelegateComponent {
+        create_endpoint_calls: Arc<AtomicUsize>,
+        create_consumer_calls: Arc<AtomicUsize>,
+        endpoint_error: Option<CamelError>,
+        consumer_error_after: usize, // fail start() this many times, then succeed
+        consumer_error: Option<CamelError>,
+    }
+
+    impl Component for ErrorDelegateComponent {
+        fn scheme(&self) -> &str {
+            "errdelegate"
+        }
+
+        fn create_endpoint(
+            &self,
+            _uri: &str,
+            _ctx: &dyn ComponentContext,
+        ) -> Result<Box<dyn Endpoint>, CamelError> {
+            self.create_endpoint_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(ref err) = self.endpoint_error {
+                return Err(err.clone());
+            }
+            Ok(Box::new(ErrorDelegateEndpoint {
+                create_consumer_calls: Arc::clone(&self.create_consumer_calls),
+                consumer_error_after: self.consumer_error_after,
+                consumer_error: self.consumer_error.clone(),
+            }))
+        }
+    }
+
+    struct ErrorDelegateEndpoint {
+        create_consumer_calls: Arc<AtomicUsize>,
+        consumer_error_after: usize,
+        consumer_error: Option<CamelError>,
+    }
+
+    impl Endpoint for ErrorDelegateEndpoint {
+        fn uri(&self) -> &str {
+            "errdelegate:delegate"
+        }
+
+        fn create_consumer(&self) -> Result<Box<dyn Consumer>, CamelError> {
+            let call_idx = self.create_consumer_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call_idx <= self.consumer_error_after {
+                return Err(self
+                    .consumer_error
+                    .clone()
+                    .unwrap_or_else(|| CamelError::ProcessorError("default error".to_string())));
+            }
+            Ok(Box::new(SuccessDelegateConsumer))
+        }
+
+        fn create_producer(&self, _ctx: &ProducerContext) -> Result<BoxProcessor, CamelError> {
+            Err(CamelError::EndpointCreationFailed("not used".to_string()))
+        }
+    }
+
+    /// A delegate consumer that starts, sends one message, then cancels.
+    struct SuccessDelegateConsumer;
+
+    #[async_trait]
+    impl Consumer for SuccessDelegateConsumer {
+        async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
+            context.send(Exchange::new(Message::new("ok"))).await?;
+            context.cancelled().await;
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), CamelError> {
+            Ok(())
+        }
+    }
+
+    fn build_error_delegate_master(
+        platform_service: Arc<dyn PlatformService>,
+        create_endpoint_calls: Arc<AtomicUsize>,
+        create_consumer_calls: Arc<AtomicUsize>,
+        endpoint_error: Option<CamelError>,
+        consumer_error_after: usize,
+        consumer_error: Option<CamelError>,
+        max_attempts: u32,
+    ) -> MasterConsumer {
+        let reconnect = NetworkRetryPolicy {
+            max_attempts,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        };
+        MasterConsumer::new(
+            "lock-err".to_string(),
+            "errdelegate:delegate".to_string(),
+            Arc::new(ErrorDelegateComponent {
+                create_endpoint_calls,
+                create_consumer_calls,
+                endpoint_error,
+                consumer_error_after,
+                consumer_error,
+            }),
+            Arc::new(NoOpMetrics),
+            platform_service,
+            Duration::from_millis(500),
+            reconnect,
+        )
+    }
+
+    #[tokio::test]
+    async fn delegate_permanent_error_terminates_master_without_retry() {
+        let leadership = Arc::new(FakeLeadershipService::new(Some(
+            LeadershipEvent::StartedLeading,
+        )));
+        let platform_service = Arc::new(FakePlatformService::new(leadership));
+        let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+        let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+
+        // Delegate that fails create_endpoint with a permanent error.
+        // Use max_attempts=0 (unlimited) — without classification, this
+        // would hang forever. With classification, the task must terminate
+        // in milliseconds via fail-fast.
+        let mut master = build_error_delegate_master(
+            platform_service,
+            Arc::clone(&create_endpoint_calls),
+            Arc::clone(&create_consumer_calls),
+            Some(CamelError::Config("permanent delegate error".to_string())),
+            0, // consumer never succeeds (we never get there)
+            None,
+            0, // max_attempts=0 → unlimited — classification is the terminator
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel.clone());
+
+        master.start(ctx).await.unwrap();
+
+        // Poll for task completion with a short timeout. A permanent error
+        // must terminate the task in milliseconds via fail-fast classification,
+        // NOT via retry-budget exhaustion.
+        let task_finished = timeout(Duration::from_millis(500), async {
+            loop {
+                if master
+                    .leadership_task
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            task_finished.is_ok(),
+            "master should terminate within 500ms via fail-fast classification"
+        );
+
+        // Verify single invocation (true fail-fast, not budget exhaustion).
+        assert_eq!(
+            create_endpoint_calls.load(Ordering::SeqCst),
+            1,
+            "permanent error must terminate master after exactly 1 invocation"
+        );
+
+        // stop() propagates the delegate error; that's correct behavior
+        let _ = master.stop().await;
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn delegate_transient_error_retries_and_eventually_succeeds() {
+        let leadership = Arc::new(FakeLeadershipService::new(Some(
+            LeadershipEvent::StartedLeading,
+        )));
+        let platform_service = Arc::new(FakePlatformService::new(leadership));
+        let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+        let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+
+        // Delegate that fails create_consumer with transient error for
+        // the first 2 attempts, then succeeds on the 3rd.
+        let mut master = build_error_delegate_master(
+            platform_service,
+            Arc::clone(&create_endpoint_calls),
+            Arc::clone(&create_consumer_calls),
+            None, // endpoint always succeeds
+            2,    // fail first 2 create_consumer calls
+            Some(CamelError::Io("connection refused".to_string())),
+            5, // max_attempts
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, cancel.clone());
+
+        master.start(ctx).await.unwrap();
+
+        // Wait for the delegate to eventually succeed.
+        let msg = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.exchange.input.body.as_text(), Some("ok"));
+
+        // Endpoint created 3 times (initial event + 2 retry ticks), consumer
+        // created 3 times (2 failures + 1 success).
+        assert_eq!(create_endpoint_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(create_consumer_calls.load(Ordering::SeqCst), 3);
+
+        cancel.cancel();
+        master.stop().await.unwrap();
+    }
+
+    // ── Existing regression tests (rc-f9k) ──────────────────────────────
+
     #[tokio::test]
     async fn stops_retrying_delegate_start_after_max_attempts() {
         let leadership = Arc::new(FakeLeadershipService::new(Some(
@@ -1107,7 +1392,10 @@ mod tests {
             Arc::new(NoOpMetrics),
             platform_service,
             Duration::from_millis(500),
-            Some(1),
+            NetworkRetryPolicy {
+                max_attempts: 1,
+                ..NetworkRetryPolicy::default()
+            },
         );
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
@@ -1117,10 +1405,14 @@ mod tests {
         master.start(ctx).await.unwrap();
         sleep(Duration::from_millis(750)).await;
 
-        assert_eq!(create_endpoint_calls.load(Ordering::SeqCst), 2);
+        // With error classification (rc-i1z), EndpointCreationFailed is
+        // permanent → fail-fast after exactly 1 invocation. Previously
+        // (pre-rc-i1z) this would have been 2 calls (initial + retry via
+        // budget exhaustion).
+        assert_eq!(create_endpoint_calls.load(Ordering::SeqCst), 1);
 
         cancel.cancel();
-        master.stop().await.unwrap();
+        let _ = master.stop().await;
     }
 
     /// Regression test for MST-002: stop() must abort the leadership JoinHandle
@@ -1193,7 +1485,10 @@ mod tests {
             Arc::new(NoOpMetrics),
             platform_service,
             Duration::from_millis(500), // drain_timeout
-            Some(30),
+            NetworkRetryPolicy {
+                max_attempts: 30,
+                ..NetworkRetryPolicy::default()
+            },
         );
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
@@ -1287,7 +1582,10 @@ mod tests {
             Arc::new(NoOpMetrics),
             platform_service,
             Duration::from_millis(500),
-            Some(30),
+            NetworkRetryPolicy {
+                max_attempts: 30,
+                ..NetworkRetryPolicy::default()
+            },
         );
 
         let (tx, _rx) = tokio::sync::mpsc::channel(16);

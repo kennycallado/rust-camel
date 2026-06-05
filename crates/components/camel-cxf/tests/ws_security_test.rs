@@ -3,7 +3,7 @@ mod support;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use camel_component_api::{Body, Exchange, Message, Value};
+use camel_component_api::{Body, Exchange, Message, NetworkRetryPolicy, Value};
 use camel_component_cxf::{
     BridgeSlot, CxfBridgePool, config::CxfPoolConfig, producer::CxfProducer,
 };
@@ -45,6 +45,7 @@ async fn test_producer_with_profile_invokes_successfully() {
         bridge_cache_dir: None,
         version: "0.1.0".to_string(),
         bind_address: None,
+        reconnect: NetworkRetryPolicy::default(),
     };
     let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("pool should build"));
     let channel = camel_bridge::channel::connect_channel(port)
@@ -95,6 +96,7 @@ async fn test_producer_handles_empty_security_profile() {
         bridge_cache_dir: None,
         version: "0.1.0".to_string(),
         bind_address: None,
+        reconnect: NetworkRetryPolicy::default(),
     };
     let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("pool should build"));
     let channel = camel_bridge::channel::connect_channel(port)

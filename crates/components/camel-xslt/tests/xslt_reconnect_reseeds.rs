@@ -72,7 +72,7 @@ async fn reconnect_reseeds_registered_stylesheets() {
     ));
 
     let mut cfg = XsltComponentConfig::default();
-    cfg.max_retries = 3;
+    cfg.reconnect.max_attempts = 4; // 3 retries after initial = 4 total calls
     let component = XsltComponent::with_client_for_testing(cfg, state_tx, state_rx, client.clone());
 
     let file = tempfile::NamedTempFile::new().unwrap();

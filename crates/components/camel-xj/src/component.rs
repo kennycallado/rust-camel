@@ -2,7 +2,6 @@ use crate::config::{Direction, XjEndpointConfig};
 use crate::endpoint::XjEndpoint;
 use crate::error::XjError;
 use crate::identity::{JSON_TO_XML_XSLT, XML_TO_JSON_XSLT};
-use camel_api::{BackoffConfig, BackoffState};
 use camel_bridge::{
     channel::connect_channel,
     download::ensure_binary_for_spec,
@@ -10,6 +9,7 @@ use camel_bridge::{
     reconnect::BridgeReconnectHandler,
     spec::XML_BRIDGE,
 };
+use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::{CamelError, Component, ComponentContext, Endpoint};
 use camel_xslt::{BridgeState, XsltBridgeClient};
 use std::future::Future;
@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, watch};
 use tonic::Code;
-use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct XjComponentConfig {
@@ -136,14 +135,24 @@ impl XjBridgeRuntime {
     ) -> Result<Vec<u8>, XjError> {
         self.ensure_bridge_started(client).await?;
 
-        let max_attempts = retry_count.saturating_add(1);
-        let mut attempt = 1u32;
-        let mut backoff = BackoffState::new(BackoffConfig {
+        let policy = NetworkRetryPolicy {
+            enabled: true,
+            max_attempts: retry_count.saturating_add(1),
             initial_delay: Duration::from_millis(retry_delay_ms),
             multiplier: 2.0,
             max_delay: Duration::from_secs(30),
-        });
+            jitter_factor: 0.0,
+        };
+        let mut attempt: u32 = 0;
+        // Manual retry loop (not retry_async / retry_async_cancelable)
+        // because between attempts self.restart_bridge(client).await must
+        // tear down and recreate the gRPC channel. This is an async
+        // lifecycle side effect, not just mutable state. The HRTB variant
+        // (bd rc-cvq) would only solve &mut borrow re-entrancy, not async
+        // side-effect orchestration. See camel-redis consumer.rs for a
+        // similar polling-loop justification.
         loop {
+            attempt += 1;
             match client
                 .transform(
                     &stylesheet_id.to_string(),
@@ -152,18 +161,24 @@ impl XjBridgeRuntime {
                     None,
                 )
                 .await
+                .map_err(XjError::from)
             {
                 Ok(result) => return Ok(result),
-                Err(err) => {
-                    let mapped = XjError::from(err);
-                    if !Self::is_transient_error(&mapped) || attempt >= max_attempts {
-                        return Err(mapped);
-                    }
-                    warn!("xj: retry attempt {attempt}/{max_attempts} after: {mapped}");
+                Err(mapped)
+                    if Self::is_transient_error(&mapped) && policy.should_retry(attempt) =>
+                {
+                    let delay = policy.delay_for(attempt - 1);
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = policy.max_attempts,
+                        delay_ms = delay.as_millis(),
+                        error = %mapped,
+                        "XJ transform transient error, retrying"
+                    );
                     self.restart_bridge(client).await?;
-                    tokio::time::sleep(backoff.next_delay()).await;
-                    attempt = attempt.saturating_add(1);
+                    tokio::time::sleep(delay).await;
                 }
+                Err(mapped) => return Err(mapped),
             }
         }
     }
@@ -472,6 +487,48 @@ mod tests {
         assert!(
             !cfg.bridge_cache_dir.ends_with("jms-bridge"),
             "XJ must not use JMS bridge cache dir"
+        );
+    }
+
+    /// Regression: max_attempts=N → exactly N invocations (caught OpenSearch off-by-one 1f5c4c2a).
+    /// Replicates the exact retry loop from `transform_with_retry_configured` (component.rs:146-176):
+    ///   attempt starts at 0, incremented at top, should_retry(attempt), delay_for(attempt-1)
+    #[tokio::test]
+    async fn retry_loop_invokes_operation_exactly_max_attempts_times() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        };
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = Arc::clone(&calls);
+
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            let op_result: Result<(), ()> = Err(());
+            match op_result {
+                Ok(_) => unreachable!(),
+                Err(_) if policy.should_retry(attempt) => {
+                    let delay = policy.delay_for(attempt - 1);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(_) => break,
+            }
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "max_attempts=3 must yield exactly 3 invocations"
         );
     }
 }

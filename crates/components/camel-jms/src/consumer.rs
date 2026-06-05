@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use camel_api::{BackoffConfig, BackoffState};
 use camel_component_api::{
     Body, CamelError, ConcurrencyModel, Consumer, ConsumerContext, Exchange, Message,
+    NetworkRetryPolicy,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -23,7 +23,7 @@ pub struct JmsConsumer {
     pool: Arc<JmsBridgePool>,
     broker_name: String,
     endpoint_config: JmsEndpointConfig,
-    reconnect_interval_ms: u64,
+    reconnect: NetworkRetryPolicy,
     cancel_token: Option<CancellationToken>,
     task_handles: Vec<JoinHandle<Result<(), CamelError>>>,
 }
@@ -33,13 +33,13 @@ impl JmsConsumer {
         pool: Arc<JmsBridgePool>,
         broker_name: String,
         endpoint_config: JmsEndpointConfig,
-        reconnect_interval_ms: u64,
+        reconnect: NetworkRetryPolicy,
     ) -> Self {
         Self {
             pool,
             broker_name,
             endpoint_config,
-            reconnect_interval_ms,
+            reconnect,
             cancel_token: None,
             task_handles: Vec::new(),
         }
@@ -117,7 +117,7 @@ async fn consumer_loop(
     pool: &JmsBridgePool,
     broker_name: &str,
     endpoint_config: &JmsEndpointConfig,
-    reconnect_interval_ms: u64,
+    reconnect: &NetworkRetryPolicy,
     cancel: CancellationToken,
     ctx: &ConsumerContext,
     idx: u32,
@@ -126,16 +126,24 @@ async fn consumer_loop(
     let map_headers = endpoint_config.map_jms_headers;
     let selector = endpoint_config.message_selector.clone();
     let mut consecutive_transport_failures: u32 = 0;
-    let mut backoff = BackoffState::new(BackoffConfig {
-        initial_delay: Duration::from_millis(reconnect_interval_ms),
-        multiplier: 2.0,
-        max_delay: Duration::from_secs(30),
-    });
+    let mut attempt: u32 = 0;
 
     // JMS-010: message selector — pass to bridge subscription when available
     // TODO(JMS-010): pass selector to bridge subscription
     let _selector = selector;
 
+    // Manual retry loops (not retry_async / retry_async_cancelable) — three
+    // retry sites nested inside this outer loop:
+    // - Retries are embedded in `tokio::select!` with cancellation tokens
+    //   (cancel.cancelled(), ctx.cancelled()); retry_async_cancelable
+    //   honours a single CancellationToken but does not interleave
+    //   cancellation checks between every operation step.
+    // - Inter-attempt side effects involve async lifecycle orchestration:
+    //   transport failure counting, pool.restart_slot() for channel
+    //   refresh, attempt counter shared across channel-await, subscribe,
+    //   and stream-error retry sites. These are async operations, not
+    //   just mutable borrows. The HRTB variant (bd rc-cvq) would only
+    //   solve &mut state, not async side-effect orchestration.
     loop {
         let channel = tokio::select! {
             _ = cancel.cancelled() => {
@@ -167,10 +175,22 @@ async fn consumer_loop(
                             error = %e,
                             "JMS consumer waiting for ready bridge failed"
                         );
+                        attempt += 1;
+                        if !reconnect.should_retry(attempt) {
+                            warn!(
+                                broker = %broker_name,
+                                destination = %destination,
+                                consumer_idx = idx,
+                                attempts = attempt,
+                                "JMS consumer max reconnect attempts reached; terminating"
+                            );
+                            return;
+                        }
+                        let delay = reconnect.delay_for(attempt - 1);
                         tokio::select! {
                             _ = cancel.cancelled() => break,
                             _ = ctx.cancelled() => break,
-                            _ = tokio::time::sleep(backoff.next_delay()) => {}
+                            _ = tokio::time::sleep(delay) => {}
                         }
                         continue;
                     }
@@ -192,7 +212,7 @@ async fn consumer_loop(
             }) {
             Ok(resp) => {
                 consecutive_transport_failures = 0;
-                backoff.reset();
+                attempt = 0;
                 info!(
                     broker = %broker_name,
                     destination = %destination,
@@ -234,10 +254,22 @@ async fn consumer_loop(
                     error = %e,
                     "JMS subscribe failed; retrying"
                 );
+                attempt += 1;
+                if !reconnect.should_retry(attempt) {
+                    warn!(
+                        broker = %broker_name,
+                        destination = %destination,
+                        consumer_idx = idx,
+                        attempts = attempt,
+                        "JMS consumer max subscribe attempts reached; terminating"
+                    );
+                    return;
+                }
+                let delay = reconnect.delay_for(attempt - 1);
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = ctx.cancelled() => break,
-                    _ = tokio::time::sleep(backoff.next_delay()) => {}
+                    _ = tokio::time::sleep(delay) => {}
                 }
                 continue;
             }
@@ -267,7 +299,7 @@ async fn consumer_loop(
                     match msg {
                         Ok(Some(jms_msg)) => {
                             consecutive_transport_failures = 0;
-                            backoff.reset();
+                            attempt = 0;
                             let exchange = build_exchange(&jms_msg, map_headers);
                             if let Err(e) = ctx.send(exchange).await {
                                 error!(
@@ -331,10 +363,22 @@ async fn consumer_loop(
             }
         }
 
+        attempt += 1;
+        if !reconnect.should_retry(attempt) {
+            warn!(
+                broker = %broker_name,
+                destination = %destination,
+                consumer_idx = idx,
+                attempts = attempt,
+                "JMS consumer max reconnect attempts reached; terminating"
+            );
+            break;
+        }
+        let delay = reconnect.delay_for(attempt - 1);
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = ctx.cancelled() => break,
-            _ = tokio::time::sleep(backoff.next_delay()) => {}
+            _ = tokio::time::sleep(delay) => {}
         }
     }
 }
@@ -385,7 +429,7 @@ impl Consumer for JmsConsumer {
         let pool = Arc::clone(&self.pool);
         let broker_name = self.broker_name.clone();
         let endpoint_config = self.endpoint_config.clone();
-        let reconnect_interval_ms = self.reconnect_interval_ms;
+        let reconnect = self.reconnect.clone();
         let cancel = CancellationToken::new();
         self.cancel_token = Some(cancel.clone());
 
@@ -399,13 +443,14 @@ impl Consumer for JmsConsumer {
                 let endpoint_config = endpoint_config.clone();
                 let cancel = cancel.clone();
                 let ctx = ctx.clone();
+                let reconnect = reconnect.clone();
 
                 tokio::spawn(async move {
                     consumer_loop(
                         &pool,
                         &broker_name,
                         &endpoint_config,
-                        reconnect_interval_ms,
+                        &reconnect,
                         cancel,
                         &ctx,
                         idx,
@@ -457,7 +502,7 @@ impl Consumer for JmsConsumer {
 mod tests {
     use super::*;
     use crate::BrokerType;
-    use crate::config::JmsPoolConfig;
+    use crate::config::{JmsPoolConfig, jms_reconnect_default};
     use tokio::sync::mpsc;
 
     #[test]
@@ -538,7 +583,12 @@ mod tests {
             .unwrap(),
         );
         let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
-        let mut consumer = JmsConsumer::new(pool, "default".to_string(), endpoint_cfg, 50);
+        let mut consumer = JmsConsumer::new(
+            pool,
+            "default".to_string(),
+            endpoint_cfg,
+            jms_reconnect_default(),
+        );
         assert!(consumer.stop().await.is_ok());
     }
 
@@ -554,7 +604,12 @@ mod tests {
             .unwrap(),
         );
         let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
-        let mut consumer = JmsConsumer::new(pool, "default".to_string(), endpoint_cfg, 50);
+        let mut consumer = JmsConsumer::new(
+            pool,
+            "default".to_string(),
+            endpoint_cfg,
+            jms_reconnect_default(),
+        );
 
         // Simulate an already-started state by setting a cancel token directly.
         consumer.cancel_token = Some(CancellationToken::new());
@@ -583,7 +638,12 @@ mod tests {
             .unwrap(),
         );
         let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
-        let mut consumer = JmsConsumer::new(pool, "default".to_string(), endpoint_cfg, 50);
+        let mut consumer = JmsConsumer::new(
+            pool,
+            "default".to_string(),
+            endpoint_cfg,
+            jms_reconnect_default(),
+        );
 
         // Simulate a started consumer with a task that respects cancellation.
         let cancel = CancellationToken::new();
@@ -619,7 +679,12 @@ mod tests {
             .unwrap(),
         );
         let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
-        let mut consumer = JmsConsumer::new(pool, "default".to_string(), endpoint_cfg, 50);
+        let mut consumer = JmsConsumer::new(
+            pool,
+            "default".to_string(),
+            endpoint_cfg,
+            jms_reconnect_default(),
+        );
 
         // Manually set a task handle that will panic.
         consumer.task_handles = vec![tokio::spawn(async {
@@ -679,7 +744,12 @@ mod tests {
             .unwrap(),
         );
         let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
-        let mut consumer = JmsConsumer::new(pool, "default".to_string(), endpoint_cfg, 50);
+        let mut consumer = JmsConsumer::new(
+            pool,
+            "default".to_string(),
+            endpoint_cfg,
+            jms_reconnect_default(),
+        );
 
         let (route_tx, _route_rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(route_tx, CancellationToken::new());
@@ -703,5 +773,53 @@ mod tests {
 
         // Cleanup: stop the health monitors etc.
         let _ = consumer.stop().await;
+    }
+
+    /// Regression: max_attempts=N → exactly N invocations (caught OpenSearch off-by-one 1f5c4c2a).
+    /// Replicates the exact retry loop from `consumer_loop` (consumer.rs:166-177):
+    ///   attempt starts at 0, incremented on error, !should_retry(attempt), delay_for(attempt-1)
+    #[tokio::test]
+    async fn retry_loop_invokes_operation_exactly_max_attempts_times() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        };
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let mut attempt: u32 = 0;
+
+        loop {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            let result: Result<(), ()> = Err(());
+            match result {
+                Ok(_) => {
+                    attempt = 0;
+                    break;
+                }
+                Err(_) => {
+                    attempt += 1;
+                    if !policy.should_retry(attempt) {
+                        break;
+                    }
+                    let delay = policy.delay_for(attempt - 1);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+            }
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "max_attempts=3 must yield exactly 3 invocations"
+        );
     }
 }

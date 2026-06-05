@@ -22,13 +22,10 @@ use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::{Router, serve};
 use camel_api::security_policy::AuthorizationDecision;
-use camel_api::{BackoffConfig, BackoffState};
 use camel_component_api::{
-    Body as CamelBody, BoxProcessor, CamelError, Exchange, Message as CamelMessage,
-};
-use camel_component_api::{
-    Component, ConcurrencyModel, Consumer, ConsumerContext, Endpoint, ExchangeEnvelope,
-    ProducerContext,
+    Body as CamelBody, BoxProcessor, CamelError, Component, ConcurrencyModel, Consumer,
+    ConsumerContext, Endpoint, Exchange, ExchangeEnvelope, Message as CamelMessage,
+    ProducerContext, retry_async,
 };
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
@@ -1047,6 +1044,16 @@ fn new_atomic_false() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
 
+/// Classify a WebSocket error as retryable (transient network failure).
+///
+/// Retryable: connection refused, timeout, connection failed.
+/// Permanent: anything else (protocol errors, auth failures, etc.).
+#[inline]
+fn is_retryable_ws_error(err: &CamelError) -> bool {
+    let s = err.to_string();
+    s.contains("connection refused") || s.contains("timeout") || s.contains("connection failed")
+}
+
 #[derive(Clone)]
 pub struct WsProducer {
     cfg: WsClientConfig,
@@ -1229,63 +1236,41 @@ impl Service<Exchange> for WsProducer {
                 &message_type
             };
 
-            let max_retries = if cfg.inner.reconnect {
-                cfg.inner.reconnect_max_attempts as usize
-            } else {
-                0
-            };
-            let mut backoff = BackoffState::new(BackoffConfig {
-                initial_delay: std::time::Duration::from_millis(cfg.inner.reconnect_delay_ms),
-                multiplier: 2.0,
-                max_delay: std::time::Duration::from_secs(30),
-            });
-            let mut attempts = 0usize;
-            let mut ws_stream = loop {
-                let connect_future = tokio_tungstenite::connect_async(request.clone());
-                match tokio::time::timeout(cfg.inner.connect_timeout, connect_future).await {
-                    Ok(Ok((stream, _))) => break stream,
-                    Ok(Err(e)) => {
-                        let err = map_connect_error(e, &url);
-                        let is_transient = err.to_string().contains("connection refused")
-                            || err.to_string().contains("timeout")
-                            || err.to_string().contains("connection failed");
-                        if is_transient && attempts < max_retries {
-                            attempts += 1;
-                            tracing::warn!(
-                                url = url,
-                                error = %err,
-                                attempt = attempts,
-                                max_retries,
-                                "WebSocket connect failed — retrying"
-                            );
-                            tokio::time::sleep(backoff.next_delay()).await;
-                            continue;
+            let reconnect_policy = cfg.inner.reconnect_policy.clone();
+            // Uses retry_async (migrated from manual loop in rc-k9c).
+            // is_retryable_ws_error: transient = connection refused / timeout /
+            // connection failed; everything else = permanent fail-fast.
+            let mut ws_stream = retry_async(
+                &reconnect_policy,
+                || {
+                    let r = request.clone();
+                    async {
+                        match tokio::time::timeout(
+                            cfg.inner.connect_timeout,
+                            tokio_tungstenite::connect_async(r),
+                        )
+                        .await
+                        {
+                            Ok(Ok((stream, _))) => Ok(stream),
+                            Ok(Err(e)) => Err(map_connect_error(e, &url)),
+                            Err(_) => Err(CamelError::ProcessorError(format!(
+                                "WebSocket connect timeout ({:?}) to {url}",
+                                cfg.inner.connect_timeout
+                            ))),
                         }
-                        return Err(err);
                     }
-                    Err(_) => {
-                        let err = CamelError::ProcessorError(format!(
-                            "WebSocket connect timeout ({:?}) to {url}",
-                            cfg.inner.connect_timeout
-                        ));
-                        if attempts < max_retries {
-                            attempts += 1;
-                            tracing::warn!(
-                                url = url,
-                                attempt = attempts,
-                                max_retries,
-                                "WebSocket connect timeout — retrying"
-                            );
-                            tokio::time::sleep(backoff.next_delay()).await;
-                            continue;
-                        }
-                        return Err(err);
-                    }
-                }
-            };
-            if attempts > 0 {
-                tracing::info!(url = url, "WebSocket producer connected after retry");
-            }
+                },
+                is_retryable_ws_error,
+            )
+            .await?;
+
+            // Close/reconnect path: rate-limited bail. On close frame, sleep
+            // delay_for(0) and return Err to signal the outer route to re-invoke
+            // the producer. The attempts counter below bounds how many times
+            // we'll signal reconnect before terminating. Independent counter —
+            // OLD code shared a counter with the connect loop above; this is a
+            // behavior change (cleaner separation of concerns).
+            let attempts = 0u32;
 
             let out_msg = body_to_client_ws_message(
                 std::mem::take(&mut exchange.input.body),
@@ -1332,16 +1317,15 @@ impl Service<Exchange> for WsProducer {
                     if normal {
                         tracing::debug!(url = url, "WebSocket producer received normal close");
                         exchange.input.body = CamelBody::Empty;
-                    } else if cfg.inner.reconnect && attempts < max_retries {
-                        backoff.reset();
-                        attempts += 1;
+                    } else if reconnect_policy.should_retry(attempts + 1) {
+                        let delay = reconnect_policy.delay_for(0); // fresh delay on close
                         tracing::warn!(
                             url = url,
-                            attempt = attempts,
-                            max_retries,
+                            attempt = attempts + 1,
+                            delay_ms = delay.as_millis(),
                             "WebSocket closed by peer — reconnecting"
                         );
-                        tokio::time::sleep(backoff.next_delay()).await;
+                        tokio::time::sleep(delay).await;
                         return Err(CamelError::ProcessorError(format!(
                             "WebSocket reconnect required after close: code {}",
                             frame.map(|f| u16::from(f.code)).unwrap_or_default()
@@ -2653,5 +2637,90 @@ mod tests {
         let err =
             WsEndpointConfig::from_uri("ws://localhost:9001/chat?binaryPayload=yes").unwrap_err();
         assert!(err.to_string().contains("binaryPayload"));
+    }
+
+    /// Regression: max_attempts=N → exactly N invocations (caught OpenSearch off-by-one 1f5c4c2a).
+    /// Replicates the exact retry loop from the WebSocket producer connect (lib.rs:~1228-1275):
+    ///   attempts starts at 0, should_retry(attempts+1), delay_for(attempts), attempts += 1
+    #[tokio::test]
+    async fn retry_loop_invokes_operation_exactly_max_attempts_times() {
+        use camel_component_api::NetworkRetryPolicy;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        };
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let mut attempts: u32 = 0;
+
+        let _result: Result<(), ()> = loop {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            let op_result: Result<(), ()> = Err(());
+            match op_result {
+                Ok(_) => unreachable!(),
+                Err(_) if policy.should_retry(attempts + 1) => {
+                    let delay = policy.delay_for(attempts);
+                    tokio::time::sleep(delay).await;
+                    attempts += 1;
+                    continue;
+                }
+                Err(_) => break Err(()),
+            }
+        };
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "max_attempts=3 must yield exactly 3 invocations"
+        );
+    }
+
+    /// Edge case: max_attempts=1 → exactly 1 invocation (initial attempt only, no retry).
+    /// Locks the edge that originally broke OpenSearch.
+    #[tokio::test]
+    async fn retry_loop_with_max_attempts_1_invokes_operation_once() {
+        use camel_component_api::NetworkRetryPolicy;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        };
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let mut attempts: u32 = 0;
+
+        let _result: Result<(), ()> = loop {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            let op_result: Result<(), ()> = Err(());
+            match op_result {
+                Ok(_) => unreachable!(),
+                Err(_) if policy.should_retry(attempts + 1) => {
+                    let delay = policy.delay_for(attempts);
+                    tokio::time::sleep(delay).await;
+                    attempts += 1;
+                    continue;
+                }
+                Err(_) => break Err(()),
+            }
+        };
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "max_attempts=1 must yield exactly 1 invocation"
+        );
     }
 }

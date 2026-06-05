@@ -1,8 +1,10 @@
 use camel_component_api::CamelError;
+use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::parse_uri;
 use std::convert::TryFrom;
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 // --- OpenSearchOperation enum ---
 
@@ -103,6 +105,9 @@ pub struct OpenSearchConfig {
     pub size: Option<u32>,
     #[serde(default)]
     pub from: Option<u32>,
+    /// Retry policy for transient HTTP failures (5xx, network errors).
+    #[serde(default)]
+    pub retry: NetworkRetryPolicy,
 }
 
 impl OpenSearchConfig {
@@ -163,6 +168,11 @@ impl OpenSearchConfig {
         self.from = Some(v);
         self
     }
+
+    pub fn with_retry(mut self, v: NetworkRetryPolicy) -> Self {
+        self.retry = v;
+        self
+    }
 }
 
 impl Default for OpenSearchConfig {
@@ -178,6 +188,7 @@ impl Default for OpenSearchConfig {
             max_bulk_bytes: None,
             size: None,
             from: None,
+            retry: NetworkRetryPolicy::default(),
         }
     }
 }
@@ -195,6 +206,7 @@ impl fmt::Debug for OpenSearchConfig {
             .field("max_bulk_bytes", &self.max_bulk_bytes)
             .field("size", &self.size)
             .field("from", &self.from)
+            .field("retry", &self.retry)
             .finish()
     }
 }
@@ -259,6 +271,14 @@ pub struct OpenSearchEndpointConfig {
 
     /// Search result offset (pagination start).
     pub from: Option<u32>,
+
+    /// Retry policy for transient HTTP failures (5xx, network errors).
+    pub retry: NetworkRetryPolicy,
+
+    /// Whether `retry` was explicitly set via URI params. Used by
+    /// [`merge_with_global`] to decide whether URI values win over
+    /// the global config. Internal tracking flag, not serialized.
+    retry_set_from_uri: bool,
 }
 
 impl fmt::Debug for OpenSearchEndpointConfig {
@@ -275,6 +295,7 @@ impl fmt::Debug for OpenSearchEndpointConfig {
             .field("max_bulk_bytes", &self.max_bulk_bytes)
             .field("size", &self.size)
             .field("from", &self.from)
+            .field("retry", &self.retry)
             .finish()
     }
 }
@@ -401,6 +422,46 @@ impl OpenSearchEndpointConfig {
             })
             .transpose()?;
 
+        // Parse retry policy from URI params
+        let mut retry = NetworkRetryPolicy::default();
+        let mut retry_set_from_uri = false;
+        if let Some(raw) = parts.params.get("retryEnabled") {
+            retry.enabled = raw.parse::<bool>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryEnabled must be a boolean, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = parts.params.get("retryMaxAttempts") {
+            retry.max_attempts = raw.parse::<u32>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryMaxAttempts must be a u32, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = parts.params.get("retryInitialDelayMs") {
+            retry.initial_delay = Duration::from_millis(raw.parse::<u64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryInitialDelayMs must be a u64, got '{raw}'"))
+            })?);
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = parts.params.get("retryMultiplier") {
+            retry.multiplier = raw.parse::<f64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryMultiplier must be a f64, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = parts.params.get("retryMaxDelayMs") {
+            retry.max_delay = Duration::from_millis(raw.parse::<u64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryMaxDelayMs must be a u64, got '{raw}'"))
+            })?);
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = parts.params.get("retryJitter") {
+            retry.jitter_factor = raw.parse::<f64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryJitter must be a f64, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+
         Ok(Self {
             host,
             port,
@@ -413,6 +474,8 @@ impl OpenSearchEndpointConfig {
             max_bulk_bytes,
             size,
             from,
+            retry,
+            retry_set_from_uri,
         })
     }
 
@@ -445,6 +508,12 @@ impl OpenSearchEndpointConfig {
             max_bulk_bytes: self.max_bulk_bytes.or(global.max_bulk_bytes),
             size: self.size.or(global.size),
             from: self.from.or(global.from),
+            retry: if self.retry_set_from_uri {
+                self.retry.clone()
+            } else {
+                global.retry.clone()
+            },
+            retry_set_from_uri: self.retry_set_from_uri,
         }
     }
 
@@ -751,6 +820,8 @@ mod tests {
             max_bulk_bytes: None,
             size: None,
             from: None,
+            retry: NetworkRetryPolicy::default(),
+            retry_set_from_uri: false,
         };
 
         let global = OpenSearchConfig::default().with_default_operation(OpenSearchOperation::INDEX);
@@ -947,5 +1018,92 @@ mod tests {
             "expected unknown operation error, got: {}",
             err
         );
+    }
+
+    // ── OS-013: NetworkRetryPolicy config ──────────────────────────────────
+
+    #[test]
+    fn retry_policy_parses_from_uri() {
+        let cfg = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/index?retryMaxAttempts=3&retryInitialDelayMs=500",
+        )
+        .expect("parse");
+        assert_eq!(cfg.retry.max_attempts, 3);
+        assert_eq!(
+            cfg.retry.initial_delay,
+            std::time::Duration::from_millis(500)
+        );
+        assert!(cfg.retry.enabled);
+    }
+
+    #[test]
+    fn retry_policy_defaults_when_uri_has_no_retry_params() {
+        let cfg =
+            OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/index").expect("parse");
+        assert!(cfg.retry.enabled);
+    }
+
+    #[test]
+    fn retry_policy_overrides_via_global_config() {
+        let ep =
+            OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/index").expect("parse");
+        let global = OpenSearchConfig::default().with_retry(NetworkRetryPolicy {
+            max_attempts: 5,
+            initial_delay: std::time::Duration::from_millis(2000),
+            ..NetworkRetryPolicy::default()
+        });
+        let merged = ep.merge_with_global(&global);
+        assert_eq!(merged.retry.max_attempts, 5);
+        assert_eq!(
+            merged.retry.initial_delay,
+            std::time::Duration::from_millis(2000)
+        );
+    }
+
+    #[test]
+    fn retry_policy_parse_full_uri_params() {
+        let cfg = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/index?retryEnabled=false&retryMaxAttempts=7&retryInitialDelayMs=1000&retryMultiplier=3.0&retryMaxDelayMs=60000&retryJitter=0.5",
+        )
+        .expect("parse");
+        assert!(!cfg.retry.enabled);
+        assert_eq!(cfg.retry.max_attempts, 7);
+        assert_eq!(
+            cfg.retry.initial_delay,
+            std::time::Duration::from_millis(1000)
+        );
+        assert!((cfg.retry.multiplier - 3.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.retry.max_delay, std::time::Duration::from_millis(60000));
+        assert!((cfg.retry.jitter_factor - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn global_config_has_retry_default() {
+        let cfg = OpenSearchConfig::default();
+        assert!(cfg.retry.enabled);
+    }
+
+    #[test]
+    fn retry_policy_from_uri_survives_merge_with_global_default() {
+        let ep = OpenSearchEndpointConfig::from_uri(
+            "opensearch://localhost:9200/i?retryMaxAttempts=10&retryInitialDelayMs=500",
+        )
+        .expect("parse");
+        let merged = ep.merge_with_global(&OpenSearchConfig::default());
+        assert_eq!(merged.retry.max_attempts, 10);
+        assert_eq!(
+            merged.retry.initial_delay,
+            std::time::Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn retry_policy_falls_back_to_global_when_uri_has_no_retry_params() {
+        let mut global = OpenSearchConfig::default();
+        global.retry.max_attempts = 7;
+        let ep =
+            OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/i").expect("parse");
+        let merged = ep.merge_with_global(&global);
+        assert_eq!(merged.retry.max_attempts, 7);
     }
 }

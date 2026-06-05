@@ -1,4 +1,5 @@
 use camel_component_api::CamelError;
+use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::UriConfig;
 use rdkafka::config::ClientConfig;
 
@@ -115,6 +116,17 @@ pub struct KafkaConfig {
     pub auto_offset_reset: String,
     pub isolation_level: String,
     pub security_protocol: String,
+
+    /// Reconnect/backoff policy for the Kafka consumer poll loop.
+    #[serde(default = "kafka_reconnect_default")]
+    pub reconnect: NetworkRetryPolicy,
+}
+
+fn kafka_reconnect_default() -> NetworkRetryPolicy {
+    NetworkRetryPolicy {
+        max_attempts: 0, // unlimited — preserves current behavior
+        ..NetworkRetryPolicy::default()
+    }
 }
 
 impl Default for KafkaConfig {
@@ -128,6 +140,10 @@ impl Default for KafkaConfig {
             auto_offset_reset: "latest".to_string(),
             isolation_level: "read_uncommitted".to_string(),
             security_protocol: "plaintext".to_string(),
+            reconnect: NetworkRetryPolicy {
+                max_attempts: 0, // unlimited
+                ..NetworkRetryPolicy::default()
+            },
         }
     }
 }
@@ -357,6 +373,10 @@ pub struct KafkaEndpointConfig {
 
     /// Number of retries before routing to DLQ. Default: 3.
     pub dlq_max_retries: u32,
+
+    /// Reconnect/backoff policy. `None` if not set in URI.
+    /// Filled by `apply_defaults()` from global config, then `resolve_defaults()`.
+    pub reconnect: Option<NetworkRetryPolicy>,
 }
 
 impl KafkaEndpointConfig {
@@ -539,6 +559,7 @@ impl KafkaEndpointConfig {
             isolation_level,
             dlq_topic,
             dlq_max_retries,
+            reconnect: None,
         };
 
         config.validate()
@@ -669,6 +690,9 @@ impl KafkaEndpointConfig {
         if self.security_protocol.is_none() {
             self.security_protocol = defaults.security_protocol.parse::<SecurityProtocol>().ok();
         }
+        if self.reconnect.is_none() {
+            self.reconnect = Some(defaults.reconnect.clone());
+        }
     }
 
     /// Resolve any remaining `None` fields to hardcoded defaults.
@@ -707,6 +731,9 @@ impl KafkaEndpointConfig {
                         CamelError::Config(format!("invalid default security protocol: {e}"))
                     })?,
             );
+        }
+        if self.reconnect.is_none() {
+            self.reconnect = Some(defaults.reconnect.clone());
         }
         Ok(())
     }
@@ -842,6 +869,7 @@ impl KafkaEndpointConfig {
             isolation_level,
             dlq_topic: cfg.dlq_topic,
             dlq_max_retries: cfg.dlq_max_retries,
+            reconnect: cfg.reconnect.unwrap_or_default(),
         })
     }
 }
@@ -882,6 +910,9 @@ pub struct ResolvedKafkaEndpointConfig {
     pub isolation_level: String,
     pub dlq_topic: Option<String>,
     pub dlq_max_retries: u32,
+
+    /// Reconnect/backoff policy for the consumer poll loop.
+    pub reconnect: NetworkRetryPolicy,
 }
 
 impl ResolvedKafkaEndpointConfig {
@@ -934,6 +965,7 @@ impl std::fmt::Debug for ResolvedKafkaEndpointConfig {
             .field("isolation_level", &self.isolation_level)
             .field("dlq_topic", &self.dlq_topic)
             .field("dlq_max_retries", &self.dlq_max_retries)
+            .field("reconnect", &self.reconnect)
             .finish()
     }
 }
@@ -981,6 +1013,7 @@ impl std::fmt::Debug for KafkaEndpointConfig {
             .field("isolation_level", &self.isolation_level)
             .field("dlq_topic", &self.dlq_topic)
             .field("dlq_max_retries", &self.dlq_max_retries)
+            .field("reconnect", &self.reconnect)
             .finish()
     }
 }
@@ -1446,6 +1479,21 @@ mod kafka_config_tests {
     }
 
     #[test]
+    fn kafka_config_has_reconnect_policy() {
+        let toml_str = r#"
+            [reconnect]
+            max_attempts = 5
+            initial_delay_ms = 200
+        "#;
+        let cfg: super::KafkaConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.reconnect.max_attempts, 5);
+        assert_eq!(
+            cfg.reconnect.initial_delay,
+            std::time::Duration::from_millis(200)
+        );
+    }
+
+    #[test]
     fn test_kafka_config_builder() {
         let cfg = KafkaConfig::default()
             .with_brokers("prod:9092")
@@ -1484,6 +1532,7 @@ mod kafka_config_tests {
             isolation_level: None,
             dlq_topic: None,
             dlq_max_retries: 3,
+            reconnect: None,
         };
 
         let defaults = KafkaConfig::default()

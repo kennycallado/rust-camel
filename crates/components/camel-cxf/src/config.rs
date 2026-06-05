@@ -1,6 +1,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use camel_component_api::NetworkRetryPolicy;
+
 use crate::BRIDGE_VERSION;
 
 fn default_max_bridges() -> usize {
@@ -13,6 +15,16 @@ fn default_bridge_start_timeout_ms() -> u64 {
 
 fn default_health_check_interval_ms() -> u64 {
     5_000
+}
+
+/// Per-component reconnect default: unlimited retries (max_attempts=0),
+/// preserving the previous infinite-reconnect behavior. Operators can opt
+/// into bounded retry via TOML `[reconnect]`.
+fn cxf_reconnect_default() -> NetworkRetryPolicy {
+    NetworkRetryPolicy {
+        max_attempts: 0, // unlimited
+        ..NetworkRetryPolicy::default()
+    }
 }
 
 /// Validates that a profile name contains only `[a-z0-9_]+`.
@@ -121,6 +133,12 @@ pub struct CxfPoolConfig {
     /// `<base-path>/<profile_name>` by the bridge.
     #[serde(default)]
     pub bind_address: Option<String>,
+    /// Reconnection policy for transient bridge connection failures.
+    /// Controls retry behavior when `connect_channel` fails during bridge
+    /// startup, health-monitor restarts, or channel refreshes.
+    /// Default: unlimited (max_attempts=0), preserving previous infinite-retry behavior.
+    #[serde(default = "cxf_reconnect_default")]
+    pub reconnect: NetworkRetryPolicy,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -138,6 +156,8 @@ struct CxfPoolConfigRaw {
     version: String,
     #[serde(default)]
     bind_address: Option<String>,
+    #[serde(default = "cxf_reconnect_default")]
+    reconnect: NetworkRetryPolicy,
 }
 
 fn default_bridge_version() -> String {
@@ -154,6 +174,7 @@ impl Default for CxfPoolConfig {
             bridge_cache_dir: None,
             version: default_bridge_version(),
             bind_address: None,
+            reconnect: cxf_reconnect_default(),
         }
     }
 }
@@ -191,6 +212,7 @@ impl TryFrom<CxfPoolConfigRaw> for CxfPoolConfig {
             bridge_cache_dir: raw.bridge_cache_dir,
             version: raw.version,
             bind_address: raw.bind_address,
+            reconnect: raw.reconnect,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -611,6 +633,7 @@ mod tests {
     #[test]
     fn test_json_negative_timeout_fails_deserialization() {
         #[derive(serde::Deserialize)]
+        #[expect(dead_code)]
         struct TimeoutWrapper {
             timeout_ms: u64,
         }
@@ -702,5 +725,44 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.mtom_enabled);
+    }
+
+    // ── Reconnect policy (rc-eyn) ──────────────────────────────────────────
+
+    #[test]
+    fn cxf_pool_config_default_reconnect_is_unlimited() {
+        let cfg = CxfPoolConfig::default();
+        assert!(cfg.reconnect.enabled);
+        assert_eq!(
+            cfg.reconnect.max_attempts, 0,
+            "default must be unlimited (max_attempts=0) to preserve previous infinite-retry behavior"
+        );
+    }
+
+    #[test]
+    fn cxf_pool_config_has_reconnect_policy() {
+        let toml_str = r#"
+            version = "0.1.0"
+            max_bridges = 5
+            bridge_start_timeout_ms = 30000
+            health_check_interval_ms = 5000
+            [[profiles]]
+            name = "test"
+            wsdl_path = "test.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+            [profiles.security]
+            [reconnect]
+            max_attempts = 5
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("parse");
+        assert_eq!(cfg.reconnect.max_attempts, 5);
+    }
+
+    #[test]
+    fn cxf_pool_config_toml_empty_reconnect_defaults_to_unlimited() {
+        let cfg: CxfPoolConfig = toml::from_str("").expect("empty toml");
+        assert!(cfg.reconnect.enabled);
+        assert_eq!(cfg.reconnect.max_attempts, 0);
     }
 }

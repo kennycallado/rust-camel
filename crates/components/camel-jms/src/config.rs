@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
+
+use camel_component_api::NetworkRetryPolicy;
 
 use crate::BrokerType;
 
@@ -17,8 +20,22 @@ fn default_bridge_start_timeout_ms() -> u64 {
     30_000
 }
 
-fn default_broker_reconnect_interval_ms() -> u64 {
+pub fn default_broker_reconnect_interval_ms() -> u64 {
     5_000
+}
+
+/// Per-component reconnect default: unlimited retries (max_attempts=0),
+/// preserving the previous infinite-reconnect behavior via BackoffState.
+/// Operators can opt into bounded retry via TOML `[reconnect]`.
+pub(crate) fn jms_reconnect_default() -> NetworkRetryPolicy {
+    NetworkRetryPolicy {
+        max_attempts: 0, // unlimited
+        initial_delay: Duration::from_millis(default_broker_reconnect_interval_ms()),
+        multiplier: 2.0,
+        max_delay: Duration::from_secs(30),
+        jitter_factor: 0.0,
+        ..NetworkRetryPolicy::default()
+    }
 }
 
 fn default_health_check_interval_ms() -> u64 {
@@ -399,6 +416,8 @@ pub struct JmsPoolConfig {
     pub health_check_interval_ms: u64,
     #[serde(default = "default_bridge_cache_dir")]
     pub bridge_cache_dir: PathBuf,
+    #[serde(default = "jms_reconnect_default")]
+    pub reconnect: NetworkRetryPolicy,
 }
 
 impl Default for JmsPoolConfig {
@@ -410,6 +429,7 @@ impl Default for JmsPoolConfig {
             broker_reconnect_interval_ms: default_broker_reconnect_interval_ms(),
             health_check_interval_ms: default_health_check_interval_ms(),
             bridge_cache_dir: default_bridge_cache_dir(),
+            reconnect: jms_reconnect_default(),
         }
     }
 }
@@ -908,5 +928,12 @@ mod tests {
         // (tested indirectly through the consumer module's build_exchange)
         let cfg = JmsEndpointConfig::from_uri("jms:queue:orders?mapJmsHeaders=false").unwrap();
         assert!(!cfg.map_jms_headers);
+    }
+
+    #[test]
+    fn jms_pool_config_has_reconnect_policy() {
+        let cfg = JmsPoolConfig::default();
+        assert_eq!(cfg.reconnect.max_attempts, 0); // unlimited
+        assert!(cfg.reconnect.enabled);
     }
 }

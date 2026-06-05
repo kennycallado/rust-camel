@@ -1,6 +1,18 @@
 use camel_bridge::spec::XML_BRIDGE;
-use camel_component_api::CamelError;
+use camel_component_api::{CamelError, NetworkRetryPolicy};
 use std::path::PathBuf;
+use std::time::Duration;
+
+fn xslt_reconnect_default() -> NetworkRetryPolicy {
+    NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 2, // old max_retries=1 → 1 initial + 1 retry = 2 total
+        initial_delay: Duration::from_millis(100),
+        multiplier: 2.0,
+        max_delay: Duration::from_secs(30),
+        jitter_factor: 0.0,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct XsltComponentConfig {
@@ -8,7 +20,7 @@ pub struct XsltComponentConfig {
     pub bridge_start_timeout_ms: u64,
     pub bridge_version: String,
     pub bridge_cache_dir: PathBuf,
-    pub max_retries: u32,
+    pub reconnect: NetworkRetryPolicy,
 }
 
 impl Default for XsltComponentConfig {
@@ -18,7 +30,7 @@ impl Default for XsltComponentConfig {
             bridge_start_timeout_ms: 30_000,
             bridge_version: crate::BRIDGE_VERSION.to_string(),
             bridge_cache_dir: camel_bridge::download::default_cache_dir_for_spec(&XML_BRIDGE),
-            max_retries: 1,
+            reconnect: xslt_reconnect_default(),
         }
     }
 }
@@ -203,5 +215,17 @@ mod tests {
             !cfg.bridge_cache_dir.ends_with("jms-bridge"),
             "XSLT must not use JMS bridge cache dir"
         );
+    }
+
+    #[test]
+    fn xslt_config_has_reconnect_policy() {
+        let cfg = XsltComponentConfig::default();
+        // Old max_retries=1 mapped to max_attempts=2 (1 initial + 1 retry).
+        assert!(cfg.reconnect.enabled);
+        assert_eq!(cfg.reconnect.max_attempts, 2);
+        assert_eq!(cfg.reconnect.initial_delay, Duration::from_millis(100));
+        assert_eq!(cfg.reconnect.multiplier, 2.0f64);
+        assert_eq!(cfg.reconnect.max_delay, Duration::from_secs(30));
+        assert_eq!(cfg.reconnect.jitter_factor, 0.0f64);
     }
 }

@@ -227,7 +227,7 @@ impl Component for FlakyDelegateComponent {
             .unwrap_or(0);
 
         if prev > 0 {
-            return Err(CamelError::EndpointCreationFailed(
+            return Err(CamelError::Io(
                 "transient delegate endpoint error".to_string(),
             ));
         }

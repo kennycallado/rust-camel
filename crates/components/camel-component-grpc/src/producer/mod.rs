@@ -1,27 +1,33 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::BytesMut;
 use camel_api::{Body, CamelError, Exchange};
-use camel_proto_compiler::ProtoCache;
 use futures::StreamExt;
 use http::uri::PathAndQuery;
-use prost::Message as _;
-use prost_reflect::{DynamicMessage, MessageDescriptor};
+use prost_reflect::MessageDescriptor;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tonic::Request;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
-use tonic::{Code, Request, Status};
 use tower::Service;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 use crate::codec::RawBytesCodec;
 use crate::config::{AuthConfig, GrpcConfig, apply_auth_metadata};
 use crate::mode::GrpcMode;
+
+mod retry;
+pub use retry::is_retryable_tonic_status;
+use retry::retry_rpc;
+use retry::tonic_to_camel_error;
+
+mod convert;
+pub(crate) use convert::proto_cache;
+use convert::{json_to_protobuf, protobuf_to_json};
 
 type ProducerFuture = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 type AcquireFut =
@@ -30,45 +36,6 @@ type AcquireFut =
 /// Default max concurrent gRPC calls per producer instance.
 const DEFAULT_CONCURRENCY: usize = 128;
 
-static PROTO_CACHE: OnceLock<ProtoCache> = OnceLock::new();
-
-fn proto_cache() -> &'static ProtoCache {
-    PROTO_CACHE.get_or_init(ProtoCache::new)
-}
-
-fn json_to_protobuf(
-    json: serde_json::Value,
-    desc: MessageDescriptor,
-) -> Result<Vec<u8>, CamelError> {
-    let json_str = serde_json::to_string(&json)
-        .map_err(|e| CamelError::TypeConversionFailed(format!("failed to serialize JSON: {e}")))?;
-    let mut de = serde_json::Deserializer::from_str(&json_str);
-    let dyn_msg = DynamicMessage::deserialize(desc, &mut de).map_err(|e| {
-        warn!(error = %e, "proto conversion failed");
-        CamelError::TypeConversionFailed(format!("failed to parse JSON into protobuf: {e}"))
-    })?;
-    let mut buf = BytesMut::new();
-    dyn_msg.encode(&mut buf).map_err(|e| {
-        warn!(error = %e, "proto conversion failed");
-        CamelError::TypeConversionFailed(format!("failed to encode protobuf message: {e}"))
-    })?;
-    Ok(buf.to_vec())
-}
-
-fn protobuf_to_json(
-    bytes: Vec<u8>,
-    desc: MessageDescriptor,
-) -> Result<serde_json::Value, CamelError> {
-    let dyn_msg = DynamicMessage::decode(desc, bytes.as_slice()).map_err(|e| {
-        warn!(error = %e, "proto conversion failed");
-        CamelError::TypeConversionFailed(format!("failed to decode protobuf bytes: {e}"))
-    })?;
-    serde_json::to_value(&dyn_msg).map_err(|e| {
-        warn!(error = %e, "proto conversion failed");
-        CamelError::TypeConversionFailed(format!("failed to serialize protobuf to JSON: {e}"))
-    })
-}
-
 pub struct GrpcProducer {
     channel: Channel,
     path: PathAndQuery,
@@ -76,6 +43,7 @@ pub struct GrpcProducer {
     resp_descriptor: MessageDescriptor,
     mode: GrpcMode,
     deadline_ms: Option<u64>,
+    retry: camel_component_api::NetworkRetryPolicy,
     semaphore: Arc<Semaphore>,
     pending_permit: Option<OwnedSemaphorePermit>,
     acquire_fut: AcquireFut,
@@ -92,6 +60,7 @@ impl Clone for GrpcProducer {
             resp_descriptor: self.resp_descriptor.clone(),
             mode: self.mode,
             deadline_ms: self.deadline_ms,
+            retry: self.retry.clone(),
             semaphore: Arc::clone(&self.semaphore),
             // Each clone starts with a fresh permit state.
             pending_permit: None,
@@ -160,6 +129,7 @@ impl GrpcProducer {
             resp_descriptor,
             mode,
             deadline_ms,
+            retry: config.retry.clone(),
             semaphore: Arc::new(Semaphore::new(DEFAULT_CONCURRENCY)),
             pending_permit: None,
             acquire_fut: None,
@@ -202,28 +172,13 @@ impl GrpcProducer {
         }
     }
 
-    fn tonic_to_camel_error(status: Status) -> CamelError {
-        let code = status.code();
-        let msg = status.message();
-        match code {
-            Code::NotFound => CamelError::ProcessorError(format!("grpc[NOT_FOUND]: {msg}")),
-            Code::Unavailable => {
-                CamelError::ProcessorError(format!("grpc[TRANSIENT][UNAVAILABLE]: {msg}"))
-            }
-            Code::DeadlineExceeded => {
-                CamelError::ProcessorError(format!("grpc[TRANSIENT][DEADLINE_EXCEEDED]: {msg}"))
-            }
-            Code::InvalidArgument => CamelError::Config(format!("grpc invalid argument: {msg}")),
-            other => CamelError::ProcessorError(format!("grpc[{other:?}]: {msg}")),
-        }
-    }
-
     fn call_unary(&mut self, mut exchange: Exchange) -> ProducerFuture {
-        let mut grpc = tonic::client::Grpc::new(self.channel.clone());
+        let channel = self.channel.clone();
         let path = self.path.clone();
         let req_df = self.req_descriptor.clone();
         let resp_desc = self.resp_descriptor.clone();
         let deadline_ms = self.deadline_ms;
+        let retry = self.retry.clone();
         let auth = self.auth.clone();
         let config_metadata = self.config_metadata.clone();
 
@@ -253,17 +208,24 @@ impl GrpcProducer {
                 request.set_timeout(Duration::from_millis(ms));
             }
 
-            grpc.ready()
-                .await
-                .map_err(|e| CamelError::ProcessorError(format!("grpc client not ready: {e}")))?;
+            let metadata_map = request.metadata().clone();
+            let body = request.into_inner();
 
-            let response = grpc
-                .unary(request, path, RawBytesCodec)
-                .await
-                .map_err(|status| {
-                    error!(code = %status.code(), "grpc unary call failed");
-                    Self::tonic_to_camel_error(status)
-                })?;
+            let response = retry_rpc(channel, &retry, "unary", |mut grpc| {
+                let mut req = Request::new(body.clone());
+                *req.metadata_mut() = metadata_map.clone();
+                if let Some(ms) = deadline_ms {
+                    req.set_timeout(Duration::from_millis(ms));
+                }
+                let p = path.clone();
+                async move {
+                    grpc.ready().await.map_err(|e| {
+                        tonic::Status::unavailable(format!("grpc client not ready: {e}"))
+                    })?;
+                    grpc.unary(req, p, RawBytesCodec).await
+                }
+            })
+            .await?;
 
             let resp_json = protobuf_to_json(response.into_inner(), resp_desc)?;
             exchange.input.body = Body::Json(resp_json);
@@ -272,11 +234,12 @@ impl GrpcProducer {
     }
 
     fn call_server_streaming(&mut self, mut exchange: Exchange) -> ProducerFuture {
-        let mut grpc = tonic::client::Grpc::new(self.channel.clone());
+        let channel = self.channel.clone();
         let path = self.path.clone();
         let req_df = self.req_descriptor.clone();
         let resp_desc = self.resp_descriptor.clone();
         let deadline_ms = self.deadline_ms;
+        let retry = self.retry.clone();
         let auth = self.auth.clone();
         let config_metadata = self.config_metadata.clone();
 
@@ -306,22 +269,29 @@ impl GrpcProducer {
                 request.set_timeout(Duration::from_millis(ms));
             }
 
-            grpc.ready()
-                .await
-                .map_err(|e| CamelError::ProcessorError(format!("grpc client not ready: {e}")))?;
+            let metadata_map = request.metadata().clone();
+            let body = request.into_inner();
 
-            let response = grpc
-                .server_streaming(request, path, RawBytesCodec)
-                .await
-                .map_err(|status| {
-                    error!(code = %status.code(), "grpc server streaming call failed");
-                    Self::tonic_to_camel_error(status)
-                })?;
+            let response = retry_rpc(channel, &retry, "server_streaming", |mut grpc| {
+                let mut req = Request::new(body.clone());
+                *req.metadata_mut() = metadata_map.clone();
+                if let Some(ms) = deadline_ms {
+                    req.set_timeout(Duration::from_millis(ms));
+                }
+                let p = path.clone();
+                async move {
+                    grpc.ready().await.map_err(|e| {
+                        tonic::Status::unavailable(format!("grpc client not ready: {e}"))
+                    })?;
+                    grpc.server_streaming(req, p, RawBytesCodec).await
+                }
+            })
+            .await?;
 
             let mut results = Vec::new();
             let mut stream = response.into_inner();
             while let Some(item) = stream.next().await {
-                let bytes = item.map_err(Self::tonic_to_camel_error)?;
+                let bytes = item.map_err(tonic_to_camel_error)?;
                 let resp_json = protobuf_to_json(bytes, resp_desc.clone())?;
                 results.push(resp_json);
             }
@@ -332,11 +302,12 @@ impl GrpcProducer {
     }
 
     fn call_client_streaming(&mut self, mut exchange: Exchange) -> ProducerFuture {
-        let mut grpc = tonic::client::Grpc::new(self.channel.clone());
+        let channel = self.channel.clone();
         let path = self.path.clone();
         let req_df = self.req_descriptor.clone();
         let resp_desc = self.resp_descriptor.clone();
         let deadline_ms = self.deadline_ms;
+        let retry = self.retry.clone();
         let auth = self.auth.clone();
         let config_metadata = self.config_metadata.clone();
 
@@ -354,11 +325,10 @@ impl GrpcProducer {
                 .map(|item| json_to_protobuf(item.clone(), req_df.clone()))
                 .collect::<Result<_, _>>()?;
 
-            let stream = futures::stream::iter(encoded);
-
-            let mut request = Request::new(stream);
-            Self::inject_headers(&exchange, &mut request);
-            apply_auth_metadata(&auth, &mut request).await?;
+            // Build the initial request with headers/auth/timeout once.
+            let mut request_template = Request::new(futures::stream::iter(encoded.clone()));
+            Self::inject_headers(&exchange, &mut request_template);
+            apply_auth_metadata(&auth, &mut request_template).await?;
             if let Some(ref metadata_str) = config_metadata {
                 for pair in metadata_str.split(',') {
                     let pair = pair.trim();
@@ -368,27 +338,33 @@ impl GrpcProducer {
                         if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
                             && let Ok(meta_val) = MetadataValue::try_from(value)
                         {
-                            request.metadata_mut().insert(name, meta_val);
+                            request_template.metadata_mut().insert(name, meta_val);
                         }
                     }
                 }
                 debug!("applied config metadata to gRPC client streaming request");
             }
             if let Some(ms) = deadline_ms {
-                request.set_timeout(Duration::from_millis(ms));
+                request_template.set_timeout(Duration::from_millis(ms));
             }
 
-            grpc.ready()
-                .await
-                .map_err(|e| CamelError::ProcessorError(format!("grpc client not ready: {e}")))?;
+            let metadata_map = request_template.metadata().clone();
 
-            let response = grpc
-                .client_streaming(request, path, RawBytesCodec)
-                .await
-                .map_err(|status| {
-                    error!(code = %status.code(), "grpc client streaming call failed");
-                    Self::tonic_to_camel_error(status)
-                })?;
+            let response = retry_rpc(channel, &retry, "client_streaming", |mut grpc| {
+                let mut request = Request::new(futures::stream::iter(encoded.clone()));
+                *request.metadata_mut() = metadata_map.clone();
+                if let Some(ms) = deadline_ms {
+                    request.set_timeout(Duration::from_millis(ms));
+                }
+                let p = path.clone();
+                async move {
+                    grpc.ready().await.map_err(|e| {
+                        tonic::Status::unavailable(format!("grpc client not ready: {e}"))
+                    })?;
+                    grpc.client_streaming(request, p, RawBytesCodec).await
+                }
+            })
+            .await?;
 
             let resp_json = protobuf_to_json(response.into_inner(), resp_desc)?;
             exchange.input.body = Body::Json(resp_json);
@@ -397,11 +373,12 @@ impl GrpcProducer {
     }
 
     fn call_bidi(&mut self, mut exchange: Exchange) -> ProducerFuture {
-        let mut grpc = tonic::client::Grpc::new(self.channel.clone());
+        let channel = self.channel.clone();
         let path = self.path.clone();
         let req_df = self.req_descriptor.clone();
         let resp_desc = self.resp_descriptor.clone();
         let deadline_ms = self.deadline_ms;
+        let retry = self.retry.clone();
         let auth = self.auth.clone();
         let config_metadata = self.config_metadata.clone();
 
@@ -419,11 +396,10 @@ impl GrpcProducer {
                 .map(|item| json_to_protobuf(item.clone(), req_df.clone()))
                 .collect::<Result<_, _>>()?;
 
-            let stream = futures::stream::iter(encoded);
-
-            let mut request = Request::new(stream);
-            Self::inject_headers(&exchange, &mut request);
-            apply_auth_metadata(&auth, &mut request).await?;
+            // Build the initial request with headers/auth/timeout once.
+            let mut request_template = Request::new(futures::stream::iter(encoded.clone()));
+            Self::inject_headers(&exchange, &mut request_template);
+            apply_auth_metadata(&auth, &mut request_template).await?;
             if let Some(ref metadata_str) = config_metadata {
                 for pair in metadata_str.split(',') {
                     let pair = pair.trim();
@@ -433,32 +409,38 @@ impl GrpcProducer {
                         if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
                             && let Ok(meta_val) = MetadataValue::try_from(value)
                         {
-                            request.metadata_mut().insert(name, meta_val);
+                            request_template.metadata_mut().insert(name, meta_val);
                         }
                     }
                 }
                 debug!("applied config metadata to gRPC bidi streaming request");
             }
             if let Some(ms) = deadline_ms {
-                request.set_timeout(Duration::from_millis(ms));
+                request_template.set_timeout(Duration::from_millis(ms));
             }
 
-            grpc.ready()
-                .await
-                .map_err(|e| CamelError::ProcessorError(format!("grpc client not ready: {e}")))?;
+            let metadata_map = request_template.metadata().clone();
 
-            let response =
-                grpc.streaming(request, path, RawBytesCodec)
-                    .await
-                    .map_err(|status| {
-                        error!(code = %status.code(), "grpc bidi streaming call failed");
-                        Self::tonic_to_camel_error(status)
+            let response = retry_rpc(channel, &retry, "bidi", |mut grpc| {
+                let mut request = Request::new(futures::stream::iter(encoded.clone()));
+                *request.metadata_mut() = metadata_map.clone();
+                if let Some(ms) = deadline_ms {
+                    request.set_timeout(Duration::from_millis(ms));
+                }
+                let p = path.clone();
+                async move {
+                    grpc.ready().await.map_err(|e| {
+                        tonic::Status::unavailable(format!("grpc client not ready: {e}"))
                     })?;
+                    grpc.streaming(request, p, RawBytesCodec).await
+                }
+            })
+            .await?;
 
             let mut results = Vec::new();
             let mut stream = response.into_inner();
             while let Some(item) = stream.next().await {
-                let bytes = item.map_err(Self::tonic_to_camel_error)?;
+                let bytes = item.map_err(tonic_to_camel_error)?;
                 let resp_json = protobuf_to_json(bytes, resp_desc.clone())?;
                 results.push(resp_json);
             }
@@ -468,6 +450,8 @@ impl GrpcProducer {
         })
     }
 }
+
+// ── Tower Service impl ────────────────────────────────────────────────────
 
 impl Service<Exchange> for GrpcProducer {
     type Response = Exchange;
@@ -518,13 +502,14 @@ impl Service<Exchange> for GrpcProducer {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::task::{Context, Poll};
 
-    use super::{GrpcProducer, json_to_protobuf, proto_cache, protobuf_to_json};
+    use super::GrpcProducer;
     use crate::GrpcMode;
     use crate::config::GrpcConfig;
     use camel_api::{Body, CamelError, Exchange, Message};
+    use camel_component_api::NetworkRetryPolicy;
     use tonic::Request;
     use tower::Service;
 
@@ -551,8 +536,11 @@ mod tests {
             interceptors: crate::config::InterceptorConfig::default(),
             consumer_strategy: crate::config::ConsumerStrategy::default(),
             producer_strategy: crate::config::ProducerStrategy::default(),
+            retry: NetworkRetryPolicy::default(),
         }
     }
+
+    // ── body_to_json tests ─────────────────────────────────────────────
 
     #[test]
     fn test_body_to_json_from_json_body() {
@@ -597,6 +585,8 @@ mod tests {
         let err = GrpcProducer::body_to_json(body).unwrap_err();
         assert!(matches!(err, CamelError::TypeConversionFailed(_)));
     }
+
+    // ── header_to_metadata tests ───────────────────────────────────────
 
     #[test]
     fn test_header_to_metadata_from_string() {
@@ -650,6 +640,8 @@ mod tests {
         assert!(result.is_none());
     }
 
+    // ── inject_headers tests ───────────────────────────────────────────
+
     #[test]
     fn test_inject_headers_transfers_all_valid_headers() {
         let exchange = exchange_with_headers(&[
@@ -686,42 +678,9 @@ mod tests {
         assert!(request.metadata().is_empty());
     }
 
-    #[test]
-    fn test_tonic_to_camel_error_unavailable() {
-        let status = tonic::Status::unavailable("service down");
-        let err = GrpcProducer::tonic_to_camel_error(status);
-        assert!(matches!(err, CamelError::ProcessorError(_)));
-        assert!(err.to_string().contains("grpc[TRANSIENT][UNAVAILABLE]"));
-        assert!(err.to_string().contains("service down"));
-    }
+    // ── tonic_to_camel_error tests ─────────────────────────────────────
 
-    #[test]
-    fn test_tonic_to_camel_error_not_found() {
-        let status = tonic::Status::not_found("method not found");
-        let err = GrpcProducer::tonic_to_camel_error(status);
-        assert!(matches!(err, CamelError::ProcessorError(_)));
-        assert!(err.to_string().contains("grpc[NOT_FOUND]"));
-        assert!(err.to_string().contains("method not found"));
-    }
-
-    #[test]
-    fn test_tonic_to_camel_error_deadline_exceeded() {
-        let status = tonic::Status::deadline_exceeded("timeout");
-        let err = GrpcProducer::tonic_to_camel_error(status);
-        assert!(matches!(err, CamelError::ProcessorError(_)));
-        assert!(
-            err.to_string()
-                .contains("grpc[TRANSIENT][DEADLINE_EXCEEDED]")
-        );
-    }
-
-    #[test]
-    fn test_tonic_to_camel_error_invalid_argument_maps_to_config() {
-        let status = tonic::Status::invalid_argument("bad arg");
-        let err = GrpcProducer::tonic_to_camel_error(status);
-        assert!(matches!(err, CamelError::Config(_)));
-        assert!(err.to_string().contains("grpc invalid argument"));
-    }
+    // ── GrpcMode tests ─────────────────────────────────────────────────
 
     #[test]
     fn test_grpc_mode_derives() {
@@ -744,67 +703,7 @@ mod tests {
         assert_ne!(GrpcMode::ClientStreaming, GrpcMode::Bidi);
     }
 
-    #[test]
-    fn test_json_to_protobuf_roundtrip() {
-        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
-        let cache = proto_cache();
-        let pool = cache
-            .get_or_compile(&proto_path, std::iter::empty::<&Path>())
-            .unwrap();
-        let svc = pool.get_service_by_name("helloworld.Greeter").unwrap();
-        let method = svc.methods().find(|m| m.name() == "SayHello").unwrap();
-        let desc = method.input();
-
-        let json = serde_json::json!({"name": "World"});
-        let bytes = json_to_protobuf(json, desc.clone()).unwrap();
-        assert!(!bytes.is_empty());
-
-        let decoded = protobuf_to_json(bytes, desc).unwrap();
-        assert_eq!(decoded["name"], "World");
-    }
-
-    #[test]
-    fn test_json_to_protobuf_invalid_field_type() {
-        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
-        let cache = proto_cache();
-        let pool = cache
-            .get_or_compile(&proto_path, std::iter::empty::<&Path>())
-            .unwrap();
-        let svc = pool.get_service_by_name("helloworld.Greeter").unwrap();
-        let method = svc.methods().find(|m| m.name() == "SayHello").unwrap();
-        let desc = method.input();
-
-        let json = serde_json::json!({"name": 123});
-        let result = json_to_protobuf(json, desc);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("failed to parse JSON into protobuf")
-        );
-    }
-
-    #[test]
-    fn test_protobuf_to_json_invalid_bytes() {
-        let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
-        let cache = proto_cache();
-        let pool = cache
-            .get_or_compile(&proto_path, std::iter::empty::<&Path>())
-            .unwrap();
-        let svc = pool.get_service_by_name("helloworld.Greeter").unwrap();
-        let method = svc.methods().find(|m| m.name() == "SayHello").unwrap();
-        let desc = method.input();
-
-        let result = protobuf_to_json(vec![0xFF, 0xFE, 0xFD], desc);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("failed to decode protobuf bytes")
-        );
-    }
+    // ── producer lifecycle tests ───────────────────────────────────────
 
     #[tokio::test]
     async fn test_producer_new_invalid_endpoint() {
@@ -924,6 +823,8 @@ mod tests {
         assert_eq!(producer_streaming.mode, GrpcMode::ServerStreaming);
     }
 
+    // ── edge case tests ────────────────────────────────────────────────
+
     #[test]
     fn test_body_to_json_from_null_body() {
         let body = Body::Json(serde_json::Value::Null);
@@ -961,32 +862,5 @@ mod tests {
         let mut request = Request::new(());
         GrpcProducer::inject_headers(&exchange, &mut request);
         assert!(request.metadata().get("x-good").is_some());
-    }
-
-    #[test]
-    fn test_tonic_to_camel_error_various_codes() {
-        let codes = [
-            tonic::Status::permission_denied("no access"),
-            tonic::Status::resource_exhausted("too many"),
-            tonic::Status::failed_precondition("bad state"),
-            tonic::Status::aborted("conflict"),
-            tonic::Status::out_of_range("oob"),
-            tonic::Status::unimplemented("no impl"),
-            tonic::Status::internal("oops"),
-            tonic::Status::data_loss("lost"),
-            tonic::Status::unauthenticated("who are you"),
-        ];
-        for status in codes {
-            let err = GrpcProducer::tonic_to_camel_error(status);
-            assert!(matches!(err, CamelError::ProcessorError(_)));
-            assert!(err.to_string().contains("grpc["));
-        }
-    }
-
-    #[test]
-    fn test_proto_cache_returns_singleton() {
-        let first = proto_cache();
-        let second = proto_cache();
-        assert!(std::ptr::eq(first, second));
     }
 }

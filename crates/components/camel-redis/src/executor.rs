@@ -1,6 +1,8 @@
 use async_trait::async_trait;
-use camel_api::{BackoffConfig, BackoffState};
-use camel_component_api::{CamelError, Exchange};
+use camel_component_api::{CamelError, Exchange, NetworkRetryPolicy};
+// retry_async is used in tests (the regression test in this file).
+#[cfg(test)]
+use camel_component_api::retry_async;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
@@ -107,86 +109,65 @@ impl RedisCommandExecutor for FakeExecutor {
     }
 }
 
-/// Executes a command with bounded exponential backoff retry on transient errors.
+/// Executes a command with retry on transient errors, using `NetworkRetryPolicy`.
 ///
-/// This is the core retry logic extracted for testability. It mirrors the
-/// retry behavior in `RedisProducer::call()`.
+/// This is the core retry logic extracted for testability.
 ///
-/// - `max_retries`: maximum number of retry attempts (default 10)
-/// - `base_ms`: base delay in milliseconds (default 100)
-/// - `max_backoff`: maximum delay cap (default 30s)
+/// - `policy`: reconnection policy (max attempts, backoff, jitter, etc.)
 /// - `is_idempotent`: whether the command is safe to retry
+///
+/// # Implementation note
+///
+/// Uses a manual retry loop calling [`NetworkRetryPolicy::should_retry`] and
+/// [`NetworkRetryPolicy::delay_for`] rather than the shared [`retry_async`]
+/// helper. Manual loop needed because: (a) `executor.reconnect()` must run
+/// before each retry attempt (not the first attempt), so `retry_async`'s
+/// "always invoke op" model doesn't fit; (b) `&mut executor` / `&mut exchange`
+/// borrows cannot be re-borrowed through `FnMut() -> async move { ... }` —
+/// the Future returned by the closure holds the borrow past the closure body,
+/// which the borrow checker rejects. `retry_async_cancelable` has the same
+/// FnMut constraint so it is also excluded.
 pub async fn execute_with_retry<E: RedisCommandExecutor>(
     executor: &mut E,
     cmd: &RedisCommand,
     exchange: &mut Exchange,
     is_idempotent: bool,
-    max_retries: u32,
-    base_ms: u64,
-    max_backoff: std::time::Duration,
+    policy: &NetworkRetryPolicy,
 ) -> Result<(), CamelError> {
-    use tracing::{debug, warn};
+    // Non-idempotent commands must not be retried — use a disabled policy.
+    let effective_policy = if is_idempotent {
+        policy.clone()
+    } else {
+        NetworkRetryPolicy::disabled()
+    };
 
-    let result = executor.execute_command(cmd, exchange).await;
+    let mut attempt: u32 = 0;
 
-    if let Err(ref e) = result
-        && is_transient_redis_error(e)
-        && is_idempotent
-    {
-        warn!(
-            command = ?cmd,
-            error = %e,
-            "Transient error on idempotent command, retrying with backoff"
-        );
-
-        let mut last_err = e.clone();
-        let mut backoff = BackoffState::new(BackoffConfig {
-            initial_delay: std::time::Duration::from_millis(base_ms),
-            multiplier: 2.0,
-            max_delay: max_backoff,
-        });
-
-        for attempt in 0..max_retries {
+    loop {
+        // Reconnect before retries (attempt > 0), not on the initial try.
+        // This preserves the existing reconnect-before-retry semantics.
+        if attempt > 0 {
             executor.reconnect().await?;
-
-            let delay = backoff.next_delay();
-            debug!(
-                command = ?cmd,
-                attempt = attempt + 1,
-                delay_ms = delay.as_millis(),
-                "Waiting before retry"
-            );
-            tokio::time::sleep(delay).await;
-
-            match executor.execute_command(cmd, exchange).await {
-                Ok(()) => {
-                    backoff.reset();
-                    return Ok(());
-                }
-                Err(retry_err) => {
-                    if is_transient_redis_error(&retry_err) {
-                        warn!(
-                            command = ?cmd,
-                            attempt = attempt + 1,
-                            error = %retry_err,
-                            "Retry failed with transient error"
-                        );
-                        last_err = retry_err;
-                        continue;
-                    } else {
-                        return Err(retry_err);
-                    }
-                }
-            }
         }
 
-        return Err(CamelError::ProcessorError(format!(
-            "Command {:?} failed after {} retries: {}",
-            cmd, max_retries, last_err
-        )));
+        match executor.execute_command(cmd, exchange).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                if !is_transient_redis_error(&err) || !effective_policy.should_retry(attempt + 1) {
+                    return Err(err);
+                }
+                let delay = effective_policy.delay_for(attempt);
+                tracing::warn!(
+                    attempt,
+                    delay_ms = delay.as_millis(),
+                    error = %err,
+                    "transient error — retrying"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+        }
     }
-
-    result
 }
 
 #[cfg(test)]
@@ -224,14 +205,19 @@ mod tests {
         let mut exchange = Exchange::default();
         let cmd = RedisCommand::Get; // idempotent
 
+        let policy = NetworkRetryPolicy {
+            max_attempts: 10,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            ..NetworkRetryPolicy::default()
+        };
+
         let result = execute_with_retry(
             &mut { executor },
             &cmd,
             &mut exchange,
             true, // is_idempotent
-            10,
-            1, // 1ms base for fast tests
-            Duration::from_millis(10),
+            &policy,
         )
         .await;
 
@@ -253,16 +239,15 @@ mod tests {
         let mut exchange = Exchange::default();
         let cmd = RedisCommand::Get;
 
-        let result = execute_with_retry(
-            &mut { executor },
-            &cmd,
-            &mut exchange,
-            true,
-            10,
-            1,
-            Duration::from_millis(10),
-        )
-        .await;
+        let policy = NetworkRetryPolicy {
+            max_attempts: 11, // 1 initial + 10 retries = 11 total
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            ..NetworkRetryPolicy::default()
+        };
+
+        let result =
+            execute_with_retry(&mut { executor }, &cmd, &mut exchange, true, &policy).await;
 
         assert!(result.is_err(), "should fail after exhausting retries");
         // 1 initial + 10 retries = 11 calls
@@ -277,14 +262,19 @@ mod tests {
         let mut exchange = Exchange::default();
         let cmd = RedisCommand::Incr; // NOT idempotent
 
+        let policy = NetworkRetryPolicy {
+            max_attempts: 10,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            ..NetworkRetryPolicy::default()
+        };
+
         let result = execute_with_retry(
             &mut { executor },
             &cmd,
             &mut exchange,
             false, // NOT idempotent
-            10,
-            1,
-            Duration::from_millis(10),
+            &policy,
         )
         .await;
 
@@ -301,14 +291,19 @@ mod tests {
         let mut exchange = Exchange::default();
         let cmd = RedisCommand::Get; // idempotent, but error is NOT transient
 
+        let policy = NetworkRetryPolicy {
+            max_attempts: 10,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            ..NetworkRetryPolicy::default()
+        };
+
         let result = execute_with_retry(
             &mut { executor },
             &cmd,
             &mut exchange,
             true, // is_idempotent
-            10,
-            1,
-            Duration::from_millis(10),
+            &policy,
         )
         .await;
 
@@ -329,16 +324,15 @@ mod tests {
         let mut exchange = Exchange::default();
         let cmd = RedisCommand::Set; // idempotent write
 
-        let result = execute_with_retry(
-            &mut { executor },
-            &cmd,
-            &mut exchange,
-            true,
-            10,
-            1,
-            Duration::from_millis(10),
-        )
-        .await;
+        let policy = NetworkRetryPolicy {
+            max_attempts: 10,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            ..NetworkRetryPolicy::default()
+        };
+
+        let result =
+            execute_with_retry(&mut { executor }, &cmd, &mut exchange, true, &policy).await;
 
         assert!(result.is_ok());
         // 1 initial + 2 retries = 3 calls
@@ -354,19 +348,51 @@ mod tests {
         let mut exchange = Exchange::default();
         let cmd = RedisCommand::Get;
 
-        let result = execute_with_retry(
-            &mut { executor },
-            &cmd,
-            &mut exchange,
-            true,
-            10,
-            1,
-            Duration::from_millis(10),
-        )
-        .await;
+        let policy = NetworkRetryPolicy {
+            max_attempts: 10,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            ..NetworkRetryPolicy::default()
+        };
+
+        let result =
+            execute_with_retry(&mut { executor }, &cmd, &mut exchange, true, &policy).await;
 
         assert!(result.is_ok());
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
         assert_eq!(reconnect_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn network_retry_policy_retries_on_transient() {
+        let policy = NetworkRetryPolicy {
+            max_attempts: 2,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            ..NetworkRetryPolicy::default()
+        };
+
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_clone = attempts.clone();
+
+        let result = retry_async::<(), _, _, _, CamelError>(
+            &policy,
+            || {
+                let c = attempts_clone.clone();
+                async move {
+                    let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if n == 0 {
+                        Err(CamelError::ProcessorError("transient".into()))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            |_| true,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

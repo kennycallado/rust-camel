@@ -1,6 +1,8 @@
 use std::str::FromStr;
+use std::time::Duration;
 
 use camel_component_api::CamelError;
+use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
 use tracing::warn;
 
@@ -179,6 +181,9 @@ pub struct SqlGlobalConfig {
     pub ssl_root_cert: Option<String>,
     pub ssl_cert: Option<String>,
     pub ssl_key: Option<String>,
+    /// Retry policy for transient database connection failures.
+    #[serde(default)]
+    pub retry: NetworkRetryPolicy,
 }
 
 impl std::fmt::Debug for SqlGlobalConfig {
@@ -192,6 +197,7 @@ impl std::fmt::Debug for SqlGlobalConfig {
             .field("ssl_root_cert", &self.ssl_root_cert)
             .field("ssl_cert", &self.ssl_cert)
             .field("ssl_key", &redacted_opt(&self.ssl_key))
+            .field("retry", &self.retry)
             .finish()
     }
 }
@@ -207,6 +213,7 @@ impl Default for SqlGlobalConfig {
             ssl_root_cert: None,
             ssl_cert: None,
             ssl_key: None,
+            retry: NetworkRetryPolicy::default(),
         }
     }
 }
@@ -255,6 +262,11 @@ impl SqlGlobalConfig {
         self.ssl_key = Some(value.into());
         self
     }
+
+    pub fn with_retry(mut self, value: NetworkRetryPolicy) -> Self {
+        self.retry = value;
+        self
+    }
 }
 
 /// Configuration for SQL component endpoints.
@@ -297,7 +309,6 @@ pub struct SqlEndpointConfig {
     /// Placeholder character for parameters. Default: '#'.
     pub placeholder: char,
     /// If true, process parameter placeholders in queries. Default: true.
-    /// When false, queries are executed as-is without template parsing.
     pub use_placeholder: bool,
     /// If true, don't execute the query (dry run). Default: false.
     pub noop: bool,
@@ -374,6 +385,14 @@ pub struct SqlEndpointConfig {
     pub ssl_cert: Option<String>,
     /// Path to SSL client key. None = use global default.
     pub ssl_key: Option<String>,
+
+    /// Retry policy for transient database connection failures.
+    pub retry: NetworkRetryPolicy,
+
+    /// Whether `retry` was explicitly set via URI params. Used by
+    /// [`apply_defaults`] to decide whether URI values win over
+    /// the global config. Internal tracking flag, not serialized.
+    retry_set_from_uri: bool,
 }
 
 impl std::fmt::Debug for SqlEndpointConfig {
@@ -418,6 +437,7 @@ impl std::fmt::Debug for SqlEndpointConfig {
             .field("ssl_root_cert", &self.ssl_root_cert)
             .field("ssl_cert", &self.ssl_cert)
             .field("ssl_key", &redacted_opt(&self.ssl_key))
+            .field("retry", &self.retry)
             .finish()
     }
 }
@@ -448,6 +468,10 @@ impl SqlEndpointConfig {
         }
         if self.ssl_key.is_none() {
             self.ssl_key = defaults.ssl_key.clone();
+        }
+        // retry: URI wins when set_from_uri, else global fills the gap
+        if !self.retry_set_from_uri {
+            self.retry = defaults.retry.clone();
         }
     }
 
@@ -783,6 +807,46 @@ impl UriConfig for SqlEndpointConfig {
         let ssl_cert = params.get("sslCert").cloned();
         let ssl_key = params.get("sslKey").cloned();
 
+        // Parse retry policy from URI params
+        let mut retry = NetworkRetryPolicy::default();
+        let mut retry_set_from_uri = false;
+        if let Some(raw) = params.get("retryEnabled") {
+            retry.enabled = raw.parse::<bool>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryEnabled must be a boolean, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = params.get("retryMaxAttempts") {
+            retry.max_attempts = raw.parse::<u32>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryMaxAttempts must be a u32, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = params.get("retryInitialDelayMs") {
+            retry.initial_delay = Duration::from_millis(raw.parse::<u64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryInitialDelayMs must be a u64, got '{raw}'"))
+            })?);
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = params.get("retryMultiplier") {
+            retry.multiplier = raw.parse::<f64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryMultiplier must be a f64, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = params.get("retryMaxDelayMs") {
+            retry.max_delay = Duration::from_millis(raw.parse::<u64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryMaxDelayMs must be a u64, got '{raw}'"))
+            })?);
+            retry_set_from_uri = true;
+        }
+        if let Some(raw) = params.get("retryJitter") {
+            retry.jitter_factor = raw.parse::<f64>().map_err(|_| {
+                CamelError::InvalidUri(format!("retryJitter must be a f64, got '{raw}'"))
+            })?;
+            retry_set_from_uri = true;
+        }
+
         Ok(Self {
             db_url,
             max_connections,
@@ -820,6 +884,8 @@ impl UriConfig for SqlEndpointConfig {
             ssl_root_cert,
             ssl_cert,
             ssl_key,
+            retry,
+            retry_set_from_uri,
         })
     }
 }
@@ -827,6 +893,7 @@ impl UriConfig for SqlEndpointConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::NetworkRetryPolicy;
 
     #[test]
     fn config_defaults() {
@@ -1136,6 +1203,7 @@ mod tests {
             ssl_root_cert: None,
             ssl_cert: None,
             ssl_key: None,
+            retry: NetworkRetryPolicy::default(),
         };
         c.apply_defaults(&global);
         assert_eq!(c.max_connections, Some(10));
@@ -1163,6 +1231,7 @@ mod tests {
             ssl_root_cert: None,
             ssl_cert: None,
             ssl_key: None,
+            retry: NetworkRetryPolicy::default(),
         };
         c.apply_defaults(&global);
         // URI-set values should NOT be overridden
@@ -1714,5 +1783,80 @@ mod tests {
             "sql:select 1?db_url=postgres://localhost/test&pollStrategy=Invalid",
         );
         assert!(result.is_err());
+    }
+
+    // ── RetryPolicy (rc-ddl) ──────────────────────────────────────────────
+
+    #[test]
+    fn sql_endpoint_config_has_retry_policy() {
+        let cfg = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=sqlite::memory:&retryMaxAttempts=3&retryInitialDelayMs=500",
+        )
+        .expect("parse");
+        assert_eq!(cfg.retry.max_attempts, 3);
+        assert_eq!(
+            cfg.retry.initial_delay,
+            std::time::Duration::from_millis(500)
+        );
+        assert!(cfg.retry.enabled);
+    }
+
+    #[test]
+    fn sql_endpoint_config_retry_defaults_when_unspecified() {
+        let cfg =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").expect("parse");
+        // When URI has no retry params, retry defaults to NetworkRetryPolicy::default()
+        assert!(cfg.retry.enabled);
+        assert_eq!(cfg.retry.max_attempts, 10); // default
+    }
+
+    #[test]
+    fn sql_global_config_has_retry_default() {
+        let cfg = SqlGlobalConfig::default();
+        assert!(cfg.retry.enabled);
+    }
+
+    #[test]
+    fn retry_policy_parse_full_uri_params() {
+        let cfg = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=sqlite::memory:&retryEnabled=false&retryMaxAttempts=7&retryInitialDelayMs=1000&retryMultiplier=3.0&retryMaxDelayMs=60000&retryJitter=0.5",
+        )
+        .expect("parse");
+        assert!(!cfg.retry.enabled);
+        assert_eq!(cfg.retry.max_attempts, 7);
+        assert_eq!(
+            cfg.retry.initial_delay,
+            std::time::Duration::from_millis(1000)
+        );
+        assert!((cfg.retry.multiplier - 3.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.retry.max_delay, std::time::Duration::from_millis(60000));
+        assert!((cfg.retry.jitter_factor - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn retry_policy_from_uri_survives_apply_defaults_with_global() {
+        let mut ep = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=sqlite::memory:&retryMaxAttempts=10&retryInitialDelayMs=500",
+        )
+        .expect("parse");
+        let global = SqlGlobalConfig::default(); // global has default retry (max_attempts=10)
+        ep.apply_defaults(&global);
+        // URI values survive when retry_set_from_uri is true
+        assert_eq!(ep.retry.max_attempts, 10);
+        assert_eq!(
+            ep.retry.initial_delay,
+            std::time::Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn retry_policy_falls_back_to_global_when_uri_has_no_retry_params() {
+        let mut ep =
+            SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite::memory:").expect("parse");
+        let mut global = SqlGlobalConfig::default();
+        global.retry.max_attempts = 7;
+        ep.apply_defaults(&global);
+        // When URI has no retry params, global fills the gap
+        assert_eq!(ep.retry.max_attempts, 7);
     }
 }

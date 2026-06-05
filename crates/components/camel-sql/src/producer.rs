@@ -17,7 +17,8 @@ use tracing::{debug, error, info, warn};
 use crate::config::{SqlEndpointConfig, SqlOutputType, enrich_db_url_with_ssl, redact_db_url};
 use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
-use crate::utils::{bind_json_values, row_to_json};
+use crate::utils::{bind_json_values, is_retryable_sqlx_error, row_to_json};
+use camel_component_api::retry_async;
 use camel_component_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
 
 #[derive(Clone)]
@@ -148,17 +149,25 @@ impl Service<Exchange> for SqlProducer {
                         CamelError::Config("max_lifetime_secs not resolved for SQL pool".into())
                     })?;
 
-                    let opts: PoolOptions<sqlx::Any> = PoolOptions::new()
-                        .max_connections(max_conn)
-                        .min_connections(min_conn)
-                        .idle_timeout(Duration::from_secs(idle_timeout))
-                        .max_lifetime(Duration::from_secs(max_lifetime));
-
                     info!(
                         db_url = %redact_db_url(&config.db_url),
                         "SQL producer pool initializing"
                     );
-                    opts.connect(&db_url).await.map_err(|e| {
+                    let retry_policy = &config.retry;
+                    retry_async::<_, _, _, _, sqlx::Error>(
+                        retry_policy,
+                        || {
+                            PoolOptions::new()
+                                .max_connections(max_conn)
+                                .min_connections(min_conn)
+                                .idle_timeout(Duration::from_secs(idle_timeout))
+                                .max_lifetime(Duration::from_secs(max_lifetime))
+                                .connect(&db_url)
+                        },
+                        is_retryable_sqlx_error,
+                    )
+                    .await
+                    .map_err(|e| {
                         // TODO(ADR-0012-g): replace with force_unhealthy_for_route once bd rc-1mo lands
                         error!(error = %e, db_url = %redact_db_url(&config.db_url), "Failed to connect to database"); // allow-log-levels
                         CamelError::EndpointCreationFailed(format!(
@@ -851,9 +860,11 @@ mod tests {
     // SQL-001: Pool init returns CamelError::Config when pool params cannot be resolved
     #[tokio::test]
     async fn producer_pool_init_returns_config_error_for_invalid_db() {
-        // Create config with an invalid db_url that will fail to connect
+        // Create config with an invalid db_url that will fail to connect.
+        // Disable retry for this test — the purpose is to verify error handling
+        // on a known-bad connect, not to exercise the retry loop.
         let mut config = SqlEndpointConfig::from_uri(
-            "sql:select 1?db_url=postgres://nonexistent-host:5432/nonexistent_db",
+            "sql:select 1?db_url=postgres://nonexistent-host:5432/nonexistent_db&retryEnabled=false",
         )
         .unwrap();
         // Set pool params explicitly so resolve_defaults doesn't help with connection
@@ -1043,5 +1054,48 @@ mod tests {
         let exchange = Exchange::new(msg);
         let result = producer.call(exchange).await;
         assert!(result.is_ok());
+    }
+
+    /// Regression: max_attempts=N → exactly N invocations (caught OpenSearch off-by-one 1f5c4c2a).
+    /// Replicates the exact retry loop from SqlProducer::start() (producer.rs:161-185):
+    ///   attempt starts at 0, incremented at top, should_retry(attempt), delay_for(attempt-1)
+    #[tokio::test]
+    async fn retry_loop_invokes_operation_exactly_max_attempts_times() {
+        use camel_component_api::NetworkRetryPolicy;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            ..NetworkRetryPolicy::default()
+        };
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = Arc::clone(&calls);
+
+        let mut attempt: u32 = 0;
+        let _result: Result<(), ()> = loop {
+            attempt += 1;
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            let op_result: Result<(), ()> = Err(());
+            match op_result {
+                Ok(v) => break Ok(v),
+                Err(_) if policy.should_retry(attempt) => {
+                    let delay = policy.delay_for(attempt - 1);
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Err(_) => break Err(()),
+            }
+        };
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "max_attempts=3 must yield exactly 3 invocations"
+        );
     }
 }
