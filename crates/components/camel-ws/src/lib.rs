@@ -25,7 +25,7 @@ use camel_api::security_policy::AuthorizationDecision;
 use camel_component_api::{
     Body as CamelBody, BoxProcessor, CamelError, Component, ConcurrencyModel, Consumer,
     ConsumerContext, Endpoint, Exchange, ExchangeEnvelope, Message as CamelMessage,
-    ProducerContext, retry_async,
+    NetworkRetryPolicy, ProducerContext, retry_async,
 };
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
@@ -1237,33 +1237,9 @@ impl Service<Exchange> for WsProducer {
             };
 
             let reconnect_policy = cfg.inner.reconnect_policy.clone();
-            // Uses retry_async (migrated from manual loop in rc-k9c).
-            // is_retryable_ws_error: transient = connection refused / timeout /
-            // connection failed; everything else = permanent fail-fast.
-            let mut ws_stream = retry_async(
-                &reconnect_policy,
-                Some("ws-producer"),
-                || {
-                    let r = request.clone();
-                    async {
-                        match tokio::time::timeout(
-                            cfg.inner.connect_timeout,
-                            tokio_tungstenite::connect_async(r),
-                        )
-                        .await
-                        {
-                            Ok(Ok((stream, _))) => Ok(stream),
-                            Ok(Err(e)) => Err(map_connect_error(e, &url)),
-                            Err(_) => Err(CamelError::ProcessorError(format!(
-                                "WebSocket connect timeout ({:?}) to {url}",
-                                cfg.inner.connect_timeout
-                            ))),
-                        }
-                    }
-                },
-                is_retryable_ws_error,
-            )
-            .await?;
+            let mut ws_stream =
+                connect_ws_with_retry(request, &url, cfg.inner.connect_timeout, &reconnect_policy)
+                    .await?;
 
             // Close/reconnect path: rate-limited bail. On close frame, sleep
             // delay_for(0) and return Err to signal the outer route to re-invoke
@@ -1455,6 +1431,46 @@ fn map_connect_error(err: tungstenite::Error, url: &str) -> CamelError {
             }
         }
     }
+}
+
+/// Connect to a WebSocket server with retry logic using the configured
+/// [`NetworkRetryPolicy`]. Extracted for testability so the regression test
+/// (rc-1nm) can drive the real production connect path rather than a
+/// synthetic fake.
+async fn connect_ws_with_retry<R>(
+    request: R,
+    url: &str,
+    connect_timeout: std::time::Duration,
+    reconnect_policy: &NetworkRetryPolicy,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    CamelError,
+>
+where
+    R: IntoClientRequest + Unpin + Clone,
+{
+    let url_owned = url.to_string();
+    retry_async(
+        reconnect_policy,
+        Some("ws-producer"),
+        || {
+            let r = request.clone();
+            let url = url_owned.clone();
+            async move {
+                match tokio::time::timeout(connect_timeout, tokio_tungstenite::connect_async(r))
+                    .await
+                {
+                    Ok(Ok((stream, _))) => Ok(stream),
+                    Ok(Err(e)) => Err(map_connect_error(e, &url)),
+                    Err(_) => Err(CamelError::ProcessorError(format!(
+                        "WebSocket connect timeout ({connect_timeout:?}) to {url}"
+                    ))),
+                }
+            }
+        },
+        is_retryable_ws_error,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -2776,11 +2792,11 @@ mod tests {
 
     /// Regression for rc-1nm: the WS producer connect path must emit
     /// `component=ws-producer` in retry log events so operators can
-    /// identify which component is retrying.
+    /// identify which component is retrying. Drives through the production
+    /// `connect_ws_with_retry` helper with a guaranteed-fail URL instead of
+    /// calling `retry_async` with a synthetic op.
     #[tokio::test]
     async fn ws_producer_retry_log_emits_component_ws_producer() {
-        use camel_component_api::{NetworkRetryPolicy, retry_async};
-
         let events = Arc::new(Mutex::new(Vec::new()));
         let layer = CollectingLayer {
             events: events.clone(),
@@ -2795,13 +2811,16 @@ mod tests {
             ..NetworkRetryPolicy::default()
         };
 
-        // Simulate the WS producer connect path: always-failing op so we get
-        // at least one retry log event.
-        let result: Result<(), CamelError> = retry_async(
+        // Drive through the production connect path with a guaranteed-fail
+        // URL. Port 1 is reserved on Linux; connect immediately fails with
+        // ECONNREFUSED.
+        let request = "ws://127.0.0.1:1".into_client_request().unwrap();
+
+        let result: Result<_, CamelError> = connect_ws_with_retry(
+            request,
+            "ws://127.0.0.1:1",
+            Duration::from_millis(100),
             &policy,
-            Some("ws-producer"),
-            || async { Err(CamelError::Io("connection refused".to_string())) },
-            |_| true,
         )
         .await;
 
