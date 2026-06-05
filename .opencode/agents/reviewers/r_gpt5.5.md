@@ -2,7 +2,7 @@
 description: Combined reviewer. Reviews implementation plans and code changes against specs, repo context, and architecture patterns.
 mode: subagent
 temperature: 0.1
-model: openai/gpt-5.3-codex
+model: openai/gpt-5.5
 tools:
   write: false
   edit: false

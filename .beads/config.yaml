@@ -13,7 +13,7 @@ issue-prefix: "rc"
 # no-db: false
 
 # Enable JSON output by default
-json: true
+json: false
 
 # Feedback title formatting for mutating commands (create/update/close/dep/edit)
 # 0 = hide titles, N > 0 = truncate to N characters
@@ -22,7 +22,6 @@ json: true
 
 # Default actor for audit trails (overridden by BEADS_ACTOR or --actor)
 actor: "opencode"
-
 # Export events (audit trail) to .beads/events.jsonl on each flush/sync
 # When enabled, new events are appended incrementally using a high-water mark.
 # Use 'bd export --events' to trigger manually regardless of this setting.
