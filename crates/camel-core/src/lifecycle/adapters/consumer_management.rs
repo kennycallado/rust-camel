@@ -45,8 +45,10 @@ pub(crate) fn spawn_consumer_task(
     tokio::spawn(async move {
         if let Err(e) = consumer.start(consumer_ctx.clone()).await {
             if is_resume {
+                // log-policy: system-broken
                 error!(route_id = %route_id, "Consumer error on resume: {e}");
             } else {
+                // log-policy: system-broken
                 error!(route_id = %route_id, "Consumer error: {e}");
             }
 
@@ -74,6 +76,7 @@ pub(crate) fn spawn_consumer_task(
                         Ok(Ok(())) => {}
                         Ok(Err(e)) if !consumer_ctx.is_cancelled() => {
                             let error_msg = e.to_string();
+                            // log-policy: system-broken
                             error!(route_id = %route_id, "Consumer background task failed: {error_msg}");
                             if let Some(ref tx) = crash_notifier {
                                 let _ = tx
@@ -90,6 +93,7 @@ pub(crate) fn spawn_consumer_task(
                         }
                         Err(join_err) if !consumer_ctx.is_cancelled() => {
                             let error_msg = format!("Consumer task panicked: {join_err}");
+                            // log-policy: system-broken
                             error!(route_id = %route_id, "{error_msg}");
                             if let Some(ref tx) = crash_notifier {
                                 let _ = tx

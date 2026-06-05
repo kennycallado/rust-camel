@@ -270,6 +270,7 @@ async fn ready_with_backoff(
                 }
             }
             Err(e) => {
+                // log-policy: system-broken
                 error!("Pipeline not ready: {e}");
                 return Err(e);
             }
@@ -1471,6 +1472,7 @@ impl RouteController for DefaultRouteController {
                         } else if let Err(ref e) = result
                             && !matches!(e, CamelError::Stopped)
                         {
+                            // log-policy: system-broken
                             error!("Pipeline error: {e}");
                         }
                     }
@@ -1519,6 +1521,7 @@ impl RouteController for DefaultRouteController {
                             } else if let Err(ref e) = result
                                 && !matches!(e, CamelError::Stopped)
                             {
+                                // log-policy: system-broken
                                 error!("Pipeline error: {e}");
                             }
                         });

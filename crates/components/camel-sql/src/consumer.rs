@@ -385,7 +385,8 @@ impl Consumer for SqlConsumer {
                 )
                 .await
                 .map_err(|e| {
-                    error!(error = %e, db_url = %redact_db_url(&self.config.db_url), "SQL connect failed, giving up");
+                    // TODO(ADR-0012-g): replace with force_unhealthy_for_route once bd rc-1mo lands
+                    error!(error = %e, db_url = %redact_db_url(&self.config.db_url), "SQL connect failed, giving up"); // allow-log-levels
                     CamelError::EndpointCreationFailed(format!(
                         "Failed to connect to database: {}",
                         e
@@ -1001,8 +1002,7 @@ mod tests {
         // The bridged path must NOT emit ERROR (handler owns it).
         assert!(
             !logs_contain("ERROR"),
-            "bridged poll failure must not emit ERROR (handler owns it); logs were:\n{}",
-            logs_contain("")
+            "bridged poll failure must not emit ERROR (handler owns it); check captured logs for stray ERROR lines"
         );
         // Sanity: warn! was emitted so the failure is still visible.
         assert!(
@@ -1060,6 +1060,40 @@ mod tests {
         assert!(
             logs_contain("ERROR"),
             "unbridged send_and_wait failure MUST emit ERROR (consumer owns the signal)"
+        );
+    }
+
+    /// Regression for ADR-0012: when bridge_error_handler=false, the unbridged
+    /// branch of handle_poll_result MUST emit ERROR for unhandled poll failure.
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn unbridged_handle_poll_result_emits_error_loud() {
+        let pool = sqlite_pool().await;
+        // Do NOT create any table — fetch_all will fail in poll_database.
+
+        let mut config = config();
+        config.bridge_error_handler = false;
+        config.query = "select * from nonexistent_table".to_string();
+        config.resolve_defaults();
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        // Healthy downstream task; should not be reached for this poll-failure path.
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(4);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange));
+                }
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+        consumer.handle_poll_result(&pool, &ctx, &template).await;
+
+        assert!(
+            logs_contain("ERROR"),
+            "unbridged handle_poll_result failure MUST emit ERROR (consumer owns signal)"
         );
     }
 

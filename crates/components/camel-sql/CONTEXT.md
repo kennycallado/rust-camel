@@ -21,7 +21,8 @@ Per ADR-0012.
 **Note on consumer.rs:205 (StreamList):** This is a **normal-data `send_and_wait` → Err** site, NOT a deliberate error-handoff (bridge) site. Per ADR-0012 "b-bridged discriminator", `send_and_wait → Err` means the route handler did NOT absorb the failure — the consumer's `error!` is the only ERROR signal for the unhandled failure. The site keeps `error!` with `// log-policy: outside-contract` + `// TODO(ADR-0012-e-metrics)` marker. Once `bd rc-mf3` lands, the metric call will be added and the site may optionally downgrade to `warn!` if the metric proves operationally sufficient. Protected by regression test `unbridged_send_and_wait_failure_emits_error_loud`.
 
 **Category (g) — Producer/Endpoint creation failure** (wiring deferred to `bd rc-1mo` — ComponentContext extension for `force_unhealthy_for_route`):
-- `producer.rs:162` (lazy pool init) uses inline `// allow-log-levels` escape + `// TODO(ADR-0012-g)` marker. Once rc-1mo lands, replace with `force_unhealthy_for_route(route_id, "endpoint-creation", reason)` + `// log-policy: outside-contract` annotation.
+- `producer.rs:162` (producer lazy pool init) uses inline `// allow-log-levels` escape + `// TODO(ADR-0012-g)` marker. Once rc-1mo lands, replace with `force_unhealthy_for_route(route_id, "endpoint-creation", reason)` + `// log-policy: outside-contract` annotation.
+- `consumer.rs:388` (consumer pool init giving up after retry budget exhausted) — same (g) category, same marker pattern, same rc-1mo deferral. Annotated in Phase 3 Task 5 polish after Phase 2 miss.
 
 **Migration status (Phase 2 close):**
 - All handler-owned sites (categories a, b-bridged) → `warn!`.

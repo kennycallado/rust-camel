@@ -170,7 +170,9 @@ async fn run_grpc_server(
         let (stream, _) = match listener.accept().await {
             Ok(s) => s,
             Err(e) => {
-                error!(error = %e, "gRPC server accept error");
+                // TODO(ADR-0012-e-metrics): wire increment_errors for gRPC server accept
+                //   via bd rc-mf3; route_id semantics TBD for cross-route infra.
+                error!(error = %e, "gRPC server accept error"); // allow-log-levels
                 continue;
             }
         };
@@ -263,6 +265,7 @@ async fn extract_principal(
             Err(tonic::Status::unavailable(msg))
         }
         Err(e) => {
+            // log-policy: system-broken
             tracing::error!(error = %e, "gRPC authentication error");
             Err(tonic::Status::internal(e.to_string()))
         }

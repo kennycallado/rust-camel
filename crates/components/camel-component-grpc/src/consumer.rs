@@ -426,6 +426,7 @@ impl GrpcConsumer {
                                             return;
                                         }
                                         Err(e) => {
+                                            // log-policy: system-broken
                                             tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
                                             let _ = reply_tx.send(GrpcReply::Err(tonic::Status::internal(format!("authorization error: {e}"))));
                                             return;
@@ -463,6 +464,7 @@ impl GrpcConsumer {
                                             return;
                                         }
                                         Err(e) => {
+                                            // log-policy: system-broken
                                             tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
                                             let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::internal(format!("authorization error: {e}")))).await;
                                             return;
@@ -494,6 +496,7 @@ impl GrpcConsumer {
                                             return;
                                         }
                                         Err(e) => {
+                                            // log-policy: system-broken
                                             tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
                                             let _ = reply_tx.send(GrpcReply::Err(tonic::Status::internal(format!("authorization error: {e}"))));
                                             return;
@@ -525,6 +528,7 @@ impl GrpcConsumer {
                                             return;
                                         }
                                         Err(e) => {
+                                            // log-policy: system-broken
                                             tracing::error!(path = %path_for_log, error = %e, "gRPC policy evaluation error");
                                             let _ = reply_tx.send(GrpcStreamItem::Error(tonic::Status::internal(format!("authorization error: {e}")))).await;
                                             return;

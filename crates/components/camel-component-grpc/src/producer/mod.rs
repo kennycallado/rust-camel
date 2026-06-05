@@ -82,7 +82,8 @@ impl GrpcProducer {
         config: &GrpcConfig,
     ) -> Result<Self, CamelError> {
         let endpoint = Endpoint::from_shared(addr.clone()).map_err(|e| {
-            error!(error = %e, "grpc producer creation failed");
+            // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
+            error!(error = %e, "grpc producer creation failed"); // allow-log-levels
             CamelError::EndpointCreationFailed(format!("invalid grpc endpoint: {e}"))
         })?;
         let channel = endpoint.connect_lazy();
@@ -91,7 +92,8 @@ impl GrpcProducer {
         let pool = cache
             .get_or_compile(&proto_path, std::iter::empty::<&Path>())
             .map_err(|e| {
-                error!(error = %e, "grpc producer creation failed");
+                // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
+                error!(error = %e, "grpc producer creation failed"); // allow-log-levels
                 CamelError::EndpointCreationFailed(format!("failed to compile proto: {e}"))
             })?;
 
@@ -99,7 +101,8 @@ impl GrpcProducer {
             let err = CamelError::EndpointCreationFailed(format!(
                 "service descriptor not found: {service_name}"
             ));
-            error!(service = %service_name, error = %err, "grpc producer creation failed");
+            // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
+            error!(service = %service_name, error = %err, "grpc producer creation failed"); // allow-log-levels
             err
         })?;
 
@@ -110,14 +113,16 @@ impl GrpcProducer {
                 let err = CamelError::EndpointCreationFailed(format!(
                     "method descriptor not found: {service_name}/{method_name}"
                 ));
-                error!(service = %service_name, method = %method_name, error = %err, "grpc producer creation failed");
+                // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
+                error!(service = %service_name, method = %method_name, error = %err, "grpc producer creation failed"); // allow-log-levels
                 err
             })?;
         let req_descriptor = method.input();
         let resp_descriptor = method.output();
         let path = PathAndQuery::from_maybe_shared(format!("/{service_name}/{method_name}"))
             .map_err(|e| {
-                error!(error = %e, "grpc producer creation failed");
+                // TODO(ADR-0012-g): replace with force_unhealthy_for_route via bd rc-1mo
+                error!(error = %e, "grpc producer creation failed"); // allow-log-levels
                 CamelError::EndpointCreationFailed(format!("invalid gRPC path: {e}"))
             })?;
 

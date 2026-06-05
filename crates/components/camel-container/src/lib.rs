@@ -70,6 +70,7 @@ pub async fn cleanup_tracked_containers() {
     let docker = match Docker::connect_with_local_defaults() {
         Ok(d) => d,
         Err(e) => {
+            // log-policy: system-broken
             tracing::error!("Failed to connect to Docker for cleanup: {}", e);
             return;
         }
@@ -1416,10 +1417,8 @@ impl ContainerConsumer {
                     return Ok(());
                 }
                 Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "Container events consumer exhausted reconnect attempts"
-                    );
+                    // TODO(ADR-0012-e-metrics): wire increment_errors("e:container:events-connect") via bd rc-mf3
+                    tracing::error!(error = %e, "Container events consumer exhausted reconnect attempts"); // allow-log-levels
                     return Err(e);
                 }
             };
@@ -1441,12 +1440,14 @@ impl ContainerConsumer {
                                 let exchange = Exchange::new(message);
 
                                 if let Err(e) = context.send(exchange).await {
+                                    // log-policy: system-broken
                                     tracing::error!("Failed to send exchange: {:?}", e);
                                     break;
                                 }
                             }
                             Some(Err(e)) => {
-                                tracing::error!("Docker event stream error: {}. Reconnecting...", e);
+                                // TODO(ADR-0012-e-metrics): wire increment_errors("e:container:events-stream") via bd rc-mf3
+                                tracing::error!("Docker event stream error: {}. Reconnecting...", e); // allow-log-levels
                                 break;
                             }
                             None => {
@@ -1499,10 +1500,8 @@ impl ContainerConsumer {
                     return Ok(());
                 }
                 Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "Container logs consumer exhausted reconnect attempts"
-                    );
+                    // TODO(ADR-0012-e-metrics): wire increment_errors("e:container:logs-connect") via bd rc-mf3
+                    tracing::error!(error = %e, "Container logs consumer exhausted reconnect attempts"); // allow-log-levels
                     return Err(e);
                 }
             };
@@ -1576,12 +1575,14 @@ impl ContainerConsumer {
                                 let exchange = Exchange::new(message);
 
                                 if let Err(e) = context.send(exchange).await {
+                                    // log-policy: system-broken
                                     tracing::error!("Failed to send log exchange: {:?}", e);
                                     break;
                                 }
                             }
                             Some(Err(e)) => {
-                                tracing::error!("Docker log stream error: {}. Reconnecting...", e);
+                                // TODO(ADR-0012-e-metrics): wire increment_errors("e:container:logs-stream") via bd rc-mf3
+                                tracing::error!("Docker log stream error: {}. Reconnecting...", e); // allow-log-levels
                                 break;
                             }
                             None => {

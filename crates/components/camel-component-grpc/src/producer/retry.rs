@@ -6,7 +6,7 @@ use camel_api::CamelError;
 use camel_component_api::{NetworkRetryPolicy, retry_async};
 use tonic::transport::Channel;
 use tonic::{Code, Status};
-use tracing::error;
+use tracing::warn;
 
 /// Classifies a tonic::Status code as transient (retryable) or permanent.
 ///
@@ -78,7 +78,8 @@ where
     match result {
         Ok(response) => Ok(response),
         Err(status) => {
-            error!(
+            // log-policy: handler-owned
+            warn!(
                 code = %status.code(),
                 "grpc {} call failed (retries exhausted or non-retryable)",
                 kind

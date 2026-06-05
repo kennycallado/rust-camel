@@ -230,6 +230,7 @@ async fn stop_delegate(
                 return Err(err);
             }
             Ok(Err(e)) if e.is_panic() => {
+                // log-policy: system-broken
                 error!(error = %e, "master delegate task panicked");
                 return Err(CamelError::ProcessorError(format!(
                     "master delegate task panicked: {e}"
@@ -382,6 +383,7 @@ impl Consumer for MasterConsumer {
                     delegate_attempts = 0;
                 }
                 if let Err(err) = reconcile_event(initial_event, &mut state, &rctx).await {
+                    // log-policy: system-broken
                     error!(lock = %lock_name, "master delegate error: {err}");
                     return Err(err);
                 }
@@ -407,6 +409,7 @@ impl Consumer for MasterConsumer {
                                 delegate_attempts = 0;
                             }
                             if let Err(err) = reconcile_event(event, &mut state, &rctx).await {
+                                // log-policy: system-broken
                                 error!(lock = %lock_name, "master delegate error: {err}");
                                 return Err(err);
                             }
@@ -416,6 +419,7 @@ impl Consumer for MasterConsumer {
                         if matches!(&state, DelegateState::Active { handle, .. } if handle.is_finished())
                             && let Err(err) = stop_delegate(&mut state, drain_timeout).await
                         {
+                            // log-policy: system-broken
                             error!(lock = %lock_name, "master delegate task failed: {err}");
                             return Err(err);
                         }
@@ -461,6 +465,7 @@ impl Consumer for MasterConsumer {
                             )
                             .await {
                                 if is_retryable_camel_error(&err) {
+                                    // log-policy: system-broken
                                     error!(
                                         lock = %lock_name,
                                         error = %err,
@@ -469,6 +474,7 @@ impl Consumer for MasterConsumer {
                                     );
                                     // Don't return — let the next tick attempt retry.
                                 } else {
+                                    // log-policy: system-broken
                                     error!(
                                         lock = %lock_name,
                                         error = %err,
@@ -524,6 +530,7 @@ impl Consumer for MasterConsumer {
                 Ok(Ok(Ok(()))) => {}
                 Ok(Ok(Err(err))) => return Err(err),
                 Ok(Err(e)) if e.is_panic() => {
+                    // log-policy: system-broken
                     error!(lock = %self.lock_name, error = %e, "leadership task panicked");
                 }
                 Ok(Err(e)) => {

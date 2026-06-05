@@ -743,6 +743,7 @@ pub fn spawn_supervision_task(
                 .max_attempts
                 .is_some_and(|max| *current_attempt > max)
             {
+                // log-policy: system-broken
                 error!(
                     route_id = %route_id,
                     attempts = *current_attempt,
@@ -761,6 +762,7 @@ pub fn spawn_supervision_task(
                     last_restart_time.insert(route_id.clone(), Instant::now());
                 }
                 Err(err) => {
+                    // log-policy: system-broken
                     error!(route_id = %route_id, error = %err, "Failed to restart route");
                 }
             }
