@@ -4,6 +4,29 @@
 //! and [`retry_async_cancelable`] (cancellation-aware variant). Components that
 //! supervise external processes (JMS, xj, xslt) should use only
 //! [`NetworkRetryPolicy::delay_for`] inside their own supervision loops.
+//!
+//! Both [`retry_async`] and [`retry_async_cancelable`] accept an optional
+//! `label` for component identity in retry logs:
+//!
+//! ```rust,ignore
+//! use camel_component_api::retry_async;
+//!
+//! retry_async(&config.reconnect, Some("ws-producer"), op, is_retryable).await?;
+//! ```
+//!
+//! When a label is set, log messages include `"ws-producer: transient error
+//! — retrying"` with a `component` structured field that operators can filter
+//! with `component=ws-producer`.
+//!
+//! For location-specific context (URLs, endpoints), wrap the retry call in a
+//! [`tracing::span`](https://docs.rs/tracing/latest/tracing/macro.span.html)
+//! whose fields are inherited by all log events inside the retry loop:
+//!
+//! ```rust,ignore
+//! let span = tracing::info_span!("ws_connect", url = %url);
+//! let _guard = span.enter();
+//! retry_async(&config.reconnect, Some("ws-producer"), op, is_retryable).await?;
+//! ```
 
 use std::{future::Future, time::Duration};
 
@@ -154,29 +177,38 @@ impl NetworkRetryPolicy {
 
 /// Executes `op` with reconnect/backoff according to `policy`.
 ///
-/// `is_retryable` classifies errors: retryable errors are retried, permanent errors are not.
+/// `label`, if `Some`, is emitted as a structured `component` tracing field
+/// and in the retry log message text so operators can identify which component
+/// is retrying (e.g., `ws-producer: transient error — retrying`). Pass `None`
+/// for the pre-0.14 backwards-compatible unlabeled path.
+///
+/// `is_retryable` classifies errors: retryable errors are retried, permanent
+/// errors are not.
 ///
 /// # Security note: error Display is logged at WARN level
 ///
-/// On every retry, the error's [`Display`](std::fmt::Display) representation is emitted via
-/// `tracing::warn!` for operator visibility during connection retries. Callers MUST sanitize
-/// errors before returning them from `op` if they may contain sensitive content such as
-/// connection strings, embedded credentials, or host‑port pairs. Sanitization belongs at
-/// the source — in the IO call whose error is wrapped — not here.
+/// On every retry, the error's [`Display`](std::fmt::Display) representation
+/// is emitted via `tracing::warn!` for operator visibility during connection
+/// retries. Callers MUST sanitize errors before returning them from `op` if
+/// they may contain sensitive content such as connection strings, embedded
+/// credentials, or host‑port pairs. Sanitization belongs at the source — in
+/// the IO call whose error is wrapped — not here.
 ///
-/// This log call is intentional and should not be removed: it provides the only diagnostic
-/// signal that a networked component is retrying and why.
+/// This log call is intentional and should not be removed: it provides the
+/// only diagnostic signal that a networked component is retrying and why.
 ///
 /// # Example
 /// ```rust,ignore
 /// let result = retry_async(
 ///     &config.reconnect,
+///     Some("ws-producer"),
 ///     || async move { connect_to_server().await },
 ///     |err: &CamelError| matches!(err, CamelError::Io(_)),
 /// ).await?;
 /// ```
 pub async fn retry_async<T, Op, Fut, IsRetryable, E>(
     policy: &NetworkRetryPolicy,
+    label: Option<&'static str>,
     op: Op,
     is_retryable: IsRetryable,
 ) -> Result<T, E>
@@ -186,7 +218,7 @@ where
     IsRetryable: Fn(&E) -> bool,
     E: std::fmt::Display,
 {
-    retry_async_inner(policy, op, is_retryable, None).await
+    retry_async_inner(policy, op, is_retryable, None, label).await
 }
 
 /// Shared private implementation used by both [`retry_async`] and
@@ -196,6 +228,7 @@ async fn retry_async_inner<T, Op, Fut, IsRetryable, E>(
     mut op: Op,
     is_retryable: IsRetryable,
     cancel: Option<&CancellationToken>,
+    label: Option<&'static str>,
 ) -> Result<T, E>
 where
     Op: FnMut() -> Fut,
@@ -212,12 +245,22 @@ where
                     return Err(err);
                 }
                 let delay = policy.delay_for(attempt);
-                tracing::warn!(
-                    attempt,
-                    delay_ms = delay.as_millis(),
-                    error = %err,
-                    "transient error — retrying"
-                );
+                if let Some(component) = label {
+                    tracing::warn!(
+                        component,
+                        attempt,
+                        delay_ms = delay.as_millis(),
+                        error = %err,
+                        "{component}: transient error — retrying"
+                    );
+                } else {
+                    tracing::warn!(
+                        attempt,
+                        delay_ms = delay.as_millis(),
+                        error = %err,
+                        "transient error — retrying"
+                    );
+                }
                 // Honour cancellation only during inter-retry sleep, not
                 // during the operation itself (that is the caller's
                 // responsibility).
@@ -243,11 +286,15 @@ where
 /// Cancellation is **not** checked during the operation itself — the caller is
 /// responsible for making the operation itself cancellation-aware if needed.
 ///
+/// `label`, if `Some`, is emitted as a structured `component` tracing field
+/// (see [`retry_async`] for details).
+///
 /// # Example
 /// ```rust,ignore
 /// let cancel = CancellationToken::new();
 /// let result = retry_async_cancelable(
 ///     &config.reconnect,
+///     Some("container-events"),
 ///     || async move { make_network_call().await },
 ///     |err| is_transient(err),
 ///     &cancel,
@@ -255,6 +302,7 @@ where
 /// ```
 pub async fn retry_async_cancelable<T, Op, Fut, IsRetryable, E>(
     policy: &NetworkRetryPolicy,
+    label: Option<&'static str>,
     op: Op,
     is_retryable: IsRetryable,
     cancel: &CancellationToken,
@@ -265,7 +313,7 @@ where
     IsRetryable: Fn(&E) -> bool,
     E: std::fmt::Display,
 {
-    retry_async_inner(policy, op, is_retryable, Some(cancel)).await
+    retry_async_inner(policy, op, is_retryable, Some(cancel), label).await
 }
 
 /// Classify a [`CamelError`] as retryable (transient network/IO errors).
@@ -286,19 +334,6 @@ pub fn is_retryable_camel_error(err: &CamelError) -> bool {
     matches!(err, CamelError::Io(_))
         || matches!(err, CamelError::ProcessorError(s) if s.contains("[TRANSIENT]"))
         || matches!(err, CamelError::ProcessorErrorWithSource(s, _) if s.contains("[TRANSIENT]"))
-}
-
-/// Convenience: [`retry_async`] with [`CamelError`] classification via
-/// [`is_retryable_camel_error`].
-pub async fn retry_camel_error<T, Op, Fut>(
-    policy: &NetworkRetryPolicy,
-    op: Op,
-) -> Result<T, CamelError>
-where
-    Op: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, CamelError>>,
-{
-    retry_async(policy, op, is_retryable_camel_error).await
 }
 
 #[cfg(test)]
@@ -354,6 +389,7 @@ mod tests {
         let count_clone = count.clone();
         let result = retry_async::<u32, _, _, _, CamelError>(
             &policy,
+            None,
             || {
                 let c = count_clone.clone();
                 async move {
@@ -378,6 +414,7 @@ mod tests {
         let attempts_clone = attempts.clone();
         let result = retry_async::<u32, _, _, _, CamelError>(
             &policy,
+            None,
             || {
                 let c = attempts_clone.clone();
                 async move {
@@ -406,6 +443,7 @@ mod tests {
         let attempts_clone = attempts.clone();
         let result = retry_async::<u32, _, _, _, CamelError>(
             &policy,
+            None,
             || {
                 let c = attempts_clone.clone();
                 async move {
@@ -432,6 +470,7 @@ mod tests {
         let attempts_clone = attempts.clone();
         let result = retry_async::<u32, _, _, _, CamelError>(
             &policy,
+            None,
             || {
                 let c = attempts_clone.clone();
                 async move {
@@ -470,6 +509,7 @@ mod tests {
         let attempts_clone = attempts.clone();
         let result = retry_async::<u32, _, _, _, CamelError>(
             &policy,
+            None,
             || {
                 let c = attempts_clone.clone();
                 async move {
@@ -537,6 +577,7 @@ mod tests {
         let calls_clone = calls.clone();
         let result: Result<(), TestError> = retry_async(
             &policy,
+            None,
             || {
                 let c = calls_clone.clone();
                 async move {
@@ -565,6 +606,7 @@ mod tests {
         let calls_clone = calls.clone();
         let result: Result<(), TestError> = retry_async(
             &policy,
+            None,
             || {
                 let c = calls_clone.clone();
                 async move {
@@ -623,10 +665,10 @@ mod tests {
         assert!(!is_retryable_camel_error(&err));
     }
 
-    // ── retry_camel_error convenience wrapper ───────────────────────────
+    // ── is_retryable_camel_error via retry_async ─────────────────────────
 
     #[tokio::test]
-    async fn retry_camel_error_retries_on_io_error() {
+    async fn retry_async_with_is_retryable_camel_error_retries_on_io_error() {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let policy = NetworkRetryPolicy {
@@ -638,20 +680,25 @@ mod tests {
 
         let calls = std::sync::Arc::new(AtomicU32::new(0));
         let calls_clone = calls.clone();
-        let result = retry_camel_error(&policy, || {
-            let c = calls_clone.clone();
-            async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                Err::<u32, _>(CamelError::Io("connection refused".to_string()))
-            }
-        })
+        let result = retry_async(
+            &policy,
+            None,
+            || {
+                let c = calls_clone.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err::<u32, _>(CamelError::Io("connection refused".to_string()))
+                }
+            },
+            is_retryable_camel_error,
+        )
         .await;
         assert!(result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
-    async fn retry_camel_error_stops_on_permanent_camel_error() {
+    async fn retry_async_with_is_retryable_camel_error_stops_on_permanent_camel_error() {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let policy = NetworkRetryPolicy {
@@ -662,13 +709,18 @@ mod tests {
 
         let calls = std::sync::Arc::new(AtomicU32::new(0));
         let calls_clone = calls.clone();
-        let result = retry_camel_error(&policy, || {
-            let c = calls_clone.clone();
-            async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                Err::<u32, _>(CamelError::Config("permanent".to_string()))
-            }
-        })
+        let result = retry_async(
+            &policy,
+            None,
+            || {
+                let c = calls_clone.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err::<u32, _>(CamelError::Config("permanent".to_string()))
+                }
+            },
+            is_retryable_camel_error,
+        )
         .await;
         assert!(result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -692,6 +744,7 @@ mod tests {
         let attempts_clone = attempts.clone();
         let result: Result<u32, CamelError> = retry_async_cancelable(
             &policy,
+            None,
             || {
                 let c = attempts_clone.clone();
                 async move {
@@ -728,6 +781,7 @@ mod tests {
         let calls_clone = calls.clone();
         let result: Result<u32, CamelError> = retry_async_cancelable(
             &policy,
+            None,
             || {
                 let c = calls_clone.clone();
                 async move {
@@ -776,6 +830,7 @@ mod tests {
 
         let result: Result<u32, CamelError> = retry_async_cancelable(
             &policy,
+            None,
             || {
                 let c = calls_clone.clone();
                 let flag = op_ran.clone();
@@ -829,6 +884,7 @@ mod tests {
 
         let result: Result<u32, CamelError> = retry_async_cancelable(
             &policy,
+            None,
             || {
                 let c = calls_clone.clone();
                 async move {
@@ -874,6 +930,7 @@ mod tests {
         let calls_clone = calls.clone();
         let result: Result<u32, CamelError> = retry_async_cancelable(
             &policy,
+            None,
             || {
                 let c = calls_clone.clone();
                 async move {
@@ -887,5 +944,183 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ── Labeled retry observability tests ───────────────────────────────
+
+    use std::fmt::Write as FmtWrite;
+    use std::sync::{Arc, Mutex};
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// A tracing `Layer` that captures formatted event field key=value pairs
+    /// into a shared buffer.
+    struct CollectingLayer {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S: Subscriber> tracing_subscriber::Layer<S> for CollectingLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut buf = String::new();
+            let mut visitor = CollectingVisitor { fields: &mut buf };
+            event.record(&mut visitor);
+            if let Ok(mut events) = self.events.lock() {
+                events.push(buf);
+            }
+        }
+    }
+
+    struct CollectingVisitor<'a> {
+        fields: &'a mut String,
+    }
+
+    impl CollectingVisitor<'_> {
+        fn record_field(&mut self, name: &str, value: &str) {
+            write!(self.fields, " {name}={value}").ok();
+        }
+    }
+
+    impl tracing::field::Visit for CollectingVisitor<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.record_field(field.name(), value);
+        }
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.record_field(field.name(), &format!("{value:?}"));
+        }
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.record_field(field.name(), &value.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn labeled_policy_emits_component_in_log_message() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let layer = CollectingLayer {
+            events: events.clone(),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 2,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            ..NetworkRetryPolicy::default()
+        };
+
+        let result = retry_async::<u32, _, _, _, CamelError>(
+            &policy,
+            Some("ws-producer"),
+            || async { Err(CamelError::Io("connection refused".to_string())) },
+            |_| true,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let captured = events.lock().unwrap();
+        assert!(
+            !captured.is_empty(),
+            "expected at least one log event, got none"
+        );
+        // The first (and only) retry should contain the component label
+        let first = &captured[0];
+        assert!(
+            first.contains("component=ws-producer"),
+            "expected 'component=ws-producer' in log event, got: {first}"
+        );
+        assert!(
+            first.contains("ws-producer: transient error"),
+            "expected 'ws-producer: transient error' in log event, got: {first}"
+        );
+    }
+
+    #[tokio::test]
+    async fn labeled_policy_preserves_structured_fields() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let layer = CollectingLayer {
+            events: events.clone(),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 2,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            ..NetworkRetryPolicy::default()
+        };
+
+        let result = retry_async::<u32, _, _, _, CamelError>(
+            &policy,
+            Some("sql-producer"),
+            || async { Err(CamelError::Io("timeout".to_string())) },
+            |_| true,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let captured = events.lock().unwrap();
+        assert!(!captured.is_empty());
+        let first = &captured[0];
+        // Structured fields must be present
+        assert!(
+            first.contains("attempt=0"),
+            "expected 'attempt=0' field, got: {first}"
+        );
+        assert!(
+            first.contains("component=sql-producer"),
+            "expected 'component=sql-producer' field, got: {first}"
+        );
+        assert!(
+            first.contains("error=IO error: timeout"),
+            "expected 'error=IO error: timeout' field, got: {first}"
+        );
+        assert!(
+            first.contains("delay_ms="),
+            "expected 'delay_ms=' field, got: {first}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unlabeled_policy_omits_component_field() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let layer = CollectingLayer {
+            events: events.clone(),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 2,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            ..NetworkRetryPolicy::default()
+        };
+        // Unlabeled path (label = None) — no component field emitted
+
+        let result = retry_async::<u32, _, _, _, CamelError>(
+            &policy,
+            None,
+            || async { Err(CamelError::Io("connection refused".to_string())) },
+            |_| true,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let captured = events.lock().unwrap();
+        assert!(!captured.is_empty());
+        let first = &captured[0];
+        assert!(
+            !first.contains("component="),
+            "expected no 'component=' field in unlabeled path, got: {first}"
+        );
+        assert!(
+            first.contains("transient error — retrying"),
+            "expected bare 'transient error — retrying' message, got: {first}"
+        );
     }
 }

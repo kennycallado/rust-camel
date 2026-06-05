@@ -566,6 +566,7 @@ impl Service<Exchange> for OpenSearchProducer {
 
             let result = retry_async::<_, _, _, _, ProducerError>(
                 &config.retry,
+                Some("opensearch-producer"),
                 || {
                     let op = operation.clone();
                     async {

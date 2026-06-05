@@ -372,6 +372,7 @@ impl Consumer for SqlConsumer {
                 let retry_policy = &self.config.retry;
                 retry_async::<_, _, _, _, sqlx::Error>(
                     retry_policy,
+                    Some("sql-consumer"),
                     || {
                         AnyPoolOptions::new()
                             .max_connections(max_conn)

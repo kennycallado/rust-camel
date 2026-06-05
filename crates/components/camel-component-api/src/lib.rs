@@ -25,7 +25,6 @@ pub use consumer::{
 pub use endpoint::{Endpoint, PollingConsumer};
 pub use network_retry::{
     NetworkRetryPolicy, is_retryable_camel_error, retry_async, retry_async_cancelable,
-    retry_camel_error,
 };
 pub use producer::ProducerContext;
 pub use registrar::ComponentRegistrar;

@@ -1242,6 +1242,7 @@ impl Service<Exchange> for WsProducer {
             // connection failed; everything else = permanent fail-fast.
             let mut ws_stream = retry_async(
                 &reconnect_policy,
+                Some("ws-producer"),
                 || {
                     let r = request.clone();
                     async {
@@ -2721,6 +2722,99 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "max_attempts=1 must yield exactly 1 invocation"
+        );
+    }
+
+    // ── rc-1nm regression: WS producer retry emits component=ws-producer ──
+
+    use std::fmt::Write as _;
+    use std::sync::{Arc, Mutex};
+    use tracing::Subscriber;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    struct CollectingLayer {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for CollectingLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut buf = String::new();
+            let mut visitor = CollectingVisitor { fields: &mut buf };
+            event.record(&mut visitor);
+            if let Ok(mut events) = self.events.lock() {
+                events.push(buf);
+            }
+        }
+    }
+
+    struct CollectingVisitor<'a> {
+        fields: &'a mut String,
+    }
+
+    impl CollectingVisitor<'_> {
+        fn record_field(&mut self, name: &str, value: &str) {
+            write!(self.fields, " {name}={value}").ok();
+        }
+    }
+
+    impl tracing::field::Visit for CollectingVisitor<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.record_field(field.name(), value);
+        }
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.record_field(field.name(), &format!("{value:?}"));
+        }
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.record_field(field.name(), &value.to_string());
+        }
+    }
+
+    /// Regression for rc-1nm: the WS producer connect path must emit
+    /// `component=ws-producer` in retry log events so operators can
+    /// identify which component is retrying.
+    #[tokio::test]
+    async fn ws_producer_retry_log_emits_component_ws_producer() {
+        use camel_component_api::{NetworkRetryPolicy, retry_async};
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let layer = CollectingLayer {
+            events: events.clone(),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let policy = NetworkRetryPolicy {
+            max_attempts: 2,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            ..NetworkRetryPolicy::default()
+        };
+
+        // Simulate the WS producer connect path: always-failing op so we get
+        // at least one retry log event.
+        let result: Result<(), CamelError> = retry_async(
+            &policy,
+            Some("ws-producer"),
+            || async { Err(CamelError::Io("connection refused".to_string())) },
+            |_| true,
+        )
+        .await;
+
+        assert!(result.is_err(), "expected exhausted-retries error");
+        let captured = events.lock().unwrap();
+        assert!(
+            !captured.is_empty(),
+            "expected at least one retry log event, got none"
+        );
+        let first = &captured[0];
+        assert!(
+            first.contains("component=ws-producer"),
+            "rc-1nm regression: expected 'component=ws-producer' in WS retry log, got: {first}"
         );
     }
 }

@@ -67,6 +67,7 @@ where
 {
     let result = retry_async::<T, _, _, _, tonic::Status>(
         retry,
+        Some("grpc-producer"),
         || {
             let grpc = tonic::client::Grpc::new(channel.clone());
             rpc_call(grpc)

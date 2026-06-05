@@ -156,6 +156,7 @@ impl Service<Exchange> for SqlProducer {
                     let retry_policy = &config.retry;
                     retry_async::<_, _, _, _, sqlx::Error>(
                         retry_policy,
+                        Some("sql-producer"),
                         || {
                             PoolOptions::new()
                                 .max_connections(max_conn)

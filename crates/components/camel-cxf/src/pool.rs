@@ -37,6 +37,7 @@ fn is_retryable_cxf_error(err: &CxfError) -> bool {
 async fn connect_with_retry(port: u16, policy: &NetworkRetryPolicy) -> Result<Channel, CxfError> {
     retry_async(
         policy,
+        Some("cxf"),
         || async {
             connect_channel(port)
                 .await
@@ -966,6 +967,7 @@ mod tests {
         // the pre-rc-4s9 manual-loop-mirror test to the migrated code path.
         let result: Result<(), CxfError> = retry_async(
             &policy,
+            Some("cxf"),
             || {
                 let c = Arc::clone(&calls_clone);
                 async move {

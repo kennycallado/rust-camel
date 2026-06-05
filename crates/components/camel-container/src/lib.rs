@@ -1403,6 +1403,7 @@ impl ContainerConsumer {
         loop {
             let docker = match retry_async_cancelable(
                 &self.config.reconnect,
+                Some("container-events"),
                 || async { self.config.connect_docker().await },
                 |_| true,
                 &cancel,
@@ -1485,6 +1486,7 @@ impl ContainerConsumer {
         loop {
             let docker = match retry_async_cancelable(
                 &self.config.reconnect,
+                Some("container-logs"),
                 || async { self.config.connect_docker().await },
                 |_| true,
                 &cancel,
