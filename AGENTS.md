@@ -43,6 +43,8 @@ If a subagent needs ULTRATHINK instructions are in .opencode/instructions/ultrat
   run: cargo xtask lint-unwrap
 - name: lint-secrets
   run: cargo xtask lint-secrets
+- name: lint-log-levels
+  run: cargo xtask lint-log-levels
 ```
 
 ## MERGE TO MAIN

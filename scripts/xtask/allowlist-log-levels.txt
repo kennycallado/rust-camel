@@ -1,0 +1,5 @@
+# log-level lint allowlist (see ADR-0012)
+# Format: <relative path from workspace root>:<line number>
+# This file MUST shrink monotonically per release — adding entries is
+# allowed only when paired with a bump to allowlist-log-levels.txt.max
+# in the same commit (the bump is the explicit opt-in signal).

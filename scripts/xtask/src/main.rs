@@ -68,6 +68,13 @@ enum Commands {
     /// Exits non-zero if any violations are found.
     /// Escape hatch: append `// allow-secret` to the line.
     LintSecrets,
+    /// Scan source files for error!() calls without a required
+    /// `// log-policy:` annotation on the preceding line.
+    /// See ADR-0012 for the convention.
+    /// Escape hatches: append `// allow-log-levels` on the same line,
+    /// or list `<relative path>:<line>` in
+    /// `scripts/xtask/allowlist-log-levels.txt`.
+    LintLogLevels,
     /// Compute the correct publish order for workspace crates by performing
     /// a topological sort over normal (non-dev) internal dependencies.
     /// Outputs shell commands suitable for publish-crates.sh.
@@ -171,6 +178,50 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-secrets error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintLogLevels => {
+            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let workspace_root = find_workspace_root_from(&manifest_dir)
+                .ok_or_else(|| "Cannot locate workspace root".to_string())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+            match lint_log_levels(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    let allowlist_entries = enforce_allowlist_max(&workspace_root).unwrap_or(0);
+                    let inline_locations =
+                        count_inline_escapes(&workspace_root).unwrap_or_default();
+                    let inline_count = inline_locations.len();
+                    println!(
+                        "lint-log-levels: OK (allowlist={allowlist_entries}, inline-escapes={inline_count} — both monotone-bounded per ADR-0012)"
+                    );
+                }
+                Ok(violations) => {
+                    println!("LOG-LEVEL VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                        println!(
+                            "    remedy: add one of `// log-policy: system-broken | outside-contract | handler-owned`"
+                        );
+                        println!("            on the preceding line. See ADR-0012.");
+                    }
+                    // Soft mode during Phase 1 rollout — do not fail CI.
+                    // Phase 2 will flip this to std::process::exit(1).
+                    let allowlist_entries = enforce_allowlist_max(&workspace_root).unwrap_or(0);
+                    let inline_locations =
+                        count_inline_escapes(&workspace_root).unwrap_or_default();
+                    let inline_count = inline_locations.len();
+                    eprintln!(
+                        "\nlint-log-levels: SOFT MODE (violations reported but not fatal during Phase 1)"
+                    );
+                    eprintln!("(allowlist={allowlist_entries}, inline-escapes={inline_count})");
+                }
+                Err(e) => {
+                    eprintln!("lint-log-levels error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -998,6 +1049,551 @@ pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
         }
     }
 
+    Ok(violations)
+}
+
+/// Scan all workspace `src/**/*.rs` files for `error!()` calls not annotated
+/// with one of:
+///   // log-policy: system-broken
+///   // log-policy: outside-contract
+///   // log-policy: handler-owned   (forbids error! — must be warn!/debug!)
+///
+/// Exclusion rules:
+///   - Test files (`tests/`, `*_test.rs`, `*_tests.rs`) and `build.rs` skipped by name.
+///   - Inside production files, `#[cfg(test)] mod ...` and `#[test] fn ...`
+///     blocks are tracked and excluded (ported from lint_unwrap's
+///     `pending_test_attr` / `test_scope_entry_depth` logic).
+///
+/// See ADR-0012 for the convention.
+
+#[derive(Debug, PartialEq)]
+enum LogPolicyKind {
+    SystemBroken,
+    OutsideContract,
+    HandlerOwned,
+    Unknown(String),
+}
+
+fn parse_log_policy(line: &str) -> Option<LogPolicyKind> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("//") {
+        return None;
+    }
+    let payload = trimmed.trim_start_matches('/').trim();
+    if !payload.starts_with("log-policy:") {
+        return None;
+    }
+    let kind = payload.trim_start_matches("log-policy:").trim();
+    Some(match kind {
+        "system-broken" => LogPolicyKind::SystemBroken,
+        "outside-contract" => LogPolicyKind::OutsideContract,
+        "handler-owned" => LogPolicyKind::HandlerOwned,
+        other => LogPolicyKind::Unknown(other.to_string()),
+    })
+}
+
+/// Returns true if the function enclosing `line_idx` contains at least one of:
+///   - `increment_errors(` (metric call)
+///   - `force_unhealthy_for_route(` (health pin)
+///   - an `if !bridged { ... }` guard wrapping the error! call.
+///
+/// Lexical approximation:
+///   - The enclosing function is found by walking backwards to the nearest `fn `.
+///   - The function body is bounded by brace-balanced scanning from the `fn`.
+///   - Guard detection walks backwards counting braces; if we hit `if !bridged`
+///     before exiting the enclosing scope, we're inside the guard.
+///
+/// Limitations: brace-counting is purely lexical; braces inside string literals
+/// or comments can affect counts. Unusual cases can be suppressed with
+/// `// allow-log-levels`.
+fn has_replacement_signal(lines: &[&str], error_line_idx: usize) -> bool {
+    let fn_start = (0..=error_line_idx)
+        .rev()
+        .find(|&i| lines.get(i).map(|l| l.contains("fn ")).unwrap_or(false))
+        .unwrap_or(0);
+    let mut depth: i32 = 0;
+    let mut seen_open = false;
+    let mut fn_end = error_line_idx;
+    for (i, line) in lines.iter().enumerate().skip(fn_start) {
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    seen_open = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if seen_open && depth <= 0 {
+            fn_end = i;
+            break;
+        }
+    }
+    let body_text: String = lines[fn_start..=fn_end.min(lines.len().saturating_sub(1))].join("\n");
+    if body_text.contains("increment_errors(") {
+        return true;
+    }
+    if body_text.contains("force_unhealthy_for_route(") {
+        return true;
+    }
+    let mut d: i32 = 0;
+    for (_idx, line) in lines[..=error_line_idx].iter().enumerate().rev() {
+        for ch in line.chars() {
+            match ch {
+                '}' => d += 1,
+                '{' => d -= 1,
+                _ => {}
+            }
+        }
+        if d < 0 && line.contains("if !bridged") {
+            return true;
+        }
+    }
+    false
+}
+
+const LABEL_REGEX: &str = r"^(b-prime|e|g):[a-z][a-z0-9-]*:[a-z][a-z0-9-]+$";
+const BD_ID_REGEX: &str = r"bd\s+[a-z0-9][a-z0-9-]*";
+const TODO_MARKER_REGEX: &str = r"TODO\(ADR-0012-[a-z-]+\)";
+
+/// Extract the string-literal second argument of `increment_errors(...)` if
+/// present on this line. Returns None if the call doesn't appear or the
+/// argument can't be extracted as a string literal.
+fn extract_increment_errors_label(line: &str) -> Option<&str> {
+    let idx = line.find("increment_errors(")?;
+    let after = &line[idx + "increment_errors(".len()..];
+    let comma = after.find(',')?;
+    let rest = after[comma + 1..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// Walks the enclosing function body and checks every
+/// `increment_errors(route_id, "label")` call. Returns a Violation for the
+/// first label that doesn't match LABEL_REGEX. Returns None if all labels
+/// match or there are no `increment_errors` calls.
+fn check_labels_in_function(lines: &[&str], error_line_idx: usize) -> Option<Violation> {
+    use regex::Regex;
+    let label_re = Regex::new(LABEL_REGEX).expect("valid label regex"); // allow-unwrap
+
+    let fn_start = (0..=error_line_idx)
+        .rev()
+        .find(|&i| lines.get(i).map(|l| l.contains("fn ")).unwrap_or(false))
+        .unwrap_or(0);
+    let mut depth: i32 = 0;
+    let mut seen_open = false;
+    let mut fn_end = error_line_idx;
+    for (i, line) in lines.iter().enumerate().skip(fn_start) {
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    seen_open = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if seen_open && depth <= 0 {
+            fn_end = i;
+            break;
+        }
+    }
+
+    for (i, line) in lines.iter().enumerate().take(fn_end + 1).skip(fn_start) {
+        if let Some(label) = extract_increment_errors_label(line)
+            && !label_re.is_match(label)
+        {
+            return Some(Violation {
+                file: String::new(), // filled in by caller
+                line: i + 1,
+                snippet: format!(
+                    "{}  (increment_errors label '{}' does not match <category>:<component>:<site> with category in {{b-prime, e, g}} — see ADR-0012)",
+                    line.trim(),
+                    label
+                ),
+            });
+        }
+    }
+    None
+}
+
+fn should_report(
+    _lines: &[&str],
+    _line_idx: usize,
+    raw_line: &str,
+    file_rel: &str,
+    allowlist: &std::collections::HashSet<String>,
+) -> bool {
+    let key = format!("{}:{}", file_rel, _line_idx + 1);
+    if allowlist.contains(&key) {
+        return false;
+    }
+    if raw_line.contains("// allow-log-levels") {
+        return false;
+    }
+    true
+}
+
+/// Returns Ok(count) if allowlist size is within the .max bound;
+/// returns Err(message) if the allowlist has grown beyond .max.
+fn enforce_allowlist_max(workspace_root: &Path) -> Result<usize, String> {
+    let allowlist_path = workspace_root
+        .join("scripts")
+        .join("xtask")
+        .join("allowlist-log-levels.txt");
+    let max_path = workspace_root
+        .join("scripts")
+        .join("xtask")
+        .join("allowlist-log-levels.txt.max");
+
+    let allowlist_content = std::fs::read_to_string(&allowlist_path).unwrap_or_default();
+    let count = allowlist_content
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .count();
+
+    let max_content = std::fs::read_to_string(&max_path)
+        .map_err(|e| format!("Cannot read {}: {e}", max_path.display()))?;
+    let max: usize = max_content
+        .trim()
+        .parse()
+        .map_err(|e| format!("Cannot parse {}: {e}", max_path.display()))?;
+
+    if count > max {
+        return Err(format!(
+            "allowlist-log-levels.txt has {count} entries but .max is {max} — \
+             adding entries requires bumping .max in the same commit \
+             (monotone-non-increasing rule, ADR-0012 R1)"
+        ));
+    }
+    Ok(count)
+}
+
+/// Counts `// allow-log-levels` occurrences across all scanned `.rs` files.
+/// Returns a Vec of (file, line) for each inline escape.
+///
+/// Excludes `scripts/xtask/` because that directory contains the lint itself —
+/// its doc comments, string literals, test fixtures, and regex definitions all
+/// mention the marker syntax and would otherwise be self-flagged as escapes.
+/// ADR-0012 applies to component code under `crates/` and `examples/`, not to
+/// meta-tooling.
+fn count_inline_escapes(workspace_root: &Path) -> Result<Vec<(String, usize)>, String> {
+    use std::path::Component;
+    use walkdir::WalkDir;
+    let escape_re = regex::Regex::new(r"//\s*allow-log-levels").expect("valid regex"); // allow-unwrap
+    let mut locations = Vec::new();
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if is_test_file(path) {
+            continue;
+        }
+        if !path
+            .components()
+            .any(|c| c == Component::Normal("src".as_ref()))
+        {
+            continue;
+        }
+        if path.components().any(|c| {
+            c == Component::Normal("target".as_ref())
+                || c == Component::Normal(".worktrees".as_ref())
+                || c == Component::Normal("scripts".as_ref())
+        }) {
+            continue;
+        }
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        let file_rel = path
+            .strip_prefix(workspace_root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+        for (idx, line) in content.lines().enumerate() {
+            if escape_re.is_match(line) {
+                locations.push((file_rel.clone(), idx + 1));
+            }
+        }
+    }
+    Ok(locations)
+}
+
+/// Returns Ok(count) if inline escape count is within allow-inline.max.
+/// Returns Err(message) if count > max.
+fn enforce_inline_max(
+    workspace_root: &Path,
+    locations: &[(String, usize)],
+) -> Result<usize, String> {
+    let max_path = workspace_root
+        .join("scripts")
+        .join("xtask")
+        .join("allow-inline.max");
+    let max_content = std::fs::read_to_string(&max_path)
+        .map_err(|e| format!("Cannot read {}: {e}", max_path.display()))?;
+    let max: usize = max_content
+        .trim()
+        .parse()
+        .map_err(|e| format!("Cannot parse {}: {e}", max_path.display()))?;
+    let count = locations.len();
+    if count > max {
+        return Err(format!(
+            "inline // allow-log-levels count is {count} but allow-inline.max is {max} — \
+             adding inline escapes requires bumping allow-inline.max in the same commit \
+             (see ADR-0012 + Task 6B)"
+        ));
+    }
+    Ok(count)
+}
+
+/// For each inline escape at (file, line), check the preceding 3 lines for:
+///   1. A TODO(ADR-0012-...) marker.
+///   2. A bd id reference.
+///      Returns a Violation per escape missing either.
+fn validate_inline_escape_markers(
+    workspace_root: &Path,
+    locations: &[(String, usize)],
+) -> Vec<Violation> {
+    let todo_re = regex::Regex::new(TODO_MARKER_REGEX).expect("valid todo regex"); // allow-unwrap
+    let bd_re = regex::Regex::new(BD_ID_REGEX).expect("valid bd id regex"); // allow-unwrap
+
+    let mut violations = Vec::new();
+    for (file_rel, line_no) in locations {
+        let path = workspace_root.join(file_rel);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let idx = line_no.saturating_sub(1);
+        let window_start = idx.saturating_sub(3);
+        let window_end = idx.min(lines.len().saturating_sub(1));
+        let window: String = lines[window_start..=window_end].join("\n");
+        if !todo_re.is_match(&window) {
+            let line_text = lines.get(idx).copied().unwrap_or("");
+            violations.push(Violation {
+                file: file_rel.clone(),
+                line: *line_no,
+                snippet: format!(
+                    "{}  (inline // allow-log-levels requires TODO(ADR-0012-<flavor>) marker within 3 lines — see ADR-0012 Task 6B)",
+                    line_text.trim()
+                ),
+            });
+            continue;
+        }
+        if !bd_re.is_match(&window) {
+            let line_text = lines.get(idx).copied().unwrap_or("");
+            violations.push(Violation {
+                file: file_rel.clone(),
+                line: *line_no,
+                snippet: format!(
+                    "{}  (TODO marker must reference a live bd id: 'bd <id>' — see ADR-0012 Task 6B)",
+                    line_text.trim()
+                ),
+            });
+        }
+    }
+    violations
+}
+
+pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> {
+    use regex::Regex;
+    use std::path::Component;
+    use walkdir::WalkDir;
+
+    let error_re = Regex::new(r"\berror!\s*\(").expect("valid regex"); // allow-unwrap
+
+    let allowlist_path = workspace_root
+        .join("scripts")
+        .join("xtask")
+        .join("allowlist-log-levels.txt");
+    let allowlist: std::collections::HashSet<String> = std::fs::read_to_string(&allowlist_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .map(|l| l.trim().to_string())
+        .collect();
+
+    let _allowlist_count = enforce_allowlist_max(workspace_root)?;
+
+    let inline_locations = count_inline_escapes(workspace_root)?;
+    let inline_count = enforce_inline_max(workspace_root, &inline_locations)?;
+    // Marker validation is a regular violation (not a structural failure).
+    let inline_marker_violations =
+        validate_inline_escape_markers(workspace_root, &inline_locations);
+
+    let mut violations = Vec::new();
+
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if is_test_file(path) {
+            continue;
+        }
+        if !path
+            .components()
+            .any(|c| c == Component::Normal("src".as_ref()))
+        {
+            continue;
+        }
+        // Skip target/ dirs and nested .worktrees/ subdirectories.
+        // Use strip_prefix so we don't skip files when the workspace root itself
+        // lives inside a worktree (CI branches, parallel worktrees).
+        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+        if rel.components().any(|c| {
+            c == Component::Normal("target".as_ref())
+                || c == Component::Normal(".worktrees".as_ref())
+        }) {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+
+        let file_rel = path
+            .strip_prefix(workspace_root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
+
+        let lines: Vec<&str> = content.lines().collect();
+        let mut pending_test_attr = false;
+        let mut test_scope_entry_depth: Option<i32> = None;
+        let mut brace_depth: i32 = 0;
+
+        for (line_idx, raw_line) in lines.iter().enumerate() {
+            let trimmed = raw_line.trim();
+
+            if test_scope_entry_depth.is_none()
+                && (trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]"))
+            {
+                pending_test_attr = true;
+            }
+
+            let entering_test_scope = pending_test_attr && test_scope_entry_depth.is_none();
+
+            for ch in trimmed.chars() {
+                match ch {
+                    '{' => {
+                        brace_depth += 1;
+                        if pending_test_attr && test_scope_entry_depth.is_none() {
+                            test_scope_entry_depth = Some(brace_depth - 1);
+                            pending_test_attr = false;
+                        }
+                    }
+                    '}' => {
+                        brace_depth -= 1;
+                        if let Some(entry) = test_scope_entry_depth
+                            && brace_depth <= entry
+                        {
+                            test_scope_entry_depth = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if pending_test_attr && test_scope_entry_depth.is_none() && trimmed.contains(';') {
+                pending_test_attr = false;
+            }
+
+            if pending_test_attr || entering_test_scope || test_scope_entry_depth.is_some() {
+                continue;
+            }
+            if trimmed.starts_with("//") {
+                continue;
+            }
+
+            if error_re.is_match(raw_line) {
+                let prev = lines.get(line_idx.wrapping_sub(1)).copied().unwrap_or("");
+                let kind = parse_log_policy(prev);
+
+                match kind {
+                    None => {
+                        if should_report(&lines, line_idx, raw_line, &file_rel, &allowlist) {
+                            violations.push(Violation {
+                                file: path.to_string_lossy().to_string(),
+                                line: line_idx + 1,
+                                snippet: format!(
+                                    "{}  (missing // log-policy: annotation — see ADR-0012)",
+                                    raw_line.trim()
+                                ),
+                            });
+                        }
+                    }
+                    Some(LogPolicyKind::HandlerOwned) => {
+                        if should_report(&lines, line_idx, raw_line, &file_rel, &allowlist) {
+                            violations.push(Violation {
+                                file: path.to_string_lossy().to_string(),
+                                line: line_idx + 1,
+                                snippet: format!(
+                                    "{}  (handler-owned must be warn!/debug!, not error!)",
+                                    raw_line.trim()
+                                ),
+                            });
+                        }
+                    }
+                    Some(LogPolicyKind::Unknown(s)) => {
+                        if should_report(&lines, line_idx, raw_line, &file_rel, &allowlist) {
+                            violations.push(Violation {
+                                file: path.to_string_lossy().to_string(),
+                                line: line_idx + 1,
+                                snippet: format!(
+                                    "{}  (unknown log-policy '{}' — must be system-broken | outside-contract | handler-owned)",
+                                    raw_line.trim(),
+                                    s
+                                ),
+                            });
+                        }
+                    }
+                    Some(LogPolicyKind::SystemBroken) => {
+                        // No further requirement.
+                    }
+                    Some(LogPolicyKind::OutsideContract) => {
+                        if !has_replacement_signal(&lines, line_idx) {
+                            if should_report(&lines, line_idx, raw_line, &file_rel, &allowlist) {
+                                violations.push(Violation {
+                                    file: path.to_string_lossy().to_string(),
+                                    line: line_idx + 1,
+                                    snippet: format!(
+                                        "{}  (outside-contract requires increment_errors OR force_unhealthy_for_route OR if !bridged {{}} guard — see ADR-0012)",
+                                        raw_line.trim()
+                                    ),
+                                });
+                            }
+                        } else {
+                            // Validate labels on any increment_errors call in
+                            // the same function — only when triggered by an
+                            // outside-contract annotation. Labels elsewhere
+                            // (e.g. legacy test helpers) are not validated.
+                            if let Some(mut lv) = check_labels_in_function(&lines, line_idx) {
+                                lv.file = path.to_string_lossy().to_string();
+                                if should_report(&lines, line_idx, raw_line, &file_rel, &allowlist)
+                                {
+                                    violations.push(lv);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    violations.extend(inline_marker_violations);
+    let _ = inline_count; // used by dispatcher reporting
     Ok(violations)
 }
 
@@ -1998,6 +2594,389 @@ mod tests {
                 violations.len(),
                 1,
                 "client_secret in format! must be caught: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    mod lint_log_levels_tests {
+        use super::*;
+        use std::fs;
+        use std::path::PathBuf;
+
+        fn tmp_workspace_log(files: &[(&str, &str)]) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "xtask-log-levels-test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            ));
+            for (rel_path, content) in files {
+                let full = dir.join(rel_path);
+                fs::create_dir_all(full.parent().unwrap()).unwrap();
+                fs::write(&full, content).unwrap();
+            }
+            fs::create_dir_all(dir.join("bridges")).unwrap();
+            fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+            // Seed allowlist files so tests that don't care about .max enforcement
+            // still pass after Task 6 step 4 introduces `?` propagation.
+            let xtask = dir.join("scripts").join("xtask");
+            fs::create_dir_all(&xtask).unwrap();
+            fs::write(xtask.join("allowlist-log-levels.txt"), "# header\n").unwrap();
+            fs::write(xtask.join("allowlist-log-levels.txt.max"), "0\n").unwrap();
+            fs::write(xtask.join("allow-inline.max"), "0\n").unwrap();
+            dir
+        }
+
+        #[test]
+        fn detects_unannotated_error_macro() {
+            let ws =
+                tmp_workspace_log(&[("crates/foo/src/lib.rs", "fn x() { error!(\"boom\"); }\n")]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1);
+            assert!(violations[0].snippet.contains("error!"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Regression: production files often embed `#[cfg(test)] mod tests { ... }`
+        /// with `error!()` inside. These MUST NOT be flagged — they're test scope.
+        /// Ported from lint_unwrap's pending_test_attr logic.
+        #[test]
+        fn ignores_error_inside_cfg_test_mod_in_production_file() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn prod() { /* happy path */ }\n\
+                 \n\
+                 #[cfg(test)]\n\
+                 mod tests {\n\
+                     #[test]\n\
+                     fn t() { error!(\"boom\"); }\n\
+                 }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn accepts_system_broken_annotation() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x() {\n    // log-policy: system-broken\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn rejects_outside_contract_without_replacement_signal() {
+            // Formerly accepted as a skeleton; now outside-contract requires
+            // an adjacent replacement signal (Task 4).
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x() {\n    // log-policy: outside-contract\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1);
+            assert!(violations[0].snippet.contains("outside-contract"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn rejects_handler_owned_with_error_macro() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x() {\n    // log-policy: handler-owned\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1);
+            assert!(violations[0].snippet.contains("handler-owned"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn rejects_unknown_annotation_kind() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x() {\n    // log-policy: made-up\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1);
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn outside_contract_accepted_with_increment_errors() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x(metrics: &dyn MetricsCollector) {\n    metrics.increment_errors(\"route\", \"b-prime:sql:on-consume\");\n    // log-policy: outside-contract\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn outside_contract_accepted_with_force_unhealthy() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x(reg: &HealthCheckRegistry) {\n    reg.force_unhealthy_for_route(\"r\", \"endpoint-creation\", \"e\");\n    // log-policy: outside-contract\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn outside_contract_accepted_with_bridged_guard() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x(bridged: bool) {\n    if !bridged {\n        // log-policy: outside-contract\n        error!(\"boom\");\n    }\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn outside_contract_rejected_without_replacement() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x() {\n    // log-policy: outside-contract\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1);
+            assert!(violations[0].snippet.contains("outside-contract"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn outside_contract_rejects_invalid_label_format() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x(metrics: &dyn MetricsCollector) {\n    metrics.increment_errors(\"route\", \"on-consume\");\n    // log-policy: outside-contract\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1);
+            assert!(violations[0].snippet.contains("label"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn outside_contract_accepts_b_prime_label() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x(metrics: &dyn MetricsCollector) {\n    metrics.increment_errors(\"route\", \"b-prime:sql:on-consume\");\n    // log-policy: outside-contract\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn outside_contract_accepts_e_label() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x(metrics: &dyn MetricsCollector) {\n    metrics.increment_errors(\"route\", \"e:grpc:accept\");\n    // log-policy: outside-contract\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn outside_contract_accepts_g_label() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x(metrics: &dyn MetricsCollector) {\n    metrics.increment_errors(\"route\", \"g:http:endpoint-create\");\n    // log-policy: outside-contract\n    error!(\"boom\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn ignores_legacy_increment_errors_labels_outside_log_policy() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x(metrics: &dyn MetricsCollector) {\n    metrics.increment_errors(\"route\", \"timeout\");\n}\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn allowlist_skips_listed_file_line() {
+            let ws =
+                tmp_workspace_log(&[("crates/foo/src/lib.rs", "fn x() { error!(\"boom\"); }\n")]);
+            fs::create_dir_all(ws.join("scripts").join("xtask")).unwrap();
+            fs::write(
+                ws.join("scripts").join("xtask").join("allowlist-log-levels.txt"),
+                "# allowlist for log-level lint (see ADR-0012)\n# format: <relative path>:<line>\ncrates/foo/src/lib.rs:1\n",
+            ).unwrap();
+            fs::write(
+                ws.join("scripts")
+                    .join("xtask")
+                    .join("allowlist-log-levels.txt.max"),
+                "1\n",
+            )
+            .unwrap();
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn inline_allow_escape_skips_violation() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x() {\n    // TODO(ADR-0012-e-metrics): via bd rc-test\n    error!(\"boom\"); // allow-log-levels\n}\n",
+            )]);
+            let xtask = ws.join("scripts").join("xtask");
+            fs::write(xtask.join("allow-inline.max"), "1\n").unwrap();
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Regression: allowlist file MUST NOT grow beyond .max (monotone-non-increasing).
+        /// Adding entries without bumping .max is the explicit signal that the
+        /// contributor intended to grow the allowlist (visible in code review).
+        #[test]
+        fn allowlist_exceeding_max_is_violation() {
+            let ws =
+                tmp_workspace_log(&[("crates/foo/src/lib.rs", "fn x() { error!(\"boom\"); }\n")]);
+            fs::create_dir_all(ws.join("scripts").join("xtask")).unwrap();
+            fs::write(
+                ws.join("scripts")
+                    .join("xtask")
+                    .join("allowlist-log-levels.txt"),
+                "crates/foo/src/lib.rs:1\n",
+            )
+            .unwrap();
+            // .max says 0 but allowlist has 1 entry → must fail
+            fs::write(
+                ws.join("scripts")
+                    .join("xtask")
+                    .join("allowlist-log-levels.txt.max"),
+                "0\n",
+            )
+            .unwrap();
+            let result = lint_log_levels(&ws);
+            assert!(result.is_err(), "expected error, got: {result:?}");
+            let err = result.unwrap_err();
+            assert!(err.contains("monotone-non-increasing"), "msg: {err}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Regression for second-expert review Q2: inline // allow-log-levels
+        /// escapes MUST be counted and bounded by allow-inline.max.
+        #[test]
+        fn inline_escape_count_exceeding_max_is_violation() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                // 2 inline escapes but .max says 1
+                "fn x() {\n    // TODO(ADR-0012-e-metrics): via bd rc-test\n    error!(\"a\"); // allow-log-levels\n    // TODO(ADR-0012-e-metrics): via bd rc-test\n    error!(\"b\"); // allow-log-levels\n}\n",
+            )]);
+            let xtask = ws.join("scripts").join("xtask");
+            fs::write(xtask.join("allow-inline.max"), "1\n").unwrap();
+            let result = lint_log_levels(&ws);
+            assert!(result.is_err(), "expected error, got: {result:?}");
+            let err = result.unwrap_err();
+            assert!(err.contains("allow-inline.max"), "msg: {err}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Regression for second-expert review Q2: every inline escape MUST
+        /// carry a TODO(ADR-0012-...) marker with a bd id.
+        #[test]
+        fn inline_escape_without_todo_marker_is_violation() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x() { error!(\"boom\"); } // allow-log-levels\n",
+            )]);
+            let xtask = ws.join("scripts").join("xtask");
+            fs::write(xtask.join("allow-inline.max"), "1\n").unwrap();
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1);
+            assert!(
+                violations[0].snippet.contains("TODO(ADR-0012-"),
+                "got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn inline_escape_with_todo_marker_and_bd_id_accepted() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x() {\n    // TODO(ADR-0012-e-metrics): wire increment_errors via bd rc-test\n    error!(\"boom\"); // allow-log-levels\n}\n",
+            )]);
+            let xtask = ws.join("scripts").join("xtask");
+            fs::write(xtask.join("allow-inline.max"), "1\n").unwrap();
+            let violations = lint_log_levels(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn inline_escape_with_todo_but_no_bd_id_is_violation() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x() {\n    // TODO(ADR-0012-e-metrics): wire increment_errors someday\n    error!(\"boom\"); // allow-log-levels\n}\n",
+            )]);
+            let xtask = ws.join("scripts").join("xtask");
+            fs::write(xtask.join("allow-inline.max"), "1\n").unwrap();
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1);
+            assert!(
+                violations[0].snippet.contains("bd <id>"),
+                "got: {violations:?}"
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// Regression: the lint's own source under `scripts/xtask/` MUST be
+        /// excluded from the inline-escape counter. Otherwise the lint
+        /// self-reports its doc comments, regex definitions, error messages,
+        /// and test fixtures as escapes (13+ mentions of `// allow-log-levels`
+        /// in scripts/xtask/src/main.rs alone). ADR-0012 applies to component
+        /// code under `crates/` and `examples/`, not to meta-tooling.
+        #[test]
+        fn inline_escape_counter_ignores_scripts_xtask_self_references() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn x() { error!(\"boom\"); }\n",
+            )]);
+            // Simulate the lint's own source file with multiple self-references
+            // (doc comments + string literals + regex definition, exactly as
+            // the real scripts/xtask/src/main.rs contains).
+            let xtask_src = ws.join("scripts").join("xtask").join("src");
+            fs::create_dir_all(&xtask_src).unwrap();
+            fs::write(
+                xtask_src.join("main.rs"),
+                "//! doc comment mentioning // allow-log-levels\n\
+                 fn count() {\n\
+                 \x20   let re = regex::Regex::new(r\"//\\s*allow-log-levels\").unwrap();\n\
+                 \x20   let fixture = \"error!(); // allow-log-levels\";\n\
+                 }\n",
+            )
+            .unwrap();
+            let xtask = ws.join("scripts").join("xtask");
+            fs::write(xtask.join("allow-inline.max"), "0\n").unwrap();
+            // Must NOT error: the 3 self-references in scripts/xtask/src/main.rs
+            // are excluded by the scripts/ path-component filter.
+            let violations = lint_log_levels(&ws).unwrap();
+            // crates/foo/src/lib.rs has an unannotated error!() → 1 violation.
+            // The 3 self-references in scripts/xtask/src/main.rs are NOT counted.
+            assert_eq!(
+                violations.len(),
+                1,
+                "scripts/xtask/ self-references must not be counted as inline escapes: got {violations:?}"
             );
             fs::remove_dir_all(&ws).unwrap();
         }
