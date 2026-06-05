@@ -209,16 +209,13 @@ fn main() {
                         );
                         println!("            on the preceding line. See ADR-0012.");
                     }
-                    // Soft mode during Phase 1 rollout — do not fail CI.
-                    // Phase 2 will flip this to std::process::exit(1).
                     let allowlist_entries = enforce_allowlist_max(&workspace_root).unwrap_or(0);
                     let inline_locations =
                         count_inline_escapes(&workspace_root).unwrap_or_default();
                     let inline_count = inline_locations.len();
-                    eprintln!(
-                        "\nlint-log-levels: SOFT MODE (violations reported but not fatal during Phase 1)"
-                    );
+                    eprintln!("\nlint-log-levels: FAILED");
                     eprintln!("(allowlist={allowlist_entries}, inline-escapes={inline_count})");
+                    std::process::exit(1);
                 }
                 Err(e) => {
                     eprintln!("lint-log-levels error: {e}");
@@ -1303,7 +1300,11 @@ fn count_inline_escapes(workspace_root: &Path) -> Result<Vec<(String, usize)>, S
         {
             continue;
         }
-        if path.components().any(|c| {
+        // Skip target/, nested .worktrees/, and scripts/ subdirectories.
+        // Use strip_prefix so we don't skip files when the workspace root itself
+        // lives inside a worktree (CI branches, parallel worktrees).
+        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+        if rel.components().any(|c| {
             c == Component::Normal("target".as_ref())
                 || c == Component::Normal(".worktrees".as_ref())
                 || c == Component::Normal("scripts".as_ref())
@@ -2948,10 +2949,8 @@ mod tests {
         /// code under `crates/` and `examples/`, not to meta-tooling.
         #[test]
         fn inline_escape_counter_ignores_scripts_xtask_self_references() {
-            let ws = tmp_workspace_log(&[(
-                "crates/foo/src/lib.rs",
-                "fn x() { error!(\"boom\"); }\n",
-            )]);
+            let ws =
+                tmp_workspace_log(&[("crates/foo/src/lib.rs", "fn x() { error!(\"boom\"); }\n")]);
             // Simulate the lint's own source file with multiple self-references
             // (doc comments + string literals + regex definition, exactly as
             // the real scripts/xtask/src/main.rs contains).

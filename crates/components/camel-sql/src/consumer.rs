@@ -100,7 +100,8 @@ impl SqlConsumer {
 
                 // Handle post-processing (onConsume/onConsumeFailed)
                 if let Err(e) = self.handle_post_processing(pool, &result, &row_json).await {
-                    error!(error = %e, "Post-processing failed");
+                    // TODO(ADR-0012-e-metrics): wire increment_errors("b-prime:sql:on-consume") via bd rc-mf3
+                    error!(error = %e, "Post-processing failed"); // allow-log-levels
                     if self.config.break_batch_on_consume_fail {
                         return Err(e);
                     }
@@ -136,7 +137,8 @@ impl SqlConsumer {
             // (e.g. `:#id`). Each row gets its own post-processing query execution.
             for row_json in rows_json.iter() {
                 if let Err(e) = self.handle_post_processing(pool, &result, row_json).await {
-                    error!(error = %e, "Post-processing failed for batch row");
+                    // TODO(ADR-0012-e-metrics): wire increment_errors("b-prime:sql:on-consume-batch") via bd rc-mf3
+                    error!(error = %e, "Post-processing failed for batch row"); // allow-log-levels
                     if self.config.break_batch_on_consume_fail {
                         return Err(e);
                     }
@@ -152,12 +154,10 @@ impl SqlConsumer {
         }
 
         // Execute on_consume_batch_complete if configured
-        if let Some(ref batch_query) = self.config.on_consume_batch_complete
-            && let Err(e) = self
+        if let Some(ref batch_query) = self.config.on_consume_batch_complete {
+            let _ = self
                 .execute_post_query(pool, batch_query, &JsonValue::Null)
-                .await
-        {
-            error!(error = %e, "onConsumeBatchComplete query failed");
+                .await;
         }
 
         Ok(())
@@ -202,7 +202,14 @@ impl SqlConsumer {
         let exchange = Exchange::new(msg);
         let result = context.send_and_wait(exchange).await;
         if let Err(e) = result {
-            error!(error = %e, "StreamList consumer downstream processing failed");
+            // log-policy: outside-contract
+            // (category b′: send_and_wait returned Err on a normal-data send,
+            // meaning the route handler did NOT absorb the failure —
+            // see ADR-0012 "b-bridged discriminator". This emitter is the
+            // only ERROR signal for the unhandled failure; must stay loud.
+            // Regression-tested by unbridged_send_and_wait_failure_emits_error_loud.)
+            // TODO(ADR-0012-e-metrics): wire increment_errors("b-prime:sql:stream-list") via bd rc-mf3
+            error!(error = %e, "StreamList consumer downstream processing failed"); // allow-log-levels
             return Err(e);
         }
 
@@ -273,6 +280,33 @@ impl SqlConsumer {
         }
 
         Ok(())
+    }
+
+    /// Handle the result of a single poll cycle, including bridging if configured.
+    /// Extracted from `run()` so tests can exercise the error-handling branch directly.
+    async fn handle_poll_result(
+        &self,
+        pool: &AnyPool,
+        context: &ConsumerContext,
+        template: &QueryTemplate,
+    ) {
+        if let Err(e) = self.poll_database(pool, context, template).await {
+            if self.config.bridge_error_handler {
+                // log-policy: handler-owned
+                // (category b-bridged: error will be wrapped as Exchange
+                // and flow into the route's error handler)
+                warn!(error = %e, "SQL consumer poll failed (bridged)");
+                if let Err(route_err) = self.bridge_poll_error(context, e).await {
+                    // (the bridge channel itself broke — route will CrashNotification per ADR-0007)
+                    // log-policy: system-broken
+                    error!(error = %route_err, "Failed to bridge SQL consumer error to route");
+                }
+            } else {
+                // TODO(ADR-0012-e-metrics): wire increment_errors("b-prime:sql:poll-failed")
+                //   via bd rc-mf3 (Endpoint trait change to expose ComponentContext::metrics())
+                error!(error = %e, "SQL consumer poll failed"); // allow-log-levels
+            }
+        }
     }
 
     async fn bridge_poll_error(
@@ -425,12 +459,7 @@ impl Consumer for SqlConsumer {
                 }
                 _ = tokio::time::sleep(Duration::from_millis(self.config.delay_ms)) => {
                     poll_count += 1;
-                    if let Err(e) = self.poll_database(pool, &context, &template).await {
-                        error!(error = %e, "SQL consumer poll failed");
-                        if let Err(route_err) = self.bridge_poll_error(&context, e).await {
-                            error!(error = %route_err, "Failed to bridge SQL consumer error to route");
-                        }
-                    }
+                    self.handle_poll_result(pool, &context, &template).await;
                 }
             }
         }
@@ -909,6 +938,105 @@ mod tests {
             .bridge_poll_error(&ctx, CamelError::ProcessorError("poll failed".into()))
             .await
             .expect("bridging should succeed");
+    }
+
+    /// Regression for ADR-0012: when bridge_error_handler=true, the poll
+    /// failure must NOT emit error! (the route's error handler owns ERROR
+    /// for bridged failures). Was previously duplicated at line 429 + 431.
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn bridged_poll_failure_emits_warn_not_error() {
+        let pool = sqlite_pool().await;
+        // Do NOT create any table — the query against a non-existent
+        // table will fail at fetch_all, returning Err BEFORE any
+        // downstream send (so lines 103/205 are never reached).
+
+        let mut config = config();
+        config.bridge_error_handler = true;
+        // Query a non-existent table to trigger a query-failure poll error.
+        config.query = "select * from nonexistent_table".to_string();
+        config.resolve_defaults();
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        // Healthy downstream — replies Ok so bridge_poll_error succeeds
+        // and does NOT emit its own error!.
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(4);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Ok(env.exchange));
+                }
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+        // Drive poll — fetch_all will fail because the table is missing.
+        consumer.handle_poll_result(&pool, &ctx, &template).await;
+
+        // The bridged path must NOT emit ERROR (handler owns it).
+        assert!(
+            !logs_contain("ERROR"),
+            "bridged poll failure must not emit ERROR (handler owns it); logs were:\n{}",
+            logs_contain("")
+        );
+        // Sanity: warn! was emitted so the failure is still visible.
+        assert!(
+            logs_contain("WARN"),
+            "bridged poll failure should emit warn! for operator visibility"
+        );
+    }
+
+    /// Regression for ADR-0012 "b-bridged discriminator": when
+    /// send_and_wait returns Err on a NORMAL-DATA send (i.e., not a
+    /// deliberate bridge_poll_error handoff), the route handler did NOT
+    /// absorb the failure (consumer.rs:77-91 contract; error_handler.rs
+    /// returns Ok in every branch). The consumer's error! is the only
+    /// ERROR signal for the unhandled failure and MUST stay at error!.
+    ///
+    /// Protects consumer.rs:205 (StreamList downstream send) and any
+    /// future site that uses send_and_wait on a non-bridge path.
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn unbridged_send_and_wait_failure_emits_error_loud() {
+        let pool = sqlite_pool().await;
+        sqlx::query("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+            .execute(&pool)
+            .await
+            .expect("create table");
+        sqlx::query("INSERT INTO items (id, name) VALUES (1, 'alpha')")
+            .execute(&pool)
+            .await
+            .expect("seed rows");
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id, name from items order by id?db_url=sqlite::memory:&outputType=StreamList&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+        // Explicitly non-bridged: normal-data send path.
+        config.bridge_error_handler = false;
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()));
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+
+        // Downstream that returns Err — simulates unhandled route failure.
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                if let Some(reply_tx) = env.reply_tx {
+                    let _ = reply_tx.send(Err(CamelError::ProcessorError("boom".into())));
+                }
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new());
+
+        let _ = consumer.poll_database(&pool, &ctx, &template).await;
+
+        // The unbridged path MUST emit ERROR — consumer owns the signal.
+        assert!(
+            logs_contain("ERROR"),
+            "unbridged send_and_wait failure MUST emit ERROR (consumer owns the signal)"
+        );
     }
 
     #[tokio::test]

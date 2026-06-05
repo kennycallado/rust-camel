@@ -72,8 +72,6 @@ pub struct DirectConfig {
     pub block: Option<bool>,
     /// When false, skip readiness error if no consumer registered.
     pub fail_if_no_consumers: Option<bool>,
-    /// TODO(DIR-005): implement bridgeErrorHandler routing
-    pub bridge_error_handler: Option<bool>,
     /// TODO(DIR-005): implement exchangePattern override
     pub exchange_pattern: Option<String>,
 }
@@ -122,13 +120,6 @@ impl DirectConfig {
             .map(|v| parse_bool("fail_if_no_consumers", v))
             .transpose()?;
 
-        let bridge_error_handler = parts
-            .params
-            .get("bridge_error_handler")
-            .or_else(|| parts.params.get("bridgeErrorHandler"))
-            .map(|v| parse_bool("bridge_error_handler", v))
-            .transpose()?;
-
         let exchange_pattern = parts
             .params
             .get("exchange_pattern")
@@ -140,7 +131,6 @@ impl DirectConfig {
             timeout_ms,
             block,
             fail_if_no_consumers,
-            bridge_error_handler,
             exchange_pattern,
         })
     }
@@ -293,7 +283,13 @@ impl Consumer for DirectConsumer {
                                 );
                                 let result = context.send_and_wait(exchange).await;
                                 if let Err(ref err) = result {
-                                    error!(
+                                    // (category b′: send_and_wait returned Err on a normal-data send,
+                                    // meaning the route handler did NOT absorb the failure —
+                                    // see ADR-0012 "b-bridged discriminator". This emitter is the
+                                    // only ERROR signal for the unhandled failure; must stay loud.)
+                                    // TODO(ADR-0012-e-metrics): wire increment_errors("b-prime:direct:send-and-wait") via bd rc-mf3
+                                    // log-policy: outside-contract
+                                    error!( // allow-log-levels
                                         endpoint_name = %name,
                                         error = %err,
                                         "direct consumer pipeline error"
@@ -470,7 +466,9 @@ impl Service<Exchange> for DirectProducer {
                             let err = CamelError::EndpointCreationFailed(format!(
                                 "no consumer registered for direct:{name}"
                             ));
-                            error!(endpoint_name = %name, error = %err, "direct send failed");
+                            // log-policy: handler-owned
+                            // (category a: producer send failure inside the route pipeline)
+                            warn!(endpoint_name = %name, error = %err, "direct send failed");
                             err
                         })?
                         .clone()
@@ -478,12 +476,16 @@ impl Service<Exchange> for DirectProducer {
 
                 let (reply_tx, reply_rx) = oneshot::channel();
                 sender.send((exchange, reply_tx)).await.map_err(|err| {
-                    error!(endpoint_name = %name, error = %err, "direct send failed");
+                    // log-policy: handler-owned
+                    // (category a: producer send failure inside the route pipeline)
+                    warn!(endpoint_name = %name, error = %err, "direct send failed");
                     CamelError::ChannelClosed
                 })?;
 
                 let result = reply_rx.await.map_err(|err| {
-                    error!(endpoint_name = %name, error = %err, "direct send failed");
+                    // log-policy: handler-owned
+                    // (category a: producer send failure inside the route pipeline)
+                    warn!(endpoint_name = %name, error = %err, "direct send failed");
                     CamelError::ChannelClosed
                 })?;
 
@@ -831,7 +833,6 @@ mod tests {
                 timeout_ms: None,
                 block: None,
                 fail_if_no_consumers: None,
-                bridge_error_handler: None,
                 exchange_pattern: None,
             },
             semaphore: Arc::new(Semaphore::new(1)),
@@ -863,7 +864,6 @@ mod tests {
                 timeout_ms: None,
                 block: None,
                 fail_if_no_consumers: None,
-                bridge_error_handler: None,
                 exchange_pattern: None,
             },
             semaphore: Arc::new(Semaphore::new(1)),
@@ -889,7 +889,6 @@ mod tests {
                 timeout_ms: None,
                 block: None,
                 fail_if_no_consumers: Some(false),
-                bridge_error_handler: None,
                 exchange_pattern: None,
             },
             semaphore: Arc::new(Semaphore::new(1)),
@@ -920,7 +919,6 @@ mod tests {
                 timeout_ms: None,
                 block: None,
                 fail_if_no_consumers: None,
-                bridge_error_handler: None,
                 exchange_pattern: None,
             },
             semaphore: Arc::new(Semaphore::new(1)),
@@ -1031,7 +1029,6 @@ mod tests {
                 timeout_ms: Some(100), // 100ms timeout
                 block: None,
                 fail_if_no_consumers: None,
-                bridge_error_handler: None,
                 exchange_pattern: None,
             },
             semaphore: Arc::new(Semaphore::new(1)),

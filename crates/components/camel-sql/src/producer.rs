@@ -159,7 +159,8 @@ impl Service<Exchange> for SqlProducer {
                         "SQL producer pool initializing"
                     );
                     opts.connect(&db_url).await.map_err(|e| {
-                        error!(error = %e, db_url = %redact_db_url(&config.db_url), "Failed to connect to database");
+                        // TODO(ADR-0012-g): replace with force_unhealthy_for_route once bd rc-1mo lands
+                        error!(error = %e, db_url = %redact_db_url(&config.db_url), "Failed to connect to database"); // allow-log-levels
                         CamelError::EndpointCreationFailed(format!(
                             "Failed to connect to database: {}",
                             e
@@ -167,10 +168,7 @@ impl Service<Exchange> for SqlProducer {
                     })
                 })
                 .await
-                .map_err(|e: CamelError| {
-                    error!("SQL producer pool initialization failed: {}", e);
-                    e.clone()
-                })?;
+                .map_err(|e: CamelError| e.clone())?;
 
             // Resolve query string
             let query_str = Self::resolve_query_source(&exchange, &config);
@@ -422,7 +420,9 @@ async fn execute_batch(
 
     // Fix 2: Batch operations must be wrapped in a transaction
     let mut tx = pool.begin().await.map_err(|e| {
-        error!("Failed to begin transaction: {}", e);
+        // log-policy: handler-owned
+        // (category a: tx begin failure inside producer pipeline)
+        warn!(error = %e, "Failed to begin transaction");
         CamelError::ProcessorError(format!("Failed to begin transaction: {}", e))
     })?;
 
@@ -449,7 +449,9 @@ async fn execute_batch(
         query = bind_json_values(query, &prepared.bindings);
 
         let result = query.execute(&mut *tx).await.map_err(|e| {
-            error!("Batch query execution failed at index {}: {}", batch_idx, e);
+            // log-policy: handler-owned
+            // (category a: batch query execution failure inside producer pipeline)
+            warn!("Batch query execution failed at index {}: {}", batch_idx, e);
             CamelError::ProcessorError(format!("Batch query execution failed: {}", e))
         })?;
 
@@ -457,7 +459,9 @@ async fn execute_batch(
         if let Some(expected) = config.expected_update_count
             && result.rows_affected() as i64 != expected
         {
-            error!(
+            // log-policy: handler-owned
+            // (category a: expected_update_count mismatch inside producer pipeline)
+            warn!(
                 "Batch item {}: expected {} rows affected, got {}",
                 batch_idx,
                 expected,
@@ -476,7 +480,9 @@ async fn execute_batch(
 
     // Commit the transaction
     tx.commit().await.map_err(|e| {
-        error!("Failed to commit transaction: {}", e);
+        // log-policy: handler-owned
+        // (category a: tx commit failure inside producer pipeline)
+        warn!(error = %e, "Failed to commit transaction");
         CamelError::ProcessorError(format!("Failed to commit transaction: {}", e))
     })?;
 

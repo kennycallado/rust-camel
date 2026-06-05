@@ -251,6 +251,7 @@ async fn send_to_handler(
 ) -> Result<Exchange, CamelError> {
     match producer {
         None => {
+            // log-policy: system-broken
             tracing::error!(
                 error = ?exchange.error,
                 "Exchange failed with no error handler configured"
@@ -259,12 +260,14 @@ async fn send_to_handler(
         }
         Some(mut prod) => match prod.ready().await {
             Err(e) => {
+                // log-policy: system-broken
                 tracing::error!("DLC/handler not ready: {e}");
                 Ok(exchange)
             }
             Ok(svc) => match svc.call(exchange.clone()).await {
                 Ok(ex) => Ok(ex),
                 Err(e) => {
+                    // log-policy: system-broken
                     tracing::error!("DLC/handler call failed: {e}");
                     // Return the original exchange with original error intact.
                     Ok(exchange)
