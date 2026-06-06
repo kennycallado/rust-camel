@@ -109,6 +109,7 @@ mod tests {
             HashMap::new(),
             crate::state_store::StateStore::new(),
             test_tokio_handle(),
+            0,
         );
         assert!(host_state.properties.is_empty());
     }

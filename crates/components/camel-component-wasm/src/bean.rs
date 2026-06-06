@@ -79,6 +79,11 @@ mod tests {
     use super::*;
     use std::sync::OnceLock;
 
+    // Note: WasmBean::new requires a real WASM file. The WasmConfig propagation
+    // chain (limits → from_limits → WasmConfig → create_host_state) is tested at
+    // the runtime layer (memory_growth_*, timeout_kills_infinite_loop_guest).
+    // All plugin types share that runtime layer, so coverage is implicit.
+
     fn test_tokio_handle() -> tokio::runtime::Handle {
         static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
         RT.get_or_init(|| tokio::runtime::Runtime::new().expect("test runtime"))
@@ -94,6 +99,7 @@ mod tests {
             HashMap::new(),
             crate::state_store::StateStore::new(),
             test_tokio_handle(),
+            0,
         );
         assert!(host_state.properties.is_empty());
     }

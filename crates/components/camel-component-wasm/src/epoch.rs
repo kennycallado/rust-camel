@@ -1,9 +1,18 @@
 //! Epoch-based execution timeout enforcement.
 //!
-//! A background thread that calls `engine.increment_epoch()` at a fixed interval
-//! (10ms by default, matching Surrealism's approach). When a WASM guest call
-//! has `store.set_epoch_deadline(N)`, wasmtime will raise a trap after N epochs
-//! have passed without the deadline being renewed.
+//! A dedicated OS thread that calls `engine.increment_epoch()` at a fixed
+//! interval (10ms by default, matching Surrealism's approach). When a WASM
+//! guest call has `store.set_epoch_deadline(N)`, wasmtime will raise a trap
+//! after N epochs have passed without the deadline being renewed.
+//!
+//! # Why a dedicated OS thread (not `tokio::spawn`)
+//!
+//! A WASM guest running a tight CPU-bound loop inside `call_async` may not
+//! yield to the tokio runtime — especially under single-worker or
+//! `current_thread` configurations. A `tokio::spawn` ticker would be queued
+//! behind such a guest and never get polled, so the epoch deadline would
+//! never fire. A dedicated OS thread is scheduled by the kernel and
+//! increments the epoch regardless of tokio's cooperation.
 //!
 //! The EpochTicker is owned by `WasmRuntime` and lives for the lifetime of the
 //! runtime. It is stopped (thread joined) when the runtime is dropped.
@@ -15,9 +24,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-use tokio::task::JoinHandle;
 use wasmtime::Engine;
 
 /// Background thread that increments the wasmtime engine epoch at a fixed interval.
@@ -25,7 +34,8 @@ use wasmtime::Engine;
 /// # Lifecycle
 ///
 /// 1. Created via `EpochTicker::start(engine, interval)`
-/// 2. Runs in the background, calling `engine.increment_epoch()` every `interval`
+/// 2. Runs on a dedicated OS thread, calling `engine.increment_epoch()` every
+///    `interval`
 /// 3. Stopped automatically when dropped (sets shutdown flag, joins thread)
 pub struct EpochTicker {
     handle: Option<JoinHandle<()>>,
@@ -33,7 +43,7 @@ pub struct EpochTicker {
 }
 
 impl EpochTicker {
-    /// Start epoch ticker task.
+    /// Start epoch ticker thread.
     ///
     /// The thread will call `engine.increment_epoch()` every `interval` until
     /// the `EpochTicker` is dropped.
@@ -45,9 +55,9 @@ impl EpochTicker {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_flag = Arc::clone(&shutdown);
 
-        let handle = tokio::task::spawn(async move {
+        let handle = std::thread::spawn(move || {
             while !shutdown_flag.load(Ordering::Acquire) {
-                tokio::time::sleep(interval).await;
+                std::thread::sleep(interval);
                 if !shutdown_flag.load(Ordering::Acquire) {
                     engine.increment_epoch();
                 }
@@ -70,7 +80,12 @@ impl Drop for EpochTicker {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
-            handle.abort();
+            // Wait for the thread to observe the shutdown flag and exit.
+            // At most one `interval` (default 10ms) of latency. This is
+            // preferable to `abort()` because we synchronously know the
+            // thread is no longer touching the engine before WasmRuntime
+            // drops the Engine itself.
+            let _ = handle.join();
         }
     }
 }

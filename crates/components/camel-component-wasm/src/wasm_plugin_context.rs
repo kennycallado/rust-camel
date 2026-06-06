@@ -104,6 +104,7 @@ impl WasmPluginContext {
                 HashMap::new(),
                 ctx.state_store.clone(),
                 tokio::runtime::Handle::current(),
+                ctx.config.max_memory_bytes,
             );
             let mut store = Store::new(&ctx.engine, host_state);
             store.limiter(|state| &mut state.limits);
@@ -160,6 +161,7 @@ impl WasmPluginContext {
                 HashMap::new(),
                 ctx.state_store.clone(),
                 tokio::runtime::Handle::current(),
+                ctx.config.max_memory_bytes,
             );
             let mut store = Store::new(&ctx.engine, host_state);
             store.limiter(|state| &mut state.limits);
@@ -203,6 +205,7 @@ impl WasmPluginContext {
             properties,
             self.state_store.clone(),
             tokio::runtime::Handle::current(),
+            self.config.max_memory_bytes,
         );
         let mut store = Store::new(&self.engine, host_state);
         store.limiter(|state| &mut state.limits);

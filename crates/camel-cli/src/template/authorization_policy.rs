@@ -1,4 +1,4 @@
-use super::{TemplateFile, cargo_toml, gitignore, plugin_toml, readme_md, to_pascal_case};
+use super::{TemplateFile, cargo_toml, gitignore, plugin_toml, to_pascal_case};
 
 pub fn authorization_policy_files(plugin_name: &str) -> Vec<TemplateFile> {
     vec![
@@ -20,7 +20,7 @@ pub fn authorization_policy_files(plugin_name: &str) -> Vec<TemplateFile> {
         },
         TemplateFile {
             path: "README.md".to_string(),
-            content: readme_md(plugin_name, "authorization-policy"),
+            content: authorization_policy_readme_md(plugin_name),
         },
         TemplateFile {
             path: ".gitignore".to_string(),
@@ -33,5 +33,39 @@ fn lib_rs(plugin_name: &str) -> String {
     let plugin_type = to_pascal_case(plugin_name);
     format!(
         "use bindings::camel::plugin::types::{{WasmError, WasmExchange}};\nuse bindings::Guest;\n\nmod bindings {{\n    wit_bindgen::generate!({{\n        world: \"authorization-policy\",\n        path: \"../wit\",\n    }});\n}}\n\nstruct {plugin_type};\n\nimpl Guest for {plugin_type} {{\n    fn init(config: Vec<(String, String)>) -> Result<(), String> {{\n        let _ = config;\n        Ok(())\n    }}\n\n    fn evaluate(exchange: WasmExchange) -> Result<Option<String>, WasmError> {{\n        let roles_prop = bindings::camel::plugin::host::get_property(\"camel.auth.roles\");\n        match roles_prop {{\n            Some(roles_json) if roles_json.contains(\"admin\") => Ok(None),\n            _ => Ok(Some(\"admin role required\".into())),\n        }}\n    }}\n}}\n\nbindings::export!({plugin_type} with_types_in bindings);\n"
+    )
+}
+
+fn authorization_policy_readme_md(plugin_name: &str) -> String {
+    format!(
+        r#"# {plugin_name}
+
+WASM authorization-policy plugin for Camel.
+
+## Build
+
+```bash
+camel plugin build
+```
+
+## Register from `Camel.toml`
+
+```toml
+[permissions.providers.{plugin_name}]
+provider = "wasm"
+path = "plugins/{plugin_name}.wasm"
+
+# Optional runtime limits — defaults: 30s timeout, 50 MiB memory.
+[permissions.providers.{plugin_name}.limits]
+timeout-secs = 5
+max-memory = 10485760
+```
+
+## Files
+
+- `src/lib.rs`: policy entrypoint implementing `init(...)` and `evaluate(...)`
+- `wit/`: WIT definitions used for guest bindings generation
+- `Camel.plugin.toml`: plugin metadata for Camel
+"#
     )
 }

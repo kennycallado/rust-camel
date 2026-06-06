@@ -239,9 +239,14 @@ camel plugin new my-processor
 # Create a bean plugin
 camel plugin new my-bean --type bean
 
+# Create an authorization-policy plugin
+camel plugin new my-policy --type authorization-policy
+
 # Force overwrite existing directory
 camel plugin new my-plugin --force
 ```
+
+Each generated plugin includes a `README.md` with a `Camel.toml` example showing how to register the plugin and (for beans and authorization policies) how to tune the optional `[limits]` block (`timeout-secs`, `max-memory`, `max-concurrent-calls`). See `docs/adr/0014-wasm-plugin-config-unification.md` for the runtime configuration model.
 
 ### `camel plugin build`
 

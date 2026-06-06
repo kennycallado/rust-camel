@@ -302,7 +302,8 @@ async fn run(
                 );
                 std::process::exit(1);
             }
-            let wasm_config = camel_component_wasm::config::WasmConfig::default();
+            let wasm_config =
+                camel_component_wasm::config::WasmConfig::from_limits(&bean_cfg.limits);
             let wasm_bean = camel_component_wasm::bean::WasmBean::new(
                 &wasm_path,
                 wasm_config,

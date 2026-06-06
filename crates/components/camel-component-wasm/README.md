@@ -232,6 +232,38 @@ let uri = "wasm:plugins/slow.wasm?timeout=5";
 let uri = "wasm:plugins/heavy.wasm?max-memory=10485760";
 ```
 
+### Configuring Bean and AuthorizationPolicy plugins via `Camel.toml`
+
+Processor plugins are configured via the `wasm:` URI query string (above). For **Bean** and **AuthorizationPolicy** plugins, the same knobs are exposed through a `[limits]` block in `Camel.toml`:
+
+```toml
+# Bean plugin
+[default.beans.my-bean]
+plugin = "my-bean"
+
+[default.beans.my-bean.limits]
+timeout-secs = 600          # optional, defaults to 30
+max-memory = 4294967296     # optional, defaults to 52428800 (50 MiB)
+max-concurrent-calls = 4    # optional, defaults to 4 (bean: not enforced today)
+```
+
+```toml
+# AuthorizationPolicy plugin (WASM provider)
+[security.permissions.providers.my-policy]
+provider = "wasm"
+path = "plugins/authz.wasm"
+
+[security.permissions.providers.my-policy.limits]
+timeout-secs = 5
+max-memory = 10485760
+```
+
+All three fields are optional. **`None` means "use the runtime default"** — no silent fallback lie (per ADR-0011). The defaults are applied explicitly in `WasmConfig::from_limits`, the single source of truth.
+
+For **SecurityPolicy**, ADR-0014 documents why no `Camel.toml` path is exposed (no production callers today). The runtime still honours the default 50 MiB cap through the shared `WasmRuntime::create_host_state`.
+
+See [`docs/adr/0014-wasm-plugin-config-unification.md`](../../docs/adr/0014-wasm-plugin-config-unification.md) for the full design rationale.
+
 ### Error variants
 
 | Variant | When raised |

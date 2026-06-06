@@ -8,6 +8,7 @@ pub mod context_ext;
 pub mod discovery;
 pub(crate) mod include;
 pub mod properties;
+pub mod wasm_limits;
 pub mod yaml;
 
 pub use config::{
@@ -21,6 +22,7 @@ pub use discovery::{
     discover_routes_with_threshold_and_security,
 };
 pub use properties::{PropertiesResolver, ResolveError};
+pub use wasm_limits::WasmLimitsConfig;
 pub use yaml::{
     YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_canonical,
     parse_yaml_to_declarative, parse_yaml_with_threshold,

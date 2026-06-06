@@ -86,7 +86,7 @@ pub async fn build_permission_registry(
 
                 let evaluator = WasmAuthorizationPolicyEvaluator::new(
                     path,
-                    WasmConfig::default(),
+                    WasmConfig::from_limits(&provider_config.limits),
                     registry.clone(),
                     provider_config.config.clone().unwrap_or_default(),
                 )
@@ -170,7 +170,14 @@ mod tests {
     use super::*;
     use camel_api::security_policy::Principal;
     use camel_config::config::PermissionCacheConfig;
+    use camel_config::wasm_limits::WasmLimitsConfig;
     use serde_json::json;
+
+    // Note: WasmAuthorizationPolicyEvaluator::new requires a real WASM file.
+    // The WasmConfig propagation chain (limits → from_limits → WasmConfig →
+    // create_host_state) is tested at the runtime layer (memory_growth_*,
+    // timeout_kills_infinite_loop_guest). All plugin types share that runtime
+    // layer, so coverage is implicit.
 
     fn test_principal() -> Principal {
         Principal {
@@ -250,7 +257,7 @@ mod tests {
         let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
         let result = WasmAuthorizationPolicyEvaluator::new(
             "/nonexistent/policy.wasm",
-            WasmConfig::default(),
+            WasmConfig::from_limits(&WasmLimitsConfig::default()),
             registry,
             HashMap::new(),
         )
@@ -295,6 +302,7 @@ mod tests {
                 path: None,
                 config: None,
                 cache: PermissionCacheConfig::default(),
+                limits: Default::default(),
             },
         );
         let result =
@@ -313,6 +321,7 @@ mod tests {
                 path: None,
                 config: None,
                 cache: PermissionCacheConfig::default(),
+                limits: Default::default(),
             },
         );
         let result =

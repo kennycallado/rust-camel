@@ -9,6 +9,7 @@ license.workspace = true
 camel-api.workspace = true
 camel-bean.workspace = true
 camel-builder.workspace = true
+camel-config.workspace = true
 camel-component-wasm.workspace = true
 camel-component-timer.workspace = true
 camel-component-log.workspace = true

@@ -1,4 +1,4 @@
-use super::{TemplateFile, cargo_toml, gitignore, plugin_toml, readme_md, to_pascal_case};
+use super::{TemplateFile, cargo_toml, gitignore, plugin_toml, to_pascal_case};
 
 pub fn bean_files(plugin_name: &str) -> Vec<TemplateFile> {
     vec![
@@ -16,7 +16,7 @@ pub fn bean_files(plugin_name: &str) -> Vec<TemplateFile> {
         },
         TemplateFile {
             path: "README.md".to_string(),
-            content: readme_md(plugin_name, "bean"),
+            content: bean_readme_md(plugin_name),
         },
         TemplateFile {
             path: ".gitignore".to_string(),
@@ -46,6 +46,39 @@ fn camel_bean_wit() -> &'static str {
 
 fn camel_plugin_wit() -> &'static str {
     camel_wit::PLUGIN_WIT
+}
+
+fn bean_readme_md(plugin_name: &str) -> String {
+    format!(
+        r#"# {plugin_name}
+
+WASM bean plugin for Camel.
+
+## Build
+
+```bash
+camel plugin build
+```
+
+## Use from `Camel.toml`
+
+```toml
+[default.beans.{plugin_name}]
+plugin = "{plugin_name}"
+
+# Optional runtime limits — defaults: 30s timeout, 50 MiB memory.
+[default.beans.{plugin_name}.limits]
+timeout-secs = 60
+max-memory = 104857600
+```
+
+## Files
+
+- `src/lib.rs`: bean entrypoint implementing `methods()` and `invoke(...)`
+- `wit/`: WIT definitions used for guest bindings generation
+- `Camel.plugin.toml`: plugin metadata for Camel
+"#
+    )
 }
 
 #[cfg(test)]

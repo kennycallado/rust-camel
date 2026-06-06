@@ -1,4 +1,12 @@
-//! WASM plugin configuration: timeouts, memory limits, epoch settings.
+//! WASM plugin configuration for Processor URI query params and `Camel.toml`
+//! limits blocks used by Bean/AuthorizationPolicy/SecurityPolicy.
+//!
+//! `max_memory_bytes` is enforced at runtime via
+//! `wasmtime::StoreLimitsBuilder::memory_size` in `WasmRuntime::create_host_state`.
+//! The default (50 MiB) is intentionally tight; raise it through `Camel.toml`
+//! (`[default.beans.<name>.limits]` or `[permissions.providers.<name>.limits]`)
+//! or via the `wasm:` URI query string (`?max-memory=N`) for Processor plugins.
+//! Timeout uses epoch interruption.
 
 use std::path::Path;
 use std::time::Duration;
@@ -8,6 +16,9 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// Default maximum linear memory in bytes (50 MB).
 const DEFAULT_MAX_MEMORY_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Default maximum concurrent `call_process` executions per producer.
+const DEFAULT_MAX_CONCURRENT_CALLS: usize = 4;
 
 /// Epoch tick interval in milliseconds (same as Surrealism).
 const EPOCH_INTERVAL_MILLIS: u64 = 10;
@@ -22,6 +33,7 @@ pub struct WasmConfig {
     pub timeout_secs: u64,
 
     /// Maximum linear memory the guest can allocate, in bytes.
+    /// Enforced via `wasmtime::StoreLimitsBuilder::memory_size`.
     pub max_memory_bytes: u64,
 
     /// Maximum concurrent `call_process` executions per producer.
@@ -33,12 +45,27 @@ impl Default for WasmConfig {
         Self {
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             max_memory_bytes: DEFAULT_MAX_MEMORY_BYTES,
-            max_concurrent_calls: 4,
+            max_concurrent_calls: DEFAULT_MAX_CONCURRENT_CALLS,
         }
     }
 }
 
 impl WasmConfig {
+    /// Build concrete runtime config from optional `Camel.toml` WASM limits.
+    ///
+    /// `None` values use runtime defaults matching `WasmConfig::default()`.
+    /// This constructor is the single source of truth for `WasmConfig` defaults
+    /// sourced from `Camel.toml` — no silent fallback lie elsewhere (ADR-0011).
+    pub fn from_limits(limits: &camel_config::WasmLimitsConfig) -> WasmConfig {
+        WasmConfig {
+            timeout_secs: limits.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
+            max_memory_bytes: limits.max_memory.unwrap_or(DEFAULT_MAX_MEMORY_BYTES),
+            max_concurrent_calls: limits
+                .max_concurrent_calls
+                .unwrap_or(DEFAULT_MAX_CONCURRENT_CALLS),
+        }
+    }
+
     /// Parse `WasmConfig` from the query portion of a WASM URI.
     ///
     /// `uri_without_scheme` is everything after `wasm:`, e.g.
@@ -232,5 +259,46 @@ mod tests {
     fn test_epoch_interval() {
         let config = WasmConfig::default();
         assert_eq!(config.epoch_interval(), Duration::from_millis(10));
+    }
+
+    #[test]
+    fn from_limits_applies_provided_values() {
+        let limits = camel_config::WasmLimitsConfig {
+            timeout_secs: Some(90),
+            max_memory: Some(128 * 1024 * 1024),
+            max_concurrent_calls: Some(2),
+        };
+
+        let config = WasmConfig::from_limits(&limits);
+
+        assert_eq!(config.timeout_secs, 90);
+        assert_eq!(config.max_memory_bytes, 128 * 1024 * 1024);
+        assert_eq!(config.max_concurrent_calls, 2);
+    }
+
+    #[test]
+    fn from_limits_falls_back_to_runtime_defaults_when_none() {
+        let limits = camel_config::WasmLimitsConfig::default();
+
+        let config = WasmConfig::from_limits(&limits);
+
+        assert_eq!(config.timeout_secs, DEFAULT_TIMEOUT_SECS);
+        assert_eq!(config.max_memory_bytes, DEFAULT_MAX_MEMORY_BYTES);
+        assert_eq!(config.max_concurrent_calls, 4);
+    }
+
+    #[test]
+    fn from_limits_mixed_some_and_none() {
+        let limits = camel_config::WasmLimitsConfig {
+            timeout_secs: Some(15),
+            max_memory: None,
+            max_concurrent_calls: Some(1),
+        };
+
+        let config = WasmConfig::from_limits(&limits);
+
+        assert_eq!(config.timeout_secs, 15);
+        assert_eq!(config.max_memory_bytes, DEFAULT_MAX_MEMORY_BYTES);
+        assert_eq!(config.max_concurrent_calls, 1);
     }
 }

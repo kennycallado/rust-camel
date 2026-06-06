@@ -8987,6 +8987,7 @@ dependencies = [
  "camel-component-log",
  "camel-component-timer",
  "camel-component-wasm",
+ "camel-config",
  "camel-core",
  "tokio",
  "tracing-subscriber",

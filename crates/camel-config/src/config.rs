@@ -473,6 +473,10 @@ pub struct BeanConfig {
     pub plugin: String,
     #[serde(default)]
     pub config: HashMap<String, String>,
+    /// WASM runtime limits for this bean. All `None` by default — runtime
+    /// defaults apply. See `WasmLimitsConfig`.
+    #[serde(default)]
+    pub limits: crate::wasm_limits::WasmLimitsConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +758,9 @@ pub struct PermissionProviderConfig {
     pub config: Option<HashMap<String, String>>,
     #[serde(default)]
     pub cache: PermissionCacheConfig,
+    /// WASM runtime limits applied when `provider = "wasm"`. Ignored otherwise.
+    #[serde(default)]
+    pub limits: crate::wasm_limits::WasmLimitsConfig,
 }
 
 fn default_positive_ttl_secs() -> u64 {
@@ -1967,6 +1974,7 @@ mod config_validation_tests {
             BeanConfig {
                 plugin: "".to_string(),
                 config: HashMap::new(),
+                limits: Default::default(),
             },
         );
         let config = CamelConfig {
@@ -1984,6 +1992,7 @@ mod config_validation_tests {
             BeanConfig {
                 plugin: "   ".to_string(),
                 config: HashMap::new(),
+                limits: Default::default(),
             },
         );
         let config = CamelConfig {
@@ -2198,6 +2207,30 @@ mod config_validation_tests {
             ..CamelConfig::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn bean_config_deserialises_with_limits() {
+        let toml_str = r#"
+        plugin = "my-plugin"
+        [limits]
+        timeout-secs = 600
+        max-memory = 4294967296
+        "#;
+        let cfg: BeanConfig = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(cfg.plugin, "my-plugin");
+        assert_eq!(cfg.limits.timeout_secs, Some(600));
+        assert_eq!(cfg.limits.max_memory, Some(4_294_967_296));
+        assert_eq!(cfg.limits.max_concurrent_calls, None);
+    }
+
+    #[test]
+    fn bean_config_defaults_limits_to_none() {
+        let toml_str = r#"
+        plugin = "my-plugin"
+        "#;
+        let cfg: BeanConfig = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(cfg.limits, crate::wasm_limits::WasmLimitsConfig::default());
     }
 }
 
@@ -2594,5 +2627,35 @@ timeout_ms = 1000
         assert!(result.is_ok(), "from_file_async_with_env should not block");
         let config = result.unwrap().expect("config should parse");
         assert_eq!(config.timeout_ms, 1000);
+    }
+}
+
+#[cfg(test)]
+mod permission_provider_config_tests {
+    use super::*;
+
+    #[test]
+    fn permission_provider_config_deserialises_with_limits() {
+        let toml_str = r#"
+        provider = "wasm"
+        path = "plugins/authz.wasm"
+        [limits]
+        timeout-secs = 5
+        max-memory = 10485760
+        "#;
+        let cfg: PermissionProviderConfig = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(cfg.provider, "wasm");
+        assert_eq!(cfg.path.as_deref(), Some("plugins/authz.wasm"));
+        assert_eq!(cfg.limits.timeout_secs, Some(5));
+        assert_eq!(cfg.limits.max_memory, Some(10_485_760));
+    }
+
+    #[test]
+    fn permission_provider_config_defaults_limits_to_none() {
+        let toml_str = r#"
+        provider = "keycloak"
+        "#;
+        let cfg: PermissionProviderConfig = toml::from_str(toml_str).expect("deserialize");
+        assert_eq!(cfg.limits, crate::wasm_limits::WasmLimitsConfig::default());
     }
 }

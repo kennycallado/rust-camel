@@ -241,6 +241,22 @@ plugin = "my-auth-bean"
 
 WASM bean plugins registered at startup. Each entry creates an isolated WASM instance.
 
+#### Optional WASM runtime limits
+
+Each bean can override the WASM runtime defaults via a `[limits]` sub-table. Fields are `Option<T>`; any unset field falls back to the runtime default (per ADR-0011 — no silent surprises).
+
+```toml
+[default.beans.carto-kit]
+plugin = "carto-kit"
+
+[default.beans.carto-kit.limits]
+timeout-secs = 600          # default: 30
+max-memory = 4294967296     # default: 52428800 (50 MiB)
+max-concurrent-calls = 4    # default: 4 (informational for beans)
+```
+
+The shared `WasmLimitsConfig` type lives in `crates/camel-config/src/wasm_limits.rs` and is re-exported as `camel_config::WasmLimitsConfig`. The same type is embedded in `[security.permissions.providers.<name>]` for WASM authorization policies. See ADR-0014 for the design rationale.
+
 ## Config Modularization (include)
 
 Split your `Camel.toml` into smaller files using the top-level `include` field.

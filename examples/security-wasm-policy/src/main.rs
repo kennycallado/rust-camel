@@ -123,6 +123,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wasm_path = fixtures_dir.join("role-check.wasm");
     let registry = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
 
+    // SecurityPolicy has no Camel.toml [limits] path today (ADR-0014 §4 —
+    // no production callers), so this example uses WasmConfig::default()
+    // directly. Compare with wasm-bean-example, which demonstrates
+    // WasmConfig::from_limits — the pattern camel-cli uses to honour
+    // [default.beans.<name>.limits].
     let wasm_policy =
         WasmSecurityPolicy::new(&wasm_path, WasmConfig::default(), registry, HashMap::new())
             .await?;

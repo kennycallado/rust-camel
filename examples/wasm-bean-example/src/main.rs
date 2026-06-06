@@ -5,6 +5,7 @@ use camel_builder::StepAccumulator;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_component_wasm::bean::WasmBean;
+use camel_config::WasmLimitsConfig;
 use camel_core::context::CamelContext;
 
 #[tokio::main]
@@ -18,13 +19,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wasm_path = fixtures_dir.join("text_utils.wasm");
     let registry_arc = Arc::new(std::sync::Mutex::new(camel_core::Registry::new()));
     let bean_config: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let wasm_bean = WasmBean::new(
-        &wasm_path,
-        camel_component_wasm::WasmConfig::default(),
-        registry_arc,
-        bean_config,
-    )
-    .await?;
+    // Build the WASM runtime config from WasmLimitsConfig. This is the same
+    // path `camel-cli` uses when loading beans from Camel.toml. Here we use
+    // defaults (all-None) — see Camel.toml's `[default.beans.<name>.limits]`
+    // block for the runtime tuning knobs (timeout-secs, max-memory,
+    // max-concurrent-calls). See ADR-0014.
+    let limits = WasmLimitsConfig {
+        timeout_secs: None,
+        max_memory: None,
+        max_concurrent_calls: None,
+    };
+    let wasm_config = camel_component_wasm::WasmConfig::from_limits(&limits);
+    let wasm_bean = WasmBean::new(&wasm_path, wasm_config, registry_arc, bean_config).await?;
 
     println!("bean methods: {:?}", wasm_bean.methods());
 
