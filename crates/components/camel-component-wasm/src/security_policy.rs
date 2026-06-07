@@ -8,6 +8,9 @@ use camel_api::security_policy::{AuthorizationDecision, SecurityPolicy, principa
 use camel_api::{CamelError, Exchange};
 use camel_core::Registry;
 
+use camel_config::config::WasmSecurityPolicyConfig;
+
+use crate::config::WasmConfig;
 use crate::error::WasmError;
 use crate::security_policy_bindings::AuthorizationPolicy as AuthorizationPolicyGuest;
 use crate::serde_bridge;
@@ -72,6 +75,33 @@ impl SecurityPolicy for WasmSecurityPolicy {
     }
 }
 
+pub async fn build_security_policy_registry(
+    policies: &HashMap<String, WasmSecurityPolicyConfig>,
+    registry: Arc<std::sync::Mutex<Registry>>,
+) -> Result<camel_auth::SecurityPolicyRegistry, WasmError> {
+    let policy_registry = camel_auth::SecurityPolicyRegistry::new();
+
+    for (name, policy_config) in policies {
+        let wasm_policy = WasmSecurityPolicy::new(
+            &policy_config.path,
+            WasmConfig::from_limits(&policy_config.limits),
+            registry.clone(),
+            policy_config.config.clone(),
+        )
+        .await
+        .map_err(|e| {
+            WasmError::InstantiationFailed(format!(
+                "failed to create WASM security policy '{}': {}",
+                name, e
+            ))
+        })?;
+
+        policy_registry.register(name.clone(), Arc::new(wasm_policy));
+    }
+
+    Ok(policy_registry)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +142,29 @@ mod tests {
             0,
         );
         assert!(host_state.properties.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_security_policy_registry_error_path_for_missing_module() {
+        let policies: HashMap<String, WasmSecurityPolicyConfig> = std::iter::once((
+            "missing".to_string(),
+            WasmSecurityPolicyConfig {
+                path: "/nonexistent/policy.wasm".into(),
+                limits: Default::default(),
+                config: Default::default(),
+            },
+        ))
+        .collect();
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let result = build_security_policy_registry(&policies, registry).await;
+        let err = match result {
+            Ok(_) => panic!("expected error for missing module"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, WasmError::InstantiationFailed(_))
+                || matches!(err, WasmError::ModuleNotFound(_)),
+            "expected InstantiationFailed or ModuleNotFound, got: {err:?}"
+        );
     }
 }

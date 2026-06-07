@@ -505,15 +505,29 @@ Key differences from the `plugin` world:
 routes:
   - id: "secured-api"
     from: "http:0.0.0.0:8080/api"
+    security_policy:
+      wasm: "corp-auth"
     steps:
-      - security-policy:
-          ref: "wasm"
-          config:
-            path: "plugins/authz-policy.wasm"
       - to: "log:secured"
 ```
 
-The `security_policy: wasm` form registers a `WasmSecurityPolicy` that evaluates every exchange against the guest module before passing it downstream.
+The `security_policy: wasm` form references a `WasmSecurityPolicy` registered in the `SecurityPolicyRegistry`. Policies are registered from `Camel.toml`:
+
+```toml
+[security.policies.wasm.corp-auth]
+path = "fixtures/role-check.wasm"
+
+[security.policies.wasm.corp-auth.limits]
+timeout-secs = 30
+max-memory = 52428800
+
+[security.policies.wasm.corp-auth.config]
+ldap_url = "ldap://corp"
+```
+
+The guest module's `init()` function receives the `[<name>.config]` pairs as sorted `(String, String)` arguments at instantiation time.
+
+> **Migration** — Previously the YAML form accepted a `config:` block per-route, which was silently dropped. As of ADR-0014 §4 closure (bd rc-0te), per-route `config` is rejected with a hard error. Move `config:` keys to `[security.policies.wasm.<name>.config]` in Camel.toml.
 
 ## Documentation
 

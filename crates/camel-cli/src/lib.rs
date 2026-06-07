@@ -147,6 +147,16 @@ pub async fn build_security_compile_context_from_config(
 
     let evaluator_registry = camel_auth::PermissionEvaluatorRegistry::new();
 
+    if let Some(ref policies) = camel_config.security.policies {
+        let policy_registry =
+            camel_component_wasm::build_security_policy_registry(&policies.wasm, registry.clone())
+                .await
+                .map_err(|e| CamelError::Config(e.to_string()))?;
+        if !policy_registry.is_empty() {
+            security_ctx = security_ctx.with_security_policy_registry(Arc::new(policy_registry));
+        }
+    }
+
     if let Some(ref permissions) = camel_config.security.permissions {
         let wasm_registry = camel_component_wasm::build_permission_registry(permissions, registry)
             .await
@@ -173,6 +183,12 @@ pub async fn build_security_compile_context_from_config(
     if camel_config.security.permissions.is_some() {
         return Err(CamelError::Config(
             "security.permissions requires camel-cli wasm feature".into(),
+        ));
+    }
+
+    if camel_config.security.policies.is_some() {
+        return Err(CamelError::Config(
+            "security.policies requires camel-cli wasm feature".into(),
         ));
     }
 

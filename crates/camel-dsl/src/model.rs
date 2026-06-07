@@ -36,6 +36,14 @@ impl SecurityCompileContext {
         self.evaluator_registry = Some(registry);
         self
     }
+
+    pub fn with_security_policy_registry(
+        mut self,
+        registry: std::sync::Arc<camel_auth::SecurityPolicyRegistry>,
+    ) -> Self {
+        self.registry = Some(registry);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,8 +71,14 @@ pub enum DeclarativeSecurityPolicy {
     Ref {
         name: String,
     },
+    /// WASM security policy reference. The `path` field is the registry name
+    /// of a policy registered via `[security.policies.wasm.<name>]` in Camel.toml.
+    /// Per-route `config` is not supported (registry is instance-based, not
+    /// factory-based — see ADR-0014 §4 closure bd rc-0te).
     Wasm {
+        /// Registry name of the WASM policy (from `[security.policies.wasm.<name>]` in Camel.toml).
         path: String,
+        /// Reserved — must be empty. Use Camel.toml `[security.policies.wasm.<name>.config]` instead.
         config: std::collections::HashMap<String, String>,
     },
     Permission {

@@ -446,6 +446,31 @@ max_entries = 10000
 | `cache.negative_ttl_secs` | u64 | no | Negative cache TTL (default: 5) |
 | `cache.max_entries` | usize | no | LRU cache capacity (default: 10000) |
 
+### `[security.policies.wasm.<name>]` -- WASM Security Policies
+
+Named WASM security policies. Each entry registers a `WasmSecurityPolicy` in the `SecurityPolicyRegistry` and is referenced from YAML by `<name>` (see `camel-dsl` README).
+
+```toml
+[security.policies.wasm.corp-auth]
+path = "plugins/authz.wasm"
+
+[security.policies.wasm.corp-auth.limits]
+timeout-secs = 30
+max-memory = 52428800
+
+[security.policies.wasm.corp-auth.config]
+ldap_url = "ldap://corp"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `path` | string | yes | Path to the `.wasm` file (relative to project root or absolute) |
+| `limits.timeout-secs` | u64 | no | Per-evaluation timeout (default per `WasmLimitsConfig`) |
+| `limits.max-memory` | u64 | no | Maximum guest memory in bytes |
+| `config` | map | no | Key-value pairs passed to the guest's `init()` function |
+
+The runtime sorts `config` by key before passing it to `init()` (deterministic ordering across runs). Unknown keys are rejected (`deny_unknown_fields`).
+
 ## Profile Selection
 
 Set the active profile via the `CAMEL_PROFILE` environment variable:

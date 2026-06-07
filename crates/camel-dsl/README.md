@@ -534,25 +534,23 @@ routes:
 
 ### `wasm:` -- WASM Policy Evaluator
 
-Delegate authorization to a WASM module.
+Delegate authorization to a WASM module registered in the `SecurityPolicyRegistry`. The value is the **registry name** of a policy declared in `[security.policies.wasm.<name>]` in Camel.toml (see `camel-config` README).
 
 ```yaml
 routes:
   - id: "wasm-policy-route"
     from: "direct:check"
     security_policy:
-      wasm:
-        path: "policies/auth_policy.wasm"
-        config:
-          allowed_roles: "admin,editor"
+      wasm: "auth-policy"
     steps:
       - to: "log:info"
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `path` | string | yes | Path to the WASM module |
-| `config` | map | no | Key-value config passed to the module |
+| `wasm` | string | yes | Registry name of a WASM policy declared in Camel.toml |
+
+> **Note** — Per-route `config:` is rejected. The policy's `config` is set once at registration time in Camel.toml (ADR-0014 §4). The runtime registry is instance-based, not factory-based; the same `<name>` shares one initialized policy across all referencing routes.
 
 ### `permission:` -- Attribute-Based Access Control (ABAC)
 

@@ -1598,8 +1598,6 @@ routes:
     from: direct:start
     security_policy:
       wasm: "plugins/my-auth-policy.wasm"
-      config:
-        ldap_url: "ldap://corp"
     steps:
       - to: log:info
 "#;
@@ -1608,7 +1606,10 @@ routes:
         match sp {
             DeclarativeSecurityPolicy::Wasm { path, config } => {
                 assert_eq!(path, "plugins/my-auth-policy.wasm");
-                assert_eq!(config.get("ldap_url").unwrap(), "ldap://corp");
+                assert!(
+                    config.is_empty(),
+                    "per-route config must be empty; use Camel.toml"
+                );
             }
             _ => panic!("expected Wasm"),
         }

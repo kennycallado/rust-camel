@@ -103,7 +103,15 @@ fn compile_security_policy(
                 None,
             ))
         }
-        crate::model::DeclarativeSecurityPolicy::Wasm { path, config: _ } => {
+        crate::model::DeclarativeSecurityPolicy::Wasm { path, config } => {
+            if !config.is_empty() {
+                return Err(CamelError::RouteError(
+                    "security_policy.wasm.config cannot be set per-route; \
+                     configure it in [security.policies.wasm.<name>.config] \
+                     in Camel.toml — ADR-0014 §4"
+                        .into(),
+                ));
+            }
             let registry = ctx.registry.as_ref().ok_or_else(|| {
                 CamelError::RouteError(
                     "security_policy with wasm requires a SecurityPolicyRegistry".into(),
@@ -3313,6 +3321,34 @@ mod tests {
         };
         let (_config, returned_auth) = compile_security_policy(def, &ctx).unwrap();
         assert!(returned_auth.is_none());
+    }
+
+    #[test]
+    fn compile_security_policy_wasm_with_yaml_config_rejected() {
+        let registry = std::sync::Arc::new(camel_auth::SecurityPolicyRegistry::new());
+        registry.register("plugin.wasm", std::sync::Arc::new(TestPolicy));
+        let ctx = SecurityCompileContext::new(None, Some(registry));
+        let mut config: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        config.insert("ldap_url".to_string(), "ldap://corp".to_string());
+        let def = DeclarativeSecurityPolicy::Wasm {
+            path: "plugin.wasm".into(),
+            config,
+        };
+        let result = compile_security_policy(def, &ctx);
+        assert!(result.is_err(), "expected error for non-empty config");
+        let err_msg = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => unreachable!(),
+        };
+        assert!(
+            err_msg.contains("ADR-0014 §4"),
+            "error must cite ADR-0014 §4, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("Camel.toml"),
+            "error must point to Camel.toml, got: {err_msg}"
+        );
     }
 
     #[test]

@@ -494,6 +494,8 @@ pub struct SecurityConfig {
     pub keycloak: Option<KeycloakSecurityConfig>,
     #[serde(default)]
     pub permissions: Option<HashMap<String, PermissionProviderConfig>>,
+    #[serde(default)]
+    pub policies: Option<WasmSecurityPoliciesConfig>,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
@@ -761,6 +763,38 @@ pub struct PermissionProviderConfig {
     /// WASM runtime limits applied when `provider = "wasm"`. Ignored otherwise.
     #[serde(default)]
     pub limits: crate::wasm_limits::WasmLimitsConfig,
+}
+
+/// Configuration for a single WASM-based security policy, referenced by name from
+/// `[security.policies.wasm.<name>]` in Camel.toml.
+///
+/// ```toml
+/// [security.policies.wasm.corp-auth]
+/// path = "plugins/authz.wasm"
+/// [security.policies.wasm.corp-auth.limits]
+/// timeout-secs = 30
+/// [security.policies.wasm.corp-auth.config]
+/// ldap_url = "ldap://corp"
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WasmSecurityPolicyConfig {
+    /// Path to the .wasm file, relative to the project root or absolute.
+    pub path: String,
+    /// WASM runtime limits (timeout, memory, concurrency).
+    #[serde(default)]
+    pub limits: crate::wasm_limits::WasmLimitsConfig,
+    /// Key-value pairs passed to the guest's `init()` function.
+    #[serde(default)]
+    pub config: HashMap<String, String>,
+}
+
+/// Wrapper for `[security.policies]` sub-tables.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WasmSecurityPoliciesConfig {
+    /// Named WASM security policies, keyed by registry name.
+    pub wasm: HashMap<String, WasmSecurityPolicyConfig>,
 }
 
 fn default_positive_ttl_secs() -> u64 {
@@ -2272,6 +2306,7 @@ refresh_skew_secs = 60
         assert!(config.security.native.is_none());
         assert!(config.security.keycloak.is_none());
         assert!(config.security.permissions.is_none());
+        assert!(config.security.policies.is_none());
     }
 
     #[test]
@@ -2511,6 +2546,61 @@ provider = "wasm"
     fn security_permissions_absent_by_default() {
         let config = SecurityConfig::default();
         assert!(config.permissions.is_none());
+    }
+
+    #[test]
+    fn parse_security_policies_wasm_full_config() {
+        let toml = r#"
+[security.policies.wasm.corp-auth]
+path = "plugins/authz.wasm"
+
+[security.policies.wasm.corp-auth.limits]
+timeout-secs = 30
+max-memory = 52428800
+
+[security.policies.wasm.corp-auth.config]
+ldap_url = "ldap://corp"
+retry_count = "3"
+"#;
+        let config: CamelConfig = toml::from_str(toml).unwrap();
+        let policies = config.security.policies.unwrap();
+        let policy = policies.wasm.get("corp-auth").unwrap();
+        assert_eq!(policy.path, "plugins/authz.wasm");
+        assert_eq!(policy.limits.timeout_secs, Some(30));
+        assert_eq!(policy.limits.max_memory, Some(52_428_800));
+        assert_eq!(policy.config.get("ldap_url").unwrap(), "ldap://corp");
+        assert_eq!(policy.config.get("retry_count").unwrap(), "3");
+    }
+
+    #[test]
+    fn parse_security_policies_wasm_minimal_config() {
+        let toml = r#"
+[security.policies.wasm.corp-auth]
+path = "plugins/authz.wasm"
+"#;
+        let config: CamelConfig = toml::from_str(toml).unwrap();
+        let policies = config.security.policies.unwrap();
+        let policy = policies.wasm.get("corp-auth").unwrap();
+        assert_eq!(policy.path, "plugins/authz.wasm");
+        assert_eq!(
+            policy.limits,
+            crate::wasm_limits::WasmLimitsConfig::default()
+        );
+        assert!(policy.config.is_empty());
+    }
+
+    #[test]
+    fn parse_security_policies_wasm_deny_unknown_fields() {
+        let toml = r#"
+[security.policies.wasm.corp-auth]
+path = "plugins/authz.wasm"
+unknown_key = "rejected"
+"#;
+        let result: Result<CamelConfig, _> = toml::from_str(toml);
+        assert!(
+            result.is_err(),
+            "deny_unknown_fields must reject unknown keys"
+        );
     }
 }
 

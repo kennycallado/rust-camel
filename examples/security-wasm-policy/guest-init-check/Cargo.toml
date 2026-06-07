@@ -1,0 +1,13 @@
+[package]
+name = "init-check-policy"
+description = "WASM authorization-policy plugin — validates init config"
+version = "0.8.1"
+edition = "2024"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57"

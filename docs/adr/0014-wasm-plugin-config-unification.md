@@ -102,3 +102,32 @@ drops the `Engine` itself.
 This change has no public-API impact (`EpochTicker` is internal to
 `camel-component-wasm`) but is recorded here because it was discovered
 through the new behavioral test for `timeout_secs`.
+
+## §4 Closure — Resolved by bd rc-0te
+
+The §4 deferral ("WasmSecurityPolicy has no production callers today; this ADR fixes its potential path without adding one") is closed by bd rc-0te.
+
+### Decision recap
+
+- **Approach**: Option A (Camel.toml-driven), consistent with the Permission variant precedent.
+- **Schema**: New `[security.policies.wasm.<name>]` block with `path` + `[limits]` + `[config]` sub-tables. `WasmSecurityPolicyConfig` struct in `crates/camel-config/src/config.rs`.
+- **Builder**: `build_security_policy_registry` in `crates/components/camel-component-wasm/src/security_policy.rs`, parallel to `build_permission_registry`.
+- **Wiring**: `camel-cli/src/lib.rs` `build_security_compile_context_from_config` populates the `SecurityPolicyRegistry` from Camel.toml + threads through `SecurityCompileContext::with_security_policy_registry`.
+- **DSL semantics**: YAML `wasm: <name>` references the registry name. Per-route `config:` block is rejected with a hard error citing this section (silent-drop forbidden by ADR-0011).
+
+### Why per-route config is rejected
+
+The `SecurityPolicyRegistry` stores `Arc<dyn SecurityPolicy>` instances (not factories). All routes referencing the same `<name>` share one policy instance with one `init_config`. Per-route config would require redesigning the registry as a factory, which is out of scope for v1. Multi-tenant users must use distinct names for distinct configs.
+
+### Sessions
+
+- Oracle: `ses_15cb70293ffeoF7nj74LiZSZLG` (Option A + schema (b) + reject per-route config)
+- Reviewer: `ses_15ca73f3cffetpVgc2XtnRdMel` (APPROVED_WITH_MINOR_ISSUES → plan v2)
+- Discovery: bd rc-c5f (closed with finding) → bd rc-0te
+
+### Commits
+
+- Commit 1: `87c184a8` — Schema in camel-config (`WasmSecurityPolicyConfig` + tests)
+- Commit 2: `c0ced1e6` — Setter + builder + camel-cli wiring
+- Commit 3: `301099c2` — compile.rs rejection + YAML semantics + tests
+- Commit 4: `b761fb91` — README + ADR amendment + behavioral test

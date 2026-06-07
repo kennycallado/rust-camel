@@ -40,7 +40,7 @@ pub use endpoint::WasmEndpoint;
 pub use epoch::EpochTicker;
 pub use error::{TrapReason, WasmError};
 pub use health::WasmHealthCheck;
-pub use security_policy::WasmSecurityPolicy;
+pub use security_policy::{WasmSecurityPolicy, build_security_policy_registry};
 pub use state_store::StateStore;
 
 use std::path::PathBuf;
