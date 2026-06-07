@@ -31,10 +31,11 @@ pub use json::{
 pub use model::{
     AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
     DeclarativeConcurrency, DeclarativeErrorHandler, DeclarativeRedeliveryPolicy, DeclarativeRoute,
-    DeclarativeSecurityPolicy, DeclarativeStep, FilterStepDef, LanguageExpressionDef, LogLevelDef,
-    LogStepDef, MulticastAggregationDef, MulticastStepDef, ScriptStepDef, SecurityCompileContext,
-    SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef,
-    SplitStepDef, StreamCacheStepDef, ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    DeclarativeSecurityPolicy, DeclarativeStep, EnrichStepDef, FilterStepDef,
+    LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
+    ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
+    SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ToStepDef,
+    ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use yaml::{
     YamlRoute, YamlRoutes, YamlStep, load_from_file, parse_yaml, parse_yaml_to_canonical,

@@ -277,6 +277,34 @@ pub trait StepAccumulator: Sized {
         self
     }
 
+    /// EIP-7 enrich: synchronous content enrichment via a resolved producer.
+    ///
+    /// Calls the given endpoint URI as a producer, then merges the response
+    /// back into the original exchange body using the default `UseEnrichedBody`
+    /// strategy (original headers/properties are preserved).
+    fn enrich(mut self, uri: impl Into<String>) -> Self {
+        self.steps_mut().push(BuilderStep::Enrich {
+            uri: uri.into(),
+            strategy: None,
+            timeout_ms: None,
+        });
+        self
+    }
+
+    /// EIP-7 pollEnrich: blocking poll of a PollingConsumer with timeout.
+    ///
+    /// Reads from a polling endpoint (e.g., file) and merges the result
+    /// into the exchange body using the default `UseEnrichedBody` strategy.
+    /// `timeout_ms` controls how long to wait for data.
+    fn poll_enrich(mut self, uri: impl Into<String>, timeout_ms: u64) -> Self {
+        self.steps_mut().push(BuilderStep::PollEnrich {
+            uri: uri.into(),
+            strategy: None,
+            timeout_ms: Some(timeout_ms),
+        });
+        self
+    }
+
     fn bean(mut self, name: impl Into<String>, method: impl Into<String>) -> Self {
         self.steps_mut().push(BuilderStep::Bean {
             name: name.into(),
@@ -1056,6 +1084,8 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::RecipientList { .. } => "recipient_list",
         BuilderStep::DeclarativeRecipientList { .. } => "declarative_recipient_list",
         BuilderStep::DeclarativeSetProperty { .. } => "set_property",
+        BuilderStep::Enrich { .. } => "enrich",
+        BuilderStep::PollEnrich { .. } => "poll_enrich",
     }
 }
 

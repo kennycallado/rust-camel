@@ -912,6 +912,16 @@ fn compile_declarative_step_with_threshold(
             Ok(BuilderStep::Delay { config })
         }
         DeclarativeStep::Loop(def) => compile_loop_step(def, stream_cache_threshold),
+        DeclarativeStep::Enrich(def) => Ok(BuilderStep::Enrich {
+            uri: def.uri,
+            strategy: def.strategy,
+            timeout_ms: def.timeout_ms,
+        }),
+        DeclarativeStep::PollEnrich(def) => Ok(BuilderStep::PollEnrich {
+            uri: def.uri,
+            strategy: def.strategy,
+            timeout_ms: def.timeout_ms,
+        }),
     }
 }
 
@@ -1127,6 +1137,8 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Delay(_) => "delay",
         DeclarativeStep::Loop(_) => "loop",
         DeclarativeStep::Function(_) => "function",
+        DeclarativeStep::Enrich(_) => "enrich",
+        DeclarativeStep::PollEnrich(_) => "poll_enrich",
     }
 }
 
@@ -1447,7 +1459,9 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
         | DeclarativeStep::Function(_)
         | DeclarativeStep::DynamicRouter(_)
         | DeclarativeStep::RoutingSlip(_)
-        | DeclarativeStep::RecipientList(_) => {}
+        | DeclarativeStep::RecipientList(_)
+        | DeclarativeStep::Enrich(_)
+        | DeclarativeStep::PollEnrich(_) => {}
     }
     Ok(())
 }

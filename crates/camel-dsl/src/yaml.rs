@@ -16,7 +16,7 @@ use crate::model::{
     AggregateStepDef, AggregateStrategyDef, BeanStepDef, BodyTypeDef, ChoiceStepDef, DataFormatDef,
     DeclarativeCircuitBreaker, DeclarativeConcurrency, DeclarativeErrorHandler,
     DeclarativeOnException, DeclarativeRedeliveryPolicy, DeclarativeRoute,
-    DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DynamicRouterStepDef,
+    DeclarativeSecurityPolicy, DeclarativeStep, DelayStepDef, DynamicRouterStepDef, EnrichStepDef,
     LanguageExpressionDef, LoadBalanceStepDef, LoadBalanceStrategyDef, LogLevelDef, LogStepDef,
     LoopStepDef, MulticastAggregationDef, MulticastStepDef, RecipientListStepDef,
     RoutingSlipStepDef, ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef,
@@ -25,18 +25,19 @@ use crate::model::{
 };
 pub use crate::yaml_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, ChoiceData, ChoiceStep, DelayBody,
-    DelayStep, DynamicRouterData, DynamicRouterStep, FilterStep, FunctionStep, LoadBalanceData,
-    LoadBalanceStep, LogConfig, LogMessageData, LogMessageExpr, LogStep, MarshalStep,
-    MulticastData, MulticastStep, PredicateBlock, RecipientListData, RecipientListStep,
-    RoutingSlipData, RoutingSlipStep, ScriptData, ScriptStep, SetBodyConfig, SetBodyData,
-    SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData, SetPropertyStep, SplitData,
-    SplitExpressionConfig, SplitExpressionYaml, SplitStep, StopStep, StreamCacheBody,
-    StreamCacheConfig, StreamCacheStep, ThrottleData, ThrottleStep, ToStep, TransformStep,
-    UnmarshalStep, ValidateStep, WireTapStep, YamlRoute, YamlRoutes, YamlStep,
+    DelayStep, DynamicRouterData, DynamicRouterStep, EnrichBody, EnrichConfig, EnrichStep,
+    FilterStep, FunctionStep, LoadBalanceData, LoadBalanceStep, LogConfig, LogMessageData,
+    LogMessageExpr, LogStep, MarshalStep, MulticastData, MulticastStep, PollEnrichStep,
+    PredicateBlock, RecipientListData, RecipientListStep, RoutingSlipData, RoutingSlipStep,
+    ScriptData, ScriptStep, SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep,
+    SetPropertyData, SetPropertyStep, SplitData, SplitExpressionConfig, SplitExpressionYaml,
+    SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep, ThrottleData,
+    ThrottleStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep, YamlRoute,
+    YamlRoutes, YamlStep,
 };
 use crate::yaml_ast::{LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 24] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 28] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
@@ -61,6 +62,10 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 24] = [
     DeclarativeStepKind::RoutingSlip,
     DeclarativeStepKind::Throttle,
     DeclarativeStepKind::RecipientList,
+    DeclarativeStepKind::Delay,
+    DeclarativeStepKind::Loop,
+    DeclarativeStepKind::Enrich,
+    DeclarativeStepKind::PollEnrich,
 ];
 
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
@@ -974,6 +979,66 @@ pub(crate) fn yaml_step_to_declarative_step(step: YamlStep) -> Result<Declarativ
                 format!("validator:{validate}")
             };
             Ok(DeclarativeStep::To(ToStepDef::new(uri)))
+        }
+        YamlStep::Enrich(EnrichStep { enrich }) => {
+            let (uri, strategy) = unpack_enrich_body(enrich)?;
+            Ok(DeclarativeStep::Enrich(EnrichStepDef {
+                uri,
+                strategy,
+                timeout_ms: None,
+            }))
+        }
+        YamlStep::PollEnrich(PollEnrichStep { poll_enrich }) => {
+            let (uri, strategy, timeout) = unpack_poll_enrich_body(poll_enrich)?;
+            Ok(DeclarativeStep::PollEnrich(EnrichStepDef {
+                uri,
+                strategy,
+                timeout_ms: timeout,
+            }))
+        }
+    }
+}
+
+fn unpack_enrich_body(body: EnrichBody) -> Result<(String, Option<String>), CamelError> {
+    match body {
+        EnrichBody::Uri(uri) => {
+            if uri.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "enrich: URI must not be empty".into(),
+                ));
+            }
+            Ok((uri, None))
+        }
+        EnrichBody::Full(config) => {
+            if config.uri.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "enrich: URI must not be empty".into(),
+                ));
+            }
+            Ok((config.uri, config.strategy))
+        }
+    }
+}
+
+fn unpack_poll_enrich_body(
+    body: EnrichBody,
+) -> Result<(String, Option<String>, Option<u64>), CamelError> {
+    match body {
+        EnrichBody::Uri(uri) => {
+            if uri.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "pollEnrich: URI must not be empty".into(),
+                ));
+            }
+            Ok((uri, None, None))
+        }
+        EnrichBody::Full(config) => {
+            if config.uri.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "pollEnrich: URI must not be empty".into(),
+                ));
+            }
+            Ok((config.uri, config.strategy, config.timeout))
         }
     }
 }

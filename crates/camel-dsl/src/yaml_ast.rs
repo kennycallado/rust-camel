@@ -266,6 +266,8 @@ pub enum YamlStep {
     Delay(DelayStep),
     Loop(LoopStep),
     Validate(ValidateStep),
+    Enrich(EnrichStep),
+    PollEnrich(PollEnrichStep),
 }
 
 #[derive(Deserialize, Debug)]
@@ -627,6 +629,38 @@ pub struct UnmarshalStep {
 #[derive(Deserialize, Debug)]
 pub struct ValidateStep {
     pub validate: String,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct EnrichStep {
+    pub enrich: EnrichBody,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct PollEnrichStep {
+    #[serde(rename = "pollEnrich")]
+    pub poll_enrich: EnrichBody,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+pub enum EnrichBody {
+    /// Shorthand: `enrich: "file:..."` or `pollEnrich: "file:..."`
+    Uri(String),
+    /// Full form: `enrich: { uri: "...", strategy: "...", timeout: ... }`
+    Full(EnrichConfig),
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct EnrichConfig {
+    pub uri: String,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]

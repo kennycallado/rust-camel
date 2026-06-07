@@ -3142,3 +3142,101 @@ async fn http_on_exception_handled_false_propagates_e2e() {
 
     h.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// EIP-7: pollEnrich — reads file content mid-route
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn poll_enrich_reads_file_into_body_mid_route() {
+    let tmp = tempfile::tempdir().unwrap();
+    tokio::fs::write(tmp.path().join("config.json"), r#"{"value":42}"#)
+        .await
+        .unwrap();
+    let file_uri = format!("file:{}?fileName=config.json", tmp.path().display());
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(FileComponent::new())
+        .build()
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .route_id("poll-enrich-test")
+        .poll_enrich(&file_uri, 5000)
+        .stream_cache_default()
+        .to("mock:result")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+
+    let endpoint = h.mock().get_endpoint("result").unwrap();
+    endpoint
+        .await_exchanges(1, std::time::Duration::from_secs(5))
+        .await;
+
+    h.stop().await;
+
+    endpoint.assert_exchange_count(1).await;
+    endpoint
+        .exchange(0)
+        .assert_body_bytes(r#"{"value":42}"#.as_bytes())
+        .assert_no_error();
+}
+
+// ---------------------------------------------------------------------------
+// Tightened negative test: camel_call(file:...?mode=read) must NOT become a
+// read path — guards against re-introducing the rejected resource: anti-pattern
+// (ADR-0015).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn negative_camel_call_with_file_mode_read_does_not_become_read_path() {
+    use camel_api::{Body, Exchange, Message};
+    use camel_component_api::NoOpComponentContext;
+    use camel_component_api::component::Component;
+    use tower::ServiceExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let existing_file = tmp.path().join("input.txt");
+    tokio::fs::write(&existing_file, "PRE_SEED_SENTINEL_CONTENT")
+        .await
+        .unwrap();
+
+    let comp = FileComponent::new();
+    let endpoint = comp
+        .create_endpoint(
+            &format!("file:{}?fileName=input.txt&mode=read", tmp.path().display()),
+            &NoOpComponentContext,
+        )
+        .expect("endpoint creation");
+
+    let ctx = camel_api::ProducerContext::default();
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
+        std::sync::Arc::new(NoOpComponentContext);
+    let producer = endpoint
+        .create_producer(rt, &ctx)
+        .expect("producer creation");
+
+    let exchange = Exchange::new(Message::new(Body::Text("PRODUCER_PAYLOAD".to_string())));
+    let result = producer.oneshot(exchange).await.expect("producer call");
+
+    let body_str =
+        String::from_utf8_lossy(&result.input.body.into_bytes(1024 * 1024).await.unwrap())
+            .to_string();
+
+    assert_ne!(
+        body_str, "PRE_SEED_SENTINEL_CONTENT",
+        "regression: camel_call(file:...?mode=read) returned the file's pre-seeded content — \
+         this means file: producer silently became a read path, violating ADR-0015"
+    );
+
+    let after = tokio::fs::read_to_string(&existing_file).await.unwrap();
+    assert_eq!(
+        after, "PRODUCER_PAYLOAD",
+        "file was not overwritten — producer behavior changed unexpectedly"
+    );
+}

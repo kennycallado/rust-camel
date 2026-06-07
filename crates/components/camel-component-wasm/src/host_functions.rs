@@ -81,6 +81,79 @@ impl Host for WasmHostState {
         result
     }
 
+    fn camel_poll(&mut self, uri: String, timeout_ms: u32) -> Result<String, WasmError> {
+        if self.call_depth > 0 {
+            return Err(WasmError::ProcessorError(
+                "recursive wasm calls not supported".to_string(),
+            ));
+        }
+        self.call_depth += 1;
+
+        let registry = self.registry.clone();
+        let async_work = async {
+            let scheme = uri.split(':').next().unwrap_or("").to_string();
+            if scheme.is_empty() {
+                return Err(WasmError::ProcessorError(format!(
+                    "invalid URI (no scheme): {}",
+                    uri
+                )));
+            }
+
+            let component = {
+                let guard = registry
+                    .lock()
+                    .map_err(|e| WasmError::Io(format!("registry lock poisoned: {}", e)))?;
+                guard.get(&scheme).ok_or_else(|| {
+                    WasmError::ProcessorError(format!("component not found for scheme: {}", scheme))
+                })?
+            };
+
+            let endpoint = component
+                .create_endpoint(&uri, &camel_component_api::NoOpComponentContext)
+                .map_err(|e| WasmError::ProcessorError(format!("create_endpoint failed: {}", e)))?;
+
+            let mut poller = endpoint.polling_consumer().ok_or_else(|| {
+                WasmError::ProcessorError(format!(
+                    "camel_poll requires a component that supports polling consumers (scheme: {})",
+                    scheme
+                ))
+            })?;
+
+            let exchange = poller
+                .receive(std::time::Duration::from_millis(timeout_ms as u64))
+                .await
+                .map_err(|e| WasmError::ProcessorError(format!("poll failed: {}", e)))?;
+
+            let body_str = match exchange {
+                Some(ex) => {
+                    let bytes = ex
+                        .input
+                        .body
+                        .into_bytes(10 * 1024 * 1024)
+                        .await
+                        .map_err(|e| {
+                            WasmError::ProcessorError(format!("body read failed: {}", e))
+                        })?;
+                    String::from_utf8_lossy(&bytes).to_string()
+                }
+                None => {
+                    return Err(WasmError::ProcessorError(format!(
+                        "no message received within {}ms timeout",
+                        timeout_ms
+                    )));
+                }
+            };
+
+            Ok(body_str)
+        };
+
+        let handle = self.tokio_handle.clone();
+        let result = tokio::task::block_in_place(|| handle.block_on(async_work));
+
+        self.call_depth -= 1;
+        result
+    }
+
     fn get_property(&mut self, key: String) -> Option<String> {
         self.properties.get(&key).map(|v| match v {
             Value::String(s) => s.clone(),
@@ -116,6 +189,28 @@ macro_rules! impl_host_for_binding {
             ) -> Result<String, crate::$bindings_mod::camel::plugin::types::WasmError> {
                 let host = self as &mut dyn Host;
                 host.camel_call(uri, payload).map_err(|e| match e {
+                    WasmError::ProcessorError(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::ProcessorError(s)
+                    }
+                    WasmError::TypeConversion(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::TypeConversion(s)
+                    }
+                    WasmError::Io(s) => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::Io(s)
+                    }
+                    WasmError::Timeout => {
+                        crate::$bindings_mod::camel::plugin::types::WasmError::Timeout
+                    }
+                })
+            }
+
+            fn camel_poll(
+                &mut self,
+                uri: String,
+                timeout_ms: u32,
+            ) -> Result<String, crate::$bindings_mod::camel::plugin::types::WasmError> {
+                let host = self as &mut dyn Host;
+                host.camel_poll(uri, timeout_ms).map_err(|e| match e {
                     WasmError::ProcessorError(s) => {
                         crate::$bindings_mod::camel::plugin::types::WasmError::ProcessorError(s)
                     }

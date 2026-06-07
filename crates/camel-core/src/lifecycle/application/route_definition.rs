@@ -179,6 +179,18 @@ pub enum BuilderStep {
         while_predicate: Option<LanguageExpressionDef>,
         steps: Vec<BuilderStep>,
     },
+    /// EIP-7 enrich: synchronous content enrichment via a resolved producer.
+    Enrich {
+        uri: String,
+        strategy: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    /// EIP-7 pollEnrich: blocking poll of a PollingConsumer with timeout.
+    PollEnrich {
+        uri: String,
+        strategy: Option<String>,
+        timeout_ms: Option<u64>,
+    },
 }
 
 impl std::fmt::Debug for BuilderStep {
@@ -323,6 +335,26 @@ impl std::fmt::Debug for BuilderStep {
                     count,
                     while_predicate.is_some(),
                     steps.len()
+                )
+            }
+            BuilderStep::Enrich {
+                uri,
+                strategy,
+                timeout_ms,
+            } => {
+                write!(
+                    f,
+                    "BuilderStep::Enrich {{ uri: {uri:?}, strategy: {strategy:?}, timeout_ms: {timeout_ms:?} }}"
+                )
+            }
+            BuilderStep::PollEnrich {
+                uri,
+                strategy,
+                timeout_ms,
+            } => {
+                write!(
+                    f,
+                    "BuilderStep::PollEnrich {{ uri: {uri:?}, strategy: {strategy:?}, timeout_ms: {timeout_ms:?} }}"
                 )
             }
         }

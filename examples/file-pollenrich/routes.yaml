@@ -1,0 +1,22 @@
+# EIP-7 pollEnrich example route (YAML declaration).
+# Equivalent to the Rust builder code in src/main.rs.
+#
+# Run with:
+#   cargo run -p file-pollenrich
+#
+# Or load this file programmatically:
+#   let routes = camel_dsl::yaml::load_from_file(Path::new("examples/file-pollenrich/routes.yaml"))?;
+#   ctx.add_routes(routes).await?;
+#   ctx.start().await?;
+
+routes:
+  - id: pollenrich-demo
+    from:
+      uri: "timer:tick?period=1000&repeatCount=3"
+    steps:
+      - pollEnrich:
+          uri: "file:/tmp/rust-camel-pollenrich?fileName=config.json&noop=true"
+          timeout: 5000
+      - streamCache:
+          threshold: 131072
+      - to: "log:enriched?showBody=true&showHeaders=true&showCorrelationId=true"

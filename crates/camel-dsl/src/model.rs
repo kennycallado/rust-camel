@@ -393,6 +393,13 @@ pub struct StreamCacheStepDef {
     pub threshold: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrichStepDef {
+    pub uri: String,
+    pub strategy: Option<String>,
+    pub timeout_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeclarativeStep {
     To(ToStepDef),
@@ -421,6 +428,49 @@ pub enum DeclarativeStep {
     Bean(BeanStepDef),
     Delay(DelayStepDef),
     Loop(LoopStepDef),
+    Enrich(EnrichStepDef),
+    PollEnrich(EnrichStepDef),
+}
+
+impl DeclarativeStep {
+    pub fn kind(&self) -> crate::contract::DeclarativeStepKind {
+        match self {
+            DeclarativeStep::To(_) => crate::contract::DeclarativeStepKind::To,
+            DeclarativeStep::Log(_) => crate::contract::DeclarativeStepKind::Log,
+            DeclarativeStep::SetHeader(_) => crate::contract::DeclarativeStepKind::SetHeader,
+            DeclarativeStep::SetProperty(_) => crate::contract::DeclarativeStepKind::SetProperty,
+            DeclarativeStep::SetBody(_) => crate::contract::DeclarativeStepKind::SetBody,
+            DeclarativeStep::ConvertBodyTo(_) => {
+                crate::contract::DeclarativeStepKind::ConvertBodyTo
+            }
+            DeclarativeStep::DynamicRouter(_) => {
+                crate::contract::DeclarativeStepKind::DynamicRouter
+            }
+            DeclarativeStep::Filter(_) => crate::contract::DeclarativeStepKind::Filter,
+            DeclarativeStep::Function(_) => crate::contract::DeclarativeStepKind::Function,
+            DeclarativeStep::LoadBalance(_) => crate::contract::DeclarativeStepKind::LoadBalance,
+            DeclarativeStep::Choice(_) => crate::contract::DeclarativeStepKind::Choice,
+            DeclarativeStep::Split(_) => crate::contract::DeclarativeStepKind::Split,
+            DeclarativeStep::Aggregate(_) => crate::contract::DeclarativeStepKind::Aggregate,
+            DeclarativeStep::WireTap(_) => crate::contract::DeclarativeStepKind::WireTap,
+            DeclarativeStep::Multicast(_) => crate::contract::DeclarativeStepKind::Multicast,
+            DeclarativeStep::RoutingSlip(_) => crate::contract::DeclarativeStepKind::RoutingSlip,
+            DeclarativeStep::RecipientList(_) => {
+                crate::contract::DeclarativeStepKind::RecipientList
+            }
+            DeclarativeStep::Stop => crate::contract::DeclarativeStepKind::Stop,
+            DeclarativeStep::Throttle(_) => crate::contract::DeclarativeStepKind::Throttle,
+            DeclarativeStep::Script(_) => crate::contract::DeclarativeStepKind::Script,
+            DeclarativeStep::StreamCache(_) => crate::contract::DeclarativeStepKind::StreamCache,
+            DeclarativeStep::Marshal(_) => crate::contract::DeclarativeStepKind::Marshal,
+            DeclarativeStep::Unmarshal(_) => crate::contract::DeclarativeStepKind::Unmarshal,
+            DeclarativeStep::Bean(_) => crate::contract::DeclarativeStepKind::Bean,
+            DeclarativeStep::Delay(_) => crate::contract::DeclarativeStepKind::Delay,
+            DeclarativeStep::Loop(_) => crate::contract::DeclarativeStepKind::Loop,
+            DeclarativeStep::Enrich(_) => crate::contract::DeclarativeStepKind::Enrich,
+            DeclarativeStep::PollEnrich(_) => crate::contract::DeclarativeStepKind::PollEnrich,
+        }
+    }
 }
 
 #[cfg(test)]

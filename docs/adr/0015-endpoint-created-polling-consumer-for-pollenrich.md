@@ -1,6 +1,10 @@
 # Endpoint-Created PollingConsumer for pollEnrich
 
-**Status**: Proposed (2026-06-07)
+**Status**: Accepted (2026-06-07)
+
+Implemented in branch `rc-3y0-eip-7` per plan
+`docs/superpowers/plans/2026-06-07-rc-3y0-eip-7-content-enricher.md`. All
+acceptance criteria from `bd rc-3y0` met; quality gates green.
 
 The `pollEnrich` DSL verb resolves its URI to an `Endpoint`, calls the
 existing `Endpoint::polling_consumer() -> Option<Box<dyn PollingConsumer>>`

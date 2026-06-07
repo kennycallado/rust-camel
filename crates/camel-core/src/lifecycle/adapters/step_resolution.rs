@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -21,7 +22,10 @@ use camel_component_api::{ComponentContext, RuntimeObservability};
 use camel_endpoint::parse_uri;
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use camel_processor::script_mutator::ScriptMutator;
-use camel_processor::{ChoiceService, WhenClause};
+use camel_processor::{
+    ChoiceService, EnrichService, EnrichmentStrategy, PollEnrichService, UseEnrichedBody,
+    WhenClause,
+};
 
 /// Helper to evaluate an async expression from a sync closure context.
 ///
@@ -113,6 +117,18 @@ fn value_to_body(value: Value) -> Body {
         Value::Null => Body::Empty,
         Value::String(text) => Body::Text(text),
         other => Body::Json(other),
+    }
+}
+
+fn resolve_enrichment_strategy(
+    name: Option<String>,
+) -> Result<Arc<dyn EnrichmentStrategy>, CamelError> {
+    match name.as_deref() {
+        None | Some("useEnrichedBody") => Ok(Arc::new(UseEnrichedBody)),
+        Some(other) => Err(CamelError::ProcessorError(format!(
+            "unknown EnrichmentStrategy `{}`; v1 only supports `useEnrichedBody` (or none for default)",
+            other
+        ))),
     }
 }
 
@@ -559,6 +575,31 @@ pub(crate) fn resolve_steps(
                 let svc = camel_processor::WireTapService::new(producer);
                 processors.push((BoxProcessor::new(svc), None));
             }
+            BuilderStep::Enrich { uri, strategy, .. } => {
+                let producer = resolve_producer(&uri)?;
+                let strategy_arc = resolve_enrichment_strategy(strategy)?;
+                let svc = EnrichService::new(producer, strategy_arc);
+                processors.push((BoxProcessor::new(svc), None));
+            }
+            BuilderStep::PollEnrich {
+                uri,
+                strategy,
+                timeout_ms,
+            } => {
+                let parsed = parse_uri(&uri)?;
+                let component = component_ctx
+                    .resolve_component(&parsed.scheme)
+                    .ok_or_else(|| CamelError::ComponentNotFound(parsed.scheme.clone()))?;
+                let endpoint = component.create_endpoint(&uri, component_ctx.as_ref())?;
+                let poller = endpoint.polling_consumer()
+                    .ok_or_else(|| CamelError::EndpointCreationFailed(
+                        format!("pollEnrich requires an endpoint that exposes a PollingConsumer; `{}` does not", uri)
+                    ))?;
+                let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000));
+                let strategy_arc = resolve_enrichment_strategy(strategy)?;
+                let svc = PollEnrichService::new(poller, timeout, strategy_arc);
+                processors.push((BoxProcessor::new(svc), None));
+            }
             BuilderStep::Multicast { config, steps } => {
                 // Each top-level step in the multicast scope becomes an independent endpoint.
                 let mut endpoints = Vec::new();
@@ -986,6 +1027,81 @@ mod tests {
     use crate::lifecycle::application::route_definition::LanguageExpressionDef;
     use crate::shared::components::domain::Registry;
 
+    /// A mock endpoint that returns `None` for polling_consumer (default).
+    struct MockEndpoint {
+        uri: String,
+    }
+
+    impl camel_component_api::endpoint::Endpoint for MockEndpoint {
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+        fn create_consumer(
+            &self,
+        ) -> Result<Box<dyn camel_component_api::consumer::Consumer>, CamelError> {
+            Err(CamelError::EndpointCreationFailed(
+                "mock not a consumer".into(),
+            ))
+        }
+        fn create_producer(
+            &self,
+            _ctx: &camel_component_api::ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
+            Err(CamelError::ProcessorError("mock not a producer".into()))
+        }
+    }
+
+    /// A mock component that vends MockEndpoint.
+    struct MockComponent;
+
+    #[async_trait::async_trait]
+    impl camel_component_api::Component for MockComponent {
+        fn scheme(&self) -> &str {
+            "mock"
+        }
+        fn create_endpoint(
+            &self,
+            uri: &str,
+            _ctx: &dyn camel_component_api::ComponentContext,
+        ) -> Result<Box<dyn camel_component_api::endpoint::Endpoint>, CamelError> {
+            Ok(Box::new(MockEndpoint {
+                uri: uri.to_string(),
+            }))
+        }
+    }
+
+    /// Minimal ComponentContext that resolves exactly one scheme to a mock component.
+    struct TestComponentContext;
+
+    impl camel_component_api::ComponentContext for TestComponentContext {
+        fn resolve_component(
+            &self,
+            scheme: &str,
+        ) -> Option<Arc<dyn camel_component_api::Component>> {
+            if scheme == "mock" {
+                Some(Arc::new(MockComponent))
+            } else {
+                None
+            }
+        }
+        fn resolve_language(&self, _name: &str) -> Option<Arc<dyn camel_language_api::Language>> {
+            None
+        }
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            Arc::new(camel_api::NoOpMetrics)
+        }
+        fn platform_service(&self) -> Arc<dyn camel_api::PlatformService> {
+            Arc::new(camel_api::NoopPlatformService::default())
+        }
+        fn register_route_health_check(
+            &self,
+            _route_id: &str,
+            _check: Arc<dyn camel_api::AsyncHealthCheck>,
+        ) {
+        }
+        fn unregister_route_health_check(&self, _route_id: &str) {}
+    }
+
     async fn languages_with_simple() -> SharedLanguageRegistry {
         let mut map: std::collections::HashMap<String, Arc<dyn Language>> =
             std::collections::HashMap::new();
@@ -1341,5 +1457,41 @@ mod tests {
         .unwrap();
 
         assert!(!resolved.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_enrich_on_non_pollable_endpoint_returns_compile_error() {
+        let languages = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let producer_ctx = ProducerContext::new();
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(TestComponentContext);
+
+        let err = resolve_steps(
+            vec![BuilderStep::PollEnrich {
+                uri: "mock:data".into(),
+                strategy: None,
+                timeout_ms: None,
+            }],
+            &producer_ctx,
+            &registry,
+            &languages,
+            &beans,
+            None,
+            component_ctx,
+            Some("r1"),
+            &FunctionStagingMode::DirectAdd,
+        )
+        .unwrap_err();
+
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("pollEnrich requires"),
+            "expected error about PollingConsumer, got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("exposes a PollingConsumer"),
+            "expected error about missing PollingConsumer, got: {err_msg}"
+        );
     }
 }

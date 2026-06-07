@@ -1,5 +1,7 @@
 use std::sync::Arc;
+use std::time::Duration;
 
+use async_trait::async_trait;
 use camel_api::{BodyType, BoxProcessor, CamelError, Exchange};
 
 use crate::ProducerContext;
@@ -13,9 +15,12 @@ use crate::runtime_observability::RuntimeObservability;
 /// consumption (e.g., file, FTP, JMS). Components that are purely
 /// event-driven (e.g., HTTP server, Kafka) can leave the default
 /// [`Endpoint::polling_consumer`] returning `None`.
+#[async_trait]
 pub trait PollingConsumer: Send + Sync {
-    /// Receive the next available exchange, or `None` if no message is pending.
-    fn receive(&self) -> Result<Option<Exchange>, CamelError>;
+    /// Receive the next available exchange within `timeout`, or `None` if none
+    /// arrives. `timeout = Duration::ZERO` means non-blocking (return
+    /// immediately if nothing pending).
+    async fn receive(&mut self, timeout: Duration) -> Result<Option<Exchange>, CamelError>;
 }
 
 /// An Endpoint represents a source or destination in a route URI.

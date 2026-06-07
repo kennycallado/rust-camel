@@ -63,6 +63,10 @@ interface host {
     /// TODO(WIT-009): Only string payloads are supported; binary/bytes support is deferred.
     camel-call: func(uri: string, payload: string) -> result<string, wasm-error>;
 
+    /// Poll an endpoint for a message synchronously (pull model).
+    /// Returns the body as a string, or an error on timeout/failure.
+    camel-poll: func(uri: string, timeout-ms: u32) -> result<string, wasm-error>;
+
     /// Read a property from the host Exchange.
     get-property: func(key: string) -> option<string>;
 
